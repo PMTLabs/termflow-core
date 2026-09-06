@@ -27,7 +27,7 @@ use regex::{Regex, RegexBuilder};
 use crate::automation_engine::subst;
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
-    Test, TextOp, TimerMode, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
+    Test, TextOp, TimerMode, TimerStep, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -279,6 +279,56 @@ pub const MIN_DELAY_MS: i64 = 1_000;
 /// message goes unstripped.
 pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
 
+/// **A rule needs input steps XOR a schedule, and this is the guard for the XOR itself** — not a
+/// property of the delay instance that first surfaced it (plan 032 review, R7).
+///
+/// The runtime's own answer to "can this rule ever do anything" is
+/// [`crate::automation_engine::eval::InputSteps::of`]: `None` unless `monitor`, `parse` and `cond`
+/// are ALL present. The one other way a rule can ever fire is a `DailyAt` schedule, which reads
+/// nothing and does not need them. Anything else — a lone `AfterMatch` wait with nothing to cross
+/// it, a bare graph with no timer and no input steps at all, a monitor with no parse — can never do
+/// anything, and it must say so in VALIDATION rather than rely on `reload`'s silent runtime skip:
+/// that skip is a fact about ONE producer's output, and C1 happened because three separate
+/// producers each reasoned about what "the editor" writes and were each wrong. A rule holds for
+/// every producer — the editor, the REST API, an import, an older build, and the mode-switch path
+/// that reaches this same shape by switching a saved schedule rule's timer back to a delay without
+/// touching the input steps at all.
+///
+/// **Mutually exclusive with `timer.scheduleWithMonitor` by construction**, not by a check added to
+/// keep them apart: this fires only when `scheduled` is false, and that code fires only when it is
+/// true. One graph can never trip both with contradictory remedies.
+///
+/// The remedy differs by shape, and saying so honestly is the whole reason this is not
+/// `timer.delayWithoutMonitor`: with a Wait step already on the canvas the fix is either add a
+/// Watch step or switch that Wait to a schedule; with no Wait step at all there is no "switch it" to
+/// offer, only "add a Watch step" or "add a Wait step set to a schedule". Naming a control the user
+/// does not have is exactly C1's mistake, so the message branches on `graph.timer` rather than
+/// stating one sentence that is wrong half the time.
+///
+/// **A blank message defers to `action.empty` alone** (found by `automationWritesWhatIsDrawn.test`'s
+/// own T4-f case, which this guard broke on the first pass). A brand-new draft with nothing drawn on
+/// it has an empty message and no input steps, and that shape trips this predicate too — but
+/// `timer` is not the mandatory field `action` is, so telling a user who has not typed anything yet
+/// that their (still nonexistent) Wait card is unreachable is exactly the "claim about an undrawn
+/// card" that module exists to rule out. Once a message is typed, if the rule still cannot run,
+/// that IS the moment to say so — which is R7's own oracle: a message typed, a Wait added, nothing
+/// to cross it.
+fn never_runs_problem(graph: &AutomationGraph) -> Option<Problem> {
+    let has_input_steps = graph.monitor.is_some() && graph.parse.is_some() && graph.cond.is_some();
+    let scheduled = matches!(graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
+    if has_input_steps || scheduled || graph.action.message.trim().is_empty() {
+        return None;
+    }
+    let message = if graph.timer.is_some() {
+        "This rule waits, but nothing will ever start the wait: it has no Watch output step to \
+         match against. Add one, or switch this Wait to run at a time of day instead."
+    } else {
+        "This rule has nothing that could ever run it: no terminals to watch, and no schedule \
+         either. Add a Watch output step, or add a Wait step set to run at a time of day."
+    };
+    Some(Problem::new(Severity::Blocks, "timer", "timer.neverRuns", message))
+}
+
 /// Everything wrong with the WAIT step — §8's `timer.*` codes (plan 032 §6.2, §6.3, §12 item 1).
 ///
 /// `None` (no wait step at all) reports nothing: every rule saved before this milestone, and every
@@ -317,28 +367,38 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
             }
         }
         TimerMode::DailyAt { minute_of_day, days } => {
-            // **A schedule DISABLES the monitor, silently, and that is why this blocks** (§6.3, §8).
+            // **A schedule DISABLES the whole read chain, silently, and that is why this blocks**
+            // (§6.3, §8).
             //
             // `run_evaluator`'s walk asks `schedule_due` for a `DailyAt` rule and skips `host.tail`
-            // entirely — for the whole rule, on every tick. So a rule carrying both a monitor and a
-            // schedule stops watching its terminals: no log row, nothing on screen, the pattern and
-            // the comparison simply never run again. Reported FIRST, because it is a fact about the
-            // rule's shape while the two below are about the schedule's own fields, and the shared
-            // fixture pins that order from both sides.
+            // entirely — for the whole rule, on every tick. So a rule carrying a schedule alongside
+            // `monitor`, `parse` and/or `cond` stops reading its terminals: no log row, nothing on
+            // screen, the pattern and the comparison simply never run again. Reported FIRST, because
+            // it is a fact about the rule's shape while the two below are about the schedule's own
+            // fields, and the shared fixture pins that order from both sides.
+            //
+            // **Wider than a monitor check alone (I2).** The skip is of the whole read chain, not
+            // the monitor: a graph with `parse` and/or `cond` but no `monitor` is admitted by
+            // `reload`, runs on the clock, and silently ignores the pattern and the comparison too.
+            // Task 27 already made exactly this widening for `schema_version_for` — spec's
+            // `monitor.is_none()` widened to all three input steps, for the same reason: an older
+            // build's `AutomationGraph` had them as required fields, so any one of the three is what
+            // actually breaks the read, not the monitor specifically. This closes the second of the
+            // two sites that needed it.
             //
             // **Making the editor's layout exclusive is not enough**, and this module already ruled
             // so one function down: `schedule_due` range-checks `minute_of_day` and the weekday mask
             // precisely because a row that reached the store by another route — the API, an import —
             // must not be runnable-but-never-firing on one side and unfireable on the other
-            // (`an_unfireable_rule_is_unfireable_on_both_sides`). Both of those routes can write a
-            // monitor and a `DailyAt` together.
-            if graph.monitor.is_some() {
+            // (`an_unfireable_rule_is_unfireable_on_both_sides`). Those routes can write any of the
+            // three input steps alongside a `DailyAt` just as easily as a monitor.
+            if graph.monitor.is_some() || graph.parse.is_some() || graph.cond.is_some() {
                 out.push(Problem::new(
                     Severity::Blocks,
                     "timer",
                     "timer.scheduleWithMonitor",
-                    "A schedule fires on the clock, so this rule will not watch its terminals. \
-                     Remove the schedule, or remove the Watch output step.",
+                    "A schedule fires on the clock, so this rule will not read its terminals. \
+                     Remove the schedule, or remove the steps that read them.",
                 ));
             }
             // **`minute_of_day` is a bare `i32` and nothing else checks it.** An out-of-range target
@@ -546,11 +606,19 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(clause_problems(&rule.graph));
 
     // --- timer ----------------------------------------------------------------------------------
+    // R7, first: a rule with no way to ever run at all — neither the input steps `InputSteps::of`
+    // needs nor a schedule. Reported ahead of `timer_problems` for the same reason
+    // `timer.scheduleWithMonitor` leads that function: it is a fact about the rule's shape, and the
+    // two guards are mutually exclusive by construction (this one fires only when `scheduled` is
+    // false; that one only when it is true), so a single graph never gets contradictory advice.
+    if let Some(p) = never_runs_problem(&rule.graph) {
+        out.push(p);
+    }
+
     // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
     // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
     // that constant's own doc — a schedule whose target is not a time of day, one whose weekday
-    // mask selects no day, and one on a rule that still has a monitor it would silently stop
-    // running.
+    // mask selects no day, and one on a rule that still reads its terminals and would silently stop.
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
@@ -1036,6 +1104,7 @@ mod tests {
             "timer.badMinute",
             "timer.noDays",
             "timer.scheduleWithMonitor",
+            "timer.neverRuns",
             "action.empty",
             "action.echo",
             "action.tokenWithoutParse",
@@ -1094,8 +1163,8 @@ mod tests {
             .unwrap_or_else(|| panic!("a schedule silences this rule's monitor: {found:?}"));
         assert_eq!(
             clash.message,
-            "A schedule fires on the clock, so this rule will not watch its terminals. \
-             Remove the schedule, or remove the Watch output step."
+            "A schedule fires on the clock, so this rule will not read its terminals. \
+             Remove the schedule, or remove the steps that read them."
         );
         assert!(clash.blocks(), "a monitor that silently never runs must not be saveable enabled");
 
@@ -1107,13 +1176,185 @@ mod tests {
             "a delay does not stop the rule watching"
         );
 
-        // And a schedule on a rule with NO monitor is the shape §6.3 is for.
+        // And a GENUINE schedule rule — no monitor, no parse, no cond, exactly §6.3's shape — has
+        // no read chain left to silence. Clearing `monitor` alone is NOT this shape (I2): the
+        // canonical rule's `parse` and `cond` are still `Some`, so a test that only cleared
+        // `monitor` would have passed on the very predicate I2 widened past.
         let mut only_schedule = scheduled.clone();
         only_schedule.graph.monitor = None;
+        only_schedule.graph.parse = None;
+        only_schedule.graph.cond = None;
         assert!(
             !problems(&only_schedule).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
-            "a schedule rule has no monitor to silence"
+            "a schedule rule with no read chain at all has nothing to silence"
         );
+    }
+
+    /// **I2 — the skip is of the whole read chain, not the monitor.** §6.3's walk skips
+    /// `host.tail` for the WHOLE rule, so `parse` and/or `cond` without a `monitor` are silently
+    /// ignored by a `DailyAt` rule exactly as a monitor would be. The old predicate
+    /// (`monitor.is_some()` alone) let a `parse` + `DailyAt` graph with no monitor through `reload`
+    /// to run on the clock and silently never read its pattern.
+    ///
+    /// Swept over the three fields independently, so a fix that widened only one of them (say,
+    /// `parse` but not `cond`) is caught rather than a single hand-picked case passing by luck.
+    #[test]
+    fn schedule_with_monitor_widens_to_any_read_step_not_only_the_monitor() {
+        let daily = TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK };
+
+        let cases: Vec<(&str, Box<dyn Fn(&mut AutomationGraph)>)> = vec![
+            ("monitor alone", Box::new(|g: &mut AutomationGraph| {
+                g.parse = None;
+                g.cond = None;
+            })),
+            ("parse alone", Box::new(|g: &mut AutomationGraph| {
+                g.monitor = None;
+                g.cond = None;
+            })),
+            ("cond alone", Box::new(|g: &mut AutomationGraph| {
+                g.monitor = None;
+                g.parse = None;
+            })),
+        ];
+        for (name, mutate) in cases {
+            let mut rule = valid_rule();
+            rule.graph.timer = Some(TimerStep { mode: daily.clone() });
+            mutate(&mut rule.graph);
+            assert!(
+                problems(&rule).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
+                "{name} left on a `DailyAt` rule must still block: {:?}",
+                problems(&rule)
+            );
+        }
+
+        // The paired negative: none of the three present has nothing left to silence.
+        let mut none_left = valid_rule();
+        none_left.graph.timer = Some(TimerStep { mode: daily });
+        none_left.graph.monitor = None;
+        none_left.graph.parse = None;
+        none_left.graph.cond = None;
+        assert!(!problems(&none_left).iter().any(|p| p.code == "timer.scheduleWithMonitor"));
+    }
+
+    // =============================================================================================
+    // R7 — a rule needs input steps XOR a schedule; anything else can never run
+    // =============================================================================================
+
+    /// **The oracle shape.** `blank → addStep 'timer' → addStep 'action' → type a message`: a Wait
+    /// step and an action, nothing that could ever cross the wait. Exactly one blocking problem —
+    /// not zero (this rule was previously admitted all the way to `reload`, which skipped it
+    /// silently) and not more than one (the default delay must not also trip `timer.delayTooShort`
+    /// or `timer.delayTooLong`).
+    #[test]
+    fn a_wait_with_nothing_to_cross_it_blocks_with_exactly_one_problem() {
+        let mut rule = valid_rule();
+        rule.graph.monitor = None;
+        rule.graph.parse = None;
+        rule.graph.cond = None;
+        rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        rule.graph.action.message = "resume".into();
+
+        let found = problems(&rule);
+        assert_eq!(
+            found.iter().map(|p| p.code.as_str()).collect::<Vec<_>>(),
+            vec!["timer.neverRuns"],
+            "{found:?}"
+        );
+        assert!(found[0].blocks());
+        assert_eq!(found[0].field, "timer");
+        assert!(
+            found[0].message.contains("Add one, or switch this Wait to run at a time of day"),
+            "a Wait already on the canvas can be switched: {:?}",
+            found[0].message
+        );
+    }
+
+    /// **The wider shape (I2/R7 together): no timer at all, and no input steps either.** Reachable
+    /// through the API even though the editor cannot express "no steps, no timer, just a message" —
+    /// §3.1 makes all four of `monitor`/`parse`/`cond`/`timer` independently optional. The message
+    /// must not tell the user to "switch" a Wait step that does not exist (C1's own mistake).
+    #[test]
+    fn a_bare_graph_with_no_timer_and_no_input_steps_also_blocks() {
+        let mut rule = valid_rule();
+        rule.graph.monitor = None;
+        rule.graph.parse = None;
+        rule.graph.cond = None;
+        rule.graph.timer = None;
+
+        let found = problems(&rule);
+        let never_runs = found
+            .iter()
+            .find(|p| p.code == "timer.neverRuns")
+            .unwrap_or_else(|| panic!("a bare graph with no timer must still block: {found:?}"));
+        assert!(
+            !never_runs.message.to_lowercase().contains("switch"),
+            "there is no Wait step on screen to switch: {:?}",
+            never_runs.message
+        );
+        assert!(never_runs.message.contains("Add a Watch output step"));
+    }
+
+    /// **The paired negatives.** A genuine schedule rule (no input steps, but `DailyAt`) and an
+    /// ordinary rule (all three input steps, no timer at all) both run, and neither trips this code.
+    #[test]
+    fn a_schedule_or_a_complete_set_of_input_steps_never_trips_never_runs() {
+        let scheduled = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        assert!(
+            !problems(&scheduled).iter().any(|p| p.code == "timer.neverRuns"),
+            "{:?}",
+            problems(&scheduled)
+        );
+
+        let mut ordinary = valid_rule();
+        ordinary.graph.timer = None;
+        assert!(
+            !problems(&ordinary).iter().any(|p| p.code == "timer.neverRuns"),
+            "{:?}",
+            problems(&ordinary)
+        );
+    }
+
+    /// **R7 and I2 are the two halves of one invariant, and a single graph must never trip both**
+    /// with contradictory advice (one saying "add a Watch step", the other "remove" one). They are
+    /// mutually exclusive by construction: `never_runs_problem` only fires when the rule is NOT
+    /// scheduled, and `timer.scheduleWithMonitor` only fires when it IS. Swept rather than asserted
+    /// for one shape, because "mutually exclusive by construction" is exactly the kind of claim a
+    /// single hand-picked case can make look true by accident.
+    #[test]
+    fn never_runs_and_schedule_with_monitor_are_mutually_exclusive() {
+        for timer in [
+            None,
+            Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } }),
+            Some(TimerStep {
+                mode: TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK },
+            }),
+        ] {
+            for (monitor, parse, cond) in [
+                (true, true, true),
+                (true, false, false),
+                (false, true, false),
+                (false, false, true),
+                (false, false, false),
+            ] {
+                let mut rule = valid_rule();
+                rule.graph.timer = timer.clone();
+                if !monitor {
+                    rule.graph.monitor = None;
+                }
+                if !parse {
+                    rule.graph.parse = None;
+                }
+                if !cond {
+                    rule.graph.cond = None;
+                }
+                let found = problems(&rule);
+                let codes: Vec<&str> = found.iter().map(|p| p.code.as_str()).collect();
+                assert!(
+                    !(codes.contains(&"timer.neverRuns") && codes.contains(&"timer.scheduleWithMonitor")),
+                    "timer={timer:?} monitor={monitor} parse={parse} cond={cond}: {codes:?}"
+                );
+            }
+        }
     }
 
     /// **Both delay bounds quote their own constant.** `timer.delayTooShort` restated its floor as

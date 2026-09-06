@@ -62,7 +62,12 @@ describe('automationValidation — the shared fixture', () => {
         // is the one table a new code cannot slip past.
         const covered = new Set(cases.flatMap((c) => c.expected.map((e) => e.code)));
         const all = Object.keys(BADGES) as ProblemCode[];
-        expect(all.length).toBeGreaterThanOrEqual(20);
+        // **Exact, not a floor** (M8 review). `toBeGreaterThanOrEqual` stopped pinning anything the
+        // moment the count first passed 20: a 22nd code with no fixture case would still satisfy
+        // "at least 20" and this test would stay green. `all.length` is DERIVED from `BADGES`
+        // (never hand-typed), so bumping this number is the one place a new code cannot be added
+        // silently — it forces a look at whether the fixture actually covers it.
+        expect(all.length).toBe(22);
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
     });
 });
@@ -139,8 +144,8 @@ describe('automationValidation — the words the user reads', () => {
             },
         };
         expect(find(both, 'timer.scheduleWithMonitor')?.message).toBe(
-            'A schedule fires on the clock, so this rule will not watch its terminals. '
-            + 'Remove the schedule, or remove the Watch output step.',
+            'A schedule fires on the clock, so this rule will not read its terminals. '
+            + 'Remove the schedule, or remove the steps that read them.',
         );
 
         // And the complement, which is the half that makes this a rule about `DailyAt` and not
@@ -154,6 +159,148 @@ describe('automationValidation — the words the user reads', () => {
             },
         };
         expect(find(delayed, 'timer.scheduleWithMonitor')).toBeUndefined();
+    });
+
+    /**
+     * **I2 — the skip is of the whole read chain, not the monitor.** §6.3's walk skips
+     * `host.tail` for the WHOLE rule, so `parse` and/or `cond` without a `monitor` are silently
+     * ignored by a `dailyAt` rule exactly as a monitor would be. The old predicate
+     * (`Boolean(graph.monitor)` alone) let a `parse` + `dailyAt` graph with no monitor through
+     * `reload` to run on the clock and silently never read its pattern.
+     */
+    it('widens to any read step, not only the monitor', () => {
+        const daily = { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } };
+
+        const parseAlone: AutomationRule = {
+            ...base(),
+            graph: { ...base().graph, monitor: undefined, cond: undefined, timer: { mode: daily } },
+        };
+        expect(find(parseAlone, 'timer.scheduleWithMonitor')).toBeDefined();
+
+        const condAlone: AutomationRule = {
+            ...base(),
+            graph: { ...base().graph, monitor: undefined, parse: undefined, timer: { mode: daily } },
+        };
+        expect(find(condAlone, 'timer.scheduleWithMonitor')).toBeDefined();
+
+        // The paired negative: none of the three present has nothing left to silence.
+        const noneLeft: AutomationRule = {
+            ...base(),
+            graph: {
+                ...base().graph,
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: { mode: daily },
+            },
+        };
+        expect(find(noneLeft, 'timer.scheduleWithMonitor')).toBeUndefined();
+    });
+
+    // =============================================================================================
+    // R7 — a rule needs input steps XOR a schedule; anything else can never run
+    // =============================================================================================
+
+    /**
+     * **The oracle shape.** `blank → addStep 'timer' → addStep 'action' → type a message`: a Wait
+     * step and an action, nothing that could ever cross the wait. Exactly one blocking problem —
+     * not zero (this rule used to be admitted all the way to `reload`, which skipped it silently)
+     * and not more than one (the default delay must not also trip a bound check).
+     */
+    it('a Wait with nothing to cross it blocks with exactly one problem', () => {
+        const rule: AutomationRule = {
+            ...base(),
+            graph: {
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: { mode: { afterMatch: { delayMs: 30_000 } } },
+                action: { message: 'resume', sendTo: 'matched', submit: true, cliType: 'default' },
+            },
+        };
+        const found = problems(rule);
+        expect(found.map((p) => p.code)).toEqual(['timer.neverRuns']);
+        expect(found[0].field).toBe('timer');
+        expect(found[0].message).toContain('Add one, or switch this Wait to run at a time of day');
+    });
+
+    /**
+     * **The wider shape (I2/R7 together): no timer at all, and no input steps either.** Reachable
+     * through the API even though the editor cannot express "no steps, no timer, just a message" —
+     * §3.1 makes all four independently optional. The message must not tell the user to "switch" a
+     * Wait step that does not exist (C1's own mistake).
+     */
+    it('a bare graph with no timer and no input steps also blocks, naming only controls that exist', () => {
+        const rule: AutomationRule = {
+            ...base(),
+            graph: {
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: undefined,
+                action: { message: 'resume', sendTo: 'matched', submit: true, cliType: 'default' },
+            },
+        };
+        const neverRuns = find(rule, 'timer.neverRuns');
+        expect(neverRuns).toBeDefined();
+        expect(neverRuns?.message.toLowerCase()).not.toContain('switch');
+        expect(neverRuns?.message).toContain('Add a Watch output step');
+    });
+
+    /** The paired negatives: a genuine schedule rule and an ordinary rule both run. */
+    it('a schedule or a complete set of input steps never trips never-runs', () => {
+        const scheduled: AutomationRule = {
+            ...base(),
+            graph: {
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } },
+                action: base().graph.action,
+            },
+        };
+        expect(find(scheduled, 'timer.neverRuns')).toBeUndefined();
+
+        const ordinary: AutomationRule = { ...base(), graph: { ...base().graph, timer: undefined } };
+        expect(find(ordinary, 'timer.neverRuns')).toBeUndefined();
+    });
+
+    /**
+     * **R7 and I2 are the two halves of one invariant, and a single graph must never trip both**
+     * with contradictory advice. They are mutually exclusive by construction: `neverRunsProblem`
+     * only fires when the rule is NOT scheduled, and `timer.scheduleWithMonitor` only fires when it
+     * IS.
+     */
+    it('never-runs and schedule-with-monitor are mutually exclusive', () => {
+        const timers = [
+            undefined,
+            { mode: { afterMatch: { delayMs: 30_000 } } },
+            { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } },
+        ];
+        const combos: Array<[boolean, boolean, boolean]> = [
+            [true, true, true],
+            [true, false, false],
+            [false, true, false],
+            [false, false, true],
+            [false, false, false],
+        ];
+        for (const timer of timers) {
+            for (const [hasMonitor, hasParse, hasCond] of combos) {
+                const rule: AutomationRule = {
+                    ...base(),
+                    graph: {
+                        ...base().graph,
+                        monitor: hasMonitor ? base().graph.monitor : undefined,
+                        parse: hasParse ? base().graph.parse : undefined,
+                        cond: hasCond ? base().graph.cond : undefined,
+                        timer,
+                    },
+                };
+                const codes = problems(rule).map((p) => p.code);
+                expect(codes.includes('timer.neverRuns') && codes.includes('timer.scheduleWithMonitor'))
+                    .toBe(false);
+            }
+        }
     });
 
     it('quotes the floor in the interval message, rather than restating it', () => {

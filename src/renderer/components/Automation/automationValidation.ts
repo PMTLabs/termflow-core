@@ -64,6 +64,7 @@ export type ProblemCode =
     | 'timer.badMinute'
     | 'timer.noDays'
     | 'timer.scheduleWithMonitor'
+    | 'timer.neverRuns'
     | 'action.empty'
     | 'action.echo'
     | 'action.tokenWithoutParse'
@@ -367,6 +368,43 @@ const WEEKDAY_BITS_MASK = 0b0111_1111;
 export const MINUTES_PER_DAY = 24 * 60;
 
 /**
+ * **A rule needs input steps XOR a schedule, and this is the guard for the XOR itself** — not a
+ * property of the delay instance that first surfaced it (plan 032 review, R7).
+ *
+ * The runtime's own answer to "can this rule ever do anything" is `InputSteps::of` on the Rust
+ * side: `null` unless `monitor`, `parse` and `cond` are ALL present. The one other way a rule can
+ * ever fire is a `dailyAt` schedule, which reads nothing and does not need them. Anything else — a
+ * lone `afterMatch` wait with nothing to cross it, a bare graph with no timer and no input steps at
+ * all, a monitor with no parse — can never do anything, and it must say so in VALIDATION rather
+ * than rely on the engine's silent runtime skip: a rule holds for every producer — the editor, the
+ * REST API, an import, an older build, and the mode-switch path that reaches this same shape by
+ * switching a saved schedule rule's timer back to a delay without touching the input steps at all.
+ *
+ * **Mutually exclusive with `timer.scheduleWithMonitor` by construction**: this fires only when
+ * `scheduled` is false, and that code fires only when it is true. One graph can never trip both
+ * with contradictory remedies.
+ *
+ * The remedy differs by shape, so the message branches on whether a Wait step exists: with one
+ * already on the canvas the fix is either add a Watch step or switch that Wait to a schedule; with
+ * none at all there is no "switch it" to offer, only "add a Watch step" or "add a Wait step set to
+ * a schedule". Naming a control the user does not have is C1's mistake, so this is not one sentence
+ * that is wrong half the time.
+ */
+function neverRunsProblem(graph: AutomationGraph): Problem | null {
+    const hasInputSteps = Boolean(graph.monitor) && Boolean(graph.parse) && Boolean(graph.cond);
+    const scheduled = Boolean(graph.timer && 'dailyAt' in graph.timer.mode);
+    // A blank message defers to `action.empty` alone — see the Rust mirror's doc for why (a brand
+    // new draft with nothing drawn is not a claim about an undrawn Wait card).
+    if (hasInputSteps || scheduled || graph.action.message.trim().length === 0) return null;
+    const message = graph.timer
+        ? 'This rule waits, but nothing will ever start the wait: it has no Watch output step to '
+            + 'match against. Add one, or switch this Wait to run at a time of day instead.'
+        : 'This rule has nothing that could ever run it: no terminals to watch, and no schedule '
+            + 'either. Add a Watch output step, or add a Wait step set to run at a time of day.';
+    return problem('blocks', 'timer', 'timer.neverRuns', message);
+}
+
+/**
  * Everything wrong with the WAIT step — §8's `timer.*` codes (plan 032 §6.2, §6.3, §12 item 1).
  *
  * Absent (no wait step at all) reports nothing: every rule saved before this milestone, and every
@@ -405,28 +443,37 @@ function timerProblems(graph: AutomationGraph): Problem[] {
             );
         }
     } else {
-        // **A schedule DISABLES the monitor, silently, and that is why this blocks** (§6.3, §8).
+        // **A schedule DISABLES the whole read chain, silently, and that is why this blocks**
+        // (§6.3, §8).
         //
         // The evaluator's walk asks `schedule_due` for a `DailyAt` rule and skips `host.tail`
-        // entirely — for the whole rule, on every tick. So a rule carrying both a monitor and a
-        // schedule stops watching its terminals: no log row, nothing on screen, the pattern and the
-        // comparison simply never run again. Reported here, and FIRST, because it is a fact about
-        // the rule's shape while the two below are about the schedule's own fields.
+        // entirely — for the whole rule, on every tick. So a rule carrying a schedule alongside
+        // `monitor`, `parse` and/or `cond` stops reading its terminals: no log row, nothing on
+        // screen, the pattern and the comparison simply never run again. Reported here, and FIRST,
+        // because it is a fact about the rule's shape while the two below are about the schedule's
+        // own fields.
+        //
+        // **Wider than a monitor check alone (I2).** The skip is of the whole read chain, not the
+        // monitor: a graph with `parse` and/or `cond` but no `monitor` is admitted by `reload`,
+        // runs on the clock, and silently ignores the pattern and the comparison too. This mirrors
+        // the identical widening already made for `schema_version_for` (spec's `monitor == null`
+        // widened to all three input steps), for the same reason: any one of the three is what
+        // actually breaks the read, not the monitor specifically.
         //
         // **Making the editor's layout exclusive is not enough**, and this codebase has already
         // ruled so: `schedule_due` range-checks `minuteOfDay` and the weekday mask precisely
         // because a row that reached the store by another route — the API, an import — must not be
         // runnable-but-never-firing on one side and unfireable on the other
-        // (`an_unfireable_rule_is_unfireable_on_both_sides`). Both of those routes can write a
-        // monitor and a `dailyAt` together.
-        if (graph.monitor) {
+        // (`an_unfireable_rule_is_unfireable_on_both_sides`). Those routes can write any of the
+        // three input steps alongside a `dailyAt` just as easily as a monitor.
+        if (graph.monitor || graph.parse || graph.cond) {
             out.push(
                 problem(
                     'blocks',
                     'timer',
                     'timer.scheduleWithMonitor',
-                    'A schedule fires on the clock, so this rule will not watch its terminals. '
-                        + 'Remove the schedule, or remove the Watch output step.',
+                    'A schedule fires on the clock, so this rule will not read its terminals. '
+                        + 'Remove the schedule, or remove the steps that read them.',
                 ),
             );
         }
@@ -601,11 +648,19 @@ export function problems(rule: AutomationRule): Problem[] {
     out.push(...clauseProblems(rule.graph));
 
     // --- timer -----------------------------------------------------------------------------------
+    // R7, first: a rule with no way to ever run at all — neither the input steps `InputSteps::of`
+    // needs nor a schedule. Reported ahead of `timerProblems` for the same reason
+    // `timer.scheduleWithMonitor` leads that function: it is a fact about the rule's shape, and the
+    // two guards are mutually exclusive by construction (this one fires only when `scheduled` is
+    // false; that one only when it is true), so a single graph never gets contradictory advice.
+    const neverRuns = neverRunsProblem(rule.graph);
+    if (neverRuns) out.push(neverRuns);
+
     // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
     // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
     // that constant's own doc — a schedule whose target is not a time of day, one whose weekday
-    // mask selects no day, and one on a rule that still has a monitor it would silently stop
-    // running.
+    // mask selects no day, and one on a rule that still reads its terminals and would silently
+    // stop.
     out.push(...timerProblems(rule.graph));
 
     // --- message ---------------------------------------------------------------------------------
@@ -734,6 +789,7 @@ export const BADGES: Record<ProblemCode, string> = {
     'timer.badMinute': 'needs a time of day',
     'timer.noDays': 'needs a day picked',
     'timer.scheduleWithMonitor': 'the watch is ignored',
+    'timer.neverRuns': 'this rule can never run',
     'action.empty': 'needs a message',
     'action.echo': 'may read its own message',
     'action.tokenWithoutParse': 'needs a pattern to capture from',
