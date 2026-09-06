@@ -567,11 +567,11 @@ export function isDirty(draft: AutomationDraft): boolean {
 /**
  * The rule as a string, with the one field whose ORDER means nothing put in a fixed one.
  *
- * `targetIds` is a set: `write_rule` replaces the pick set row by row and the engine resolves it
- * with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from `['tm-2','tm-1']`. The
- * picker's toggle appends, though, so unticking a terminal and ticking it straight back rotated the
- * array — and the draft then read dirty forever, with a *Leave without saving?* dialog over an
- * identical rule.
+ * `targetIds` and `excludedIds` are sets: `write_rule` replaces each set row by row and the engine
+ * resolves them with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from
+ * `['tm-2','tm-1']`. The picker's toggle appends, though, so unticking a terminal and ticking it
+ * straight back rotated the array — and the draft then read dirty forever, with a *Leave without
+ * saving?* dialog over an identical rule.
  *
  * **Both sides go through this**, which is the whole point: normalising one side of a comparison and
  * not the other can only invent differences (`transform-on-one-side-of-a-comparison`). And it
@@ -593,7 +593,12 @@ function comparable(rule: AutomationRule): string {
               ),
           }
         : rule.graph;
-    return JSON.stringify({ ...rule, graph, targetIds: [...rule.targetIds].sort() });
+    return JSON.stringify({
+        ...rule,
+        graph,
+        targetIds: [...rule.targetIds].sort(),
+        excludedIds: [...(rule.excludedIds ?? [])].sort(),
+    });
 }
 
 export type DraftAction =
@@ -613,6 +618,10 @@ export type DraftAction =
     | { type: 'followNew'; followNew: boolean }
     | { type: 'targets'; ids: string[] }
     | { type: 'toggleTarget'; id: string }
+    | { type: 'excludedTargets'; ids: string[] }
+    | { type: 'toggleExcludedTarget'; id: string }
+    | { type: 'excludeCriterion'; criterion: AutomationRule['criterion'] | null }
+    | { type: 'excludeCriterionValue'; value: string }
     | { type: 'monitor'; patch: Partial<AutomationMonitorStep> }
     | { type: 'preset'; preset: AutomationParseStep['preset'] }
     | { type: 'literal'; literal: string }
@@ -759,6 +768,21 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                     ? rule.targetIds.filter((id) => id !== action.id)
                     : [...rule.targetIds, action.id],
             });
+        case 'excludedTargets':
+            return withRule(draft, { ...rule, excludedIds: [...action.ids] });
+        case 'toggleExcludedTarget': {
+            const excludedIds = rule.excludedIds ?? [];
+            return withRule(draft, {
+                ...rule,
+                excludedIds: excludedIds.includes(action.id)
+                    ? excludedIds.filter((id) => id !== action.id)
+                    : [...excludedIds, action.id],
+            });
+        }
+        case 'excludeCriterion':
+            return withRule(draft, { ...rule, excludeCriterion: action.criterion });
+        case 'excludeCriterionValue':
+            return withRule(draft, { ...rule, excludeCriterionValue: action.value });
         // **A patch to a step the rule does not have is a no-op, never a materialisation.** Plan
         // 032 §3.1 lets a schedule rule carry no monitor/parse/cond at all, and these six actions
         // come from panels that are only mounted for a step the rule HAS. Filling the gap in from
