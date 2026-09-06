@@ -150,7 +150,7 @@ function compileError(find: string): string {
  *
  * Only ever called on a pattern that has already compiled.
  */
-function groupsOf(find: string): { count: number; names: Set<string> } {
+export function groupsOf(find: string): { count: number; names: Set<string> } {
     try {
         const probe = new RegExp(`${browserSource(find)}|`);
         const m = probe.exec('');

@@ -1136,6 +1136,13 @@
     border-color: #4a5b66;
 }
 
+/* A chip past the pattern's own groups — still clickable (typing it is what a §05 "out of range"
+   problem is FOR), just visibly not one the pattern can supply. */
+.au-editor .au-token.dead {
+    border-style: dashed;
+    color: #6a6e77;
+}
+
 .au-editor .au-plainsay {
     margin-top: 7px;
     padding: 7px 9px;
@@ -1166,6 +1173,14 @@
 
 .au-editor .au-preview .au-hit {
     color: #9fd8f7;
+}
+
+/* An out-of-range token (mockup §05) — the send would be refused, so the preview says so rather
+   than showing a message nothing would actually type. */
+.au-editor .au-preview.blocked {
+    color: #ffc9c5;
+    background: rgba(248, 81, 73, 0.09);
+    border-color: #6e2b28;
 }
 
 .au-editor .au-cap {

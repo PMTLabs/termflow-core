@@ -23,8 +23,10 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 
 import { AuInspector } from '../AuInspector';
+import { ActionPanel } from '../panels/ActionPanel';
 import { draftFromRule } from '../automationDraft';
-import { faceFor } from '../automationDerive';
+import type { AutomationDraft } from '../automationDraft';
+import { faceFor, panelFor } from '../automationDerive';
 import { problems } from '../automationValidation';
 import { displayedPattern } from '../automationPresets';
 import { STEP_ORDER } from '../automationSteps';
@@ -33,7 +35,7 @@ import {
     AUTOMATION_TEMPLATES,
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
-import type { AutomationRule } from '../../../types/electron';
+import type { AutomationActionStep, AutomationRule } from '../../../types/electron';
 
 describe('the inspector panels — rendered, per template', () => {
     let container: HTMLDivElement;
@@ -120,10 +122,18 @@ describe('the inspector panels — rendered, per template', () => {
         for (const rule of rules) {
             const others = rules.filter((r) => r !== rule);
 
-            const actionText = await show(rule, 'action');
+            // **The DISPLAYED VALUE, not the whole panel's text.** Task 7 added static chrome to
+            // this panel — chip labels `$0`/`$1`/`$2`, help copy that names `$1` by example — which
+            // is present on EVERY action panel regardless of which rule is open, and one template's
+            // own message is the single character `'1'`. A whole-container substring check flags
+            // that chrome as if it were a leaked value; reading the same `.au-cap` span the
+            // per-template loop above reads is the precise oracle for "the value this panel is
+            // SHOWING", exactly as that loop's own comment already argues.
+            await show(rule, 'action');
+            const shownMessage = container.querySelector('.au-cap')?.textContent ?? '';
             for (const other of others) {
                 if (other.graph.action.message === rule.graph.action.message) continue;
-                expect(actionText).not.toContain(other.graph.action.message);
+                expect(shownMessage).not.toContain(other.graph.action.message);
             }
 
             await show(rule, 'parse');
@@ -330,5 +340,146 @@ describe('the inspector panels — rendered, per template', () => {
         const text = await show(rule, 'cond');
         expect(text).toContain(says);
         expect(text).not.toContain(doesNotSay);
+    });
+});
+
+/**
+ * Task 7 — the substitute checkbox, the token chips, and the live preview (plan 032 §4.2, mockup
+ * §04). Mounts `ActionPanel` directly rather than through `AuInspector`: the behaviour under test
+ * is entirely this panel's own (the checkbox and chips write only `action.*`, and the preview reads
+ * only `draft.rule.graph` + `sample`), so a direct mount is the narrowest oracle that still reads
+ * the real component's DOM rather than `automationDerive`'s records — the same reasoning the file
+ * header gives for testing panels rendered instead of `stepValues() === stepValues()`.
+ */
+describe('ActionPanel — the substitute checkbox, token chips, and live preview (mockup §04)', () => {
+    let container: HTMLDivElement;
+    let root: Root;
+
+    beforeEach(() => {
+        container = document.createElement('div');
+        document.body.appendChild(container);
+        root = createRoot(container);
+    });
+
+    afterEach(async () => {
+        await act(async () => root.unmount());
+        container.remove();
+    });
+
+    const noop = () => {};
+
+    /**
+     * The first template's own pattern — `ctx:(\d+)%`, exactly ONE bracketed group — with only the
+     * action step overridden. `$1` is therefore always in range and `$2`/`$3` never are, which is
+     * what lets a test tell "resolves" apart from "out of range" without inventing a pattern of
+     * its own.
+     */
+    function draftWith(actionPatch: Partial<AutomationActionStep>): AutomationDraft {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule: AutomationRule = {
+            ...base,
+            graph: { ...base.graph, action: { ...base.graph.action, ...actionPatch } },
+        };
+        return { ...draftFromRule(rule), selected: 'action' };
+    }
+
+    async function renderAction(
+        actionPatch: Partial<AutomationActionStep>,
+        opts: { sample?: Record<string, string>; dispatch?: (a: unknown) => void } = {},
+    ) {
+        const draft = draftWith(actionPatch);
+        const model = panelFor(draft.rule, 'action', { problems: [] });
+        await act(async () => {
+            root.render(
+                <ActionPanel
+                    draft={draft}
+                    model={model}
+                    dispatch={opts.dispatch ?? noop}
+                    sample={opts.sample}
+                />,
+            );
+        });
+        return {
+            draft,
+            preview: () => container.querySelector('[data-testid="action-preview"]'),
+            messageInput: () =>
+                container.querySelector<HTMLInputElement>('input[aria-label="Message to send"]')!,
+        };
+    }
+
+    it('types $1 literally when substitution is off', async () => {
+        const { preview } = await renderAction({ message: 'fix $1', substitute: false });
+        expect(preview()?.textContent).toContain('fix $1');
+    });
+
+    it('resolves $1 from the sample capture when substitution is on', async () => {
+        const { preview } = await renderAction(
+            { message: 'fix $1', substitute: true },
+            { sample: { 1: '17' } },
+        );
+        expect(preview()?.textContent).toContain('fix 17');
+    });
+
+    it('shows the blocking problem and no preview for an out-of-range token', async () => {
+        const { preview } = await renderAction(
+            { message: 'fix $3', substitute: true },
+            { sample: { 1: '17' } },
+        );
+        expect(preview()?.textContent).toContain('Nothing would be sent');
+    });
+
+    it('renders the substitute toggle as a real, labelled checkbox — not a styled div', async () => {
+        await renderAction({ message: 'fix $1', substitute: false });
+        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]');
+        expect(box).not.toBeNull();
+        expect(box!.checked).toBe(false);
+        expect(container.querySelector('.au-checkrow')?.textContent).toContain('Insert captured values');
+    });
+
+    it('checks the box once substitution is already on', async () => {
+        await renderAction({ message: 'fix $1', substitute: true });
+        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]');
+        expect(box!.checked).toBe(true);
+    });
+
+    it('dispatches the toggle when the checkbox is clicked', async () => {
+        const dispatch = jest.fn();
+        await renderAction({ message: 'fix $1', substitute: false }, { dispatch });
+        const box = container.querySelector<HTMLInputElement>('.au-checkrow input[type="checkbox"]')!;
+        await act(async () => box.click());
+        expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { substitute: true } });
+    });
+
+    it("renders one chip per group the pattern produces, plus $0 and $$, and marks the next one out of range as dead", async () => {
+        await renderAction({ message: '', substitute: false });
+        const chips = [...container.querySelectorAll('.au-tokens .au-token')].map((el) => el.textContent);
+        expect(chips).toEqual(['$0', '$1', '$2', '$$']);
+        const dead = [...container.querySelectorAll('.au-tokens .au-token.dead')].map((el) => el.textContent);
+        expect(dead).toEqual(['$2']);
+    });
+
+    it('clicking a chip inserts it into the message at the cursor', async () => {
+        const dispatch = jest.fn();
+        const { messageInput } = await renderAction({ message: 'fix ', substitute: false }, { dispatch });
+        const input = messageInput();
+        input.focus();
+        input.setSelectionRange(4, 4); // right after "fix "
+        const chip = [...container.querySelectorAll('.au-tokens .au-token')]
+            .find((el) => el.textContent === '$1') as HTMLButtonElement;
+        await act(async () => chip.click());
+        expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { message: 'fix $1' } });
+    });
+
+    /**
+     * Mutation guard: the preview must read `action.message` through the resolution rule, not
+     * print it verbatim regardless of `substitute`. See task-7-report.md's mutation-check note —
+     * this is the test that fails when the resolution branch is bypassed.
+     */
+    it('does not show the raw token once substitution has resolved it', async () => {
+        const { preview } = await renderAction(
+            { message: 'fix $1', substitute: true },
+            { sample: { 1: '17' } },
+        );
+        expect(preview()?.textContent).not.toContain('$1');
     });
 });
