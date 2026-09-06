@@ -712,8 +712,18 @@ export interface AutomationLogEntry {
  * `automation_engine::dry::StepTrace`.
  */
 export interface DryRunStep {
-  /** `monitor` | `parse` | `cond` | `action` — always all four, always in the graph's order. */
-  kind: 'monitor' | 'parse' | 'cond' | 'action';
+  /**
+   * `monitor` | `parse` | `cond` | `timer` | `action` — **not always all five, and not one fixed
+   * count.** A plain rule (no wait step) reports the original four, in the graph's order. A DELAY
+   * rule (`timer.mode.afterMatch`) inserts `timer` between `cond` and `action`, five steps. A
+   * SCHEDULE rule (`timer.mode.dailyAt`) has no `monitor`, `parse` or `cond` at all — it reads
+   * nothing (plan 032 §6.3) — so its report carries only `timer` and `action`.
+   *
+   * This corrects an earlier version of this doc comment that said "always all four, always in the
+   * graph's order": that was already only true for a rule with no wait step, and plan 032 §6–§7 is
+   * what made it stop being true for the other two shapes.
+   */
+  kind: 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
   /**
    * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
    * not be drawn as one.

@@ -12,6 +12,9 @@
  */
 import type { AutomationRule } from '../../../types/electron';
 import type { AutomationRuntimePairState } from '../../../services/automationEvents';
+// A leaf module, not `automationDerive.ts`: this file cannot import THAT without a cycle (see
+// `automationTimerWords.ts`'s own header) — the reason task 25's dispatch calls out explicitly.
+import { clockTime, describeDays } from '../../Automation/automationTimerWords';
 
 /**
  * The shared state vocabulary of mockup §09. The same seven ids name the list pill, and in M5 the
@@ -252,13 +255,23 @@ export function describeCriterion(rule: AutomationRule): string {
     }
 }
 
-/** *Checks every 30s* / *On every new line*. */
+/** *Checks every 30s* / *On every new line* / *At 09:00, weekdays*. */
 export function describeCadence(rule: AutomationRule): string {
-    const { monitor } = rule.graph;
-    // A rule with no monitor step does not poll at all (plan 032 §3.1). It has no cadence to
-    // describe — a schedule rule's *"at 09:00 on weekdays"* is a Timer sentence, which §7 gives
-    // this module in milestone 5. Until then, say nothing rather than invent a check interval.
-    if (!monitor) return '—';
+    const { monitor, timer } = rule.graph;
+    // A rule with no monitor step does not poll at all (plan 032 §3.1) — but a SCHEDULE rule still
+    // has a cadence in the sense this chip means it: when it runs. §6.3's walk skips `host.tail` for
+    // the whole rule, so there is nothing to check, but there is still a clock to name.
+    if (!monitor) {
+        if (timer && 'dailyAt' in timer.mode) {
+            const { minuteOfDay, days } = timer.mode.dailyAt;
+            const at = clockTime(minuteOfDay);
+            const when = describeDays(days);
+            if (at !== null && when !== '') return `At ${at}, ${when}`;
+        }
+        // Neither a monitor nor a finished schedule: genuinely nothing to say yet (an unfinished
+        // schedule's own blocking problem — `timer.badMinute`/`timer.noDays` — says what is missing).
+        return '—';
+    }
     if (monitor.cadence === 'onOutput') return 'On every new line';
     const ms = monitor.everyMs;
     if (ms % 60000 === 0) {

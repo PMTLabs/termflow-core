@@ -26,14 +26,19 @@ use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
     AutomationLogEntry, AutomationRule, Clause, CompareOp, Finds, Join, LogKind, Test, TextOp,
+    TimerMode, TimerStep,
 };
 
 /// One step of the graph, as the editor's Test panel draws it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepTrace {
-    /// `monitor` | `parse` | `cond` | `action` — the graph's own four steps, always all four and
-    /// always in this order, so the panel can draw the chain before it knows the answer.
+    /// `monitor` | `parse` | `cond` | `timer` | `action` — **not always all five, and not one fixed
+    /// count** (plan 032 §6–§7, corrected during task 25). A plain rule (no wait step) reports the
+    /// original four, in the graph's order. A DELAY rule (`AfterMatch`) inserts `timer` between
+    /// `cond` and `action` — five steps. A SCHEDULE rule (`DailyAt`) reads nothing at all (§6.3), so
+    /// its report carries only `timer` and `action` — no `monitor`, `parse` or `cond` row exists to
+    /// draw.
     pub kind: String,
     /// `ok` | `failed` | `skipped`. `skipped` is a step that never ran because an earlier one failed;
     /// it is not a pass, and the panel must not draw it as one.
@@ -65,7 +70,58 @@ pub const UNREADABLE: &str = "unreadable";
 const MONITOR: &str = "monitor";
 const PARSE: &str = "parse";
 const COND: &str = "cond";
+const TIMER: &str = "timer";
 const ACTION: &str = "action";
+
+/// An `AfterMatch` wait, in the pane's own terse style — `30 s`, `1.5 s`, `2 min` — never restating
+/// `MAX_DELAY_MS`/`MIN_DELAY_MS` as a bound, because this is naming a CONCRETE wait, not a range.
+/// Independent of `automationDerive.ts`'s `describeDelay`: the two sides of the wire already word a
+/// comparison differently (`63 > 25` here vs *"rises above 25"* there), and there is no §10.x test
+/// requiring this one to match it byte-for-byte the way substitution must (§1.1).
+fn describe_wait(delay_ms: i64) -> String {
+    if delay_ms >= 60_000 && delay_ms % 60_000 == 0 {
+        return format!("{} min", delay_ms / 60_000);
+    }
+    if delay_ms % 1_000 == 0 {
+        return format!("{} s", delay_ms / 1_000);
+    }
+    format!("{:.1} s", delay_ms as f64 / 1_000.0)
+}
+
+/// `minuteOfDay` as `HH:MM` — the schedule dry run's own formatter, not shared with the TS side for
+/// the same reason `describe_wait` is not (see its own doc).
+fn clock_time(minute_of_day: i32) -> String {
+    format!("{:02}:{:02}", minute_of_day / 60, minute_of_day % 60)
+}
+
+/// Bits 0–6 of a `dailyAt` mask are Mon..Sun (plan 032 §3.1). Bit 7 names no day.
+const DAY_NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+/// A weekday mask in words, matching `automationDerive.ts`'s `describeDays` in shape (`every day`,
+/// `weekdays`, `weekends`, or the days themselves) though not sharing its code across the wire.
+fn days_words(days: u8) -> String {
+    const WEEKDAY_MASK: u8 = 0b0001_1111;
+    const WEEKEND_MASK: u8 = 0b0110_0000;
+    const EVERY_DAY_MASK: u8 = 0b0111_1111;
+    let picked = days & EVERY_DAY_MASK;
+    if picked == 0 {
+        return "no days".to_string();
+    }
+    if picked == EVERY_DAY_MASK {
+        return "every day".to_string();
+    }
+    if picked == WEEKDAY_MASK {
+        return "weekdays".to_string();
+    }
+    if picked == WEEKEND_MASK {
+        return "weekends".to_string();
+    }
+    (0..7)
+        .filter(|i| picked & (1 << i) != 0)
+        .map(|i| DAY_NAMES[i as usize])
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 fn step(kind: &str, status: &str, detail: String) -> StepTrace {
     StepTrace { kind: kind.to_string(), status: status.to_string(), detail }
@@ -189,10 +245,48 @@ pub fn evaluate_once(
     };
 
     // 0. A schedule rule (§6.3) has no monitor, parse or cond step at all: nothing to read, and
-    //    therefore no condition this function could compute. `unreadable` — the verdict whose whole
-    //    meaning is *"the rule was never judged at all"* — rather than `would-not-fire`, which would
-    //    claim a verdict that was never reached. This is the minimum that does not lie; task 25 owns
-    //    the schedule-aware wording for the Test pane.
+    //    therefore no condition this function could compute — but there IS a schedule and a send, so
+    //    task 25 reports those two instead of a blanket `unreadable` with three cards standing for
+    //    steps the rule does not have (the same reasoning `stepValues`' `NOT_IN_THIS_RULE` already
+    //    applies to the editor's cards, applied here to the Test pane's).
+    //
+    //    Any OTHER missing subset (a monitor with no parse, say) is a malformed shape validation
+    //    already refuses before a rule can be enabled; that keeps the old, honest "nothing was read"
+    //    answer below, on all four original steps.
+    if rule.graph.monitor.is_none() && rule.graph.parse.is_none() && rule.graph.cond.is_none() {
+        let Some(TimerStep { mode: TimerMode::DailyAt { minute_of_day, days } }) = &rule.graph.timer
+        else {
+            // Neither a monitor NOR a schedule: nothing this rule could ever fire on. Validation
+            // refuses this shape before it can be enabled; still the honest, non-panicking answer.
+            return finish(UNREADABLE, vec![skipped(TIMER), skipped(ACTION)]);
+        };
+        let timer_step = step(
+            TIMER,
+            "ok",
+            format!("sends at {}, {} — nothing on screen is read", clock_time(*minute_of_day), days_words(*days)),
+        );
+        // §6.3/M4: `process_for_leaf` is still asked for a schedule rule — it is what ADDRESSES the
+        // send when the clock strikes — even though `host.tail` never is.
+        let Some(_pc) = host.process_for_leaf(tm) else {
+            return finish(
+                UNREADABLE,
+                vec![timer_step, step(ACTION, "failed", "that terminal is not open right now".to_string())],
+            );
+        };
+        let action_step = match preview_message(&rule.graph.action.message, rule.graph.action.substitute, None) {
+            Ok(body) => step(
+                ACTION,
+                "ok",
+                match &terminal_name {
+                    Some(name) => format!("would type `{}` into {}", body, name),
+                    None => format!("would type `{}`", body),
+                },
+            ),
+            Err(e) => step(ACTION, "failed", format!("nothing would be sent — `{}` had no value here", e)),
+        };
+        return finish(WOULD_FIRE, vec![timer_step, action_step]);
+    }
+
     let Some(steps) = eval::InputSteps::of(&rule.graph) else {
         return finish(
             UNREADABLE,
@@ -411,8 +505,29 @@ pub fn evaluate_once(
         step(ACTION, "skipped", "nothing would be sent".to_string())
     };
 
+    // A DELAY rule (`AfterMatch`) inserts a `timer` row here, between the comparison and the send —
+    // the same slot `run_evaluator`'s live walk parks a send in (§6.2). Only when the condition
+    // matched: with no crossing there is nothing that would be parked, and `skipped` says so, the
+    // same way `action` above is `skipped` rather than describing a send that would not happen.
+    // `DailyAt` never reaches this line — it is handled entirely in the schedule branch above, which
+    // returns before `InputSteps::of` is even asked for a verdict.
+    let timer_step = match &rule.graph.timer {
+        Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms } }) if would_fire => {
+            Some(step(TIMER, "ok", format!("would wait {} before sending", describe_wait(*delay_ms))))
+        }
+        Some(TimerStep { mode: TimerMode::AfterMatch { .. } }) => {
+            Some(step(TIMER, "skipped", "nothing to wait for".to_string()))
+        }
+        _ => None,
+    };
+
     let verdict = if would_fire { WOULD_FIRE } else { WOULD_NOT_FIRE };
-    finish(verdict, vec![monitor, parse, cond, action])
+    let mut all_steps = vec![monitor, parse, cond];
+    if let Some(t) = timer_step {
+        all_steps.push(t);
+    }
+    all_steps.push(action);
+    finish(verdict, all_steps)
 }
 
 /// What the Test button says would be typed.
@@ -1106,4 +1221,98 @@ mod tests {
         assert!(body.contains("eval::evaluate("), "and it must go through the SAME pure core");
     }
 
+    // =============================================================================================
+    // Task 25 (plan 032 §7) — the wait step's own row
+    // =============================================================================================
+
+    /// **A DELAY rule inserts a fifth row, between the comparison and the send, only when it would
+    /// actually park.** `kinds` proves the row exists and sits where §6.2's live park does; `detail`
+    /// proves it names the wait, through `describe_wait` (never a literal restating `delay_ms`, the
+    /// same discipline `timer_problems`'s own bound messages follow).
+    #[test]
+    fn a_delay_rule_reports_a_timer_row_between_cond_and_action_when_it_would_fire() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        fake.say("pc-1", "ctx:63%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE);
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "timer", "action"]);
+        assert_eq!(statuses(&report), vec!["ok", "ok", "ok", "ok", "ok"]);
+        let timer = detail(&report, "timer");
+        assert!(timer.contains("30 s"), "{timer}");
+        assert!(timer.contains("wait"), "{timer}");
+        // The action row is untouched by the wait's presence — it still names what would be typed.
+        assert_eq!(
+            detail(&report, "action"),
+            "would type `prepare to do context-hand-off` into codex · core"
+        );
+    }
+
+    /// The paired negative: the condition did NOT cross, so nothing would be parked — the timer row
+    /// still exists (the rule DOES have a wait step) but says so is `skipped`, matching `action`'s own
+    /// `skipped` treatment for the same reason on the same run.
+    #[test]
+    fn a_delay_rules_timer_row_is_skipped_when_the_condition_does_not_cross() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        fake.say("pc-1", "ctx:18%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_NOT_FIRE);
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "timer", "action"]);
+        assert_eq!(status(&report, "timer"), "skipped");
+        assert_eq!(detail(&report, "timer"), "nothing to wait for");
+    }
+
+    /// The paired positive for the class above: a rule with NO wait step at all reports the original
+    /// four rows — no `timer` kind appears, ever, for the common case every template still is.
+    #[test]
+    fn a_rule_with_no_wait_step_reports_no_timer_row() {
+        let (engine, fake, host) = wire(vec![]);
+        fake.say("pc-1", "ctx:63%\n");
+        let report = evaluate_once(&engine, host.as_ref(), &ctx_rule("au-1"), "tm-1", 1_000);
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "action"]);
+    }
+
+    /// **A SCHEDULE rule reads nothing, so its report has no `monitor`/`parse`/`cond` row to draw at
+    /// all** — just the schedule and the send, task 25's replacement for the old blanket
+    /// `unreadable` + four skipped rows this shape used to get (§6.3, corrected during
+    /// implementation: "task 25 owns the schedule-aware wording for the Test pane").
+    #[test]
+    fn a_schedule_rule_reports_only_its_timer_and_action_rows() {
+        let (engine, fake, host) = wire(vec![schedule_only_rule("au-sched")]);
+        let rule = schedule_only_rule("au-sched");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(report.verdict, WOULD_FIRE, "{:?}", report.steps);
+        assert_eq!(kinds(&report), vec!["timer", "action"]);
+        assert_eq!(statuses(&report), vec!["ok", "ok"]);
+        let timer = detail(&report, "timer");
+        assert!(timer.contains("09:00"), "{timer}");
+        assert!(timer.contains("weekdays"), "{timer}");
+        assert_eq!(detail(&report, "action"), "would type `stand-up notes?` into codex · core");
+        assert!(fake.written().is_empty(), "a schedule dry run must still type nothing");
+    }
+
+    /// The schedule branch still asks `process_for_leaf` (§6.3/M4: it is what ADDRESSES the eventual
+    /// send, even though `host.tail` is never asked) — so a terminal that is not open is `unreadable`,
+    /// the same distinction §10.17b's live-terminal test draws for the ordinary four-step path.
+    #[test]
+    fn a_schedule_rule_against_a_closed_terminal_is_unreadable() {
+        let (engine, fake, host) = wire(vec![]);
+        fake.leaves.lock().unwrap().clear();
+
+        let report = evaluate_once(&engine, host.as_ref(), &schedule_only_rule("au-sched"), "tm-1", 1_000);
+
+        assert_eq!(report.verdict, UNREADABLE);
+        assert_eq!(kinds(&report), vec!["timer", "action"]);
+        assert_eq!(status(&report, "action"), "failed");
+        assert!(fake.written().is_empty());
+    }
 }

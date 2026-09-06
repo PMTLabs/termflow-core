@@ -298,6 +298,32 @@ describe('automationDerive — a step the rule does not have', () => {
         expect(ctx.problems.map((p) => p.code)).toContain('targets.empty');
         expect(stateFor(rule, 'monitor', ctx).tone).toBe('error');
     });
+
+    /**
+     * **The Wait card's subtitle cannot be one fixed number.** Plan 032 §3 makes it a HEAD-OR-MIDDLE
+     * box: step 4 in delay mode (between the comparison and the send, `STEP_ORDER`'s own slot) and
+     * step 1 in schedule mode, where it is the first thing that happens — the mockup draws both, and
+     * `STEP_ORDER` is one array, so a subtitle built only from it can only ever be right about one.
+     * Task 25's own dispatch: *"the mockup shows 'Step 1' for a schedule rule — and it is right."*
+     */
+    it('numbers the Wait card by the rule\'s OWN mode, not by the fixed step order', () => {
+        const delayRule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        delayRule.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+        expect(panelFor(delayRule, 'timer', ctxFor(delayRule)).subtitle).toMatch(/^Step 4 ·/);
+
+        const schedRule = scheduleRule();
+        expect(panelFor(schedRule, 'timer', ctxFor(schedRule)).subtitle).toMatch(/^Step 1 ·/);
+
+        // The paired negative: a rule with NO wait step at all is not "step 1" either — the fixed
+        // order still applies to the placeholder card.
+        const noTimer = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        expect(panelFor(noTimer, 'timer', ctxFor(noTimer)).subtitle).toMatch(/^Step 4 ·/);
+
+        // Deliberately NOT asserted here: `action`'s own subtitle in schedule mode stays "Step 5"
+        // (`STEP_ORDER`'s fixed slot) even though Wait now reads "Step 1" — renumbering every other
+        // card around an absent one is the larger fix task 25's own dispatch says to leave alone
+        // rather than half-do.
+    });
 });
 
 describe('automationDerive — missing values are marked, not blank', () => {

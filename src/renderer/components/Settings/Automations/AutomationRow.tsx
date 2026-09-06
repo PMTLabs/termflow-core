@@ -115,6 +115,11 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                             {' '}<span className="au-arrow">{sentence.verb}</span>{' '}
                             <b>{sentence.detail}</b>
                         </>
+                    )}
+                    {sentence.waitClause && (
+                        <>
+                            {' '}<span className="au-arrow">→</span> {sentence.waitClause}
+                        </>
                     )}{' '}
                     <span className="au-arrow">→</span> {sentence.verbSend}{' '}
                     <span className="au-msg">&quot;{sentence.message}&quot;</span>

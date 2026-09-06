@@ -424,6 +424,82 @@ describe('the row reads as a sentence', () => {
         expect(s.verb).toBeNull();
     });
 
+    /**
+     * Plan 032 §7 — the Wait step's own clause in the row's sentence (task 25).
+     *
+     * **The acceptance shape, not the acceptance STRING.** The brief that specified these two cases
+     * quoted *"when output has API error → wait 30s → type resume"* and *"at 09:00 on weekdays →
+     * type /context"*, but this codebase's existing voice already differs from that quote in its own
+     * established ways (`when output starts matching`, `describeDelay`'s `30 seconds` rather than
+     * `30s`) — so what is pinned here is the SHAPE each acceptance case names: a delay rule's
+     * sentence names the wait BETWEEN the match and the send, and a schedule rule's leads with the
+     * clock and never mentions output at all.
+     */
+    describe('the wait step (plan 032 §7)', () => {
+        it('delay mode: names the wait between the condition and the send', () => {
+            const r = rule();
+            r.graph.cond = { kind: 'text', op: null, threshold: null };
+            r.graph.parse = { preset: 'exactWords', literal: null, find: 'API error', keep: 'whole' };
+            r.graph.action = { message: 'resume', sendTo: 'matched', submit: false, cliType: 'default' };
+            r.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+
+            const s = describeRule(r);
+
+            expect(s.lead).toBe('when output starts matching');
+            expect(s.subject).toBe('API error');
+            expect(s.waitClause).toBe('wait 30 seconds');
+            expect(s.verbSend).toBe('type');
+            expect(s.message).toBe('resume');
+        });
+
+        it('a delay with no length typed yet names no wait clause', () => {
+            // The validator's own `timer.delayTooShort` covers this; the row must not invent a
+            // number the rule does not have for a field that is merely unset.
+            const r = rule();
+            r.graph.timer = { mode: { afterMatch: { delayMs: 0 } } };
+            expect(describeRule(r).waitClause).toBeNull();
+        });
+
+        it('a rule with no wait step at all names no wait clause', () => {
+            expect(describeRule(rule()).waitClause).toBeNull();
+        });
+
+        /**
+         * **Schedule mode leads with the clock and never mentions output.** The mutation this test is
+         * written to kill: making the schedule branch fall through to the delay-mode wording (e.g. by
+         * deleting or short-circuiting the `'dailyAt' in timer.mode` check) would make this rule read
+         * through its `parse`/`cond` — which it still carries in this fixture — as
+         * *"when the number in ctx:(\d+)% rises above 25"*, exactly the sentence this test forbids.
+         */
+        it('schedule mode: leads with the clock, mentions no output, whatever else the rule carries', () => {
+            const r = rule();
+            r.graph.timer = { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } };
+            r.graph.action = { message: '/context', sendTo: 'matched', submit: true, cliType: 'default' };
+
+            const s = describeRule(r);
+
+            expect(s.lead).toBe('at');
+            expect(s.subject).toBe('09:00 on weekdays');
+            expect(s.verb).toBeNull();
+            expect(s.detail).toBeNull();
+            expect(s.waitClause).toBeNull();
+            expect(s.verbSend).toBe('send');
+            expect(s.message).toBe('/context');
+            // The premise this test polices: this fixture (`rule()`) still carries its own
+            // monitor/parse/cond — the sentence must not smuggle any of their words in anyway.
+            expect(r.graph.cond).not.toBeUndefined();
+            const whole = `${s.lead} ${s.subject} ${s.verb ?? ''} ${s.detail ?? ''}`;
+            expect(whole).not.toMatch(/ctx|number|output|matches|rises/);
+        });
+
+        it('an unfinished schedule (no days picked) says only what it sends, like a rule with no trigger', () => {
+            const r = rule();
+            r.graph.timer = { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0 } } };
+            const s = describeRule(r);
+            expect(s.lead).not.toBe('at');
+        });
+    });
+
     it('describes a PINNED rule by its picked terminals, not by its stale criterion', () => {
         // A pinned rule still carries a criterion — the columns are non-optional and keep whatever
         // they last held — and `watched_set` ignores it entirely for that mode. Switching on the
@@ -470,5 +546,33 @@ describe('the row reads as a sentence', () => {
         const streamed = rule();
         streamed.graph.monitor.cadence = 'onOutput';
         expect(describeCadence(streamed)).toBe('On every new line');
+    });
+
+    /**
+     * Plan 032 §7 (task 25) — the cadence chip for a rule with no monitor step at all.
+     *
+     * `describeCadence`'s own doc comment used to say *"say nothing rather than invent a check
+     * interval… until then"*, naming this exact milestone. `clockTime`/`describeDays` come from
+     * `automationTimerWords.ts` rather than `automationDerive.ts` — the module this file cannot
+     * import without a cycle — so this also pins that the import actually resolves to something.
+     */
+    it('describes a SCHEDULE rule\'s cadence by its clock, having no monitor step at all', () => {
+        const { monitor: _m, ...rest } = rule().graph;
+        const scheduled = rule();
+        scheduled.graph = {
+            ...rest,
+            timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 } } },
+        };
+        expect(describeCadence(scheduled)).toBe('At 09:00, weekdays');
+
+        // An unfinished schedule (no days picked) has nothing to name yet — the same "say nothing"
+        // answer a rule with no monitor and no timer at all gets.
+        const unfinished = rule();
+        unfinished.graph = { ...rest, timer: { mode: { dailyAt: { minuteOfDay: 9 * 60, days: 0 } } } };
+        expect(describeCadence(unfinished)).toBe('—');
+
+        const neither = rule();
+        neither.graph = { ...rest };
+        expect(describeCadence(neither)).toBe('—');
     });
 });

@@ -34,6 +34,13 @@ import type { Problem, ProblemField } from './automationValidation';
 import { badgeFor, sourceText } from './automationValidation';
 import type { StepKind } from './automationSteps';
 import { STEP_LABELS, STEP_ORDER, STEP_SUBTITLES } from './automationSteps';
+// Moved out to `automationTimerWords.ts` (plan 032 §7): `automationState.ts`'s own `describeCadence`
+// needs these same two formatters for a schedule rule's cadence line, and this module already
+// imports FROM `automationState.ts` — so leaving them here would be an import cycle. Re-exported
+// below so every existing importer of them from this module keeps working unchanged.
+import { clockTime, describeDays } from './automationTimerWords';
+
+export { clockTime, daysOf, describeDays } from './automationTimerWords';
 
 /** Every step's `field` in the problem list. They are the same words, and that is deliberate. */
 export const STEP_FIELDS: Record<StepKind, ProblemField[]> = {
@@ -206,48 +213,6 @@ export const WAIT_MODE_PHRASES = {
     afterMatch: 'After the comparison passes',
     dailyAt: 'At a time of day',
 } as const;
-
-/** Bits 0–6 of a `dailyAt` mask are Mon..Sun (plan 032 §3.1). Bit 7 names no day. */
-const DAY_NAMES = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const;
-const WEEKDAY_MASK = 0b0001_1111;
-const WEEKEND_MASK = 0b0110_0000;
-const EVERY_DAY_MASK = 0b0111_1111;
-
-/** Which days a mask selects, in order. Exported so the panel's checkboxes and this agree. */
-export function daysOf(mask: number): string[] {
-    return DAY_NAMES.filter((_, i) => (mask & (1 << i)) !== 0);
-}
-
-/**
- * A weekday mask in words — `every day`, `weekdays`, `weekends`, or the days themselves.
- *
- * The three named sets are not a convenience: `Mon, Tue, Wed, Thu, Fri` is 25 characters and the
- * node's value column holds about 23 to a line (see `AU_NODE_W`), so the common case would wrap the
- * one row the card gives this step. Returns `''` for a mask that selects nothing, which is
- * `timer.noDays` and is reported as a missing value rather than as a set of no days.
- */
-export function describeDays(mask: number): string {
-    const picked = mask & EVERY_DAY_MASK;
-    if (picked === 0) return '';
-    if (picked === EVERY_DAY_MASK) return 'every day';
-    if (picked === WEEKDAY_MASK) return 'weekdays';
-    if (picked === WEEKEND_MASK) return 'weekends';
-    return daysOf(picked).join(', ');
-}
-
-/**
- * A minute-of-day as a 24-hour clock time, or `null` when it is not a time of day at all.
- *
- * `minuteOfDay` is a bare number on both sides of the wire and `timer.badMinute` is what refuses an
- * out-of-range one — but validation runs beside this, not before it, so the editor draws a rule
- * that is blocked. `null` is the honest answer for `-5`; `-1:-5` is not.
- */
-export function clockTime(minuteOfDay: number): string | null {
-    if (!Number.isInteger(minuteOfDay) || minuteOfDay < 0 || minuteOfDay >= 24 * 60) return null;
-    const hh = String(Math.floor(minuteOfDay / 60)).padStart(2, '0');
-    const mm = String(minuteOfDay % 60).padStart(2, '0');
-    return `${hh}:${mm}`;
-}
 
 /**
  * The wait as one sentence, or `null` when the rule does not state one yet.
@@ -539,6 +504,24 @@ export interface PanelModel {
 }
 
 /**
+ * The subtitle's own step number — `STEP_ORDER`'s fixed position, except for `timer`.
+ *
+ * Plan 032 §3 makes the Wait card a HEAD-OR-MIDDLE box: it is step 4 when it holds a delay (between
+ * the comparison and the send, where `STEP_ORDER` puts it) and step 1 when it is a schedule's own
+ * start — the mockup draws both. `STEP_ORDER` is one fixed array, so it can only ever be right about
+ * one of the two; this is the one place a panel's step number reads the RULE instead of the order.
+ *
+ * Deliberately narrow: only `timer` moves. A schedule rule's Watch/Read/Compare cards keep their
+ * `STEP_ORDER` numbers (2/3/4 rather than 1) even though they hold nothing (`NOT_IN_THIS_RULE`) —
+ * renumbering every card around an absent one is a bigger change than the one thing the mockup
+ * actually shows differently, and `action` staying at its own fixed number is the same call.
+ */
+function stepPosition(rule: AutomationRule, step: StepKind): number {
+    if (step === 'timer' && rule.graph.timer && 'dailyAt' in rule.graph.timer.mode) return 1;
+    return STEP_ORDER.indexOf(step) + 1;
+}
+
+/**
  * The inspector panel's model.
  *
  * A panel component renders controls bound to `rule.graph`, but everything it *displays as text* —
@@ -546,7 +529,7 @@ export interface PanelModel {
  * describe different rules.
  */
 export function panelFor(rule: AutomationRule, step: StepKind, ctx: DeriveContext): PanelModel {
-    const index = STEP_ORDER.indexOf(step) + 1;
+    const index = stepPosition(rule, step);
     const mine = problemsForStep(ctx.problems, step);
     const count = ctx.problems.length;
     return {
@@ -641,17 +624,33 @@ const OP_WORDS: Record<string, string> = {
  * `automationState` cannot import `condSentence` from here without a cycle.
  */
 export interface RuleSentence {
-    /** `when the number in` / `when output starts matching` / `when` — never carries the pattern. */
+    /**
+     * `when the number in` / `when output starts matching` / `when` / `at` — never carries the
+     * pattern or the clock. `'at'` is the schedule mode's own lead (§6.3, §7): it pairs with
+     * `subject` carrying the time and days, and with `verb`/`detail` both null, because a schedule
+     * rule reads nothing for this sentence to mention.
+     */
     lead: string;
-    /** The pattern, or the literal the user typed when there is one. Emphasised by the row. */
+    /**
+     * The pattern, or the literal the user typed when there is one — emphasised by the row. In
+     * schedule mode this carries the clock and days instead (`09:00 on weekdays`), because there is
+     * no pattern to show.
+     */
     subject: string;
-    /** The condition verb, or null when the condition needs none (a plain event rule). */
+    /** The condition verb, or null when the condition needs none (a plain event rule, or a schedule). */
     verb: string | null;
     /**
      * What the verb reads against, emphasised by the row: a v1 threshold, or the whole clause
      * sentence. Null when the verb is.
      */
     detail: string | null;
+    /**
+     * The Wait step's own clause — `wait 30 seconds` — shown between the condition and the send in
+     * DELAY mode. `null` when there is nothing to add there: no wait step, a delay with no length
+     * typed yet (the validator's own blocking sentence covers that), or SCHEDULE mode, whose
+     * `lead`/`subject` already carry the whole timing — a second clause would repeat the clock.
+     */
+    waitClause: string | null;
     /** `send` or `type` — *Answer a confirmation* deliberately does not press Enter. */
     verbSend: string;
     message: string;
@@ -659,18 +658,59 @@ export interface RuleSentence {
     sendNote: string | null;
 }
 
+/**
+ * The wait clause between the condition and the send — `wait 30 seconds` — read through
+ * `describeDelay` so the row and the Wait panel's own sentence (`waitSentence`, `stepValues`) never
+ * spell one delay two different ways (§1.1). `null` for a schedule timer: `describeRule` never asks
+ * this for one, since the clock already carries the whole story in `lead`/`subject`.
+ */
+function delayClause(timer: AutomationTimerStep | undefined): string | null {
+    if (!timer || !('afterMatch' in timer.mode)) return null;
+    const { delayMs } = timer.mode.afterMatch;
+    // Not yet given a length: the validator's own `timer.delayTooShort` covers a value under the
+    // floor, and this must not invent a number the rule does not have for one that is merely unset.
+    if (delayMs <= 0) return null;
+    return `wait ${describeDelay(delayMs)}`;
+}
+
 export function describeRule(rule: AutomationRule): RuleSentence {
-    const { parse, cond, action } = rule.graph;
+    const { parse, cond, timer, action } = rule.graph;
     const send = {
         verbSend: action.submit ? 'send' : 'type',
         message: action.message,
         sendNote: action.submit ? null : ' — no Enter',
     };
-    // **A rule with no parse or cond step says only what it sends.** Plan 032 §7 gives this
-    // sentence a Timer clause (*"at 09:00, …"*) in milestone 5; until then the honest answer is to
-    // name no trigger at all rather than describe one the rule does not have.
+
+    // **Schedule mode leads with the clock and never with the output.** §6.3: the walk skips
+    // `host.tail` for the WHOLE rule on every tick, so there is no condition this sentence could
+    // describe truthfully — including for the blocked shape that also carries a monitor
+    // (`timer.scheduleWithMonitor`), which is exactly why this is checked before `parse`/`cond` are
+    // ever consulted, not after.
+    if (timer && 'dailyAt' in timer.mode) {
+        const { minuteOfDay, days } = timer.mode.dailyAt;
+        const at = clockTime(minuteOfDay);
+        const when = describeDays(days);
+        if (at !== null && when !== '') {
+            return {
+                lead: 'at',
+                subject: `${at} on ${when}`,
+                verb: null,
+                detail: null,
+                waitClause: null,
+                ...send,
+            };
+        }
+        // An unfinished schedule (a bad minute, or no days picked) has nothing worth naming yet —
+        // `timer.badMinute`/`timer.noDays` are the validator's own words for it — so this falls
+        // through to "says only what it sends" below, the same honest answer a rule with no
+        // parse/cond step gets.
+    }
+
+    const waitClause = delayClause(timer);
+
+    // **A rule with no parse or cond step says only what it sends.**
     if (!parse || !cond) {
-        return { lead: '', subject: '', verb: null, detail: null, ...send };
+        return { lead: '', subject: '', verb: null, detail: null, waitClause, ...send };
     }
     const subject = parse.literal && parse.literal.length > 0 ? parse.literal : parse.find;
 
@@ -678,23 +718,28 @@ export function describeRule(rule: AutomationRule): RuleSentence {
     // an event rule with clauses used to read "when X appears" and drop them. One reading, through
     // `condSentence` — the same function the node face and `CondPanel` read.
     if ((cond.clauses ?? []).length > 0) {
-        return { lead: 'when', subject, verb: 'matches and', detail: condSentence(cond), ...send };
+        return {
+            lead: 'when', subject, verb: 'matches and', detail: condSentence(cond), waitClause, ...send,
+        };
     }
     if (cond.kind !== 'number') {
-        return { lead: 'when output starts matching', subject, verb: null, detail: null, ...send };
+        return { lead: 'when output starts matching', subject, verb: null, detail: null, waitClause, ...send };
     }
     // **The same blocked shape, on the third surface.** `OP_WORDS[cond.op ?? 'gt']` invented
     // *"rises above"* for a comparison the rule does not carry and paired it with a `detail` of
     // `null`, which the row draws as an empty `<b>`. One reading, through `condSentence` — §1.1:
     // two surfaces on one screen must not make opposite claims about one rule.
     if (cond.op == null || cond.threshold == null) {
-        return { lead: 'when', subject, verb: 'matches, but', detail: condSentence(cond), ...send };
+        return {
+            lead: 'when', subject, verb: 'matches, but', detail: condSentence(cond), waitClause, ...send,
+        };
     }
     return {
         lead: 'when the number in',
         subject,
         verb: OP_WORDS[cond.op] ?? 'reaches',
         detail: String(cond.threshold),
+        waitClause,
         ...send,
     };
 }
