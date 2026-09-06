@@ -869,4 +869,25 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         await renderCond([clause('$1', 'is over', '25')], { find: 'ctx:(\\d+)%' });
         expect(verdicts()).toHaveLength(1);
     });
+
+    /**
+     * **A reading has to say where it came from.** `$1 holds "63"` beside a green tick is a claim,
+     * and the thing it is read from is `sayPattern`'s worked example — not a terminal. Without the
+     * note a user reasonably reads the row as live output and trusts a verdict about a line no
+     * terminal ever printed.
+     */
+    it('says the readings come from the worked example, and only while there are readings', async () => {
+        await renderCond([clause('$1', 'is over', '25')], { find: 'ctx:(\\d+)%' });
+        const text = container.textContent ?? '';
+        expect(text).toContain('worked example');
+        expect(text).toContain('not from a terminal');
+
+        // Not on a rule with no reading to explain — the rows there carry no verdict either.
+        await renderCond([clause('$1', 'is over', '25')], { find: '(unclosed' });
+        expect(container.textContent ?? '').not.toContain('worked example');
+
+        // …nor on a rule with no comparisons at all.
+        await renderCond([], { find: 'ctx:(\\d+)%' });
+        expect(container.textContent ?? '').not.toContain('worked example');
+    });
 });

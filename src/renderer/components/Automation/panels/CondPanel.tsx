@@ -419,6 +419,20 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                         No comparisons — this rule fires when {condSentence(cond)}.
                     </AuHelp>
                 )}
+                {/* **Where those readings came from, said rather than implied.** The values and
+                    verdicts above are `sampleFromPattern`'s — this pattern's own worked example run
+                    back through itself, the same string *Read a value* shows under "Matches lines
+                    like …". They are not a terminal read, and a row saying `$1 holds "63"` beside a
+                    green tick, with nothing to say where 63 came from, is a surface making a claim
+                    it cannot support. `Test run` is the one that judges a rule against real output,
+                    so it is named here rather than left to be found. */}
+                {caps !== null && clauses.length > 0 && (
+                    <AuHelp>
+                        These readings come from this pattern&apos;s own worked example, not from a
+                        terminal. <b>Test run</b> judges the rule against a terminal&apos;s real
+                        output.
+                    </AuHelp>
+                )}
             </AuField>
 
             {/* A join over ONE row is meaningless — hidden until there is something to combine. */}
