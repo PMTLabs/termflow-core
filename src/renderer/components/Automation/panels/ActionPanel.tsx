@@ -42,6 +42,9 @@ export interface ActionPanelProps {
 
 type ChipInfo = { text: string; dead: boolean };
 
+/** The scanner reads bare `$N` as one digit, so group 10 and above need braces everywhere. */
+const groupToken = (n: number): string => (n < 10 ? `$${n}` : `\${${n}}`);
+
 /**
  * A default sample, when the caller does not supply one: run the pattern's OWN worked example back
  * through the SAME pattern. Never invents a value beyond what `ParsePanel` already shows the user
@@ -127,8 +130,8 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     // rather than merely implied by the live chips stopping (mockup §04).
     const chips: ChipInfo[] = [
         { text: '$0', dead: !patternReady },
-        ...Array.from({ length: groups.count }, (_, i): ChipInfo => ({ text: `$${i + 1}`, dead: false })),
-        { text: `$${groups.count + 1}`, dead: true },
+        ...Array.from({ length: groups.count }, (_, i): ChipInfo => ({ text: groupToken(i + 1), dead: false })),
+        { text: groupToken(groups.count + 1), dead: true },
         { text: '$$', dead: false },
     ];
 
