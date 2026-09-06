@@ -120,6 +120,36 @@ pub fn target_already_past(mode: &TimerMode, now_local: LocalTime) -> bool {
     (0..MINUTES_PER_DAY).contains(minute_of_day) && now_local.minute_of_day >= *minute_of_day
 }
 
+/// Do these two versions of a rule's timer aim at the SAME minute of the day?
+///
+/// **`reload`'s question, and the one that decides whether an edit keeps the day it already spent.**
+/// Saving a rule moves `updated_at`, `forget_rule` drops everything that rule owns — the day mark
+/// included — and the re-seed that follows cannot tell *never fired today* from *fired today, the
+/// mark was just deleted*. So the mark is captured and put back, and this is the gate on putting it
+/// back: a rename, a new message or a different target leaves today's target instant exactly where
+/// it was, and that instant is spent.
+///
+/// **The mask is deliberately NOT part of the comparison**, though "did the timer change" would take
+/// it. Today's target instant is the `minute_of_day` alone: a Monday 09:00 that has already run is
+/// spent whatever the weekday mask is edited to at 09:30, so clearing on a mask edit would write
+/// *"09:00 went by while nothing was watching the clock"* about a 09:00 that ran — the very row this
+/// gate exists to stop. `schedule_due` consults the mask on every future day regardless, so keeping
+/// the mark takes nothing away from the edit.
+///
+/// A minute that MOVED is a different instant, and the day has not been spent on it — a 09:00 rule
+/// dragged to 17:00 at 09:30 must ring at 17:00 today. Anything that is not a `DailyAt` on both
+/// sides has no target minute to compare: a delay has no day mark to keep, and switching between the
+/// two modes is a new schedule either way.
+pub fn same_target_minute(before: Option<&TimerMode>, after: Option<&TimerMode>) -> bool {
+    match (before, after) {
+        (
+            Some(TimerMode::DailyAt { minute_of_day: was, .. }),
+            Some(TimerMode::DailyAt { minute_of_day: now, .. }),
+        ) => was == now,
+        _ => false,
+    }
+}
+
 /// A `minute_of_day` as a 24-hour `HH:MM`.
 ///
 /// **Here rather than in `dry.rs`, where it started, because it now has two readers.** The dry run
@@ -373,6 +403,35 @@ mod tests {
         ));
         assert!(!target_already_past(&daily_at(-5, ALL_DAYS), local(monday, 0)));
         assert!(!target_already_past(&daily_at(MINUTES_PER_DAY, ALL_DAYS), local(monday, 0)));
+    }
+
+    /// **The mask is not part of "same target minute", and that is the ruling, not an oversight.**
+    ///
+    /// `reload` keeps a rule's spent day across an edit when this says the minute did not move. A
+    /// mask edit leaves today's target instant exactly where it was — a 09:00 that ran this morning
+    /// ran — so taking the mask into the comparison would clear the mark and let the re-seed write
+    /// *"09:00 went by while nothing was watching the clock"* about a 09:00 that fired.
+    ///
+    /// A moved minute is a different instant and must clear it, or a rule dragged from 09:00 to 17:00
+    /// at 09:30 never rings at 17:00.
+    #[test]
+    fn only_a_moved_minute_is_a_different_target() {
+        let nine = daily_at(9 * 60, WEEKDAYS);
+        let nine_every_day = daily_at(9 * 60, ALL_DAYS);
+        let five = daily_at(17 * 60, WEEKDAYS);
+        let delay = TimerMode::AfterMatch { delay_ms: 30_000 };
+
+        assert!(same_target_minute(Some(&nine), Some(&nine)), "a rename moves nothing");
+        assert!(
+            same_target_minute(Some(&nine), Some(&nine_every_day)),
+            "adding a weekday does not un-run this morning"
+        );
+        assert!(!same_target_minute(Some(&nine), Some(&five)), "17:00 is an instant today has not spent");
+        assert!(!same_target_minute(Some(&nine), Some(&delay)), "a delay has no target minute at all");
+        assert!(!same_target_minute(Some(&delay), Some(&nine)));
+        assert!(!same_target_minute(Some(&delay), Some(&delay)), "and two delays share no day mark");
+        assert!(!same_target_minute(None, Some(&nine)), "a rule that has just gained a schedule");
+        assert!(!same_target_minute(Some(&nine), None), "and one that has just lost one");
     }
 
     /// A delay rule is not a schedule and is never due here — it is parked and drained elsewhere.

@@ -493,15 +493,42 @@ impl AutomationEngine {
         }
 
         // Whose keys survive. Read the previous generation BEFORE swapping, so "unchanged" is a
-        // comparison and not a guess.
-        let previous: Vec<(String, i64)> = {
+        // comparison and not a guess. The previous timer comes with it, for the day mark below.
+        let previous: Vec<(String, i64, Option<TimerMode>)> = {
             let guard = self.live.read().unwrap_or_else(|e| e.into_inner());
-            guard.iter().map(|(id, l)| (id.clone(), l.rule.updated_at)).collect()
+            guard
+                .iter()
+                .map(|(id, l)| {
+                    (id.clone(), l.rule.updated_at, l.rule.graph.timer.as_ref().map(|t| t.mode.clone()))
+                })
+                .collect()
         };
-        for (id, was) in previous {
-            let unchanged = next.get(&id).is_some_and(|l| l.rule.updated_at == was);
-            if !unchanged {
-                self.runtime.forget_rule(&id);
+        for (id, was, timer_was) in previous {
+            let after = next.get(&id);
+            if after.is_some_and(|l| l.rule.updated_at == was) {
+                continue;
+            }
+            // **Captured before the purge, because the purge is what destroys it** — and the
+            // re-seed below cannot reconstruct it: an absent mark and a target three hours past are
+            // spelled identically, so it would decide the day had been missed and write *"09:00 went
+            // by while nothing was watching the clock"* thirty minutes after the `Sent` row for that
+            // same run. `Held` is Decision-class, so the verbose gate cannot drop that row, and with
+            // `LOG_CAP` at 200 one editing session's worth of them evicts the rule's real history.
+            //
+            // Only for a rule that is still HERE with the same target minute: a rule that left the
+            // live set (disabled, deleted, completed) is meant to lose everything it owns, and a
+            // moved minute is an instant today has not been spent on. `schedule::same_target_minute`
+            // owns that judgement, mask included.
+            let spent_day = self.runtime.last_fired_day(&id);
+            let same_minute = schedule::same_target_minute(
+                timer_was.as_ref(),
+                after.and_then(|l| l.rule.graph.timer.as_ref()).map(|t| &t.mode),
+            );
+            self.runtime.forget_rule(&id);
+            if same_minute {
+                if let Some(day) = spent_day {
+                    self.runtime.set_last_fired_day(&id, day);
+                }
             }
         }
 
@@ -1058,6 +1085,156 @@ mod tests {
         assert!(
             !schedule::schedule_due(&mode, engine.runtime.last_fired_day("au-sched"), afternoon),
             "an edit at 14:00 delivered the 09:00 message on the next tick"
+        );
+    }
+
+    /// **An edit made after the rule has already fired must not write "today's run was skipped"** —
+    /// that row is a lie, and it is written into the record the user consults to find out what the
+    /// rule did.
+    ///
+    /// `reload` purges a changed rule's `last_fired_day` (the store stamps `updated_at` on EVERY
+    /// save) and then re-seeds. The re-seed cannot tell *never fired today* from *fired today, the
+    /// mark was just deleted*, so it decided the day had been missed: the app runs across 09:00 and
+    /// sends, the user renames the rule at 09:30, and a `Held` row lands thirty minutes after the
+    /// `Sent` row for that same run saying nothing was watching the clock. Every subsequent save
+    /// wrote another one, and `Held` is Decision-class — the verbose gate cannot drop it — so with
+    /// `LOG_CAP` at 200 the duplicates evict the rule's real history.
+    ///
+    /// **This asserts the ROWS, and that is the whole point.**
+    /// `a_schedule_edited_after_its_minute_is_re_seeded_rather_than_unmarked` above asserts only the
+    /// mark, which is exactly how this got through: the re-seed restores the same mark the fire
+    /// left, so the mark is right and the log is wrong.
+    #[test]
+    fn a_schedule_renamed_after_it_fired_writes_no_suppression_row() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        // 08:00: the app is running BEFORE the minute, so nothing is seeded and nothing is said.
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        assert_eq!(engine.runtime.last_fired_day("au-sched"), None, "premise: 09:00 is still ahead");
+
+        // 09:00 arrives and the rule fires. `evaluate_tick` marks the day after the leaves and
+        // `run_send` writes the `Sent` row; both are reproduced here rather than driven through the
+        // loop, which needs a host this module has no business wiring for a `reload` test.
+        engine.runtime.set_last_fired_day("au-sched", monday);
+        store
+            .append(&AutomationLogEntry {
+                id: 0,
+                rule_id: "au-sched".into(),
+                terminal_id: Some("tm-1".into()),
+                terminal_name: Some("shell".into()),
+                kind: LogKind::Sent,
+                detail: "sent to shell".into(),
+                at: 1_000,
+            })
+            .unwrap();
+
+        // 09:30, and the user only renames it: same minute, same days.
+        sched.name = "morning stand-up".into();
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        let report = engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        let rows = store
+            .load_automation_log(&crate::automation_store::LogScope::All, LogOrder::Asc, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the rename wrote a row about a run that happened: {rows:?}");
+        assert_eq!(rows[0].kind, LogKind::Sent, "the `Sent` row is still the last word: {rows:?}");
+        assert!(!report.emit, "no row was written, so no window has anything to refetch");
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(monday),
+            "and the day is still spent, so the rename cannot send a second message today"
+        );
+    }
+
+    /// **Moving the schedule to a different minute is a NEW schedule, and it may fire today.**
+    ///
+    /// The discriminator for keeping the day mark is *did the target minute move*, not *did the rule
+    /// change*: a rename leaves today's target instant exactly where it was and therefore spent,
+    /// while a move puts it somewhere the day has not been spent on. This is the direction
+    /// "always preserve" gets wrong — a 09:00 rule moved to 17:00 at 09:30 must ring at 17:00.
+    #[test]
+    fn a_schedule_moved_to_a_later_minute_fires_at_the_new_time_today() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday);
+
+        // 09:30: the user drags the time to 17:00.
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 17 * 60, days: 0b0001_1111 },
+        });
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            None,
+            "17:00 has not gone by today, so nothing has spent it"
+        );
+        let TimerStep { mode } = sched.graph.timer.clone().expect("a schedule rule has a timer");
+        assert!(
+            schedule::schedule_due(
+                &mode,
+                engine.runtime.last_fired_day("au-sched"),
+                at(monday, 17 * 60)
+            ),
+            "the rule was moved to 17:00 and then refused to ring at 17:00"
+        );
+    }
+
+    /// **Changing only the WEEKDAYS keeps the day mark** — and this is where the ruling this branch
+    /// shipped differs from the one it was handed.
+    ///
+    /// The brief's discriminator was *did the timer change*, which takes the mask with it. But
+    /// today's target instant is the `minute_of_day` alone: a Monday 09:00 that has already run is
+    /// spent whatever the mask is edited to at 09:30, so clearing the mark on a mask edit re-creates
+    /// the exact false row this fix exists to remove — *"09:00 went by while nothing was watching"*,
+    /// about a 09:00 that ran. The mask is consulted by `schedule_due` on every future day anyway,
+    /// so keeping the mark costs it nothing.
+    ///
+    /// The price is named rather than hidden: a user who adds TODAY's weekday to the mask after the
+    /// minute has passed gets silence rather than a row explaining it — the same silence a rule
+    /// whose day was seeded on a masked-out morning already gets, and the direction the brief itself
+    /// calls safe (a missed extra send beats a false row).
+    #[test]
+    fn a_schedule_whose_weekdays_changed_keeps_the_day_it_already_spent() {
+        let store = AutomationStore::new_in_memory();
+        let mut sched = crate::automation_engine::test_host::schedule_only_rule("au-sched");
+        store.save_rule(&sched).unwrap();
+
+        let engine = AutomationEngine::new(0);
+        let monday = monday_2026_09_07();
+        engine.reload_at(&store, 0, at(monday, 8 * 60)).unwrap();
+        engine.runtime.set_last_fired_day("au-sched", monday);
+
+        // 09:30: Mon-Fri becomes every day. Same minute; today has still run.
+        sched.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0111_1111 },
+        });
+        sched.updated_at += 1;
+        store.save_rule(&sched).unwrap();
+        let report = engine.reload_at(&store, 2_000, at(monday, 9 * 60 + 30)).unwrap();
+
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(monday),
+            "adding a weekday does not un-run this morning"
+        );
+        assert!(!report.emit);
+        assert!(
+            log_rows(&store).is_empty(),
+            "a mask edit said this morning was skipped: {:?}",
+            log_rows(&store)
         );
     }
 

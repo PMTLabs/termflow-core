@@ -175,6 +175,15 @@ pub struct AutomationRuntime {
     /// Purged by `forget_rule` alone: it is a fact about the rule's own day, which a terminal
     /// closing or leaving a watched set does not undo. In memory only, like `parked` — launch
     /// starts empty, and `reload` runs at launch, which is what puts the seed there.
+    ///
+    /// **`reload` carries it ACROSS that purge when the rule's target minute has not moved**
+    /// (`schedule::same_target_minute`), and this map is the only one it does that for. Every save
+    /// moves `updated_at`, so `forget_rule` runs on a rename — and the re-seed that follows cannot
+    /// tell *never fired today* from *fired today, the mark was just deleted*. It decided the day had
+    /// been missed and wrote *"09:00 went by while nothing was watching the clock"* into the log
+    /// half an hour after the `sent` row for that same run. The other maps here want the purge: an
+    /// edit resetting a rule's arm state is Q11, and settled decision 7 wants the next crossing to be
+    /// a real one. A day that was spent stays spent.
     last_fired_day: DashMap<String, i32>,
 }
 
