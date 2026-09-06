@@ -24,7 +24,6 @@
 
 use regex::{Regex, RegexBuilder};
 
-use crate::automation::runtime::ECHO_TTL_MS;
 use crate::automation_engine::subst;
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
@@ -264,6 +263,22 @@ fn clause_problems(graph: &AutomationGraph) -> Vec<Problem> {
 /// and too permissive for a delay: a sub-second "wait" is a send, not a wait.
 pub const MIN_DELAY_MS: i64 = 1_000;
 
+/// The ceiling on an `AfterMatch` wait — plan 032 §12 item 2.
+///
+/// **A parked send lives only in memory.** `AutomationRuntime.parked` is a `DashMap` built empty at
+/// launch and never persisted, so a wait that outlives the process is a message the feature quietly
+/// never sends. The cap is what keeps the promise the editor makes when it accepts a delay small
+/// enough to survive an ordinary session.
+///
+/// **It equals `ECHO_TTL_MS` today by coincidence, and the two are unrelated — do not couple them.**
+/// This cap used to be written as `ECHO_TTL_MS` on the theory that a longer wait outlives the echo
+/// needle that hides the rule's own message from itself. That theory is false: `run_send` calls
+/// `push_echo(&tm, .., landed)` where `landed` is the moment the write LANDED, and `push_echo` sets
+/// `until_ms = now_ms + ECHO_TTL_MS`, so a needle's life starts at the SEND. The wait between the
+/// crossing and the send cannot shorten it, and there is no delay length at which a rule's own
+/// message goes unstripped.
+pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
+
 /// Bits 0–6 of `TimerMode::DailyAt::days` are Mon..Sun (plan §3.1). `u8` has an 8th bit (0x80) that
 /// names no weekday at all — this mask is what `timer.noDays` checks against, so a hand-crafted or
 /// corrupted mask with ONLY that spare bit set is still treated as "no day selected" rather than
@@ -283,25 +298,26 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
     match &timer.mode {
         TimerMode::AfterMatch { delay_ms } => {
             if *delay_ms < MIN_DELAY_MS {
+                // The number is DERIVED, never restated: a floor quoted as a literal lies the day
+                // the constant moves, which is the same reason `monitor.interval` quotes
+                // `MIN_TIMER_MS`.
                 out.push(Problem::new(
                     Severity::Blocks,
                     "timer",
                     "timer.delayTooShort",
-                    "Wait at least 1 second before sending.",
+                    format!("Wait at least {} second before sending.", MIN_DELAY_MS / 1_000),
                 ));
-            } else if *delay_ms >= ECHO_TTL_MS {
-                // §6.2: the engine forgets its own echo needle after ECHO_TTL_MS. A wait at or
-                // beyond that fires after the guard that would have hidden the send has already
-                // expired, so the rule can read its own message back and re-trigger itself — a real
-                // feedback loop, not a tidiness rule. Referencing the constant, rather than a
-                // literal, is what keeps this cap correct if ECHO_TTL_MS ever moves.
+            } else if *delay_ms >= MAX_DELAY_MS {
+                // §12 item 2, and NOT the echo needle — see `MAX_DELAY_MS`'s own doc for why that
+                // justification was false. A parked send is held in memory and nowhere else, so the
+                // words name the thing the cap actually protects the user from.
                 out.push(Problem::new(
                     Severity::Blocks,
                     "timer",
                     "timer.delayTooLong",
                     format!(
-                        "Wait less than {} minutes, or the rule may hear its own message and fire again.",
-                        ECHO_TTL_MS / 60_000
+                        "Wait less than {} minutes — a waiting message is held in memory and is lost if TermFlow quits.",
+                        MAX_DELAY_MS / 60_000
                     ),
                 ));
             }
@@ -604,7 +620,7 @@ mod tests {
     use super::*;
     use crate::automation_store::{
         ActionStep, Cadence, Clause, CompareOp, CondStep, MonitorStep, ParsePreset, ParseStep,
-        ReadMode, SendTo,
+        ReadMode, SendTo, TimerStep,
     };
     use crate::automation_store::{AutomationRule, Criterion, TargetMode};
 
@@ -999,6 +1015,39 @@ mod tests {
         assert_eq!(
             incomplete.message,
             "Add a comparison — this rule reads a value but has nothing to compare it with."
+        );
+    }
+
+    /// **Both delay bounds quote their own constant.** `timer.delayTooShort` restated its floor as
+    /// the literal words *"at least 1 second"* while `MIN_DELAY_MS` sat three lines above it, which
+    /// is a sentence that goes false the day the floor moves and says nothing when it does.
+    ///
+    /// The cap's words are pinned here too, because they are the half that was WRONG: they blamed
+    /// the echo needle (see `MAX_DELAY_MS`), which no wait length can outlive.
+    /// `automationValidation.ts` asserts the same two sentences, built the same way.
+    #[test]
+    fn both_delay_bounds_quote_their_constant_rather_than_restating_it() {
+        let with_delay = |delay_ms: i64| {
+            let mut rule = valid_rule();
+            rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms } });
+            rule
+        };
+
+        let short = problems(&with_delay(MIN_DELAY_MS - 1));
+        let short = short.iter().find(|p| p.code == "timer.delayTooShort").expect("under the floor");
+        assert_eq!(
+            short.message,
+            format!("Wait at least {} second before sending.", MIN_DELAY_MS / 1_000)
+        );
+
+        let long = problems(&with_delay(MAX_DELAY_MS));
+        let long = long.iter().find(|p| p.code == "timer.delayTooLong").expect("at the cap");
+        assert_eq!(
+            long.message,
+            format!(
+                "Wait less than {} minutes — a waiting message is held in memory and is lost if TermFlow quits.",
+                MAX_DELAY_MS / 60_000
+            )
         );
     }
 

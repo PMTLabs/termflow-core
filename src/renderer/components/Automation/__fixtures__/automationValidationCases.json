@@ -2473,8 +2473,8 @@
       "expected": []
     },
     {
-      "name": "timer.delayTooLong — exactly ECHO_TTL_MS blocks",
-      "why": "§6.2: a wait at or beyond the echo TTL can outlive the guard that hides its own send, so the rule can hear its own message and re-fire. ECHO_TTL_MS is 10 minutes (runtime.rs:36).",
+      "name": "timer.delayTooLong — exactly MAX_DELAY_MS blocks",
+      "why": "§12 item 2: a parked send is held in memory and nowhere else, so a wait long enough to outlive the session is a message the feature would never deliver. MAX_DELAY_MS is 10 minutes (automation_validation.rs).",
       "rule": {
         "id": "au-fix",
         "name": "Context handoff reminder",
@@ -2532,7 +2532,7 @@
       ]
     },
     {
-      "name": "timer.delayTooLong's cap — one ms under ECHO_TTL_MS is clean",
+      "name": "timer.delayTooLong's cap — one ms under MAX_DELAY_MS is clean",
       "rule": {
         "id": "au-fix",
         "name": "Context handoff reminder",

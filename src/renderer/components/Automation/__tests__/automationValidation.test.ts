@@ -14,6 +14,8 @@
 import fixture from '../__fixtures__/automationValidationCases.json';
 import type { AutomationRule } from '../../../types/electron';
 import {
+    MAX_DELAY_MS,
+    MIN_DELAY_MS,
     MIN_TIMER_MS,
     badgeFor,
     blockingProblems,
@@ -132,6 +134,28 @@ describe('automationValidation — the words the user reads', () => {
         };
         expect(find(fast, 'monitor.interval')?.message).toBe(
             `Check no more often than every ${MIN_TIMER_MS} ms.`,
+        );
+    });
+
+    /**
+     * **Both delay bounds quote their own constant.** `timer.delayTooShort` restated its floor as
+     * the literal words *"at least 1 second"* while `MIN_DELAY_MS` sat a few lines above it — a
+     * sentence that goes false the day the floor moves, and says nothing when it does.
+     *
+     * The cap's words are pinned too, because they are the half that was WRONG: they blamed the
+     * echo needle, whose life starts when the write LANDS and which therefore no wait length can
+     * outlive. `automation_validation.rs` asserts the same two sentences, built the same way.
+     */
+    it('quotes both delay bounds from their constants, rather than restating them', () => {
+        const withDelay = (delayMs: number): AutomationRule => ({
+            ...base(),
+            graph: { ...base().graph, timer: { mode: { afterMatch: { delayMs } } } },
+        });
+        expect(find(withDelay(MIN_DELAY_MS - 1), 'timer.delayTooShort')?.message).toBe(
+            `Wait at least ${MIN_DELAY_MS / 1_000} second before sending.`,
+        );
+        expect(find(withDelay(MAX_DELAY_MS), 'timer.delayTooLong')?.message).toBe(
+            `Wait less than ${MAX_DELAY_MS / 60_000} minutes — a waiting message is held in memory and is lost if TermFlow quits.`,
         );
     });
 

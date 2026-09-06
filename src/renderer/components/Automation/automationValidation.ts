@@ -325,14 +325,24 @@ function clauseProblems(graph: AutomationGraph): Problem[] {
 export const MIN_DELAY_MS = 1_000;
 
 /**
- * Mirrors `ECHO_TTL_MS` in `src-tauri/src/automation/runtime.rs:36` (10 minutes, as
- * `10 * 60 * 1_000`). TypeScript cannot import a Rust constant, so this number is typed by hand —
- * kept honest, not merely commented, by the shared fixture's two `timer.delayTooLong` boundary
- * cases: one wait at exactly this value (blocks) and one a millisecond under it (clean). If
- * `ECHO_TTL_MS` ever moves in `runtime.rs` without this constant moving with it, one of those two
- * cases starts failing on THIS side, in this file's own test run — the drift cannot go silent.
+ * The ceiling on an `AfterMatch` wait — plan 032 §12 item 2. Mirrors `MAX_DELAY_MS` in
+ * `automation_validation.rs`.
+ *
+ * **A parked send lives only in memory.** The engine's `parked` map is built empty at launch and
+ * never persisted, so a wait that outlives the process is a message the feature quietly never
+ * sends. The cap is what keeps the promise the editor makes by accepting a delay at all.
+ *
+ * It equals the engine's `ECHO_TTL_MS` today **by coincidence, and the two are unrelated** — the
+ * echo needle's life starts when the write LANDS, not at the crossing, so no wait length can
+ * outlive it. `MAX_DELAY_MS`'s own doc on the Rust side carries the evidence.
+ *
+ * TypeScript cannot import a Rust constant, so this number is typed by hand — kept honest, not
+ * merely commented, by the shared fixture's two `timer.delayTooLong` boundary cases: one wait at
+ * exactly this value (blocks) and one a millisecond under it (clean). If `MAX_DELAY_MS` ever moves
+ * in `automation_validation.rs` without this constant moving with it, one of those two cases starts
+ * failing on THIS side, in this file's own test run — the drift cannot go silent.
  */
-export const ECHO_TTL_MS = 10 * 60 * 1_000;
+export const MAX_DELAY_MS = 10 * 60 * 1_000;
 
 /**
  * Bits 0–6 of a `dailyAt` timer's `days` are Mon..Sun (plan §3.1). The type is a `number` on this
@@ -358,20 +368,26 @@ function timerProblems(graph: AutomationGraph): Problem[] {
     if ('afterMatch' in mode) {
         const { delayMs } = mode.afterMatch;
         if (delayMs < MIN_DELAY_MS) {
+            // The number is DERIVED, never restated: a floor quoted as a literal lies the day the
+            // constant moves, which is the same reason `monitor.interval` quotes `MIN_TIMER_MS`.
             out.push(
-                problem('blocks', 'timer', 'timer.delayTooShort', 'Wait at least 1 second before sending.'),
+                problem(
+                    'blocks',
+                    'timer',
+                    'timer.delayTooShort',
+                    `Wait at least ${MIN_DELAY_MS / 1_000} second before sending.`,
+                ),
             );
-        } else if (delayMs >= ECHO_TTL_MS) {
-            // §6.2: the engine forgets its own echo needle after ECHO_TTL_MS. A wait at or beyond
-            // that fires after the guard that would have hidden the send has already expired, so
-            // the rule can read its own message back and re-trigger itself — a real feedback loop,
-            // not a tidiness rule.
+        } else if (delayMs >= MAX_DELAY_MS) {
+            // §12 item 2, and NOT the echo needle — see `MAX_DELAY_MS` above for why that
+            // justification was false. A parked send is held in memory and nowhere else, so the
+            // words name the thing the cap actually protects the user from.
             out.push(
                 problem(
                     'blocks',
                     'timer',
                     'timer.delayTooLong',
-                    `Wait less than ${ECHO_TTL_MS / 60_000} minutes, or the rule may hear its own message and fire again.`,
+                    `Wait less than ${MAX_DELAY_MS / 60_000} minutes — a waiting message is held in memory and is lost if TermFlow quits.`,
                 ),
             );
         }
