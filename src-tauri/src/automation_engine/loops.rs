@@ -1460,6 +1460,58 @@ mod tests {
         );
     }
 
+    /// **The day is marked even when not one target was reachable** — and that is a ruling, not a
+    /// side effect.
+    ///
+    /// A 09:00 rule whose terminals are all asleep at 09:00 sends nothing, and must not then deliver
+    /// its prompt to the first one that wakes at 14:00. Marking only when a send was actually pushed
+    /// is nagging on arrival, per terminal — the behaviour plan 028 Q3 ruled against for arm state
+    /// and which 6.3's launch seeding exists to prevent for exactly this rule kind.
+    ///
+    /// The cost is the opposite edge: an app started at 08:59:59 whose leaves are not indexed by
+    /// 09:00 silently skips that day. A prompt typed late into a live agent is judged the worse of
+    /// the two.
+    ///
+    /// **This is also the test that kills a day mark written inside the leaves loop.** With the
+    /// predicate asked once per rule, a per-leaf mark starves nobody in the same tick — but a rule
+    /// with no reachable leaf never reaches it at all, so the day is never spent and the rule fires
+    /// on arrival. The next-day tick is here so "does not fire" cannot be satisfied by a rule that
+    /// was killed outright.
+    #[tokio::test(start_paused = true)]
+    async fn a_schedule_whose_targets_were_all_asleep_does_not_nag_the_first_one_to_wake() {
+        let (engine, fake, host) =
+            wire_targets(vec![schedule_only_rule("au-sched")], &[], &[("au-sched", &["tm-1"])]);
+        assert!(host.process_for_leaf("tm-1").is_none(), "premise: nothing is awake");
+
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(
+            engine.runtime.last_fired_day("au-sched"),
+            Some(day_ordinal(2026, 9, 7)),
+            "the rule's turn for today passed, with nobody there to send to"
+        );
+
+        // The terminal wakes five hours later. Today is spent.
+        open_terminal(&fake, "tm-1", "pc-1", "tm-1");
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 14, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert!(
+            fake.written().is_empty(),
+            "a 09:00 prompt was delivered at 14:00 because a terminal turned up: {:?}",
+            fake.written()
+        );
+
+        // Tomorrow is not spent.
+        evaluate_tick(&engine, &host, 0, at_local(2026, 9, 8, Weekday::Tue, 9, 0)).await;
+        tokio::time::sleep(Duration::from_millis(2_000)).await;
+        assert_eq!(
+            sent_to(&fake, "stand-up notes?"),
+            vec!["pc-1"],
+            "a skipped day must not retire the rule: {:?}",
+            fake.written()
+        );
+    }
+
     /// **R6 binds a schedule rule too.** The one `sends.push` in this module lives inside `admit`,
     /// which is what applies the single-run claim; a schedule branch that pushed directly would opt
     /// the whole rule kind out of `runs_once`, exactly as 6.2's parked route once did.
