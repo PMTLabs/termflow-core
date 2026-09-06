@@ -176,20 +176,15 @@ pub async fn list_watchable_terminals(
     state: State<'_, AppState>,
     rule_id: Option<String>,
     include_ids: Option<Vec<String>>,
+    criteria: Vec<Criterion>,
 ) -> Result<Vec<WatchableTerminal>, String> {
     let owned = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let store = owned.automation_store.clone();
-        // Only the criterion of the rule being edited, so opening the picker on a `Terminal ID is`
-        // rule never enumerates the machine's processes (§10.13).
-        let criteria: Vec<Criterion> = match rule_id.as_deref() {
-            Some(id) => store
-                .get_rule(id)
-                .map_err(to_string_err)?
-                .map(|r| vec![r.criterion])
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+        // The editor supplies its CURRENT rule-mode criteria, including the exception. `rule_id`
+        // scopes only the persisted label snapshots below: a saved row is stale while its draft is
+        // being edited, and a new draft has no saved row at all. Keeping those jobs separate means
+        // a command/cwd criterion gets the scan it needs before preview resolution.
         let live = EngineHost::roster(&owned, &criteria);
 
         // §4.3: scoped to the rule when the caller names one — the editor always knows which rule it

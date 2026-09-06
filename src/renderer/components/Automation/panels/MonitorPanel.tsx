@@ -192,6 +192,7 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                             Matching <span className="au-n">{targetPreview.matched.length}</span>
                             {' - '}excluded <span className="au-n">{targetPreview.excluded.length}</span>
                             {' = '}watching <span className="au-n">{targetPreview.watching.length}</span>
+                            {targetPreview.watching.length === 0 && ' — nothing is being watched'}
                         </div>
                     )}
                 </>

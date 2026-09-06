@@ -1075,7 +1075,7 @@ pub fn targeting_tick(
     let criteria: Vec<Criterion> = rules
         .iter()
         .filter(|l| l.rule.target_mode == TargetMode::Rule)
-        .map(|l| l.rule.criterion)
+        .flat_map(|l| std::iter::once(l.rule.criterion).chain(l.rule.exclude_criterion))
         .collect();
     let rows = host.roster(&criteria);
     // Indexed once, outside the rule loop: the snapshot walk below wants the row for a terminal it
@@ -4104,6 +4104,35 @@ mod tests {
             ids,
             vec!["tm-1".to_string()],
             "a rule was given a snapshot row for a terminal it does not watch"
+        );
+    }
+
+    /// An exception is a criterion the roster must answer too. The fake deliberately exposes its
+    /// process-derived command lines only when `roster` was asked for `CommandContains`, mirroring
+    /// the production scan gate. Reverting the exclusion half of the criteria collection leaves the
+    /// line empty, so `tm-1` incorrectly remains watched and this test fails.
+    #[test]
+    fn targeting_requests_and_uses_command_lines_for_an_exclusion_criterion() {
+        let mut rule = ctx_rule("au-exclude-claude");
+        rule.criterion = Criterion::AllTerminals;
+        rule.exclude_criterion = Some(Criterion::CommandContains);
+        rule.exclude_criterion_value = "claude".into();
+        let (engine, fake, host) = wire(vec![rule]);
+        fake.scanned_command_lines
+            .lock()
+            .unwrap()
+            .insert("tm-1".into(), vec!["pwsh.exe -Command claude".into()]);
+
+        let pass = targeting_tick(&engine, &host, 1_000);
+
+        assert!(
+            fake.last_roster_criteria().contains(&Criterion::CommandContains),
+            "the exclusion must request the process scan that populates command lines"
+        );
+        assert_eq!(
+            pass.watched.get("au-exclude-claude"),
+            Some(&HashSet::new()),
+            "the populated command line must make the exception remove tm-1"
         );
     }
 

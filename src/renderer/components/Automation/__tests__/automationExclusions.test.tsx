@@ -124,6 +124,14 @@ describe('the exclusions panel', () => {
         expect(numbers.map((n) => n.textContent)).toEqual(['4', '2', '2']);
     });
 
+    it('advises when the shared preview resolves no terminals to watch', async () => {
+        installPreview({ matched: ['tm-a'], excluded: ['tm-a'], watching: [] });
+        await show(rule({ excludedIds: ['tm-a'] }));
+
+        expect(container.querySelector('.au-termcount')?.textContent)
+            .toBe('Matching 1 - excluded 1 = watching 0 — nothing is being watched');
+    });
+
     it('does not offer exclusions on a hand-picked target set', async () => {
         await show(rule({
             targetMode: 'pinned',

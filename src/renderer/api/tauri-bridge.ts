@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
+import type { TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -221,7 +221,7 @@ interface ElectronAPI {
   listAutomations: () => Promise<AutomationRule[]>;
   getAutomationRuntime: () => Promise<AutomationStatePayload>;
   loadAutomationLog: (ruleId: string | null, newestFirst: boolean, limit: number) => Promise<AutomationLogEntry[]>;
-  listWatchableTerminals: (ruleId: string | null, includeIds: string[] | null) => Promise<WatchableTerminal[]>;
+  listWatchableTerminals: (ruleId: string | null, includeIds: string[] | null, criteria: AutomationCriterion[]) => Promise<WatchableTerminal[]>;
   previewAutomationTargets: (rule: AutomationRule, terminals: WatchableTerminal[]) => Promise<AutomationTargetPreview>;
   dryRunAutomation: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
   saveAutomation: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
@@ -905,8 +905,8 @@ const tauriBridge: ElectronAPI = {
   getAutomationRuntime: async () => invoke<AutomationStatePayload>('get_automation_runtime'),
   loadAutomationLog: async (ruleId, newestFirst, limit) =>
     invoke<AutomationLogEntry[]>('load_automation_log', { ruleId, newestFirst, limit }),
-  listWatchableTerminals: async (ruleId, includeIds) =>
-    invoke<WatchableTerminal[]>('list_watchable_terminals', { ruleId, includeIds }),
+  listWatchableTerminals: async (ruleId, includeIds, criteria) =>
+    invoke<WatchableTerminal[]>('list_watchable_terminals', { ruleId, includeIds, criteria }),
   previewAutomationTargets: async (rule, terminals) =>
     invoke<AutomationTargetPreview>('preview_automation_targets', { rule, terminals }),
   dryRunAutomation: async (rule, terminalId) =>

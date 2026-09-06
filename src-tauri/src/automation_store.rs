@@ -3221,6 +3221,27 @@ mod tests {
         assert!(store.get_rule("au-2").unwrap().is_some());
     }
 
+    /// Reusing an id is the observable regression: without `DELETE FROM automation_exclusions`, a
+    /// newly saved rule silently inherits the deleted rule's exception rows.
+    #[test]
+    fn deleting_then_reusing_a_rule_id_does_not_restore_old_exclusions() {
+        let store = AutomationStore::new_in_memory();
+        let mut original = rule("au-x");
+        original.excluded_ids = vec!["tm-excluded-before-delete".into()];
+        store.save_rule(&original).unwrap();
+
+        assert!(store.delete_rule("au-x").unwrap());
+
+        let replacement = rule("au-x");
+        store.save_rule(&replacement).unwrap();
+        let saved = store.get_rule("au-x").unwrap().unwrap();
+        assert!(
+            saved.excluded_ids.is_empty(),
+            "the replacement must not inherit exclusions from the deleted rule: {:?}",
+            saved.excluded_ids
+        );
+    }
+
     #[test]
     fn mark_completed_stamps_the_rule_and_reports_a_missing_one() {
         let store = AutomationStore::new_in_memory();

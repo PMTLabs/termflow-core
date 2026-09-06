@@ -31,6 +31,11 @@ pub(crate) struct FakeHost {
     pub(crate) store: Arc<AutomationStore>,
     pub(crate) leaves: Mutex<HashMap<String, String>>,
     pub(crate) roster: Mutex<Vec<RosterRow>>,
+    /// Process-derived command lines, made visible only when the caller asks the roster for the
+    /// criterion that requires a process scan. This gives targeting tests the same request/populate
+    /// seam as `AppState::roster` without taking a real machine snapshot.
+    pub(crate) scanned_command_lines: Mutex<HashMap<String, Vec<String>>>,
+    pub(crate) roster_criteria: Mutex<Vec<Vec<Criterion>>>,
     pub(crate) text: Mutex<HashMap<String, String>>,
     /// Every `tail` the engine asked for, in order — **the screen reads, recorded**.
     ///
@@ -67,6 +72,8 @@ impl FakeHost {
             store: Arc::new(AutomationStore::new_in_memory()),
             leaves: Mutex::new(HashMap::new()),
             roster: Mutex::new(Vec::new()),
+            scanned_command_lines: Mutex::new(HashMap::new()),
+            roster_criteria: Mutex::new(Vec::new()),
             text: Mutex::new(HashMap::new()),
             tails: Mutex::new(Vec::new()),
             writes: Mutex::new(Vec::new()),
@@ -136,6 +143,10 @@ impl FakeHost {
     pub(crate) fn announced(&self) -> Vec<String> {
         self.changed.lock().unwrap().iter().flatten().cloned().collect()
     }
+
+    pub(crate) fn last_roster_criteria(&self) -> Vec<Criterion> {
+        self.roster_criteria.lock().unwrap().last().cloned().unwrap_or_default()
+    }
 }
 
 impl EngineHost for FakeHost {
@@ -146,8 +157,22 @@ impl EngineHost for FakeHost {
         }
         self.leaves.lock().unwrap().get(tm).cloned()
     }
-    fn roster(&self, _criteria: &[Criterion]) -> Vec<RosterRow> {
-        self.roster.lock().unwrap().clone()
+    fn roster(&self, criteria: &[Criterion]) -> Vec<RosterRow> {
+        self.roster_criteria.lock().unwrap().push(criteria.to_vec());
+        let mut rows = self.roster.lock().unwrap().clone();
+        if criteria.contains(&Criterion::CommandContains) {
+            let scanned = self.scanned_command_lines.lock().unwrap();
+            for row in &mut rows {
+                if let Some(lines) = row
+                    .terminal_id
+                    .as_deref()
+                    .and_then(|terminal_id| scanned.get(terminal_id))
+                {
+                    row.command_lines = lines.clone();
+                }
+            }
+        }
+        rows
     }
     fn live_processes(&self) -> Vec<String> {
         self.leaves.lock().unwrap().values().cloned().collect()

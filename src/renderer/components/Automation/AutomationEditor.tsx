@@ -218,6 +218,11 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             const rows = await api.listWatchableTerminals(
                 draft.rule.id.length > 0 ? draft.rule.id : null,
                 draft.rule.targetIds.length > 0 ? draft.rule.targetIds : null,
+                writing.targetMode === 'rule'
+                    ? [writing.criterion, writing.excludeCriterion].filter(
+                        (criterion): criterion is NonNullable<typeof criterion> => criterion != null,
+                    )
+                    : [],
             );
             setTerminals(rows);
             setTerminalsError(null);
@@ -227,9 +232,17 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             setTerminalsLoading(false);
         }
         // The pick set is a dependency because a newly ticked id has to appear in the roster with
-        // its snapshot; the rule id is one because it changes exactly once, on the first save.
+        // its snapshot; the criteria are because they decide whether the roster needs process/cwd
+        // data; the rule id changes exactly once, on the first save.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [api, draft.rule.id, draft.rule.targetIds.join(',')]);
+    }, [
+        api,
+        draft.rule.id,
+        draft.rule.targetIds.join(','),
+        writing.targetMode,
+        writing.criterion,
+        writing.excludeCriterion,
+    ]);
 
     /**
      * The roster is POLLED, not fetched once.

@@ -403,6 +403,7 @@ export interface ElectronAPI {
   listWatchableTerminals?: (
     ruleId: string | null,
     includeIds: string[] | null,
+    criteria: AutomationCriterion[],
   ) => Promise<WatchableTerminal[]>;
   previewAutomationTargets?: (
     rule: AutomationRule,
