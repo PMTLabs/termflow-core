@@ -312,6 +312,80 @@ describe('draftFromRule', () => {
             .toEqual(['timer.out->action.in']);
     });
 
+    /**
+     * **Task 29, the READ direction: `present` and the graph agree about which steps a rule has.**
+     *
+     * `draftFromRule` used to draw all four original steps for any saved rule whatever its graph
+     * held, on a premise written in `automationSteps.ts` — *"a rule's graph carries all four steps
+     * whatever is drawn"* — that §3.1 made false. Two reviewers reported the two halves of it
+     * separately: three dead cards whose panels return `null`, and a saved schedule rule that can
+     * never have `monitor`/`parse`/`cond` added back, because `canAddStep` refuses each one as
+     * *"already has"* while `graph.monitor` is absent.
+     *
+     * Mutation M-a: revert the `'saved'` arm to the unconditional
+     * `STEP_ORDER.filter((s) => s !== 'timer' || rule.graph.timer != null)` → this dies, and the
+     * ordinary-rule test below must not.
+     */
+    it('draws only the steps a saved schedule rule actually has', () => {
+        const { monitor: _m, parse: _p, cond: _c, ...graph } = draftFromTemplate(
+            AUTOMATION_TEMPLATES[0],
+        ).graph;
+        const draft = draftFromRule({
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: { ...graph, timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } } },
+        });
+        expect(draft.present).toEqual(['timer', 'action']);
+        expect(draft.wires.map((w) => `${w.from.step}.${w.from.port}->${w.to.step}.${w.to.port}`))
+            .toEqual(['timer.out->action.in']);
+    });
+
+    /**
+     * **The case R1 must NOT move**, and it is every rule that exists today: an ordinary v1 rule
+     * has all four original steps in its graph, so it goes on opening with all four cards and no
+     * wait card. Without this the regression is invisible — the only rule whose behaviour the
+     * change touches is one that genuinely lacks a step.
+     */
+    it('still draws all four cards for an ordinary saved rule, and no wait card', () => {
+        const draft = draftFromRule(draftFromTemplate(AUTOMATION_TEMPLATES[0]));
+        expect(draft.present).toEqual(WITHOUT_TIMER);
+        expect(canAddStep(draft.present, 'timer')).toBeNull();
+    });
+
+    /**
+     * **R2 — `addStep` materialises whatever it reveals, and the input steps materialise as a
+     * GROUP.** The reasoning written at the timer branch — *"revealing a card over nothing would
+     * give the panel no step to bind to and the save nothing to write"* — is a fact about absence,
+     * not about timers, and after R1 monitor/parse/cond can be absent too.
+     *
+     * The group half is the same all-or-nothing contract `ruleFromDraft` and `eval::InputSteps::of`
+     * keep: filling in only the card that was revealed writes a monitor with no parse and no cond,
+     * which no validation rule reports and which `reload` then admits and `evaluate_pair` silently
+     * declines forever.
+     *
+     * Mutation M-b: narrow the materialisation back to `action.step === 'timer'` → this dies.
+     */
+    it('fills in the graph for a revealed input step, all three of them', () => {
+        const { monitor: _m, parse: _p, cond: _c, ...graph } = draftFromTemplate(
+            AUTOMATION_TEMPLATES[0],
+        ).graph;
+        const schedule = draftFromRule({
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: { ...graph, timer: { mode: { afterMatch: { delayMs: 30_000 } } } },
+        });
+        expect(schedule.rule.graph.parse).toBeUndefined();
+
+        const added = draftReducer(schedule, { type: 'addStep', step: 'parse' });
+        expect(added.rule.graph.parse).not.toBeNull();
+        expect(added.rule.graph.parse).toBeDefined();
+        expect(added.rule.graph.monitor).toBeDefined();
+        expect(added.rule.graph.cond).toBeDefined();
+        // The CARD the user asked for, and only that one — the graph is all-or-nothing, the canvas
+        // is not.
+        expect(added.present).toEqual(['parse', 'timer', 'action']);
+        // Sourced from `blankDraft()`, never from a second set of defaults written here.
+        expect(added.rule.graph.parse).toEqual(blankDraft().graph.parse);
+    });
+
     it('draws NOTHING for a brand-new rule', () => {
         // Mockup §03's third state: an empty canvas and the "Start with Watch output" hint, so
         // building one from nothing is a thing the palette teaches rather than a thing that has

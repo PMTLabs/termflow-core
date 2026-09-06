@@ -202,6 +202,64 @@ describe('canAddStep', () => {
         expect(refusal?.reason).toContain(STEP_LABELS.cond);
         expect(refusal?.reason).toContain(STEP_LABELS.timer);
     });
+
+    /**
+     * **R3 — the palette must not offer an add that validation will block with no way back.**
+     *
+     * Task 29 makes `monitor`/`parse`/`cond` addable to a saved rule that lacks them, and that
+     * creates this trap: there is no remove gesture and no undo, so an add whose only remedy is a
+     * control that does not exist strands the user with the draft or with discarding every other
+     * edit they made.
+     *
+     * **The set, derived by reading both validators** (`automationValidation.ts`'s `timerProblems`
+     * / `patternProblems` / the `cond.incomplete` clause, and `automation_validation.rs`'s
+     * `timer_problems` / `pattern_problems` / the `Finds::Reading` clause, which agree):
+     *
+     * | add       | delay (`afterMatch`)          | schedule (`dailyAt`)                        |
+     * |-----------|-------------------------------|---------------------------------------------|
+     * | `monitor` | nothing                       | **`timer.scheduleWithMonitor`** — REFUSED    |
+     * | `parse`   | `parse.empty`                 | `parse.empty`                                |
+     * | `cond`    | nothing (`blankDraft`'s cond is `kind: 'text'`, so `cond.incomplete` — a `number` rule with no clauses — does not apply) |
+     *
+     * Only `monitor` on a schedule rule is refused, and the difference is not the severity but the
+     * REMEDY. `parse.empty` is cleared by typing in the card that was just added. There is no field
+     * anywhere that clears `timer.scheduleWithMonitor`: its own message offers *"remove the schedule,
+     * or remove the Watch output step"*, and the editor has neither control. The one thing the user
+     * CAN do is change the Wait step's mode, so the refusal says that.
+     *
+     * Mutation M-c: delete the refusal branch → the schedule row dies, the delay rows stay green.
+     */
+    describe('R3 — an add with no way back', () => {
+        const scheduleCanvas: StepKind[] = ['timer', 'action'];
+
+        it('refuses a Watch output step on a schedule rule, and says what the user CAN change', () => {
+            const refusal = canAddStep(scheduleCanvas, 'monitor', 'dailyAt');
+            expect(refusal).not.toBeNull();
+            expect(refusal?.reason).toContain(STEP_LABELS.monitor);
+            // "Wait", never "Timer" — `Cadence::Timer` is already the monitor's poll interval.
+            expect(refusal?.reason).toContain(STEP_LABELS.timer);
+            expect(refusal?.reason).not.toMatch(/remove/i);
+        });
+
+        it('permits every add whose problem the new card itself can clear', () => {
+            // Delay mode: the same canvas, the same adds, nothing refused — the set is empty here.
+            expect(canAddStep(scheduleCanvas, 'monitor', 'afterMatch')).toBeNull();
+            expect(canAddStep(['monitor', 'timer', 'action'], 'parse', 'afterMatch')).toBeNull();
+            expect(canAddStep(['monitor', 'timer', 'action'], 'parse', 'dailyAt')).toBeNull();
+            expect(canAddStep(['monitor', 'parse', 'timer', 'action'], 'cond', 'afterMatch')).toBeNull();
+            expect(canAddStep(['monitor', 'parse', 'timer', 'action'], 'cond', 'dailyAt')).toBeNull();
+        });
+
+        /**
+         * The shape defaults to `afterMatch`, which is what a canvas with no wait step at all
+         * answers (`timerShapeOf`) — so every caller that predates the argument keeps its behaviour
+         * and no ordinary rule is newly refused.
+         */
+        it('defaults to the delay shape, so a rule with no wait step is unaffected', () => {
+            expect(canAddStep([], 'monitor')).toEqual(canAddStep([], 'monitor', 'afterMatch'));
+            expect(canAddStep([], 'monitor')).toBeNull();
+        });
+    });
 });
 
 describe('defaultWires', () => {

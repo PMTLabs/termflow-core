@@ -23,9 +23,12 @@
  *
  * What the canvas adds is *which of them the user has put on it yet* — a brand-new rule opens on an
  * empty canvas (mockup §03's third state) and the palette is how it gets built. `present` is
- * session-only presentation, not persistence: it is re-derived on every open, and a SAVED rule
- * draws all four cards whatever its graph holds, which is why `automationDerive` has both a
- * *not in this rule* placeholder and an `absent` node tone.
+ * session-only presentation, not persistence: it is re-derived on every open. It used to be
+ * re-derived as *all four original steps whatever the graph holds*; since task 29 a saved rule
+ * draws **the steps it actually has**, so a schedule rule opens on its clock and its send and
+ * nothing else. `automationDerive`'s *not in this rule* placeholder and `absent` node tone are
+ * still reached — by a rule whose graph a MAKER other than this editor wrote, and by the test pane
+ * — but no longer by every schedule rule on open.
  */
 
 export type StepKind = 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
@@ -254,8 +257,35 @@ const REQUIRES: Partial<Record<StepKind, readonly StepKind[]>> = {
 /**
  * Whether a palette drop may add this step, and why not when it may not (mockup §03: *"the drop is
  * refused with the reason, rather than silently doing nothing"*).
+ *
+ * **`shape` is the wait's mode, and it is here because of what task 29 made possible.** Once
+ * `draftFromRule` draws only the steps a rule HAS, a saved schedule rule can be offered a
+ * `Watch output` step — and there is no remove gesture and no undo, so an add whose only remedy is
+ * a control that does not exist strands the user with the draft or with discarding every other edit
+ * they made. The invariant is *the palette must not offer an add that validation will block with no
+ * way back*, and exactly one add fails it:
+ *
+ * - `monitor` on a `dailyAt` rule raises `timer.scheduleWithMonitor`, whose own message offers
+ *   *"remove the schedule, or remove the Watch output step"* — and no field anywhere clears it.
+ * - `parse` raises `parse.empty`, which the card that was just revealed clears the moment the user
+ *   types in it. `cond` raises nothing at all (`blankDraft()`'s cond is `kind: 'text'`, and
+ *   `cond.incomplete` is a `number` rule's problem). Neither is a trap, and neither is refused.
+ *
+ * Both validators were read for that, not one: they agree here, but §8's two exhaustiveness lists
+ * deliberately no longer do, so assuming would have been guessing.
+ *
+ * **A refusal, not a `ProblemCode`.** This is a palette affordance, not a property of a saved rule;
+ * the rule it prevents is already `timer.scheduleWithMonitor`, and restating it as a twenty-second
+ * tri-surface code (TS + Rust + the shared fixture) would be two names for one fact.
+ *
+ * Defaults to `'afterMatch'`, which is what `timerShapeOf` answers for a rule with no wait step at
+ * all — so every canvas that has none behaves exactly as before.
  */
-export function canAddStep(present: readonly StepKind[], kind: StepKind): Refusal | null {
+export function canAddStep(
+    present: readonly StepKind[],
+    kind: StepKind,
+    shape: TimerShape = 'afterMatch',
+): Refusal | null {
     if (present.includes(kind)) {
         return {
             reason: `This rule already has a ${STEP_LABELS[kind]} step. Each step appears once.`,
@@ -271,22 +301,42 @@ export function canAddStep(present: readonly StepKind[], kind: StepKind): Refusa
             reason: `Add ${names} first — ${STEP_LABELS[kind]} has nothing to work on until ${tail}.`,
         };
     }
+    if (kind === 'monitor' && shape === 'dailyAt') {
+        // **Actionable, and it names a control that exists.** `timer.scheduleWithMonitor`'s own
+        // wording — *"remove the Watch output step"* — is the sentence C1 stranded users with. The
+        // one thing the user can actually do is switch the wait's mode, which `TimerPanel`'s
+        // *What kind of wait* radio does, so that is what this says. "Wait", never "Timer".
+        return {
+            reason: `This rule fires on the clock, so a ${STEP_LABELS.monitor} step would never run. `
+                + `Change the ${STEP_LABELS.timer} step from a time of day to a delay first.`,
+        };
+    }
     return null;
 }
 
 /**
- * **There is no `canRemoveStep`, because there is no remove.**
+ * **There is still no `canRemoveStep`, and the reason it used to give has expired.**
  *
- * There was one — a mirror of `canAddStep`, with a test, and no caller. Wiring it to a control on
- * the card would have been the honest-looking fix and the wrong one: `present` is session-only
- * canvas state, and a rule's graph carries all four steps whatever is drawn. Taking *Send a message*
- * off the canvas would hide the card and leave the message, the Enter and the send-to intact, so the
- * rule would go on typing into terminals with nothing on screen to say so.
+ * There was one — a mirror of `canAddStep`, with a test, and no caller. What justified deleting it
+ * was the sentence *"`present` is session-only canvas state, and a rule's graph carries all four
+ * steps whatever is drawn"*. **That second clause is no longer true.** §3.1 made `monitor`, `parse`
+ * and `cond` optional, task 29 made `draftFromRule` derive `present` from the graph, and
+ * `ruleFromDraft` omits the three input steps as a group when the canvas draws none — so `present`
+ * now DOES mean something the saved rule agrees with, which is precisely the condition the old note
+ * said a remove would need. A false comment that justifies real behaviour is how C1 got here, so it
+ * is corrected rather than left standing.
  *
- * `addStep` is coherent for the same reason this is not: on a fresh canvas it REVEALS a step so the
- * user can fill it in, and everything it reveals is blank and blocking until they do. Undoing an
- * add would need `present` to mean something the saved rule agrees with, which is a schema question
- * (§7.7), not a gesture.
+ * Remove is still absent, on the remaining half of the argument, which is untouched: taking a card
+ * off the canvas has to decide what happens to the DATA behind it. Hiding *Send to terminal* while
+ * leaving the message, the Enter and the send-to intact means the rule goes on typing into terminals
+ * with nothing on screen to say so — and `action` is not optional on the DTO, so there is no shape
+ * for its absence to write. For the three that are optional the question is answerable but not
+ * answered here: it is a gesture with a data consequence, and it needs designing rather than
+ * enabling.
+ *
+ * `addStep` is coherent because it moves the other way: it REVEALS a step and materialises whatever
+ * the panel needs to bind to, and everything it reveals is blank and blocking until the user fills
+ * it in.
  */
 
 /**

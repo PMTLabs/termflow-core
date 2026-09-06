@@ -58,7 +58,7 @@ import type { NodeFace, NodeState } from './automationDerive';
 import type { StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep } from './automationSteps';
 import type { CanvasOpening, NodePos } from './automationDraft';
-import { draftFromRule, draftReducer, isDirty, ruleFromDraft } from './automationDraft';
+import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
 import { AuPalette } from './AuPalette';
 import { AuInspector } from './AuInspector';
@@ -527,7 +527,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
      * (`gate-in-the-caller-lets-new-callers-opt-out`).
      */
     const addStep = useCallback((step: StepKind, pos?: NodePos) => {
-        const refusal = canAddStep(latest.current.draft.present, step);
+        const { draft: current } = latest.current;
+        const refusal = canAddStep(current.present, step, timerShapeOf(current.rule));
         if (refusal) {
             toast(refusal.reason, 'error');
             return;
@@ -718,6 +719,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 <div className="au-mbody">
                     <AuPalette
                         present={draft.present}
+                        timerShape={timerShapeOf(draft.rule)}
                         summary={ruleSummary(writing)}
                         onBeginDrag={(step, e) => paletteDrag.begin(step, e)}
                         onAdd={(step) => addStep(step)}

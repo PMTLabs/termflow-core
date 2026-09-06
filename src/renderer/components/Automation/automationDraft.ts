@@ -379,19 +379,31 @@ export type CanvasOpening = 'saved' | 'blank' | 'seeded' | 'template';
  */
 export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'saved'): AutomationDraft {
     // `'blank'` alone draws nothing; `'seeded'` draws the one step it configured; `'saved'` and
-    // `'template'` are both complete rules and draw all four of the original steps.
+    // `'template'` are complete rules and draw **the steps their graph actually holds**.
     //
-    // **The wait step is the exception, and it has to be.** The other four are drawn whatever the
-    // graph holds — a saved rule shows all four cards, blank ones included, because that is the
-    // shape of a rule. A wait is genuinely optional and most rules have none, so drawing its card
-    // for every rule would (a) put a permanently *not in this rule* card on every canvas, and
-    // (b) make `canAddStep` refuse it as already present, which is the palette's only route to
-    // adding one. Drawn when the rule has it, offered by the palette when it does not.
+    // That last arm used to draw all four original steps whatever the graph held, on the premise —
+    // written out beside `canAddStep` — that *"a rule's graph carries all four steps whatever is
+    // drawn"*. §3.1 made it false: `monitor`, `parse` and `cond` are `Option` now and a schedule
+    // rule (§6.3) genuinely has none of them. Two symptoms were reported separately from one cause.
+    // A saved schedule rule opened with three cards standing for steps it does not have, whose
+    // panels render nothing; and it could never have them ADDED back, because `canAddStep` refused
+    // each one as *"This rule already has a Watch step"* while `graph.monitor` was absent. The user
+    // was stuck with the shape they first saved.
+    //
+    // **`'blank'` and `'seeded'` stay opening-driven, and must.** `blankDraft()` materialises all
+    // four steps as a SCAFFOLD, so deriving from the graph there would draw four cards on a canvas
+    // whose whole point is that it is empty. The two new-rule openings are saying something the
+    // graph cannot.
+    //
+    // `action` is drawn unconditionally because §3.1 keeps it required — there is no absence to
+    // detect — and the wait is drawn on the same rule as the other three now, rather than as the
+    // exception it used to be: a rule that has one gets its card, a rule that does not can be
+    // offered one by the palette.
     const present: StepKind[] = opening === 'blank'
         ? []
         : opening === 'seeded'
             ? ['monitor']
-            : STEP_ORDER.filter((s) => s !== 'timer' || rule.graph.timer != null);
+            : STEP_ORDER.filter((s) => s === 'action' || rule.graph[s] != null);
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -644,6 +656,31 @@ const withGraph = (
     graph: Partial<AutomationRule['graph']>,
 ): AutomationDraft => withRule(draft, { ...draft.rule, graph: { ...draft.rule.graph, ...graph } });
 
+/**
+ * The rule with the graph fields a newly revealed card needs — see `addStep`'s own note.
+ *
+ * Returns the rule UNCHANGED when there is nothing to fill in, so `addStep` on a complete rule is
+ * still presentation-only and cannot make an unedited draft read dirty.
+ */
+function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
+    if (step === 'timer') {
+        return rule.graph.timer == null
+            ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
+            : rule;
+    }
+    if (step === 'action' || INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
+    const blank = blankDraft().graph;
+    return {
+        ...rule,
+        graph: {
+            ...rule.graph,
+            monitor: rule.graph.monitor ?? blank.monitor,
+            parse: rule.graph.parse ?? blank.parse,
+            cond: rule.graph.cond ?? blank.cond,
+        },
+    };
+}
+
 export function draftReducer(draft: AutomationDraft, action: DraftAction): AutomationDraft {
     const { rule } = draft;
     switch (action.type) {
@@ -737,15 +774,22 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             const present = STEP_ORDER.filter(
                 (s) => s === action.step || draft.present.includes(s),
             );
-            // **The wait step is the one add that MATERIALISES, and only because it is the one
-            // step `blankDraft()` does not carry.** Adding a `Read a value` reveals a card over a
-            // `graph.parse` that already exists; `graph.timer` is absent by design on every rule
-            // that does not use one (§3.1), so revealing a card over nothing would give the panel
-            // no step to bind to and the save nothing to write. Everything else about `addStep`
-            // stays presentation-only.
-            const next = action.step === 'timer' && rule.graph.timer == null
-                ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
-                : rule;
+            // **An add MATERIALISES whatever it reveals.** Revealing a card over nothing gives the
+            // panel no step to bind to and the save nothing to write — which was already the
+            // reasoning for the wait step, and is a fact about ABSENCE rather than about timers.
+            // Task 29 made it general: `draftFromRule` now draws only the steps a rule has, so
+            // `monitor`, `parse` and `cond` can be absent when the palette offers them too.
+            //
+            // **The three input steps materialise as a GROUP**, the same all-or-nothing contract
+            // `ruleFromDraft` writes them under and `eval::InputSteps::of` reads them under. Filling
+            // in only the revealed card would put a monitor with no parse into the graph, and
+            // nothing reports that shape: `reload` admits it (it has something to watch),
+            // `InputSteps::of` then answers `None`, and `evaluate_pair` declines it on every tick
+            // for the life of the rule, silently.
+            //
+            // Shapes come from `blankDraft()`, never from a second set of defaults written here —
+            // two answers to *"what does an empty Watch step look like"* would drift.
+            const next = materialise(rule, action.step);
             return {
                 ...draft,
                 rule: next,
