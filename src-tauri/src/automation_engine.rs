@@ -28,6 +28,7 @@ pub mod dry;
 pub mod eval;
 pub mod host;
 pub mod loops;
+pub mod subst;
 #[cfg(test)]
 pub mod test_host;
 
