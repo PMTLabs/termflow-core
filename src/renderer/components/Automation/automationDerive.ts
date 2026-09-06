@@ -33,6 +33,7 @@ import type { PatternSaying } from './automationPresets';
 import type { Problem, ProblemField } from './automationValidation';
 import { badgeFor, sourceText } from './automationValidation';
 import type { StepKind } from './automationSteps';
+import type { OutPortKey } from './automationSteps';
 import { STEP_LABELS, STEP_ORDER, STEP_SUBTITLES } from './automationSteps';
 // Moved out to `automationTimerWords.ts` (plan 032 §7): `automationState.ts`'s own `describeCadence`
 // needs these same two formatters for a schedule rule's cadence line, and this module already
@@ -542,21 +543,29 @@ export interface PanelModel {
 }
 
 /**
- * The subtitle's own step number — `STEP_ORDER`'s fixed position, except for `timer`.
+ * The subtitle's own step number — **counted over the steps the rule HAS**, in `STEP_ORDER`.
  *
- * Plan 032 §3 makes the Wait card a HEAD-OR-MIDDLE box: it is step 4 when it holds a delay (between
- * the comparison and the send, where `STEP_ORDER` puts it) and step 1 when it is a schedule's own
- * start — the mockup draws both. `STEP_ORDER` is one fixed array, so it can only ever be right about
- * one of the two; this is the one place a panel's step number reads the RULE instead of the order.
+ * This used to be `STEP_ORDER.indexOf(step) + 1` with one special case for a `dailyAt` wait, and
+ * the special case was the tell. `STEP_ORDER` has five members while most rules have four, so every
+ * four-step rule — which is every rule written before this milestone — drew cards numbered 1, 2, 3
+ * and **5**, with the Send panel's own head reading *"Step 5 · what happens when it fires"* on a
+ * canvas with no step 4 on it. Seen on screen on a stock template.
  *
- * Deliberately narrow: only `timer` moves. A schedule rule's Watch/Read/Compare cards keep their
- * `STEP_ORDER` numbers (2/3/4 rather than 1) even though they hold nothing (`NOT_IN_THIS_RULE`) —
- * renumbering every card around an absent one is a bigger change than the one thing the mockup
- * actually shows differently, and `action` staying at its own fixed number is the same call.
+ * Counting what the rule holds answers all three shapes with one rule rather than three: the
+ * four-step chain ends at 4, a delay rule ends at 5 with the wait at 4, and a schedule rule's two
+ * cards are 1 and 2 — which is the mockup's *"Step 1"* for the clock, arrived at rather than
+ * special-cased. Plan 032 §3's HEAD-OR-MIDDLE wait needs no branch of its own once the count
+ * follows the rule.
+ *
+ * **The fallback is for a card the rule does not have.** `automationDerive` draws placeholder cards
+ * (`NOT_IN_THIS_RULE`) for absent steps, and a step that is not in the count has no position in it;
+ * such a card keeps `STEP_ORDER`'s fixed slot, which is what it stood in before and the only number
+ * available for it.
  */
 function stepPosition(rule: AutomationRule, step: StepKind): number {
-    if (step === 'timer' && rule.graph.timer && 'dailyAt' in rule.graph.timer.mode) return 1;
-    return STEP_ORDER.indexOf(step) + 1;
+    const held = STEP_ORDER.filter((s) => hasStep(rule, s));
+    const at = held.indexOf(step);
+    return at >= 0 ? at + 1 : STEP_ORDER.indexOf(step) + 1;
 }
 
 /**
@@ -628,6 +637,29 @@ export function ruleSummary(rule: AutomationRule): string {
         rule.graph.action.submit ? 'send' : 'type'
     } ${action.message.text}`;
 }
+
+/**
+ * What each wire carries, keyed by the port it LEAVES — the chip `AuWires` draws on it (mockup §03:
+ * *"the value rides on the wire: `"ctx:63%"` → `63` → `yes`"*).
+ *
+ * **`Record<OutPortKey, string>`, and that is the point.** This was a `Record<string, string>` built
+ * from four hardcoded keys, so the wait step's output had no entry and `AuWires`' `{chip ?? '·'}`
+ * drew a bare dot — on a five-card rule beside four wires that all read a word, and on a schedule
+ * rule where it is the canvas's only wire. Keyed off the port table, a port with no chip is a `tsc`
+ * error rather than a dot nobody notices.
+ *
+ * `parse.out` and `cond.true` are the two a dry run can improve on with a real observed value; the
+ * editor overlays those and takes the rest from here.
+ */
+export const WIRE_CHIPS: Record<OutPortKey, string> = {
+    'monitor.out': 'lines',
+    'parse.out': 'value',
+    'cond.true': 'yes/no',
+    'cond.false': 'no',
+    // What leaves the Wait step is the wait being OVER — not the verdict that went in, and on a
+    // schedule rule there was no verdict at all. Same word as the port's own label.
+    'timer.out': 'go',
+};
 
 // =================================================================================================
 // The rule as one sentence — the Settings row and the template card

@@ -53,9 +53,9 @@ import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { useDialogA11y } from '../UI/useDialogA11y';
 import { automationRowState } from '../Settings/Automations/automationState';
 import { blockingProblems, problems as validate } from './automationValidation';
-import { faceFor, ruleSummary, stateFor } from './automationDerive';
+import { WIRE_CHIPS, faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
-import type { StepKind } from './automationSteps';
+import type { OutPortKey, StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep } from './automationSteps';
 import type { CanvasOpening, NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
@@ -506,15 +506,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
 
     // What each wire is carrying, from the draft — and from the last dry run when there is one,
     // because a real value beats a described one.
-    const chips = useMemo(() => {
+    const chips = useMemo<Record<OutPortKey, string>>(() => {
         const parseStep = report?.steps.find((s) => s.kind === 'parse');
         const condStep = report?.steps.find((s) => s.kind === 'cond');
+        // The words come from `WIRE_CHIPS`, which is keyed off the port table — this used to be four
+        // hardcoded keys, and the wait step's output was the fifth nobody added. Only the two a dry
+        // run can improve on are overlaid: a real matched value beats a described one.
         return {
-            'monitor.out': 'lines',
-            // A real matched value beats a described one, and only a dry run has ever seen one.
-            'parse.out': parseStep?.status === 'ok' ? parseStep.detail : 'value',
-            'cond.true': condStep?.status === 'ok' ? 'yes' : 'yes/no',
-            'cond.false': 'no',
+            ...WIRE_CHIPS,
+            'parse.out': parseStep?.status === 'ok' ? parseStep.detail : WIRE_CHIPS['parse.out'],
+            'cond.true': condStep?.status === 'ok' ? 'yes' : WIRE_CHIPS['cond.true'],
         };
     }, [report]);
 

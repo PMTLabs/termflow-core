@@ -116,18 +116,22 @@ export interface PortSpec {
 /**
  * The static port table. `cond` has **two** outputs and the mockup draws both, wired or not: seeing
  * the unused `no` port is how a user learns that nothing happens on the other path.
+ *
+ * **Declared `as const` so the port IDS survive as literal types**, which is what lets `OutPortKey`
+ * below be derived from this table instead of typed out beside it. `STEP_PORTS` itself keeps the
+ * wide `Record<StepKind, readonly PortSpec[]>` annotation, so every reader is unaffected.
  */
-export const STEP_PORTS: Record<StepKind, readonly PortSpec[]> = {
-    monitor: Object.freeze([{ id: 'out', dir: 'out', type: 'lines', label: 'lines' }]),
+const PORTS = {
+    monitor: Object.freeze([{ id: 'out', dir: 'out', type: 'lines', label: 'lines' }] as const),
     parse: Object.freeze([
         { id: 'in', dir: 'in', type: 'lines', label: 'lines' },
         { id: 'out', dir: 'out', type: 'value', label: 'value' },
-    ]),
+    ] as const),
     cond: Object.freeze([
         { id: 'in', dir: 'in', type: 'value', label: 'value' },
         { id: 'true', dir: 'out', type: 'verdict', label: 'yes' },
         { id: 'false', dir: 'out', type: 'verdict', label: 'no' },
-    ]),
+    ] as const),
     /**
      * **Both ports carry a verdict, and both exist in both modes.** In delay mode the crossing
      * arrives on `in` and leaves on `out` `delayMs` later; in schedule mode nothing arrives at all
@@ -135,13 +139,37 @@ export const STEP_PORTS: Record<StepKind, readonly PortSpec[]> = {
      * always been. A mode-dependent port table would make `allPorts()`, `portAnchor` and
      * `portSides` all take a mode they otherwise have no use for, to hide a dot rather than to
      * change what a wire may do.
+     *
+     * **The two LABELS differ, because they are not the same thing arriving and leaving.** Both
+     * used to read `verdict`, so the card said verdict → verdict and named nothing that happens in
+     * between. What arrives is the comparison's yes; what leaves is the wait being over, on a rule
+     * that has no comparison at all in schedule mode — so the outgoing dot says `go`.
      */
     timer: Object.freeze([
         { id: 'in', dir: 'in', type: 'verdict', label: 'verdict' },
-        { id: 'out', dir: 'out', type: 'verdict', label: 'verdict' },
-    ]),
-    action: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }]),
-};
+        { id: 'out', dir: 'out', type: 'verdict', label: 'go' },
+    ] as const),
+    action: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }] as const),
+} as const;
+
+export const STEP_PORTS: Record<StepKind, readonly PortSpec[]> = PORTS;
+
+/**
+ * The map key of every port a wire can LEAVE — `'monitor.out' | 'parse.out' | 'cond.true' |
+ * 'cond.false' | 'timer.out'`, derived from `PORTS` rather than written out.
+ *
+ * A wire chip is keyed by its source port, and `AuWires` draws a bare `·` for a key with no entry.
+ * That map was a `Record<string, string>` built from four hardcoded keys, so `timer.out` had none
+ * and the Wait → Send wire — the ONLY wire on a schedule rule's canvas — rendered as a dot beside
+ * four wires reading `lines` / `value` / `yes/no` / `verdict`. The same index-signature class task
+ * 23 fixed at `FIELD_STEPS`, fixed the same way: a `Record<OutPortKey, …>` fails `tsc` on a missing
+ * key, so the NEXT port cannot be forgotten silently.
+ *
+ * `action` contributes nothing — it has no output — and `` `action.${never}` `` is `never`, so the
+ * union simply does not mention it.
+ */
+type OutPortIds<K extends StepKind> = Extract<(typeof PORTS)[K][number], { dir: 'out' }>['id'];
+export type OutPortKey = { [K in StepKind]: `${K}.${OutPortIds<K>}` }[StepKind];
 
 export interface PortRef {
     step: StepKind;

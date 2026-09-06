@@ -156,6 +156,25 @@ describe('canConnect — the ordered-pair matrix', () => {
     });
 });
 
+/**
+ * **G3: both of the Wait card's ports read `verdict`**, in and out, so the card said
+ * verdict → verdict and named nothing that happens in between. What ARRIVES is the comparison's
+ * yes; what LEAVES is the wait being over — and in schedule mode there was no comparison at all, so
+ * the outgoing dot was labelled after something the rule does not have.
+ *
+ * Stated as a relation rather than as the word, so renaming either port on purpose is a one-line
+ * change and renaming both to the same thing is not.
+ */
+describe('port labels', () => {
+    it('gives the wait step two different words, in and out', () => {
+        const [into, outOf] = STEP_PORTS.timer;
+        expect(into.dir).toBe('in');
+        expect(outOf.dir).toBe('out');
+        expect(outOf.label).not.toBe(into.label);
+        expect(outOf.label.trim().length).toBeGreaterThan(0);
+    });
+});
+
 describe('canAddStep', () => {
     it('refuses a second copy of a step, naming it', () => {
         expect(canAddStep(['monitor'], 'monitor')?.reason).toContain(STEP_LABELS.monitor);

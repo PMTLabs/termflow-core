@@ -16,6 +16,7 @@ import {
     draftFromTemplate,
 } from '../../Settings/Automations/automationTemplates';
 import {
+    WIRE_CHIPS,
     condFaceText,
     condSentence,
     faceFor,
@@ -26,7 +27,7 @@ import {
 } from '../automationDerive';
 import type { DeriveContext } from '../automationDerive';
 import { problems } from '../automationValidation';
-import { STEP_ORDER } from '../automationSteps';
+import { STEP_ORDER, STEP_PORTS } from '../automationSteps';
 import type { StepKind } from '../automationSteps';
 import { displayedPattern } from '../automationPresets';
 import type { AutomationClause, AutomationCondStep } from '../../../types/electron';
@@ -417,10 +418,66 @@ describe('automationDerive — a step the rule does not have', () => {
         const noTimer = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         expect(panelFor(noTimer, 'timer', ctxFor(noTimer)).subtitle).toMatch(/^Step 4 ·/);
 
-        // Deliberately NOT asserted here: `action`'s own subtitle in schedule mode stays "Step 5"
-        // (`STEP_ORDER`'s fixed slot) even though Wait now reads "Step 1" — renumbering every other
-        // card around an absent one is the larger fix task 25's own dispatch says to leave alone
-        // rather than half-do.
+    });
+
+    /**
+     * **M2, confirmed on screen: every four-step rule's Send panel said "Step 5".** A stock template
+     * draws FOUR cards and its Send card's head read *"Send to terminal — Step 5 · what happens when
+     * it fires"*; the cards read 1, 2, 3, 5, with no step 4 anywhere. That is every rule that exists
+     * today, not an edge case.
+     *
+     * The cause was `stepPosition` special-casing `timer` alone while `action` took its index from a
+     * five-element `STEP_ORDER`. The fix is to number from the steps the rule HAS — which is what
+     * task 29 makes available — rather than to add a second special case, since one special case is
+     * how the first wrong number got here.
+     *
+     * Mutation: revert to indexing `STEP_ORDER` → the four-step row dies, the five-step row does not.
+     */
+    it('numbers a card by the steps the rule HAS, so a four-step rule ends at 4', () => {
+        const fourStep = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        expect(fourStep.graph.timer).toBeUndefined();
+        expect(panelFor(fourStep, 'action', ctxFor(fourStep)).subtitle).toMatch(/^Step 4 ·/);
+
+        const fiveStep = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        fiveStep.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+        expect(panelFor(fiveStep, 'action', ctxFor(fiveStep)).subtitle).toMatch(/^Step 5 ·/);
+
+        // And the schedule rule, whose two cards are 1 and 2 — the same arithmetic, not a third case.
+        const sched = scheduleRule();
+        expect(panelFor(sched, 'timer', ctxFor(sched)).subtitle).toMatch(/^Step 1 ·/);
+        expect(panelFor(sched, 'action', ctxFor(sched)).subtitle).toMatch(/^Step 2 ·/);
+    });
+});
+
+/**
+ * **M1, confirmed on screen twice: the Wait → Send wire had no chip.** It rendered a bare `·` — on a
+ * schedule rule, where it is the canvas's ONLY wire, and on a five-card rule where every other wire
+ * reads `lines` / `value` / `yes/no` / `verdict` and this one is a dot.
+ *
+ * The chip map was a `Record<string, string>` built from four hardcoded port keys and `AuWires`
+ * draws `{chip ?? '·'}`, so a fifth port arrived with nothing to say and nothing to say so. Keyed
+ * off the port table instead, this is now exhaustive by construction: a missing entry is a `tsc`
+ * error, and this test is the runtime half of the same claim.
+ */
+describe('WIRE_CHIPS', () => {
+    /** Every port a wire can leave, read off the port table rather than listed here. */
+    const outPorts = STEP_ORDER.flatMap((step) =>
+        STEP_PORTS[step].filter((p) => p.dir === 'out').map((p) => `${step}.${p.id}`),
+    );
+
+    it('says a real word on every port a wire can leave, the wait step included', () => {
+        expect(outPorts).toContain('timer.out');
+        for (const key of outPorts) {
+            const chip = (WIRE_CHIPS as Record<string, string | undefined>)[key];
+            // `AuWires` renders `{chip ?? '·'}`, so an absent entry IS the dot that was reported.
+            expect(chip).toBeDefined();
+            expect(chip).not.toBe('·');
+            expect((chip ?? '').trim().length).toBeGreaterThan(0);
+        }
+    });
+
+    it('carries no entry for a port no wire leaves', () => {
+        expect(Object.keys(WIRE_CHIPS).sort()).toEqual([...outPorts].sort());
     });
 });
 
