@@ -63,6 +63,7 @@ export type ProblemCode =
     | 'timer.delayTooLong'
     | 'timer.badMinute'
     | 'timer.noDays'
+    | 'timer.scheduleWithMonitor'
     | 'action.empty'
     | 'action.echo'
     | 'action.tokenWithoutParse'
@@ -404,6 +405,31 @@ function timerProblems(graph: AutomationGraph): Problem[] {
             );
         }
     } else {
+        // **A schedule DISABLES the monitor, silently, and that is why this blocks** (§6.3, §8).
+        //
+        // The evaluator's walk asks `schedule_due` for a `DailyAt` rule and skips `host.tail`
+        // entirely — for the whole rule, on every tick. So a rule carrying both a monitor and a
+        // schedule stops watching its terminals: no log row, nothing on screen, the pattern and the
+        // comparison simply never run again. Reported here, and FIRST, because it is a fact about
+        // the rule's shape while the two below are about the schedule's own fields.
+        //
+        // **Making the editor's layout exclusive is not enough**, and this codebase has already
+        // ruled so: `schedule_due` range-checks `minuteOfDay` and the weekday mask precisely
+        // because a row that reached the store by another route — the API, an import — must not be
+        // runnable-but-never-firing on one side and unfireable on the other
+        // (`an_unfireable_rule_is_unfireable_on_both_sides`). Both of those routes can write a
+        // monitor and a `dailyAt` together.
+        if (graph.monitor) {
+            out.push(
+                problem(
+                    'blocks',
+                    'timer',
+                    'timer.scheduleWithMonitor',
+                    'A schedule fires on the clock, so this rule will not watch its terminals. '
+                        + 'Remove the schedule, or remove the Watch output step.',
+                ),
+            );
+        }
         const { minuteOfDay, days } = mode.dailyAt;
         if (minuteOfDay < 0 || minuteOfDay >= MINUTES_PER_DAY) {
             // The last minute of the day is DERIVED, never restated: `23:59` written out is a
@@ -577,7 +603,9 @@ export function problems(rule: AutomationRule): Problem[] {
     // --- timer -----------------------------------------------------------------------------------
     // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
     // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
-    // that constant's own doc — and a schedule whose weekday mask selects no day.
+    // that constant's own doc — a schedule whose target is not a time of day, one whose weekday
+    // mask selects no day, and one on a rule that still has a monitor it would silently stop
+    // running.
     out.push(...timerProblems(rule.graph));
 
     // --- message ---------------------------------------------------------------------------------
@@ -705,6 +733,7 @@ export const BADGES: Record<ProblemCode, string> = {
     'timer.delayTooLong': 'wait is too long',
     'timer.badMinute': 'needs a time of day',
     'timer.noDays': 'needs a day picked',
+    'timer.scheduleWithMonitor': 'the watch is ignored',
     'action.empty': 'needs a message',
     'action.echo': 'may read its own message',
     'action.tokenWithoutParse': 'needs a pattern to capture from',

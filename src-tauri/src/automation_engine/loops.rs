@@ -1382,12 +1382,42 @@ mod tests {
         terminals: &[(&str, &str)],
         watched: &[(&str, &[&str])],
     ) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+        wire_targets_planted(rules, terminals, watched, false)
+    }
+
+    /// `wire_targets`, planting with `save_rule_bypassing_the_enable_gate_for_tests`.
+    ///
+    /// For the one rule shape §7.8's enable gate now refuses to CREATE enabled: a monitor and a
+    /// `DailyAt` schedule together, which `timer.scheduleWithMonitor` blocks because the schedule
+    /// path silences the monitor for the whole rule. The row is still real rather than hypothetical
+    /// — a build older than that validation could enable one, and `reload` does not re-run the
+    /// check (its exemption is scoped to `parse.*`, on purpose) — and what it does when it gets here
+    /// is exactly what the two tests below pin. Same reason
+    /// `wire_bypassing_the_enable_gate` exists one module over for `action.unknownToken`.
+    fn wire_targets_bypassing_the_enable_gate(
+        rules: Vec<AutomationRule>,
+        terminals: &[(&str, &str)],
+        watched: &[(&str, &[&str])],
+    ) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
+        wire_targets_planted(rules, terminals, watched, true)
+    }
+
+    fn wire_targets_planted(
+        rules: Vec<AutomationRule>,
+        terminals: &[(&str, &str)],
+        watched: &[(&str, &[&str])],
+        bypass_enable_gate: bool,
+    ) -> (Arc<AutomationEngine>, Arc<FakeHost>, Arc<dyn EngineHost>) {
         let fake = Arc::new(FakeHost::new());
         for (tm, pc) in terminals {
             open_terminal(&fake, tm, pc, tm);
         }
         for rule in &rules {
-            fake.store.save_rule(rule).unwrap();
+            if bypass_enable_gate {
+                fake.store.save_rule_bypassing_the_enable_gate_for_tests(rule).unwrap();
+            } else {
+                fake.store.save_rule(rule).unwrap();
+            }
         }
         let engine = Arc::new(AutomationEngine::new(0));
         engine.reload(&fake.store, 0).unwrap();
@@ -1692,7 +1722,9 @@ mod tests {
     /// crossing has none to roll back to — so it is READ from the pair rather than assumed, which
     /// makes `restore_arm` write back the value it just read. A constant `ArmState::Unseen` is a
     /// harmless no-op for a rule with no monitor and destroys the arm state of a rule that has both,
-    /// which is why the fixture here is the hybrid.
+    /// which is why the fixture here is the hybrid — planted past the enable gate, which
+    /// `timer.scheduleWithMonitor` now closes against creating one, for the reason
+    /// `wire_targets_bypassing_the_enable_gate` gives.
     ///
     /// `label` is resolved at DECIDE time for 2.8's reason: this row is written after the terminal is
     /// gone, and a lookup at write time returns `None` for exactly the line the Name column serves.
@@ -1702,8 +1734,11 @@ mod tests {
         hybrid.graph.timer = Some(TimerStep {
             mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
         });
-        let (engine, fake, host) =
-            wire_targets(vec![hybrid], &[("tm-1", "pc-1")], &[("au-both", &["tm-1"])]);
+        let (engine, fake, host) = wire_targets_bypassing_the_enable_gate(
+            vec![hybrid],
+            &[("tm-1", "pc-1")],
+            &[("au-both", &["tm-1"])],
+        );
         engine.runtime.set_arm("au-both", "tm-1", ArmState::Fired { at_ms: 5 });
 
         // Decided while the terminal is open; it closes before the spawned send takes its turn.
@@ -1762,11 +1797,15 @@ mod tests {
     /// **The TIMER decides the path, not the absence of a monitor** — 6.3: *"a rule whose Timer is
     /// in schedule mode takes a new evaluation path that never reads a screen"*.
     ///
-    /// Nothing forbids a rule from carrying both: `timer_problems` and the monitor's own interval
-    /// check constrain neither against the other, and a monitor rule that gains a Wait step through
-    /// the API or an import is exactly this row. Gating the branch on `monitor.is_none()` would
-    /// leave it reading the window four times a second and firing on a crossing as well as on the
-    /// clock — two messages from one rule, on a path 6.3 says reads nothing.
+    /// **The editor now refuses to CREATE this row enabled, and the engine still has to run it.**
+    /// This comment used to say *"nothing forbids a rule from carrying both"*, which stopped being
+    /// true when `timer.scheduleWithMonitor` landed: 6.3's own note says the silencing "is a
+    /// consequence a user cannot see, so it is backed by a blocking validation problem". That is a
+    /// gate on the WRITE, not a proof the row cannot exist — a build older than the validation
+    /// could enable one, and `reload` does not re-check it (its exemption is scoped to `parse.*`).
+    /// Hence the bypassing rig. Gating the branch on `monitor.is_none()` instead would leave such a
+    /// row reading the window four times a second and firing on a crossing as well as on the clock
+    /// — two messages from one rule, on a path 6.3 says reads nothing.
     ///
     /// Both halves are needed. At 08:00 the monitor would cross (armed, dirty, over the threshold)
     /// and must not; at 09:00 the schedule fires and still nothing is read. `au-read` is the live
@@ -1777,7 +1816,7 @@ mod tests {
         hybrid.graph.timer = Some(TimerStep {
             mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
         });
-        let (engine, fake, host) = wire_targets(
+        let (engine, fake, host) = wire_targets_bypassing_the_enable_gate(
             vec![hybrid, ctx_rule_saying("au-read", "a reader", 2)],
             &[("tm-1", "pc-1"), ("tm-4", "pc-4")],
             &[("au-both", &["tm-1"]), ("au-read", &["tm-4"])],

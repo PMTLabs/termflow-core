@@ -117,6 +117,45 @@ describe('automationValidation — the words the user reads', () => {
         );
     });
 
+    /**
+     * **The message names both ways out, and names the card, not the field.**
+     *
+     * `Watch output` is what the palette item and the node face are labelled — the same reason
+     * `cond.incomplete` says *Add a comparison* rather than naming `cond`. And both remedies are
+     * offered because either is right depending on what the user meant: a rule that should watch
+     * has no business carrying a schedule, and a rule that should fire on the clock has no business
+     * carrying a monitor it will silently ignore.
+     *
+     * `automation_validation.rs` asserts this sentence character for character — the shared fixture
+     * compares `code`, so prose is pinned once per implementation.
+     */
+    it('names both ways out of a schedule that would silence the monitor', () => {
+        const both: AutomationRule = {
+            ...base(),
+            graph: {
+                ...base().graph,
+                monitor: { read: 'newOutput', cadence: 'onOutput', everyMs: 30_000 },
+                timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } },
+            },
+        };
+        expect(find(both, 'timer.scheduleWithMonitor')?.message).toBe(
+            'A schedule fires on the clock, so this rule will not watch its terminals. '
+            + 'Remove the schedule, or remove the Watch output step.',
+        );
+
+        // And the complement, which is the half that makes this a rule about `DailyAt` and not
+        // about timers: a DELAY on a watching rule is exactly what a delay is for.
+        const delayed: AutomationRule = {
+            ...base(),
+            graph: {
+                ...base().graph,
+                monitor: { read: 'newOutput', cadence: 'onOutput', everyMs: 30_000 },
+                timer: { mode: { afterMatch: { delayMs: 30_000 } } },
+            },
+        };
+        expect(find(delayed, 'timer.scheduleWithMonitor')).toBeUndefined();
+    });
+
     it('quotes the floor in the interval message, rather than restating it', () => {
         const fast: AutomationRule = {
             ...base(),

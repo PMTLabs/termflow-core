@@ -317,6 +317,30 @@ fn timer_problems(graph: &AutomationGraph) -> Vec<Problem> {
             }
         }
         TimerMode::DailyAt { minute_of_day, days } => {
+            // **A schedule DISABLES the monitor, silently, and that is why this blocks** (§6.3, §8).
+            //
+            // `run_evaluator`'s walk asks `schedule_due` for a `DailyAt` rule and skips `host.tail`
+            // entirely — for the whole rule, on every tick. So a rule carrying both a monitor and a
+            // schedule stops watching its terminals: no log row, nothing on screen, the pattern and
+            // the comparison simply never run again. Reported FIRST, because it is a fact about the
+            // rule's shape while the two below are about the schedule's own fields, and the shared
+            // fixture pins that order from both sides.
+            //
+            // **Making the editor's layout exclusive is not enough**, and this module already ruled
+            // so one function down: `schedule_due` range-checks `minute_of_day` and the weekday mask
+            // precisely because a row that reached the store by another route — the API, an import —
+            // must not be runnable-but-never-firing on one side and unfireable on the other
+            // (`an_unfireable_rule_is_unfireable_on_both_sides`). Both of those routes can write a
+            // monitor and a `DailyAt` together.
+            if graph.monitor.is_some() {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "timer",
+                    "timer.scheduleWithMonitor",
+                    "A schedule fires on the clock, so this rule will not watch its terminals. \
+                     Remove the schedule, or remove the Watch output step.",
+                ));
+            }
             // **`minute_of_day` is a bare `i32` and nothing else checks it.** An out-of-range target
             // does not fail loudly — it fails by never firing (`5000`) or by firing from midnight
             // every day (`-5`, which makes `now >= target` true from the first tick). The bound is
@@ -524,8 +548,9 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // --- timer ----------------------------------------------------------------------------------
     // §8's `timer.*` codes: a wait shorter than the floor, a wait at or beyond `MAX_DELAY_MS` —
     // the ceiling a parked send's IN-MEMORY life sets, never the echo TTL it happens to equal, see
-    // that constant's own doc — a schedule whose target is not a time of day, and one whose
-    // weekday mask selects no day.
+    // that constant's own doc — a schedule whose target is not a time of day, one whose weekday
+    // mask selects no day, and one on a rule that still has a monitor it would silently stop
+    // running.
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
@@ -1010,6 +1035,7 @@ mod tests {
             "timer.delayTooLong",
             "timer.badMinute",
             "timer.noDays",
+            "timer.scheduleWithMonitor",
             "action.empty",
             "action.echo",
             "action.tokenWithoutParse",
@@ -1041,6 +1067,52 @@ mod tests {
         assert_eq!(
             incomplete.message,
             "Add a comparison — this rule reads a value but has nothing to compare it with."
+        );
+    }
+
+    /// **The message names both ways out, and names the card rather than the field.**
+    ///
+    /// `Watch output` is what the palette item and the node face are labelled — the same reason
+    /// `cond.incomplete` says *Add a comparison* rather than naming `cond`. Both remedies are
+    /// offered because either is right depending on what the user meant.
+    ///
+    /// The complement is asserted in the same test, and it is what makes this a rule about
+    /// `DailyAt` rather than about timers: a DELAY on a watching rule is exactly what a delay is
+    /// for. `automationValidation.ts` asserts the same sentence, character for character.
+    #[test]
+    fn the_schedule_with_monitor_message_names_both_ways_out() {
+        let mut scheduled = valid_rule();
+        scheduled.graph.timer = Some(TimerStep {
+            mode: TimerMode::DailyAt { minute_of_day: 540, days: WEEKDAY_BITS_MASK },
+        });
+        assert!(scheduled.graph.monitor.is_some(), "the canonical rule watches something");
+
+        let found = problems(&scheduled);
+        let clash = found
+            .iter()
+            .find(|p| p.code == "timer.scheduleWithMonitor")
+            .unwrap_or_else(|| panic!("a schedule silences this rule's monitor: {found:?}"));
+        assert_eq!(
+            clash.message,
+            "A schedule fires on the clock, so this rule will not watch its terminals. \
+             Remove the schedule, or remove the Watch output step."
+        );
+        assert!(clash.blocks(), "a monitor that silently never runs must not be saveable enabled");
+
+        // A DELAY on a watching rule is the point of a delay.
+        let mut delayed = valid_rule();
+        delayed.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+        assert!(
+            !problems(&delayed).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
+            "a delay does not stop the rule watching"
+        );
+
+        // And a schedule on a rule with NO monitor is the shape §6.3 is for.
+        let mut only_schedule = scheduled.clone();
+        only_schedule.graph.monitor = None;
+        assert!(
+            !problems(&only_schedule).iter().any(|p| p.code == "timer.scheduleWithMonitor"),
+            "a schedule rule has no monitor to silence"
         );
     }
 

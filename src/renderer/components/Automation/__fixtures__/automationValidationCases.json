@@ -2602,11 +2602,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2661,11 +2656,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2714,11 +2704,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2768,11 +2753,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2828,11 +2808,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2888,11 +2863,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2942,11 +2912,6 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
-          "monitor": {
-            "read": "newOutput",
-            "cadence": "timer",
-            "everyMs": 30000
-          },
           "parse": {
             "preset": "percentage",
             "literal": null,
@@ -2979,6 +2944,181 @@
           "severity": "blocks",
           "field": "timer",
           "code": "timer.badMinute"
+        }
+      ]
+    },
+    {
+      "name": "timer.scheduleWithMonitor — a schedule on a rule that still watches its terminals",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 31
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.scheduleWithMonitor"
+        }
+      ]
+    },
+    {
+      "name": "timer.scheduleWithMonitor's other half — a DELAY on a watching rule is the point of a delay",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "afterMatch": {
+                "delayMs": 30000
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": []
+    },
+    {
+      "name": "timer.scheduleWithMonitor — reported ahead of the schedule’s own fields",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "timer": {
+            "mode": {
+              "dailyAt": {
+                "minuteOfDay": 540,
+                "days": 0
+              }
+            }
+          },
+          "action": {
+            "message": "prepare to do context-hand-off",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.scheduleWithMonitor"
+        },
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.noDays"
         }
       ]
     }
