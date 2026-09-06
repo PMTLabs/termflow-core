@@ -12,6 +12,7 @@ import React from 'react';
 import type { AutomationRule } from '../../../types/electron';
 import { AUTOMATION_TEMPLATES, AutomationTemplate, blankDraft, draftFromTemplate } from './automationTemplates';
 import { describeRule } from '../../Automation/automationDerive';
+import { AuRuleSentence } from '../../Automation/AuRuleSentence';
 
 export interface TemplateGalleryProps {
     onBack: () => void;
@@ -74,7 +75,11 @@ export const TemplateGallery: React.FC<TemplateGalleryProps> = ({ onBack, onPick
     </div>
 );
 
-const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void }> = ({
+/**
+ * Exported for the both-surfaces test: the gallery's own cards are the six built-in templates, none
+ * of which carries a wait step, so the surface cannot otherwise be shown a rule that has one.
+ */
+export const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void }> = ({
     template,
     onPick,
 }) => {
@@ -90,17 +95,7 @@ const TemplateCard: React.FC<{ template: AutomationTemplate; onPick: () => void 
             </span>
             <span className="au-tplbody">
                 <span className="au-tplsay">
-                    {sentence.lead} <b>{sentence.subject}</b>
-                    {sentence.verb && (
-                        <>
-                            {' '}
-                            <span className="au-arrow">{sentence.verb}</span> <b>{sentence.detail}</b>
-                        </>
-                    )}
-                    <br />
-                    <span className="au-arrow">→</span> {sentence.verbSend}{' '}
-                    <span className="au-msg">&quot;{sentence.message}&quot;</span>
-                    {sentence.sendNote && <span className="au-arrow">{sentence.sendNote}</span>}
+                    <AuRuleSentence sentence={sentence} stacked />
                 </span>
                 <span className="au-tplwhy">{template.why}</span>
             </span>

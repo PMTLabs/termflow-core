@@ -20,6 +20,7 @@ import {
     describeWatching,
 } from './automationState';
 import { describeRule } from '../../Automation/automationDerive';
+import { AuRuleSentence } from '../../Automation/AuRuleSentence';
 
 /**
  * The footer's fire history is the ENGINE'S LIVE STATE, and it is not the rule's lifetime.
@@ -109,21 +110,7 @@ export const AutomationRow: React.FC<AutomationRowProps> = ({
                 </div>
 
                 <div className="au-sentence">
-                    {sentence.lead} <b>{sentence.subject}</b>
-                    {sentence.verb && (
-                        <>
-                            {' '}<span className="au-arrow">{sentence.verb}</span>{' '}
-                            <b>{sentence.detail}</b>
-                        </>
-                    )}
-                    {sentence.waitClause && (
-                        <>
-                            {' '}<span className="au-arrow">→</span> {sentence.waitClause}
-                        </>
-                    )}{' '}
-                    <span className="au-arrow">→</span> {sentence.verbSend}{' '}
-                    <span className="au-msg">&quot;{sentence.message}&quot;</span>
-                    {sentence.sendNote && <span className="au-arrow">{sentence.sendNote}</span>}
+                    <AuRuleSentence sentence={sentence} />
                 </div>
 
                 <div className="au-meta">
