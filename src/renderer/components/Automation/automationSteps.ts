@@ -8,11 +8,19 @@
  * §10.21's ordered-pair matrix a cheap and total test rather than a sampling of the interesting
  * cases.
  *
- * The four steps are **fixed**: a rule is always monitor → parse → cond → action, and the DTO has a
- * field for each (§7.7). What the canvas adds is *which of them the user has put on it yet* — a
- * brand-new rule opens on an empty canvas (mockup §03's third state) and the palette is how it gets
- * built. That is presentation, not persistence: nothing about the layout round-trips, because the
- * `graph` blob has no place to put it and inventing one would be a schema field nothing reads.
+ * **The four step KINDS are fixed; a rule having all four is not.** This file's arithmetic is over
+ * the names — the order, the ports, which pairs may be wired — and none of it reads `rule.graph`.
+ * That is what keeps it true while the DTO changes underneath it: plan 032 §3.1 made `monitor`,
+ * `parse` and `cond` optional, so a schedule rule (§6.3) is `action` and a `timer` and nothing else,
+ * and §7 adds `'timer'` to `StepKind` itself in milestone 5 (task 23). The header used to say *"a
+ * rule is always monitor → parse → cond → action, and the DTO has a field for each"*, which the DTO
+ * and every schedule-rule comment in this milestone contradict.
+ *
+ * What the canvas adds is *which of them the user has put on it yet* — a brand-new rule opens on an
+ * empty canvas (mockup §03's third state) and the palette is how it gets built. `present` is
+ * session-only presentation, not persistence: it is re-derived on every open, and a SAVED rule
+ * draws all four cards whatever its graph holds, which is why `automationDerive` has both a
+ * *not in this rule* placeholder and an `absent` node tone.
  */
 
 export type StepKind = 'monitor' | 'parse' | 'cond' | 'action';
