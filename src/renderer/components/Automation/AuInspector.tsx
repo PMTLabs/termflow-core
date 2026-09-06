@@ -19,6 +19,7 @@ import { STEP_GLYPHS } from './AuNode';
 import { MonitorPanel } from './panels/MonitorPanel';
 import { ParsePanel } from './panels/ParsePanel';
 import { CondPanel } from './panels/CondPanel';
+import { TimerPanel } from './panels/TimerPanel';
 import { ActionPanel } from './panels/ActionPanel';
 
 export interface AuInspectorProps {
@@ -128,6 +129,9 @@ export const AuInspector: React.FC<AuInspectorProps> = (props) => {
                         onRearm={props.onRearm}
                         dispatch={props.dispatch}
                     />
+                )}
+                {step === 'timer' && (
+                    <TimerPanel draft={draft} model={model} dispatch={props.dispatch} />
                 )}
                 {step === 'action' && (
                     <ActionPanel draft={draft} model={model} dispatch={props.dispatch} />

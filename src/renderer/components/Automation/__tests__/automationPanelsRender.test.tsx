@@ -176,9 +176,10 @@ describe('the inspector panels — rendered, per template', () => {
             // Task 14: the face's single `fires` row (the clause sentence, or its legacy
             // fallback) replaced the old two-row `compare`/`threshold` layout — see `FACE_ROWS`.
             cond: ['fires'],
-            // Task 23 added the kind; task 24 adds the panel. Until it exists there is nothing on
-            // screen for this loop to read, and a key here would assert against an empty panel.
-            timer: [],
+            // No template carries a wait step, so what this pins for `timer` is the ABSENT case —
+            // that the panel and the card word *not in this rule* identically, which is the one
+            // sentence about a missing step both surfaces state in prose.
+            timer: ['when'],
             action: ['message', 'send'],
         };
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);

@@ -20,6 +20,7 @@ import type {
     AutomationCondStep,
     AutomationRule,
     AutomationTextOp,
+    AutomationTimerStep,
 } from '../../types/electron';
 import type { AutomationRuntimePairState } from '../../services/automationEvents';
 import {
@@ -246,6 +247,34 @@ export function clockTime(minuteOfDay: number): string | null {
     const hh = String(Math.floor(minuteOfDay / 60)).padStart(2, '0');
     const mm = String(minuteOfDay % 60).padStart(2, '0');
     return `${hh}:${mm}`;
+}
+
+/**
+ * The wait as one sentence, or `null` when the rule does not state one yet.
+ *
+ * `null` rather than a sentence about a blank field: the three ways this step can be unfinished —
+ * no wait length, a `minuteOfDay` that is not a time of day, a mask that picks no day — are all
+ * blocking problems with their own words in `automationValidation`, and a paraphrase beside them
+ * would either repeat them or, worse, describe a rule that cannot run as though it could
+ * (*"Waits 0 seconds after the rule matches"*).
+ *
+ * Lives here rather than in the panel for the reason `saying` does: it is DISPLAYED prose derived
+ * from the rule, and the module exists so two surfaces cannot word one rule differently.
+ */
+export function waitSentence(timer: AutomationTimerStep): string | null {
+    if ('afterMatch' in timer.mode) {
+        const { delayMs } = timer.mode.afterMatch;
+        if (delayMs <= 0) return null;
+        return `Waits ${describeDelay(delayMs)} after the rule matches, then sends.`;
+    }
+    const { minuteOfDay, days } = timer.mode.dailyAt;
+    const at = clockTime(minuteOfDay);
+    const when = describeDays(days);
+    if (at === null || when === '') return null;
+    // §6.3: the walk skips `host.tail` for the whole rule, so this half is not a flourish — it is
+    // the consequence a user cannot otherwise see, and the reason `timer.scheduleWithMonitor` is a
+    // blocking problem rather than a layout rule.
+    return `Sends at ${at}, ${when} — nothing on screen is read.`;
 }
 
 /**

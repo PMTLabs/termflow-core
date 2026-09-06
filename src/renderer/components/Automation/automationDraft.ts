@@ -136,6 +136,17 @@ export function timerShapeOf(rule: AutomationRule): TimerShape {
  */
 export const DEFAULT_TIMER_MODE: AutomationTimerMode = { afterMatch: { delayMs: 30_000 } };
 
+/**
+ * What *At a time of day* starts from — mockup §03's own rule, 09:00 on weekdays.
+ *
+ * A default that picks days matters more than the hour does: an empty mask is `timer.noDays`, so a
+ * mask-less default would block the rule the instant the radio moved, which is a control punishing
+ * the user for using it. Bits 0–6 are Mon..Sun (§3.1).
+ */
+export const DEFAULT_SCHEDULE_MODE: AutomationTimerMode = {
+    dailyAt: { minuteOfDay: 9 * 60, days: 0b0001_1111 },
+};
+
 /** Where a port sits when nothing is wired to it: the reading order, inputs left and outputs right. */
 export function defaultPortSide(dir: 'in' | 'out'): PortSide {
     return dir === 'in' ? 'l' : 'r';
@@ -561,6 +572,15 @@ export type DraftAction =
      * it into `cond`, exactly like every other field there.
      */
     | { type: 'clauses'; clauses: AutomationClause[] }
+    /**
+     * The whole mode, replaced — never a patch.
+     *
+     * `AutomationTimerMode` is externally tagged (`{afterMatch:…}` / `{dailyAt:…}`) and Rust's
+     * `TimerMode` is an enum, so a value carrying both keys is not a mode with a stale field in it:
+     * it is a blob `serde_json` refuses. A `Partial<…>` here would make that shape expressible, and
+     * expressible-but-refused is the shape that saves clean and comes back broken.
+     */
+    | { type: 'timer'; mode: AutomationTimerMode }
     | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
@@ -649,6 +669,19 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             // being written rather than of a keystroke on the way to it.
             if (!rule.graph.cond) return draft;
             return withGraph(draft, { cond: { ...rule.graph.cond, clauses: action.clauses } });
+        case 'timer': {
+            // The same no-op discipline the five patches above follow: `TimerPanel` is mounted only
+            // for a rule that HAS the step, and filling one in from a default here would mint a
+            // wait behind the user's back. The palette's `addStep` is what adds one.
+            if (!rule.graph.timer) return draft;
+            const next = { ...rule, graph: { ...rule.graph, timer: { mode: action.mode } } };
+            // **The wires follow the mode**, and this is the only place they can: the two modes draw
+            // different pictures (§6.2 threads the wait between the verdict and the send, §6.3 makes
+            // it the only wire), and `wires` is re-derived on open and on `addStep` and nowhere else.
+            // Without this, switching to a schedule left the canvas drawing the delay's chain over a
+            // rule that no longer reads anything.
+            return { ...draft, rule: next, wires: defaultWires(draft.present, timerShapeOf(next)) };
+        }
         case 'action':
             return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
         case 'select':

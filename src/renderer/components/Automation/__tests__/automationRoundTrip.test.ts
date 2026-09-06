@@ -602,6 +602,47 @@ describe('the reducer', () => {
     });
 
     /**
+     * **The canvas follows the mode, and only the reducer can make it.**
+     *
+     * `wires` is re-derived on open and on `addStep`, and nowhere else — so before this case
+     * existed, switching a finished rule to a schedule left the canvas drawing the delay's whole
+     * chain over a rule that no longer reads anything. The picture and the rule are the one thing
+     * `defaultWires`' own header promises cannot disagree.
+     */
+    it('re-draws the wires when the wait switches mode', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        rule.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
+        const opened = draftFromRule(rule);
+        expect(opened.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+
+        const scheduled = draftReducer(opened, {
+            type: 'timer',
+            mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } },
+        });
+        expect(scheduled.rule.graph.timer).toEqual({
+            mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } },
+        });
+        expect(scheduled.wires).toEqual(defaultWires(STEP_ORDER, 'dailyAt'));
+
+        // And back, so this is a re-derivation rather than a one-way collapse.
+        const back = draftReducer(scheduled, { type: 'timer', mode: { afterMatch: { delayMs: 5_000 } } });
+        expect(back.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+    });
+
+    /**
+     * A patch to a step the rule does not have is a no-op, never a materialisation — the same
+     * discipline the monitor/parse/cond cases follow. The palette's `addStep` is the one route that
+     * adds a wait, and it is explicit about it.
+     */
+    it('ignores a mode change on a rule with no wait step', () => {
+        const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const opened = draftFromRule(rule);
+        const after = draftReducer(opened, { type: 'timer', mode: { afterMatch: { delayMs: 5_000 } } });
+        expect(after).toBe(opened);
+        expect(after.rule.graph.timer).toBeUndefined();
+    });
+
+    /**
      * **Adding the wait card writes the step into the rule.** Every other `addStep` is
      * presentation-only, because `blankDraft()` already carries a monitor, a parse, a cond and an
      * action — the card is revealed over a field that exists. `graph.timer` is absent by design on
