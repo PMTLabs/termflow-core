@@ -24,7 +24,7 @@
 use regex::Regex;
 
 use crate::automation_store::{
-    AutomationGraph, Clause, CompareOp, Finds, Keep, ReadMode, Source, Test, TextOp,
+    AutomationGraph, Clause, CompareOp, Finds, Join, Keep, ReadMode, Source, Test, TextOp,
 };
 
 /// How many lines back a "new output as it appears" read looks.
@@ -466,6 +466,45 @@ fn test_text(op: TextOp, token: &str, value: &str) -> Truth {
             Ok(re) => Truth::from_compare(re.is_match(token)),
             Err(_) => Truth::Unknown,
         },
+    }
+}
+
+/// Fold N clause results into one under a single `Join`, in three-valued (Kleene) logic. §5.6.
+///
+/// Two-valued `&&`/`||` over `Unknown` treated as `false` would destroy the reason `Unknown` exists:
+/// a rule with one broken clause and one satisfied one would silently read as "no" under AND and
+/// "no" under OR-with-a-false-partner, either of which re-introduces the "once per line wearing once
+/// per crossing's clothes" defect `Truth`'s doc comment warns about. Short-circuits are still real:
+/// AND on a known `False` and OR on a known `True` decide the fold outright, `Unknown` partners or
+/// not.
+///
+/// **An empty list is `Truth::True`**, for both joins — not the vacuous "no clause is False" AND
+/// gets for free, and not the vacuous "no clause is True" OR would otherwise give. §5.5 step 4 only
+/// reaches this function's caller when the pattern already matched, so an empty clause list means
+/// the match itself is the whole condition — today's zero-clause word rule, unchanged.
+pub fn fold_clauses(vals: &[Truth], join: Join) -> Truth {
+    if vals.is_empty() {
+        return Truth::True;
+    }
+    match join {
+        Join::And => {
+            if vals.iter().any(|v| *v == Truth::False) {
+                Truth::False
+            } else if vals.iter().any(|v| *v == Truth::Unknown) {
+                Truth::Unknown
+            } else {
+                Truth::True
+            }
+        }
+        Join::Or => {
+            if vals.iter().any(|v| *v == Truth::True) {
+                Truth::True
+            } else if vals.iter().any(|v| *v == Truth::Unknown) {
+                Truth::Unknown
+            } else {
+                Truth::False
+            }
+        }
     }
 }
 
@@ -1229,6 +1268,42 @@ mod tests {
         let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
         let c = Clause { source: Source::Whole, test: Test::Text { op: TextOp::Matches, value: "(".into() } };
         assert_eq!(test_clause(&c, &caps), Truth::Unknown, "a broken clause must not read as 'no'");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // §5.6 — the Kleene fold
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn kleene_and_or_over_two() {
+        use Truth::{False as F, True as T, Unknown as U};
+        for (a, b, and, or) in [
+            (T, T, T, T), (T, F, F, T), (F, F, F, F),
+            (U, F, F, U),   // AND short-circuits on a known False
+            (U, T, U, T),   // OR short-circuits on a known True
+            (U, U, U, U),
+        ] {
+            assert_eq!(fold_clauses(&[a, b], Join::And), and, "AND {a:?} {b:?}");
+            assert_eq!(fold_clauses(&[b, a], Join::And), and, "AND is commutative");
+            assert_eq!(fold_clauses(&[a, b], Join::Or), or, "OR {a:?} {b:?}");
+            assert_eq!(fold_clauses(&[b, a], Join::Or), or, "OR is commutative");
+        }
+    }
+
+    #[test]
+    fn kleene_folds_over_three_not_only_pairs() {
+        use Truth::{False as F, True as T, Unknown as U};
+        assert_eq!(fold_clauses(&[T, U, F], Join::And), F);
+        assert_eq!(fold_clauses(&[T, U, T], Join::And), U);
+        assert_eq!(fold_clauses(&[F, U, T], Join::Or), T);
+        assert_eq!(fold_clauses(&[F, U, F], Join::Or), U);
+    }
+
+    #[test]
+    fn an_empty_clause_list_is_true() {
+        // §5.5 step 4: the match itself is the condition. Reached only when there WAS a match.
+        assert_eq!(fold_clauses(&[], Join::And), Truth::True);
+        assert_eq!(fold_clauses(&[], Join::Or), Truth::True);
     }
 
     // -----------------------------------------------------------------------------------------
