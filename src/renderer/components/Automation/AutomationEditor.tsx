@@ -56,7 +56,8 @@ import { blockingProblems, problems as validate } from './automationValidation';
 import { WIRE_CHIPS, faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { OutPortKey, StepKind } from './automationSteps';
-import { STEP_ORDER, canAddStep } from './automationSteps';
+import { STEP_ORDER, canAddStep, removalGroup } from './automationSteps';
+import { listSteps } from './AuNodeMenu';
 import type { CanvasOpening, NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
@@ -552,6 +553,35 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         if (pos) dispatch({ type: 'moveStep', step, pos });
     }, []);
 
+    /**
+     * **The one place a step is removed**, whatever gesture asked for it — the Delete key on a
+     * focused card, and the card's right-click menu. `addStep`'s own note says why this is a
+     * callback rather than a `dispatch` at each call site, and it is the same reason: the gate
+     * belongs where every gesture goes through it, not in whichever caller was written first.
+     *
+     * It is not, however, the only place a step COMES OFF: pulling a destination's wire chip still
+     * removes it, and that path reaches the same `withoutSteps` inside the reducer. The reducer is
+     * where the two meet, so this callback owns only what the reducer cannot see — telling the
+     * user when the gesture took more cards than it was aimed at.
+     *
+     * **The toast fires only for the group**, never for a single card. A card that vanishes when
+     * you press Delete on it needs no narration; three cards vanishing when you aimed at one is a
+     * surprise, and the message names all three rather than announcing a count.
+     */
+    const removeStep = useCallback((step: StepKind) => {
+        const { draft: current } = latest.current;
+        const group = removalGroup(current.present, step);
+        if (group.length === 0) return;
+        dispatch({ type: 'removeStep', step });
+        if (group.length > 1) {
+            toast(
+                `Removed ${listSteps(group)} — the three reading steps work as one, `
+                    + 'so a rule has all of them or none.',
+                'info',
+            );
+        }
+    }, []);
+
     const toWorldRef = useRef<(x: number, y: number) => NodePos | null>(() => null);
     // Stable, because `AuCanvas` calls it from an effect: a new identity every render would make
     // that effect re-run on every frame of a drag.
@@ -749,6 +779,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         onMove={(step, pos) => dispatch({ type: 'moveStep', step, pos })}
                         onConnect={(wire) => dispatch({ type: 'addWire', wire })}
                         onDisconnect={(wire) => dispatch({ type: 'removeWire', wire })}
+                        onRemove={removeStep}
                         onRefuse={(reason) => toast(reason, 'error')}
                         onViewportReady={takeViewport}
                     >

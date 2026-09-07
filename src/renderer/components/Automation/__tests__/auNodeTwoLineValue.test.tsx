@@ -234,6 +234,7 @@ describe('a node value wraps to two lines instead of ellipsing at one', () => {
                         onMove={() => {}}
                         onConnect={() => {}}
                         onDisconnect={() => {}}
+                        onRemove={() => {}}
                         onRefuse={() => {}}
                         onViewportReady={() => {}}
                     />,

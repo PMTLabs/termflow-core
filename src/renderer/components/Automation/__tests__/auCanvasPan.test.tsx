@@ -68,6 +68,7 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
                     onMove={() => {}}
                     onConnect={() => {}}
                     onDisconnect={() => {}}
+                    onRemove={() => {}}
                     onRefuse={() => {}}
                     onViewportReady={(fn) => { toWorld = fn; }}
                 />,

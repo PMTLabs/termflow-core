@@ -21,7 +21,9 @@ import type { AutomationDraft, NodePos } from './automationDraft';
 import { AU_NODE_H, AU_NODE_W, portSides } from './automationDraft';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { PortRef, StepKind, Wire } from './automationSteps';
+import { removalGroup } from './automationSteps';
 import { AuNode } from './AuNode';
+import { AuNodeMenu } from './AuNodeMenu';
 import { AuWires } from './AuWires';
 import { useAuNodeDrag } from './useAuNodeDrag';
 import { useAuWireDrag } from './useAuWireDrag';
@@ -38,6 +40,12 @@ export interface AuCanvasProps {
     onMove: (step: StepKind, pos: NodePos) => void;
     onConnect: (wire: Wire) => void;
     onDisconnect: (wire: Wire) => void;
+    /**
+     * Take a step off the canvas. **The step the gesture was aimed at**, not the set that will go:
+     * the editor asks `removalGroup` for that, so the reducer, the menu's label and the toast are
+     * all reading one answer rather than three.
+     */
+    onRemove: (step: StepKind) => void;
     onRefuse: (reason: string) => void;
     /** The palette drag needs screen → world too, and only this component knows the transform. */
     onViewportReady: (toWorld: (x: number, y: number) => NodePos | null) => void;
@@ -53,6 +61,7 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
     onMove,
     onConnect,
     onDisconnect,
+    onRemove,
     onRefuse,
     onViewportReady,
     children,
@@ -63,6 +72,8 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
     const dpr = typeof window === 'undefined' ? 1 : (window.devicePixelRatio || 1);
     const [vp, setVp] = useState<Viewport>({ x: 0, y: 0, z: 1 });
     const [spacePan, setSpacePan] = useState(false);
+    // Where the right-click menu is, and which card it was aimed at. `null` is closed.
+    const [menu, setMenu] = useState<{ step: StepKind; x: number; y: number } | null>(null);
     const panning = useRef<{ x: number; y: number } | null>(null);
 
     const toWorldOrNull = useCallback((clientX: number, clientY: number): NodePos | null => {
@@ -289,6 +300,17 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                         dropPorts={dropPorts[step]}
                         sides={sides}
                         onSelect={() => onSelect(step)}
+                        onDelete={() => onRemove(step)}
+                        onContextMenu={(e) => {
+                            e.preventDefault();
+                            // Or the canvas beneath opens a second menu on the same press.
+                            e.stopPropagation();
+                            // A right-click SELECTS as well, so the inspector is showing the card
+                            // the menu is about — a menu offering to delete one step over a panel
+                            // describing another is the same drift the label rule above avoids.
+                            onSelect(step);
+                            setMenu({ step, x: e.clientX, y: e.clientY });
+                        }}
                         // Space-pan wins over a node drag. React's bubble handler on the node runs
                         // BEFORE the canvas's own, so without this a space+drag that happened to
                         // start on a card moved the card AND the viewport, by the same delta, in
@@ -326,6 +348,16 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                     ▢
                 </button>
             </div>
+
+            {menu && (
+                <AuNodeMenu
+                    group={removalGroup(draft.present, menu.step)}
+                    x={menu.x}
+                    y={menu.y}
+                    onClose={() => setMenu(null)}
+                    onDelete={() => onRemove(menu.step)}
+                />
+            )}
 
             {children}
         </div>

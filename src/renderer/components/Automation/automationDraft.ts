@@ -35,7 +35,7 @@ import type {
     AutomationTimerMode,
 } from '../../types/electron';
 import type { StepKind, TimerShape, Wire } from './automationSteps';
-import { INPUT_STEPS, STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
+import { INPUT_STEPS, STEP_ORDER, STEP_PORTS, defaultWires, removalGroup, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
 // The gallery's own starting point, used here as the `'template'` opening's dirty BASELINE — the
 // state the gallery was showing before a card was clicked. Same direction `AutomationMenuSection`
@@ -661,6 +661,14 @@ export type DraftAction =
     | { type: 'webhook'; patch: Partial<NonNullable<AutomationRule['graph']['webhook']>> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
+    /**
+     * Take a card OFF the canvas and delete the graph field behind it.
+     *
+     * One step is named, never a list, because the caller does not get to choose the set: the
+     * three input steps come off together and `removalGroup` is the one place that is decided.
+     * An action carrying its own list would let a gesture drop `parse` alone.
+     */
+    | { type: 'removeStep'; step: StepKind }
     | { type: 'moveStep'; step: StepKind; pos: NodePos }
     | { type: 'addWire'; wire: Wire }
     | { type: 'removeWire'; wire: Wire }
@@ -759,6 +767,42 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
         },
     };
 }
+
+/**
+ * The draft with `steps` gone — **off the canvas AND out of the graph**, which is one operation.
+ *
+ * The pair is the whole of the design `removalGroup` describes. Dropping a card from `present`
+ * alone leaves the step's data behind, and `graphAsWritten` only omits the input group and the two
+ * destinations — a `timer` hidden that way would go on delaying every send with no card on screen
+ * to say so. Deleting the graph field alone leaves a card drawing a step that is not there.
+ *
+ * `layout` is deliberately KEPT. A position is a user choice — it is why `graph.layout` is
+ * persisted at all — so a card the palette puts back returns to where its owner last dragged it
+ * rather than to the default column; `freeSlot` still pushes it clear if something moved into the
+ * slot meanwhile.
+ *
+ * Used by `removeStep` and by `removeWire`'s destination branch, which is the same removal reached
+ * by pulling the wire out instead of by aiming at the card. Two copies of *"and re-derive the
+ * wires, and clear the selection if it pointed at what just went"* is how two gestures end up
+ * leaving different drafts behind.
+ */
+function withoutSteps(draft: AutomationDraft, steps: readonly StepKind[]): AutomationDraft {
+    if (steps.length === 0) return draft;
+    const graph = { ...draft.rule.graph };
+    for (const step of steps) delete graph[step];
+    const present = draft.present.filter((step) => !steps.includes(step));
+    const next = { ...draft.rule, graph };
+    return {
+        ...draft,
+        rule: next,
+        present,
+        // Re-derived, never filtered: removing the wait does not merely drop its two wires, it
+        // reconnects the verdict to the send the wait used to sit between.
+        wires: defaultWires(present, timerShapeOf(next)),
+        selected: draft.selected !== null && steps.includes(draft.selected) ? null : draft.selected,
+    };
+}
+
 
 export function draftReducer(draft: AutomationDraft, action: DraftAction): AutomationDraft {
     const { rule } = draft;
@@ -907,22 +951,17 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             return { ...draft, layout: { ...draft.layout, [action.step]: action.pos } };
         case 'addWire':
             return { ...draft, wires: [...draft.wires, action.wire] };
+        case 'removeStep':
+            // The GROUP, not the step: aiming at `Read a value` takes all three reading cards with
+            // it. Aiming at a card that is not on the canvas returns an empty list, which
+            // `withoutSteps` treats as the no-op it is.
+            return withoutSteps(draft, removalGroup(draft.present, action.step));
         case 'removeWire':
             // A destination card has exactly one incoming wire, so its wire chip is its remove
             // gesture. Removing it must remove the destination too: merely hiding the card while
             // retaining `action` would leave a live terminal send on a webhook-only canvas.
             if (action.wire.to.step === 'action' || action.wire.to.step === 'webhook') {
-                const destination = action.wire.to.step;
-                const { [destination]: _removed, ...graph } = rule.graph;
-                const present = draft.present.filter((step) => step !== destination);
-                const next = { ...rule, graph };
-                return {
-                    ...draft,
-                    rule: next,
-                    present,
-                    wires: defaultWires(present, timerShapeOf(next)),
-                    selected: draft.selected === destination ? null : draft.selected,
-                };
+                return withoutSteps(draft, [action.wire.to.step]);
             }
             return {
                 ...draft,

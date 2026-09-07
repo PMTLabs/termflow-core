@@ -3409,6 +3409,22 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
           "webhook": {
             "provider": "discord",
             "url": "",
@@ -3444,6 +3460,22 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
           "webhook": {
             "provider": "discord",
             "url": "not-a-url",
@@ -3479,6 +3511,22 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
           "webhook": {
             "provider": "discord",
             "url": "http://hooks.example.invalid/relay",
@@ -3514,6 +3562,22 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "percentage",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
           "webhook": {
             "provider": "discord",
             "url": "https://example.invalid/hook",
@@ -3549,6 +3613,16 @@
         "createdAt": 0,
         "updatedAt": 0,
         "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "timer",
+            "everyMs": 30000
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
           "parse": {
             "preset": "custom",
             "literal": null,
@@ -3625,6 +3699,41 @@
           "severity": "blocks",
           "field": "action",
           "code": "action.empty"
+        }
+      ]
+    },
+    {
+      "name": "a destination with nothing to trigger it can never run",
+      "why": "The shape a card removal reaches: the three reading steps taken off a webhook rule that has no wait either. Nothing reads a terminal and no clock fires, so it is unrunnable — and it used to report NOTHING, because a webhook EXEMPTED the rule from the never-runs guard instead of counting as the destination it is. That exemption also hid the same hole for a rule carrying both destinations.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "webhook": {
+            "provider": "discord",
+            "url": "https://discord.com/api/webhooks/1/abc",
+            "body": "build failed"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "timer",
+          "code": "timer.neverRuns"
         }
       ]
     }

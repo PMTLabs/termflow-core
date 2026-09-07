@@ -461,6 +461,17 @@ export const MINUTES_PER_DAY = 24 * 60;
  * `scheduled` is false, and that code fires only when it is true. One graph can never trip both
  * with contradictory remedies.
  *
+ * **A webhook is a DESTINATION, and it used to be read here as a trigger.** The guard exempted
+ * any graph carrying one, which does nothing for a webhook-only rule — that shape is already
+ * exempt for having no terminal message — and silently exempted the shapes that matter: a rule
+ * with a webhook and nothing to start it reported NO problem at all, so it saved, enabled, and
+ * never fired. Reachable through the REST API and an import from the day the step existed, and
+ * reachable from the editor the moment a card could be deleted (`removalGroup`): take the three
+ * reading steps off a webhook rule with no wait and this is exactly what is left. The two
+ * questions are asked separately now — *can anything trigger it* (`hasInputSteps || scheduled`)
+ * and *is there anything to do* (`hasDestination`) — which is what the message underneath has
+ * always claimed to be about.
+ *
  * The remedy differs by shape, so the message branches on whether a Wait step exists: with one
  * already on the canvas the fix is either add a Watch step or switch that Wait to a schedule; with
  * none at all there is no "switch it" to offer, only "add a Watch step" or "add a Wait step set to
@@ -473,7 +484,10 @@ function neverRunsProblem(graph: AutomationGraph): Problem | null {
     // A blank terminal message defers to `action.empty` alone; an absent terminal destination is
     // valid when a webhook is present, and must not be made into an action to satisfy this guard.
     const hasTerminalDestination = (graph.action?.message.trim().length ?? 0) !== 0;
-    if (hasInputSteps || scheduled || graph.webhook || !hasTerminalDestination) return null;
+    // **A webhook is a DESTINATION, not a trigger**, and conflating the two is what let an
+    // unrunnable rule report nothing at all — see this function's own doc.
+    const hasDestination = hasTerminalDestination || Boolean(graph.webhook);
+    if (hasInputSteps || scheduled || !hasDestination) return null;
     const message = graph.timer
         ? 'This rule waits, but nothing will ever start the wait: it has no Watch output step to '
             + 'match against. Add one, or switch this Wait to run at a time of day instead.'

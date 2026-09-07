@@ -489,6 +489,17 @@
     border-color: #6e2b28;
 }
 
+/*
+ * The card is a tab stop now — that is what aims the Delete key — so it needs a ring that is not
+ * the selection border. `:focus-visible`, so a mouse click gets the `.on` border alone and only a
+ * keyboard arrival draws this; `outline-offset` puts it clear of the 10px radius rather than
+ * tracing it, and an outline rather than a box-shadow so `.on`'s own shadow still shows through.
+ */
+.au-editor .au-node:focus-visible {
+    outline: 2px solid #5aa9c9;
+    outline-offset: 3px;
+}
+
 .au-editor .au-nrail {
     position: absolute;
     left: 0;
@@ -1875,4 +1886,20 @@
 .au-selopt.dead {
     color: #6b6f78;
     cursor: not-allowed;
+}
+
+/* ------------------------------------------------------------- AuNodeMenu --- */
+
+/*
+ * `CanvasMenu` borrows `PaneContextMenu.css`, whose `.pane-context-menu` sits at z-index 1000 — a
+ * layer chosen for a menu over the terminal grid, and one this 9990 modal would paint straight
+ * over. Unnamespaced and lifted for the same reason `.au-selmenu` above is: the menu portals to
+ * `body`, so a `.au-editor` descendant selector would match nothing.
+ *
+ * A step above `.au-selmenu`'s 9995 and still below the 9999 a ConfirmDialog opened over the editor
+ * needs. The two can never be open together — the select's own outside-mousedown closes it before
+ * a right-click lands — so the order between them states the stack rather than fixing anything.
+ */
+.pane-context-menu.au-nodemenu {
+    z-index: 9996;
 }

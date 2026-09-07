@@ -293,10 +293,12 @@ const REQUIRES: Partial<Record<StepKind, readonly StepKind[]>> = {
  *
  * **`shape` is the wait's mode, and it is here because of what task 29 made possible.** Once
  * `draftFromRule` draws only the steps a rule HAS, a saved schedule rule can be offered a
- * `Watch output` step — and there is no remove gesture and no undo, so an add whose only remedy is
- * a control that does not exist strands the user with the draft or with discarding every other edit
- * they made. The invariant is *the palette must not offer an add that validation will block with no
- * way back*, and exactly one add fails it:
+ * `Watch output` step. This refusal was first written under *"there is no remove gesture and no
+ * undo"*, which `removalGroup` has since made false — so the invariant it enforces is restated on
+ * the ground that survives: **the palette must not offer an add whose only remedy is a control the
+ * user has to go looking for.** A card can now be deleted, but a step that blocks the rule the
+ * instant it lands still teaches the wrong thing about what the palette offers, and the refusal's
+ * own sentence names the control that actually fixes the shape. Exactly one add fails it:
  *
  * - `monitor` on a `dailyAt` rule raises `timer.scheduleWithMonitor`, whose own message offers
  *   *"remove the schedule, or remove the Watch output step"* — and no field anywhere clears it.
@@ -348,29 +350,48 @@ export function canAddStep(
 }
 
 /**
- * **There is still no `canRemoveStep`, and the reason it used to give has expired.**
+ * Which cards come off together when this one is removed — **the three input steps travel as a
+ * group; every other step is alone.**
  *
- * There was one — a mirror of `canAddStep`, with a test, and no caller. What justified deleting it
- * was the sentence *"`present` is session-only canvas state, and a rule's graph carries all four
- * steps whatever is drawn"*. **That second clause is no longer true.** §3.1 made `monitor`, `parse`
- * and `cond` optional, task 29 made `draftFromRule` derive `present` from the graph, and
- * `ruleFromDraft` omits the three input steps as a group when the canvas draws none — so `present`
- * now DOES mean something the saved rule agrees with, which is precisely the condition the old note
- * said a remove would need. A false comment that justifies real behaviour is how C1 got here, so it
- * is corrected rather than left standing.
+ * There used to be nothing here but a note explaining why removal was unimplemented, and both
+ * halves of it have now been overtaken. The first — *"a rule's graph carries all four steps
+ * whatever is drawn"* — died when §3.1 made `monitor`, `parse` and `cond` optional and task 29
+ * made `draftFromRule` derive `present` from the graph. The second said the gesture "needs
+ * designing rather than enabling"; this is that design, and `draftReducer`'s `removeStep` is where
+ * it happens.
  *
- * Remove is still absent, on the remaining half of the argument, which is untouched: taking a card
- * off the canvas has to decide what happens to the DATA behind it. Hiding *Send to terminal* while
- * leaving the message, the Enter and the send-to intact means the rule goes on typing into terminals
- * with nothing on screen to say so — and `action` is not optional on the DTO, so there is no shape
- * for its absence to write. For the three that are optional the question is answerable but not
- * answered here: it is a gesture with a data consequence, and it needs designing rather than
- * enabling.
+ * **A removal deletes the step's graph field**, so nothing survives the card that drew it. That was
+ * the concrete worry the old note raised and it is a real one: hiding *Send to terminal* while
+ * leaving its message, its Enter and its send-to intact would leave the rule typing into terminals
+ * with nothing on screen to say so. The DTO makes the deletion expressible — all six steps are
+ * optional on `AutomationGraph` — so absence is a shape a save can write, not a hole
+ * `graphAsWritten` has to paper over.
  *
- * `addStep` is coherent because it moves the other way: it REVEALS a step and materialises whatever
- * the panel needs to bind to, and everything it reveals is blank and blocking until the user fills
- * it in.
+ * **Why the input steps are a group and not three cards.** `eval::InputSteps::of` answers `None`
+ * unless a graph holds all three, so a strict subset is a rule the engine reads nothing for. That
+ * is the contract `INPUT_STEPS` already documents and `ruleFromDraft` already writes under;
+ * removing one at a time would be a THIRD answer to it, and the one that produces a rule which
+ * looks complete on screen and silently never fires.
+ *
+ * Filtered by `present`, so this is the cards actually on the canvas rather than the cards a
+ * complete rule would have — and it is computed ONCE, for the menu that names them, the reducer
+ * that drops them and the toast that reports them. A menu offering to delete three steps over a
+ * canvas holding two is what a second derivation buys.
+ *
+ * **There is deliberately no `canRemoveStep` refusal to go with `canAddStep`.** Every shape a
+ * removal can reach is one `problems()` already reports on — no destination is
+ * `rule.noDestination`, nothing to trigger the rule is `timer.neverRuns` — so a refusal would be a
+ * second, weaker statement of a rule that already holds for every producer. Aiming at a card that
+ * is not on the canvas returns an empty group, and the reducer treats that as a no-op: the same
+ * discipline its panel patches follow.
  */
+export function removalGroup(
+    present: readonly StepKind[],
+    kind: StepKind,
+): StepKind[] {
+    const group = INPUT_STEPS.includes(kind) ? INPUT_STEPS : [kind];
+    return group.filter((step) => present.includes(step));
+}
 
 /**
  * The wires implied by a set of steps and the wait's mode — the chain, plus the `yes` branch.

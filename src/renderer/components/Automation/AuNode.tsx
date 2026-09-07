@@ -43,6 +43,19 @@ export interface AuNodeProps {
      */
     sides: Record<string, PortSide>;
     onSelect: () => void;
+    /**
+     * Take this card off the canvas — the Delete key, aimed by FOCUS rather than by selection.
+     *
+     * The canvas has a `window` keydown listener already (Space arms panning) and this deliberately
+     * is not a second one. Selection outlives the pointer: a user selects a card, clicks into the
+     * inspector's message box and types — and a window-level Delete would then have to guess, from
+     * the event target, whether the user meant the character in front of the caret or the card
+     * still drawn as selected. Handled on the card, the question never arises, because a text field
+     * that has the caret also has the focus.
+     */
+    onDelete: () => void;
+    /** Right-click: `AuCanvas` opens the one-item menu at the pointer. */
+    onContextMenu: (e: React.MouseEvent) => void;
     onPointerDown: (e: React.PointerEvent) => void;
     onPortPointerDown: (port: PortRef, e: React.PointerEvent) => void;
     onPortPointerUp: (port: PortRef, e: React.PointerEvent) => void;
@@ -58,6 +71,8 @@ export const AuNode: React.FC<AuNodeProps> = ({
     selected,
     dropPorts,
     onSelect,
+    onDelete,
+    onContextMenu,
     onPointerDown,
     onPortPointerDown,
     onPortPointerUp,
@@ -68,6 +83,22 @@ export const AuNode: React.FC<AuNodeProps> = ({
         data-step={step}
         role="group"
         aria-label={`${face.title} step`}
+        // Focusable, which is what makes the Delete key aimable at all — and it is a plain
+        // improvement besides: until now the only tab stops on a card were its port buttons, so the
+        // cards themselves were unreachable by keyboard. Nothing here calls `preventDefault` on
+        // pointerdown, so a click focuses the card the same press that selects and drags it.
+        tabIndex={0}
+        onKeyDown={(e) => {
+            if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+            // Backspace on a non-editable element is a history-back gesture in some browsers, and
+            // this one is a webview with a single document to go back from.
+            e.preventDefault();
+            // The editor listens for keys too. A Delete that has already removed a card must not
+            // also reach whatever else is listening for one.
+            e.stopPropagation();
+            onDelete();
+        }}
+        onContextMenu={onContextMenu}
         onPointerDown={onPointerDown}
         onClick={onSelect}
     >

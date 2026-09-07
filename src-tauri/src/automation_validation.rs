@@ -329,6 +329,17 @@ pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
 /// keep them apart: this fires only when `scheduled` is false, and that code fires only when it is
 /// true. One graph can never trip both with contradictory remedies.
 ///
+/// **A webhook is a DESTINATION, and it used to be read here as a trigger.** The guard exempted
+/// any graph carrying one, which does nothing for a webhook-only rule — that shape is already
+/// exempt for having no terminal message — and silently exempted the shapes that matter: a rule
+/// with a webhook and nothing to start it reported NO problem at all, so it saved, enabled, and
+/// never fired. Reachable through the REST API and an import from the day the step existed, and
+/// reachable from the editor the moment a card could be deleted: take the three reading steps
+/// off a webhook rule with no wait and this is exactly what is left. The two questions are asked
+/// separately now — *can anything trigger it* (`has_input_steps || scheduled`) and *is there
+/// anything to do* (`has_destination`) — which is what the message underneath has always
+/// claimed to be about.
+///
 /// The remedy differs by shape, and saying so honestly is the whole reason this is not
 /// `timer.delayWithoutMonitor`: with a Wait step already on the canvas the fix is either add a
 /// Watch step or switch that Wait to a schedule; with no Wait step at all there is no "switch it" to
@@ -348,7 +359,10 @@ fn never_runs_problem(graph: &AutomationGraph) -> Option<Problem> {
     let has_input_steps = graph.monitor.is_some() && graph.parse.is_some() && graph.cond.is_some();
     let scheduled = matches!(graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
     let has_terminal_destination = graph.action.as_ref().is_some_and(|action| !action.message.trim().is_empty());
-    if has_input_steps || scheduled || graph.webhook.is_some() || !has_terminal_destination {
+    // **A webhook is a DESTINATION, not a trigger**, and conflating the two is what let an
+    // unrunnable rule report nothing at all — see this function's own doc.
+    let has_destination = has_terminal_destination || graph.webhook.is_some();
+    if has_input_steps || scheduled || !has_destination {
         return None;
     }
     let message = if graph.timer.is_some() {
