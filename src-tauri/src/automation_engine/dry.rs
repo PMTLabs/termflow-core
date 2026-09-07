@@ -27,7 +27,7 @@ use crate::automation_engine::subst;
 use crate::automation_engine::AutomationEngine;
 use crate::automation_store::{
     ActionStep, AutomationLogEntry, AutomationRule, Clause, CompareOp, Finds, Join, LogKind, Test, TextOp,
-    TimerMode, TimerStep,
+    TimerMode, TimerStep, WebhookStep,
 };
 
 /// One step of the graph, as the editor's Test panel draws it.
@@ -73,6 +73,7 @@ const PARSE: &str = "parse";
 const COND: &str = "cond";
 const TIMER: &str = "timer";
 const ACTION: &str = "action";
+const WEBHOOK: &str = "webhook";
 
 /// An `AfterMatch` wait, in the pane's own terse style — `30 s`, `1.5 s`, `2 min` — never restating
 /// `MAX_DELAY_MS`/`MIN_DELAY_MS` as a bound, because this is naming a CONCRETE wait, not a range.
@@ -139,6 +140,41 @@ fn action_trace(action: Option<&ActionStep>, caps: Option<&eval::Captures>, term
 
 fn push_skipped_action(steps: &mut Vec<StepTrace>, action: Option<&ActionStep>) {
     if action.is_some() { steps.push(skipped(ACTION)); }
+}
+
+fn masked_webhook_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(url) => match url.host_str() {
+            Some(host) => format!("{}://{}", url.scheme(), host),
+            None => "an invalid webhook URL".to_string(),
+        },
+        Err(_) => "an invalid webhook URL".to_string(),
+    }
+}
+
+fn webhook_trace(webhook: Option<&WebhookStep>, caps: Option<&eval::Captures>) -> Option<StepTrace> {
+    let webhook = webhook?;
+    Some(match preview_message(&webhook.body, webhook.substitute, caps) {
+        Ok(message) => {
+            let body = String::from_utf8(crate::automation_webhook::payload(webhook.provider, &message))
+                .expect("a webhook payload from a UTF-8 string is UTF-8");
+            step(
+                WEBHOOK,
+                "ok",
+                format!(
+                    "would post via {:?} `{}` to {}",
+                    webhook.provider,
+                    body,
+                    masked_webhook_url(&webhook.url),
+                ),
+            )
+        }
+        Err(e) => step(WEBHOOK, "failed", format!("nothing would be sent — `{}` had no value here", e)),
+    })
+}
+
+fn push_skipped_webhook(steps: &mut Vec<StepTrace>, webhook: Option<&WebhookStep>) {
+    if webhook.is_some() { steps.push(skipped(WEBHOOK)); }
 }
 
 fn symbol(op: CompareOp) -> &'static str {
@@ -281,6 +317,7 @@ pub fn evaluate_once(
             // have refused it.
             let mut steps = vec![skipped(TIMER)];
             push_skipped_action(&mut steps, rule.graph.action.as_ref());
+            push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref());
             return finish(UNREADABLE, steps);
         };
         // **I1.** `schedule_due` refuses a `minute_of_day` outside `0..MINUTES_PER_DAY` and a
@@ -310,7 +347,7 @@ pub fn evaluate_once(
             };
             return finish(
                 WOULD_NOT_FIRE,
-                { let mut steps = vec![step(TIMER, "failed", format!("this schedule can never fire — {why}"))]; push_skipped_action(&mut steps, rule.graph.action.as_ref()); steps },
+                { let mut steps = vec![step(TIMER, "failed", format!("this schedule can never fire — {why}"))]; push_skipped_action(&mut steps, rule.graph.action.as_ref()); push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref()); steps },
             );
         }
         let timer_step = step(
@@ -323,18 +360,19 @@ pub fn evaluate_once(
         let Some(_pc) = host.process_for_leaf(tm) else {
             return finish(
                 UNREADABLE,
-                { let mut steps = vec![timer_step]; if rule.graph.action.is_some() { steps.push(step(ACTION, "failed", "that terminal is not open right now".to_string())); } steps },
+                { let mut steps = vec![timer_step]; if rule.graph.action.is_some() { steps.push(step(ACTION, "failed", "that terminal is not open right now".to_string())); } push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref()); steps },
             );
         };
         let mut steps = vec![timer_step];
         if let Some(action_step) = action_trace(rule.graph.action.as_ref(), None, terminal_name.as_deref()) { steps.push(action_step); }
+        if let Some(webhook_step) = webhook_trace(rule.graph.webhook.as_ref(), None) { steps.push(webhook_step); }
         return finish(WOULD_FIRE, steps);
     }
 
     let Some(steps) = eval::InputSteps::of(&rule.graph) else {
         return finish(
             UNREADABLE,
-            { let mut steps = vec![skipped(MONITOR), skipped(PARSE), skipped(COND)]; push_skipped_action(&mut steps, rule.graph.action.as_ref()); steps },
+            { let mut steps = vec![skipped(MONITOR), skipped(PARSE), skipped(COND)]; push_skipped_action(&mut steps, rule.graph.action.as_ref()); push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref()); steps },
         );
     };
     let pattern = steps.parse.find.clone();
@@ -343,6 +381,7 @@ pub fn evaluate_once(
     let Some(pc) = host.process_for_leaf(tm) else {
         let mut steps = vec![step(MONITOR, "failed", "that terminal is not open right now".to_string()), skipped(PARSE), skipped(COND)];
         push_skipped_action(&mut steps, rule.graph.action.as_ref());
+        push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref());
         return finish(UNREADABLE, steps);
     };
 
@@ -364,6 +403,7 @@ pub fn evaluate_once(
                     skipped(COND),
                 ];
             push_skipped_action(&mut steps, rule.graph.action.as_ref());
+            push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref());
             return finish(WOULD_NOT_FIRE, steps);
         }
     };
@@ -397,6 +437,7 @@ pub fn evaluate_once(
     let Some(ev) = eval::evaluate(folded, &re, &echoes, prev, &port, &pc, now_ms) else {
         let mut steps = vec![step(MONITOR, "failed", "there is nothing to read from that terminal yet".to_string()), skipped(PARSE), skipped(COND)];
         push_skipped_action(&mut steps, rule.graph.action.as_ref());
+        push_skipped_webhook(&mut steps, rule.graph.webhook.as_ref());
         return finish(UNREADABLE, steps);
     };
 
@@ -513,6 +554,11 @@ pub fn evaluate_once(
     } else {
         rule.graph.action.as_ref().map(|_| step(ACTION, "skipped", "nothing would be sent".to_string()))
     };
+    let webhook = if would_fire {
+        webhook_trace(rule.graph.webhook.as_ref(), ev.captures.as_ref())
+    } else {
+        rule.graph.webhook.as_ref().map(|_| step(WEBHOOK, "skipped", "nothing would be sent".to_string()))
+    };
 
     // A DELAY rule (`AfterMatch`) inserts a `timer` row here, between the comparison and the send —
     // the same slot `run_evaluator`'s live walk parks a send in (§6.2). Only when the condition
@@ -536,6 +582,7 @@ pub fn evaluate_once(
         all_steps.push(t);
     }
     if let Some(action) = action { all_steps.push(action); }
+    if let Some(webhook) = webhook { all_steps.push(webhook); }
     finish(verdict, all_steps)
 }
 
@@ -559,6 +606,7 @@ mod tests {
     use crate::automation_engine::test_host::*;
     use crate::automation_store::{
         Clause, CondStep, Finds, Join, Keep, LogOrder, LogScope, Source, Test as ClauseTest, TextOp,
+        WebhookProvider, WebhookStep,
     };
 
     fn kinds(report: &DryRunReport) -> Vec<&str> {
@@ -1082,6 +1130,29 @@ mod tests {
             "would type `prepare to do context-hand-off` into codex · core"
         );
         assert_eq!(report.terminal_id, "tm-1");
+    }
+
+    #[test]
+    fn the_webhook_step_names_its_provider_and_payload_without_its_secret_url_path() {
+        let (engine, fake, host) = wire(vec![]);
+        let mut rule = ctx_rule("au-1");
+        rule.graph.webhook = Some(WebhookStep {
+            provider: WebhookProvider::Discord,
+            url: "https://hooks.example.invalid/secret-token".into(),
+            body: "build failed".into(),
+            substitute: false,
+        });
+        fake.say("pc-1", "ctx:63%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+
+        assert_eq!(kinds(&report), vec!["monitor", "parse", "cond", "action", "webhook"]);
+        let webhook = detail(&report, "webhook");
+        assert_eq!(status(&report, "webhook"), "ok");
+        assert!(webhook.contains("Discord"), "{webhook}");
+        assert!(webhook.contains(r#"{"content":"build failed"}"#), "{webhook}");
+        assert!(webhook.contains("https://hooks.example.invalid"), "{webhook}");
+        assert!(!webhook.contains("/secret-token"), "{webhook}");
     }
 
     // =============================================================================================

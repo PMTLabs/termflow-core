@@ -97,7 +97,7 @@ pub async fn send_body(webhook: &WebhookStep, message: &str) -> Result<(), Webho
     }
 }
 
-fn payload(provider: WebhookProvider, message: &str) -> Vec<u8> {
+pub(crate) fn payload(provider: WebhookProvider, message: &str) -> Vec<u8> {
     match provider {
         WebhookProvider::Discord => serde_json::to_vec(&serde_json::json!({ "content": message }))
             .expect("a string is always serializable as JSON"),
@@ -248,7 +248,7 @@ mod tests {
 
     /// The renderer preview has its own implementation, so the exact bytes for every provider live
     /// in one fixture both sides read. `payload` stays private to this module in production; this
-    /// child test module reaches it through Rust's normal private-item test visibility.
+    /// dry-run producer calls it too, so the preview and sender cannot drift on payload bytes.
     #[test]
     fn payload_matches_the_shared_fixture() {
         #[derive(serde::Deserialize)]
