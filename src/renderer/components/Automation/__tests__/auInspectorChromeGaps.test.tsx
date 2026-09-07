@@ -189,6 +189,26 @@ describe('the state pill and its re-arm button', () => {
 });
 
 /**
+ * A third instance of the same family, and the one that gives the family its name: **an
+ * inline-block's baseline is its LAST line box.**
+ *
+ * A `<button>` is inline-block by default, so a problem long enough to wrap gave its `li` one line
+ * box whose baseline sat on the second line — and an outside list marker is placed on that
+ * baseline. The bullet drew beside `webhook destination.` with the words it belonged to sitting
+ * above it, unmarked. Only the longer of the two problems showed it.
+ *
+ * jsdom cannot lay this out, so the fix was checked by rendering the real stylesheet's own
+ * `.au-problems` rules in headless Edge, before and after, at a width that forces the wrap. What
+ * is asserted here is the declaration that makes it true — a block-level button has its first line
+ * as the item's first line, and the marker has nowhere else to go.
+ */
+describe('a problem long enough to wrap', () => {
+    it('keeps its bullet on the first line, the button being block-level', () => {
+        expect(ruleBody('.au-editor .au-problems li button')).toMatch(/display:\s*block/);
+    });
+});
+
+/**
  * The same alignment problem in the other place it appeared: a 15px icon beside 0.8rem uppercase
  * text, aligned on a baseline neither shares. The label centres its items rather than picking a
  * `vertical-align` length that can only be right for one font size.
