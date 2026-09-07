@@ -258,14 +258,14 @@ pub(crate) fn emit_activation(app: &tauri::AppHandle, window_label: &str, tab_id
             // exist for: with "keep running in the background" the last window is
             // *hidden* on close (see the close handler in lib.rs), and a hidden or
             // minimized window cannot take focus. Without the show/unminimize the click
-            // would switch tabs inside a window the user cannot see. Same ordering as
-            // `show_or_focus_main_window` in lib.rs, which is the established pattern
-            // for surfacing the app from the tray.
-            let _ = window.unminimize();
-            let _ = window.show();
-            if let Err(e) = window.set_focus() {
-                log::warn!("[NOTIFY] failed to focus window {window_label}: {e}");
-            }
+            // would switch tabs inside a window the user cannot see.
+            //
+            // Through `restore_and_focus`, not a hand-rolled unminimize/show/set_focus:
+            // this path used to copy that sequence out of `show_or_focus_main_window` and
+            // so omitted the `sync` that re-shows the WEBVIEW, which is what makes a
+            // restored window paint. The tab would switch inside a window that came back
+            // blank — the exact failure the gate exists to prevent.
+            crate::webview_power::restore_and_focus(&window);
         }
         None => log::warn!("[NOTIFY] activation for missing window label: {window_label}"),
     }

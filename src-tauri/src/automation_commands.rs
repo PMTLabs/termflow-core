@@ -934,18 +934,20 @@ mod source_tests {
     /// produce a hit under any implementation — while five files that do declare commands were never
     /// scanned. The floor below is the same check applied to this test itself: an instrument whose
     /// clean result has never been shown to be capable of being dirty is not a census.
+    ///
+    /// The second version named the six files that declare commands *today*. That is the same defect
+    /// one round later: a seventh file, or a split of `commands.rs` into a module directory, moves
+    /// commands out of the corpus and the `never` narrows in silence. So the corpus is walked. The
+    /// floor stops being decoration once the list is gone — it is now the only thing standing
+    /// between a wrong root and a green run.
     #[test]
     fn no_automation_command_lives_outside_this_module() {
         let mut scanned = 0;
-        for (path, source) in [
-            ("commands.rs", include_str!("commands.rs")),
-            ("peer_commands.rs", include_str!("peer_commands.rs")),
-            ("network_commands.rs", include_str!("network_commands.rs")),
-            ("open_commands.rs", include_str!("open_commands.rs")),
-            ("shell_integration.rs", include_str!("shell_integration.rs")),
-            ("native_notify.rs", include_str!("native_notify.rs")),
-        ] {
-            let code = crate::automation_engine::test_host::strip_comments(source);
+        for (path, code) in crate::automation_engine::test_host::crate_sources() {
+            // This module is where they are SUPPOSED to live.
+            if path == "automation_commands.rs" {
+                continue;
+            }
             for body in code.split("#[tauri::command]").skip(1) {
                 scanned += 1;
                 let name = body.split("fn ").nth(1).and_then(|s| s.split('(').next()).unwrap_or("?");
@@ -960,8 +962,8 @@ mod source_tests {
         }
         assert!(
             scanned >= 80,
-            "this scan reached {} command bodies: the files it names have moved and it is now \
-             asserting a `never` over almost nothing",
+            "this scan reached {} command bodies: the walk is pointed somewhere wrong and it is \
+             now asserting a `never` over almost nothing",
             scanned
         );
     }
@@ -1012,26 +1014,50 @@ mod source_tests {
     /// converts through `identity.process_for_leaf` and nowhere else (§7.4).
     #[test]
     fn the_engine_never_reaches_for_the_lenient_resolver() {
-        for (path, source) in [
-            ("automation_engine.rs", include_str!("automation_engine.rs")),
-            ("automation_engine/loops.rs", include_str!("automation_engine/loops.rs")),
-            ("automation_engine/dry.rs", include_str!("automation_engine/dry.rs")),
-            ("automation_engine/host.rs", include_str!("automation_engine/host.rs")),
-            ("automation_commands.rs", include_str!("automation_commands.rs")),
-        ] {
-            let body = crate::automation_engine::test_host::strip_comments(source);
-            // The needle is ASSEMBLED, and that is not decoration: this file is one of the files
-            // scanned, so a literal `"resolve_ref("` in the assertion is itself a match and the test
-            // fails against its own source. Slicing the test module off instead would not work here —
-            // `automation_engine.rs` declares a `#[cfg(test)]` module near the top, so cutting at the
-            // first one cuts the whole file.
-            let needle = format!("{}(", "resolve_ref");
+        // The needle is ASSEMBLED, and that is not decoration: this file is one of the files
+        // scanned, so a literal `"resolve_ref("` in the assertion is itself a match and the test
+        // fails against its own source. Slicing the test module off instead would not work here —
+        // `automation_engine.rs` declares a `#[cfg(test)]` module near the top, so cutting at the
+        // first one cuts the whole file.
+        let needle = format!("{}(", "resolve_ref");
+
+        // Walked, not listed. The five names this used to carry were the engine's files on the day
+        // it was written; `automation_engine/` has gained modules since, and every one of them was
+        // outside a `never` that reported green regardless. Nothing anchored it either — a corpus
+        // that cannot produce the needle would have passed identically.
+        let sources = crate::automation_engine::test_host::crate_sources();
+        let mut scanned = 0;
+
+        for (path, body) in &sources {
+            let is_engine = path.starts_with("automation_engine")
+                || path.starts_with("automation/")
+                || path == "automation_commands.rs";
+            if !is_engine {
+                continue;
+            }
+            scanned += 1;
             assert!(
                 !body.contains(&needle),
                 "{} reaches for that resolver: the one conversion is identity.process_for_leaf",
                 path
             );
         }
+
+        assert!(
+            scanned >= 8,
+            "this scan reached {scanned} engine files: the walk is pointed somewhere wrong"
+        );
+
+        // The corpus must be capable of producing the needle, or the `never` above is a test that
+        // cannot fail. `state.rs` is the file that DEFINES the lenient resolver, and it is outside
+        // the engine — which is the whole shape of the claim.
+        assert!(
+            sources
+                .iter()
+                .any(|(path, body)| path != "automation_commands.rs" && body.contains(&needle)),
+            "`{needle}` no longer appears anywhere in the crate: this census can no longer fail, \
+             and the conversion it is about has been renamed or removed"
+        );
     }
 
     /// **§3.5's own sentence, and both arms of it.** *"saved from window `main`, replacing the

@@ -140,29 +140,82 @@ mod tests {
     ///
     /// So the gate lives in `restore_and_focus` and this test makes bypassing it a build
     /// failure rather than a code-review question.
+    ///
+    /// **Scanned by walking `src/`, not by naming files.** The first version listed `lib.rs` and
+    /// `commands.rs` — the two files that had the bug when it was written — and `native_notify.rs`
+    /// then shipped `emit_activation` doing `unminimize(); show(); set_focus()` with no `sync`,
+    /// which is this exact defect and which this test reported green on for its whole life. A
+    /// census whose corpus is a list is a census that only ever covers the past; the walk covers a
+    /// file because it exists.
     #[test]
     fn no_other_file_restores_a_window_directly() {
-        const SOURCES: [(&str, &str); 2] = [
-            ("lib.rs", include_str!("lib.rs")),
-            ("commands.rs", include_str!("commands.rs")),
-        ];
-        for (name, src) in SOURCES {
+        // This file DEFINES the gate, so its own `unminimize()` is the one legitimate call.
+        const GATE: &str = "webview_power.rs";
+        // ASSEMBLED, because the failure message below is itself source text containing the
+        // needle: a literal here matches this test's own file, and the skip above is then the
+        // only thing standing between the census and failing against itself.
+        let needle = format!(".{}()", "unminimize");
+        let mut scanned = 0;
+
+        for (path, src) in crate::automation_engine::test_host::crate_sources() {
+            if path == GATE {
+                continue;
+            }
+            scanned += 1;
             assert!(
-                !src.contains(".unminimize()"),
-                "{name} calls .unminimize() directly. Use webview_power::restore_and_focus \
+                !src.contains(&needle),
+                "{path} calls .unminimize() directly. Use webview_power::restore_and_focus \
                  instead, or the webview stays invisible and the window restores BLANK."
             );
         }
+
+        assert!(scanned >= 50, "the scan reached only {scanned} files");
     }
 
-    /// Guards the guard: if `include_str!` ever pointed at the wrong file, or the sources
-    /// were emptied, the assertion above would pass vacuously and prove nothing.
+    /// Guards the guard, and the half that matters is the SECOND one.
+    ///
+    /// A corpus floor only proves files were read. It cannot prove the needle is one this corpus
+    /// is capable of producing — and a negative assertion over a corpus that can never contain
+    /// its needle is the definition of a test that cannot fail. The old version of this checked
+    /// `commands.rs.contains("pub async fn")`, which is ambient: every remnant of any split of
+    /// that file satisfies it, so it would have kept passing after precisely the change it exists
+    /// to notice.
+    ///
+    /// So the anchor is the needle itself, found in the one file that is allowed to have it.
     #[test]
     fn the_scanned_sources_are_real() {
-        const LIB: &str = include_str!("lib.rs");
-        const COMMANDS: &str = include_str!("commands.rs");
-        assert!(LIB.contains("on_window_event"), "lib.rs is not the file this test thinks it is");
-        assert!(COMMANDS.contains("pub async fn"), "commands.rs is not the file this test thinks it is");
+        let sources = crate::automation_engine::test_host::crate_sources();
+
+        let gate = sources
+            .iter()
+            .find(|(path, _)| path == "webview_power.rs")
+            .expect("the walk must reach this file");
+        // Assembled AND sliced to the production half. Both are load-bearing: a literal needle is
+        // satisfied by the census's own failure message a few lines above, and an unsliced scan is
+        // satisfied by that same message even when `restore_and_focus` has stopped calling it. The
+        // first version of this anchor had both faults and would have passed with the gate gutted.
+        let needle = format!(".{}()", "unminimize");
+        let production = &gate.1[..gate
+            .1
+            .find("#[cfg(test)]")
+            .expect("the tests must follow the code")];
+        assert!(
+            production.contains(&needle),
+            "the needle no longer appears in the production half of the file that defines the \
+             gate: the census above can no longer fail for any input"
+        );
+
+        // And the corpus really is the app's, not some empty or unrelated tree.
+        assert!(
+            sources.iter().any(|(_, src)| src.contains("on_window_event")),
+            "the walk found no window-event wiring: this is not the crate this test thinks it is"
+        );
+        assert!(
+            sources
+                .iter()
+                .any(|(_, src)| src.contains("webview_power::restore_and_focus(")),
+            "nothing calls the gate: either the corpus is wrong or the gate is now dead code"
+        );
     }
 
     #[test]

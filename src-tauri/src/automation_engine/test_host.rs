@@ -441,3 +441,63 @@ pub(crate) fn strip_comments(source: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// **Every `.rs` file under `src/`, walked at test time rather than named at compile time.**
+///
+/// A census built on `include_str!` of a hardcoded list is only ever as wide as that list, and the
+/// list is a thing someone has to remember. Two ways it goes quietly wrong:
+///
+/// - **A scanned file is split.** The code moves out from under the scan into a sibling nobody
+///   listed, and the census then reports green over a remnant. Moving a split file to the
+///   `foo/mod.rs` layout makes a *stale* path a compile error — but nothing can make a *missing*
+///   path an error, because by definition nothing points at it.
+/// - **A new file simply appears.** This is not hypothetical here: `webview_power`'s "no other file
+///   restores a window directly" scanned `lib.rs` and `commands.rs`, and `native_notify.rs` had been
+///   calling `unminimize()` directly — the exact thing it forbids — for as long as that function has
+///   existed. The guard was green the whole time. Widening it to this walk is what found it.
+///
+/// So the corpus is derived from the filesystem: a file is scanned because it EXISTS, not because
+/// someone remembered it. `CARGO_MANIFEST_DIR` is baked at compile time, so the walk is anchored to
+/// this crate rather than to the working directory a test happens to run from.
+///
+/// **The floor is the point.** A census over an empty corpus passes perfectly, so the one failure
+/// this helper must never have is returning nothing — a wrong root, or a checkout without sources,
+/// would silently disarm every caller at once. Asserting the size here means one floor protects all
+/// of them, instead of each census needing to remember its own.
+///
+/// Returns `(path relative to `src/`, [`strip_comments`]ed contents)`, sorted, with `/` separators
+/// on every platform so callers can match paths literally.
+pub(crate) fn crate_sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot walk {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("walked from root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+                out.push((rel, strip_comments(&text)));
+            }
+        }
+    }
+
+    out.sort();
+    assert!(
+        out.len() >= 50,
+        "the source walk reached {} files: it is pointed somewhere wrong, and every census built \
+         on it is now asserting over almost nothing",
+        out.len()
+    );
+    out
+}
