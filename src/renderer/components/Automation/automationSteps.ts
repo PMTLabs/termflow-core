@@ -1,5 +1,5 @@
 /**
- * The five steps, their typed ports, and the one function that decides whether a wire is legal
+ * The six steps, their typed ports, and the one function that decides whether a wire is legal
  * (plan 028 §6.3, plan 032 §6.2/§6.3/§9, mockup §03).
  *
  * **Canvas Mode's ports are undirected 4-compass geometry with no type system**, and the only
@@ -8,7 +8,7 @@
  * §10.21's ordered-pair matrix a cheap and total test rather than a sampling of the interesting
  * cases.
  *
- * **The five step KINDS are fixed; a rule having all five is not.** This file's arithmetic is over
+ * **The six step KINDS are fixed; a rule having all six is not.** This file's arithmetic is over
  * the names — the order, the ports, which pairs may be wired — and none of it reads `rule.graph`.
  * That is what keeps it true while the DTO changes underneath it: plan 032 §3.1 made `monitor`,
  * `parse` and `cond` optional, so a schedule rule (§6.3) is `action` and a `timer` and nothing else.
@@ -31,7 +31,7 @@
  * — but no longer by every schedule rule on open.
  */
 
-export type StepKind = 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
+export type StepKind = 'monitor' | 'parse' | 'cond' | 'timer' | 'action' | 'webhook';
 
 /**
  * Left to right, and also the order the palette lists them and the problem list reports them.
@@ -48,6 +48,7 @@ export const STEP_ORDER: readonly StepKind[] = Object.freeze([
     'cond',
     'timer',
     'action',
+    'webhook',
 ]);
 
 /**
@@ -84,6 +85,7 @@ export const STEP_LABELS: Record<StepKind, string> = {
     cond: 'Compare it',
     timer: 'Wait',
     action: 'Send to terminal',
+    webhook: 'Send to webhook',
 };
 
 /** The line under the title in the inspector head — *Step 2 · find text, pull a number out*. */
@@ -93,6 +95,7 @@ export const STEP_SUBTITLES: Record<StepKind, string> = {
     cond: 'decide yes or no',
     timer: 'hold, or fire on the clock',
     action: 'what happens when it fires',
+    webhook: 'what happens when it fires',
 };
 
 /** What travels on a wire. Three types, and only equal types connect. */
@@ -150,6 +153,7 @@ const PORTS = {
         { id: 'out', dir: 'out', type: 'verdict', label: 'go' },
     ] as const),
     action: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }] as const),
+    webhook: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }] as const),
 } as const;
 
 export const STEP_PORTS: Record<StepKind, readonly PortSpec[]> = PORTS;
@@ -266,8 +270,8 @@ export function canConnect(
 /**
  * Which step must already be on the canvas before this one makes sense — **any ONE of them**.
  *
- * A list rather than a single kind, because `action` has two drivers and always did in principle:
- * the verdict from `Compare it` on a watching rule, and the wait itself on a schedule rule, which
+ * A list rather than a single kind, because either destination has two drivers in principle: the
+ * verdict from `Compare it` on a watching rule, and the wait itself on a schedule rule, which
  * has no comparison and is not allowed one (§6.3). Named as one predecessor, the palette demanded a
  * `Compare it` that a schedule rule must not carry, so *"a wait and a send"* — the whole of mockup
  * §03's rule — could not be built at all.
@@ -280,6 +284,7 @@ const REQUIRES: Partial<Record<StepKind, readonly StepKind[]>> = {
     parse: ['monitor'],
     cond: ['parse'],
     action: ['cond', 'timer'],
+    webhook: ['cond', 'timer'],
 };
 
 /**
@@ -399,6 +404,9 @@ export function defaultWires(
         if (has('action')) {
             out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'action', port: 'in' } });
         }
+        if (has('webhook')) {
+            out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'webhook', port: 'in' } });
+        }
         return out;
     }
 
@@ -415,6 +423,11 @@ export function defaultWires(
         out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'action', port: 'in' } });
     } else if (has('cond') && has('action')) {
         out.push({ from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } });
+    }
+    if (has('timer') && has('webhook')) {
+        out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'webhook', port: 'in' } });
+    } else if (has('cond') && has('webhook')) {
+        out.push({ from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } });
     }
     return out;
 }

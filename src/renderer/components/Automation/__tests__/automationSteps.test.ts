@@ -1,12 +1,12 @@
 /**
- * §10.21 — the ordered-pair matrix over all five steps.
+ * §10.21 — the ordered-pair matrix over all six steps.
  *
- * Total rather than sampled: nine ports, eighty-one ordered pairs, and exactly five are legal. A
+ * Total rather than sampled: ten ports, one hundred ordered pairs, and exactly seven are legal. A
  * test that checked "monitor connects to parse" and "parse does not connect to action" would pass on
  * a `canConnect` that had lost its type check entirely — the interesting refusals are the ones
  * nobody thinks to write down.
  *
- * **The fifth step is `timer`, and it has two shapes rather than one** (plan 032 §6.2, §6.3), which
+ * **The timer has two shapes rather than one** (plan 032 §6.2, §6.3), which
  * is why `defaultWires` takes the shape as an argument and why this file asserts BOTH: in delay mode
  * the wait sits between the verdict and the send, and in schedule mode it *starts* the rule and
  * nothing else is wired at all.
@@ -34,7 +34,7 @@ import {
 const key = (p: PortRef) => `${p.step}.${p.port}`;
 
 /** The four steps a rule had before the wait step existed — still a real shape, and the common one. */
-const WITHOUT_TIMER: StepKind[] = STEP_ORDER.filter((s) => s !== 'timer');
+const WITHOUT_TIMER: StepKind[] = STEP_ORDER.filter((s) => s !== 'timer' && s !== 'webhook');
 
 /**
  * The wires SOME legal shape of a rule implies, and nothing else.
@@ -45,7 +45,7 @@ const WITHOUT_TIMER: StepKind[] = STEP_ORDER.filter((s) => s !== 'timer');
  * FAILS while the engine goes on firing when it succeeds. `wires` is session-only canvas state and
  * no behaviour derives from it, so the drawing was the only thing that changed.
  *
- * **Five rather than three, because the wait step adds two and removes none.** `cond.true->action.in`
+ * **Seven rather than three, because the wait and webhook add four and remove none.** `cond.true->action.in`
  * stays legal: a rule with no wait step is still the ordinary rule, and refusing that pair would
  * un-draw every rule written before this milestone.
  */
@@ -55,12 +55,14 @@ const LEGAL = new Set([
     'cond.true->timer.in',
     'cond.true->action.in',
     'timer.out->action.in',
+    'cond.true->webhook.in',
+    'timer.out->webhook.in',
 ]);
 
 describe('canConnect — the ordered-pair matrix', () => {
     const ports = allPorts();
 
-    it('has the nine ports the step table declares', () => {
+    it('has the ten ports the step table declares', () => {
         expect(ports.map(key)).toEqual([
             'monitor.out',
             'parse.in',
@@ -74,10 +76,11 @@ describe('canConnect — the ordered-pair matrix', () => {
             'timer.in',
             'timer.out',
             'action.in',
+            'webhook.in',
         ]);
     });
 
-    it('accepts exactly five of the eighty-one ordered pairs', () => {
+    it('accepts exactly seven of the one hundred ordered pairs', () => {
         const accepted: string[] = [];
         for (const from of ports) {
             for (const to of ports) {
@@ -87,7 +90,7 @@ describe('canConnect — the ordered-pair matrix', () => {
             }
         }
         expect(accepted.sort()).toEqual([...LEGAL].sort());
-        expect(ports.length * ports.length).toBe(81);
+        expect(ports.length * ports.length).toBe(100);
     });
 
     it('refuses each pair for the RIGHT reason', () => {
@@ -116,6 +119,9 @@ describe('canConnect — the ordered-pair matrix', () => {
         expect(reason('parse.out', 'action.in')).toBe(
             `${STEP_LABELS.parse} sends a value, and ${STEP_LABELS.action} expects a yes or no.`,
         );
+        expect(reason('parse.out', 'webhook.in')).toBe(
+            `${STEP_LABELS.parse} sends a value, and ${STEP_LABELS.webhook} expects a yes or no.`,
+        );
         // Shape. The one refusal that is not about direction, self or type: `cond.false` is a real
         // output of the right type into a free input, and wiring it would draw the opposite of what
         // the rule does. The reason names the port that DOES drive the step, not the one tried.
@@ -129,6 +135,10 @@ describe('canConnect — the ordered-pair matrix', () => {
             `${STEP_LABELS.timer} runs on ${STEP_LABELS.cond}'s yes output. The canvas draws the `
             + 'rule, and a wire the rule would not follow is a picture of something else.',
         );
+        expect(reason('cond.false', 'webhook.in')).toBe(
+            `${STEP_LABELS.webhook} runs on ${STEP_LABELS.cond}'s yes output. The canvas draws the `
+            + 'rule, and a wire the rule would not follow is a picture of something else.',
+        );
         // Type, on the new kind: the wait carries a verdict, so a value cannot enter it and the
         // lines a monitor prints cannot either.
         expect(reason('parse.out', 'timer.in')).toBe(
@@ -136,6 +146,7 @@ describe('canConnect — the ordered-pair matrix', () => {
         );
         // Direction, on the new kind: the wait's own input is not a source.
         expect(reason('timer.in', 'action.in')).toMatch(/output.*input/i);
+        expect(reason('timer.in', 'webhook.in')).toMatch(/output.*input/i);
     });
 
     it('refuses a second wire into an input, BEFORE it asks about shape', () => {
@@ -222,6 +233,11 @@ describe('canAddStep', () => {
         expect(refusal?.reason).toContain(STEP_LABELS.timer);
     });
 
+    it('accepts the webhook after EITHER of the two steps that can drive it', () => {
+        expect(canAddStep(['timer'], 'webhook')).toBeNull();
+        expect(canAddStep(['monitor', 'parse', 'cond'], 'webhook')).toBeNull();
+    });
+
     /**
      * **R3 — the palette must not offer an add that validation will block with no way back.**
      *
@@ -285,14 +301,15 @@ describe('defaultWires', () => {
     const drawn = (wires: ReturnType<typeof defaultWires>) =>
         wires.map((w) => `${key(w.from)}->${key(w.to)}`);
 
-    it('wires the chain and leaves the `no` branch empty', () => {
+    it('wires both destinations directly from the verdict without a wait', () => {
         // The unused `no` port is how a user learns nothing happens on the other path — mockup §03
         // draws it deliberately, so wiring it would be a design change, not a convenience.
-        const wires = defaultWires(WITHOUT_TIMER);
+        const wires = defaultWires(STEP_ORDER.filter((s) => s !== 'timer'));
         expect(drawn(wires)).toEqual([
             'monitor.out->parse.in',
             'parse.out->cond.in',
             'cond.true->action.in',
+            'cond.true->webhook.in',
         ]);
         expect(wires.some((w) => w.from.port === 'false')).toBe(false);
     });
@@ -308,6 +325,7 @@ describe('defaultWires', () => {
             'parse.out->cond.in',
             'cond.true->timer.in',
             'timer.out->action.in',
+            'timer.out->webhook.in',
         ]);
     });
 
@@ -321,9 +339,13 @@ describe('defaultWires', () => {
      * interesting case is the rule that HAS a monitor (which `timer.scheduleWithMonitor` blocks),
      * not the tidy two-card one, because only the former can tell the two modes apart.
      */
-    it('wires only the wait into the send in schedule mode, and nothing else', () => {
-        expect(drawn(defaultWires(STEP_ORDER, 'dailyAt'))).toEqual(['timer.out->action.in']);
+    it('wires the wait into both destinations in schedule mode, and nothing else', () => {
+        expect(drawn(defaultWires(STEP_ORDER, 'dailyAt'))).toEqual([
+            'timer.out->action.in',
+            'timer.out->webhook.in',
+        ]);
         expect(drawn(defaultWires(['timer', 'action'], 'dailyAt'))).toEqual(['timer.out->action.in']);
+        expect(drawn(defaultWires(['timer', 'webhook'], 'dailyAt'))).toEqual(['timer.out->webhook.in']);
     });
 
     it('produces only wires `canConnect` would accept, at every stage of building', () => {

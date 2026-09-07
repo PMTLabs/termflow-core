@@ -52,6 +52,8 @@ export const STEP_FIELDS: Record<StepKind, ProblemField[]> = {
     cond: ['cond'],
     timer: ['timer'],
     action: ['action'],
+    // Webhook validation is still owned by the destination field until Task 12 adds its panel.
+    webhook: [],
 };
 
 export interface DeriveContext {
@@ -268,7 +270,7 @@ export function describeDelay(ms: number): string {
  * face that silently picked `values[1]` would break the moment a row moved.
  */
 export function stepValues(rule: AutomationRule, step: StepKind): Record<string, StepValue> {
-    const { monitor, parse, cond, timer, action } = rule.graph;
+    const { monitor, parse, cond, timer, action, webhook } = rule.graph;
     switch (step) {
         case 'monitor':
             return {
@@ -346,7 +348,13 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
             return { mode: value(WAIT_MODE_PHRASES.dailyAt), when: value(`${at}, ${when}`) };
         }
         case 'action':
-        default:
+            if (!action) {
+                return {
+                    message: NOT_IN_THIS_RULE,
+                    send: NOT_IN_THIS_RULE,
+                    sendTo: NOT_IN_THIS_RULE,
+                };
+            }
             return {
                 message:
                     action.message.trim().length === 0
@@ -355,6 +363,8 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
                 send: value(action.submit ? SEND_PHRASES.submit : SEND_PHRASES.hold),
                 sendTo: value(SEND_TO_PHRASES[action.sendTo]),
             };
+        case 'webhook':
+            return { provider: webhook ? value(webhook.provider) : NOT_IN_THIS_RULE };
     }
 }
 
@@ -399,6 +409,11 @@ const FACE_ROWS: Record<StepKind, Array<{ label: string; key: string }>> = {
     action: [
         { label: 'Send', key: 'message' },
         { label: 'Then', key: 'send' },
+    ],
+    webhook: [
+        // The endpoint is a credential. Provider is the only webhook configuration safe to show
+        // on the canvas; Task 12 owns its editable inspector.
+        { label: 'Post', key: 'provider' },
     ],
 };
 
@@ -474,15 +489,14 @@ export type NodeTone = 'error' | 'warn' | 'live' | 'ready' | 'absent';
 /**
  * Does the rule actually HAVE this step? (plan 032 §3.1.)
  *
- * `action` is the one step no rule can be without — a rule with nothing to send is not a rule — so
- * it is the only kind this answers `true` for unconditionally. The other three are optional on the
- * DTO. Since task 29 `draftFromRule` draws only the steps a rule HAS, so the editor no longer opens
+ * Every step is optional on the DTO: a rule needs at least one destination, not necessarily a
+ * terminal send. Since task 29 `draftFromRule` draws only the steps a rule HAS, so the editor no longer opens
  * a schedule rule on three cards standing for steps it does not have — but this answer is still
  * load-bearing for every other reader of a graph, the test pane included, and for a row that reached
  * the store by some other route.
  */
 function hasStep(rule: AutomationRule, step: StepKind): boolean {
-    return step === 'action' || rule.graph[step] != null;
+    return rule.graph[step] != null;
 }
 
 export interface NodeState {
@@ -632,7 +646,15 @@ function whenPhrase(rule: AutomationRule, pattern: string, cond: Record<string, 
  */
 export function ruleSummary(rule: AutomationRule): string {
     const timer = rule.graph.timer;
-    const action = stepValues(rule, 'action');
+    const destination = rule.graph.action
+        ? {
+            verb: rule.graph.action.submit ? 'send' : 'type',
+            message: rule.graph.action.message,
+        }
+        : {
+            verb: 'post',
+            message: rule.graph.webhook?.provider ?? 'no destination',
+        };
     // A schedule fires on its clock even when it carries monitor/parse/cond steps (the validator
     // reports that shape separately), so it takes the same precedence as `describeRule` below.
     // The rail omits targets: the list row has no room for them and saying it is “watching” would
@@ -642,15 +664,15 @@ export function ruleSummary(rule: AutomationRule): string {
         const at = clockTime(minuteOfDay);
         const when = describeDays(days);
         if (at !== null && when !== '') {
-            return `At ${at} on ${when} · ${rule.graph.action.submit ? 'send' : 'type'} ${action.message.text}`;
+            return `At ${at} on ${when} · ${destination.verb} ${destination.message}`;
         }
     }
     const monitor = stepValues(rule, 'monitor');
     const parse = stepValues(rule, 'parse');
     const cond = stepValues(rule, 'cond');
     return `Watching ${monitor.terminals.text} · ${whenPhrase(rule, parse.find.text, cond)} · ${
-        rule.graph.action.submit ? 'send' : 'type'
-    } ${action.message.text}`;
+        destination.verb
+    } ${destination.message}`;
 }
 
 /**
@@ -760,10 +782,16 @@ function delayClause(timer: AutomationTimerStep | undefined): string | null {
 
 export function describeRule(rule: AutomationRule): RuleSentence {
     const { parse, cond, timer, action } = rule.graph;
-    const send = {
+    const send = action
+        ? {
         verbSend: action.submit ? 'send' : 'type',
         message: action.message,
         sendNote: action.submit ? null : ' — no Enter',
+        }
+        : {
+            verbSend: 'post',
+            message: rule.graph.webhook?.provider ?? 'no destination',
+            sendNote: null,
     };
 
     // **Schedule mode leads with the clock and never with the output.** §6.3: the walk skips

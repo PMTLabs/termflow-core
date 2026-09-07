@@ -1040,6 +1040,22 @@
     gap: 7px;
 }
 
+.au-editor .au-frow .au-mini {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    color: #a9adb6;
+    background: #1c1d22;
+    border: 1px solid #34363e;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.au-editor .au-frow .au-mini:hover {
+    color: #fff;
+    background: #2c2f37;
+}
+
 .au-editor .au-radio,
 .au-editor .au-checkrow {
     display: flex;

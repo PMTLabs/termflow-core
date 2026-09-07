@@ -26,7 +26,100 @@ const run = (draft: AutomationDraft, actions: DraftAction[]): AutomationDraft =>
 const blockingCodes = (draft: AutomationDraft): string[] =>
     blockingProblems(problems(ruleFromDraft(draft))).map((p) => p.code);
 
+const webhook = { provider: 'discord' as const, url: 'https://hooks.example.invalid/canvas', body: 'done' };
+
+const configuredWebhook = (draft: AutomationDraft): AutomationDraft => ({
+    ...draft,
+    rule: { ...draft.rule, graph: { ...draft.rule.graph, webhook } },
+});
+
 describe('the editor writes the steps the canvas draws', () => {
+    it('omits a hidden action scaffold from the graph a save serializes', () => {
+        const draft = draftFromRule(blankDraft(), 'blank');
+        expect(draft.rule.graph.action).toBeDefined();
+        expect(draft.present).not.toContain('action');
+
+        const written = JSON.parse(JSON.stringify(ruleFromDraft(draft)));
+        expect(written.graph).not.toHaveProperty('action');
+    });
+
+    it('ignores an action edit when the draft has no action', () => {
+        const { action: _action, ...graph } = blankDraft().graph;
+        const draft = draftFromRule({ ...blankDraft(), graph }, 'blank');
+
+        const after = draftReducer(draft, { type: 'action', patch: { message: 'do not send' } });
+        expect(after).toBe(draft);
+        expect(after.rule.graph).not.toHaveProperty('action');
+    });
+
+    it('creates and reopens a webhook-only canvas without serializing the action scaffold', () => {
+        const created = configuredWebhook(run(draftFromRule(blankDraft(), 'blank'), [
+            { type: 'addStep', step: 'monitor' },
+            { type: 'addStep', step: 'parse' },
+            { type: 'addStep', step: 'cond' },
+            { type: 'addStep', step: 'webhook' },
+        ]));
+
+        const saved = JSON.parse(JSON.stringify(ruleFromDraft(created)));
+        expect(saved.graph.action).toBeUndefined();
+        expect(saved.graph.webhook).toEqual(webhook);
+
+        const reopened = draftFromRule(saved);
+        expect(reopened.present).toEqual(['monitor', 'parse', 'cond', 'webhook']);
+        expect(reopened.wires).toEqual([
+            { from: { step: 'monitor', port: 'out' }, to: { step: 'parse', port: 'in' } },
+            { from: { step: 'parse', port: 'out' }, to: { step: 'cond', port: 'in' } },
+            { from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } },
+        ]);
+    });
+
+    it('adds a terminal send beside a webhook destination and reopens both', () => {
+        const withBoth = configuredWebhook(run(draftFromRule(blankDraft(), 'blank'), [
+            { type: 'addStep', step: 'monitor' },
+            { type: 'addStep', step: 'parse' },
+            { type: 'addStep', step: 'cond' },
+            { type: 'addStep', step: 'webhook' },
+            { type: 'addStep', step: 'action' },
+            { type: 'action', patch: { message: 'send this too' } },
+        ]));
+
+        const reopened = draftFromRule(JSON.parse(JSON.stringify(ruleFromDraft(withBoth))));
+        expect(reopened.present).toEqual(['monitor', 'parse', 'cond', 'action', 'webhook']);
+        expect(reopened.wires).toEqual([
+            { from: { step: 'monitor', port: 'out' }, to: { step: 'parse', port: 'in' } },
+            { from: { step: 'parse', port: 'out' }, to: { step: 'cond', port: 'in' } },
+            { from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } },
+            { from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } },
+        ]);
+    });
+
+    it('removes either destination through its wire chip without retaining an action scaffold', () => {
+        const withBoth = configuredWebhook(run(draftFromRule(blankDraft(), 'blank'), [
+            { type: 'addStep', step: 'monitor' },
+            { type: 'addStep', step: 'parse' },
+            { type: 'addStep', step: 'cond' },
+            { type: 'addStep', step: 'action' },
+            { type: 'action', patch: { message: 'send this too' } },
+            { type: 'addStep', step: 'webhook' },
+        ]));
+
+        const withoutTerminal = draftReducer(withBoth, {
+            type: 'removeWire',
+            wire: { from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } },
+        });
+        expect(withoutTerminal.present).toEqual(['monitor', 'parse', 'cond', 'webhook']);
+        expect(ruleFromDraft(withoutTerminal).graph.action).toBeUndefined();
+        expect(ruleFromDraft(withoutTerminal).graph.webhook).toEqual(webhook);
+
+        const withoutWebhook = draftReducer(withBoth, {
+            type: 'removeWire',
+            wire: { from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } },
+        });
+        expect(withoutWebhook.present).toEqual(['monitor', 'parse', 'cond', 'action']);
+        expect(ruleFromDraft(withoutWebhook).graph.webhook).toBeUndefined();
+        expect(ruleFromDraft(withoutWebhook).graph.action?.message).toBe('send this too');
+    });
+
     /**
      * **C1, and the one assertion whose absence hid it.** Built the way the palette builds it —
      * `addStep` for each card, then the Wait panel's own mode dispatch — and asked of
@@ -83,9 +176,9 @@ describe('the editor writes the steps the canvas draws', () => {
      * type"* — the first thing a new user sees after *Start from scratch*. The group omission
      * removes the first, because nothing on the canvas claims to read anything.
      *
-     * The second stays, and stays on purpose. `action` is the one step the DTO makes mandatory
-     * (§3.1: *"every rule in both scenarios ends in a send"*), so *"enter the message"* is true of a
-     * blank rule and not a claim about an undrawn card. Filtering it out is the alternative, and it
+     * The second stays, and stays on purpose. A blank rule has neither a terminal message nor a
+     * webhook destination, so reporting its missing destination is true of a blank rule and not a
+     * claim about an undrawn card. Filtering it out is the alternative, and it
      * would make the inspector's list disagree with the Enable gate beside it — `blocking.length`
      * is what dims the toggle, so a filtered list reads *no problems* over a control that refuses to
      * move and says nothing. One unfixable-looking sentence is worse than one true one.
@@ -93,6 +186,6 @@ describe('the editor writes the steps the canvas draws', () => {
     it('a blank canvas reports exactly the one problem a blank rule really has', () => {
         const draft = draftFromRule(blankDraft(), 'blank');
         expect(draft.present).toEqual([]);
-        expect(blockingCodes(draft)).toEqual(['action.empty']);
+        expect(blockingCodes(draft)).toEqual(['rule.noDestination']);
     });
 });

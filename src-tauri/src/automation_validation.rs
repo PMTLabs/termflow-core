@@ -22,12 +22,15 @@
 //! about the parse step alone and need nothing but the graph. **M3 lands the whole-rule rules** (no
 //! terminals, empty message, the echo warning) with the enable path, and **M5 the shared fixture**.
 
-use regex::{Regex, RegexBuilder};
+use std::collections::BTreeMap;
 
-use crate::automation_engine::subst;
+use regex::{Regex, RegexBuilder};
+use reqwest::Url;
+
+use crate::automation_engine::{eval, subst};
 use crate::automation_store::{
     AutomationGraph, AutomationRule, Cadence, Criterion, Finds, Keep, ParseStep, Source, TargetMode,
-    Test, TextOp, TimerMode, TimerStep, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
+    Test, TextOp, TimerMode, TimerStep, WebhookProvider, MINUTES_PER_DAY, WEEKDAY_BITS_MASK,
 };
 
 /// Whether a problem stops the rule running, or merely tells the user something.
@@ -126,6 +129,34 @@ fn token_supplied(compiled: &Regex, group: Option<usize>, name: Option<&str>) ->
         (Some(n), _) => n <= compiled.captures_len().saturating_sub(1),
         (None, Some(name)) => compiled.capture_names().any(|cn| cn == Some(name)),
         (None, None) => true, // $0 / Source::Whole is always the whole match.
+    }
+}
+
+fn sample_webhook_captures(compiled: &Regex) -> eval::Captures {
+    let groups = (0..compiled.captures_len())
+        .map(|index| Some(format!("[g{index}]")))
+        .collect();
+    let named = compiled
+        .capture_names()
+        .filter_map(|name| name.map(|name| (name.to_string(), Some(format!("[{name}]")))))
+        .collect::<BTreeMap<_, _>>();
+
+    eval::Captures { groups, named }
+}
+
+fn rendered_webhook_body(webhook: &crate::automation_store::WebhookStep, parse: Option<&ParseStep>) -> String {
+    if !webhook.substitute {
+        return webhook.body.clone();
+    }
+    let Some(parse) = parse else {
+        return webhook.body.clone();
+    };
+    let Ok(compiled) = compile(&parse.find) else {
+        return webhook.body.clone();
+    };
+    match subst::substitute(&webhook.body, Some(&sample_webhook_captures(&compiled))) {
+        Ok(body) => body,
+        Err(_) => webhook.body.clone(),
     }
 }
 
@@ -316,7 +347,8 @@ pub const MAX_DELAY_MS: i64 = 10 * 60 * 1_000;
 fn never_runs_problem(graph: &AutomationGraph) -> Option<Problem> {
     let has_input_steps = graph.monitor.is_some() && graph.parse.is_some() && graph.cond.is_some();
     let scheduled = matches!(graph.timer, Some(TimerStep { mode: TimerMode::DailyAt { .. } }));
-    if has_input_steps || scheduled || graph.action.message.trim().is_empty() {
+    let has_terminal_destination = graph.action.as_ref().is_some_and(|action| !action.message.trim().is_empty());
+    if has_input_steps || scheduled || graph.webhook.is_some() || !has_terminal_destination {
         return None;
     }
     let message = if graph.timer.is_some() {
@@ -517,6 +549,14 @@ in the message, as $2, $3 and so on.",
 /// worse than one that says so.
 pub const MIN_TIMER_MS: i64 = crate::automation_engine::due::EVENT_MIN_INTERVAL_MS;
 
+/// Which terminal criteria have a companion value field to fill in.
+///
+/// `AllTerminals` is the one selector that deliberately needs no value. Both the watched-set
+/// criterion and its optional exclusion use this same predicate so the two controls cannot drift.
+fn criterion_needs_value(criterion: Criterion) -> bool {
+    !matches!(criterion, Criterion::AllTerminals)
+}
+
 /// Everything wrong with a WHOLE rule — §6.5's five categories: **target, interval, pattern,
 /// threshold, message**.
 ///
@@ -547,13 +587,25 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             }
         }
         TargetMode::Rule => {
-            let needs_value = !matches!(rule.criterion, Criterion::AllTerminals);
-            if needs_value && rule.criterion_value.trim().is_empty() {
+            if criterion_needs_value(rule.criterion) && rule.criterion_value.trim().is_empty() {
                 out.push(Problem::new(
                     Severity::Blocks,
                     "targets",
                     "targets.criterion",
                     "Fill in what the terminals must match, or watch all terminals instead.",
+                ));
+            }
+
+            if rule
+                .exclude_criterion
+                .is_some_and(criterion_needs_value)
+                && rule.exclude_criterion_value.trim().is_empty()
+            {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "targets",
+                    "targets.excludeValueEmpty",
+                    "Fill in what the exclusion must match, or exclude all terminals instead.",
                 ));
             }
         }
@@ -622,14 +674,26 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     out.extend(timer_problems(&rule.graph));
 
     // --- message --------------------------------------------------------------------------------
-    if rule.graph.action.message.trim().is_empty() {
+    if rule.graph.action.is_none() && rule.graph.webhook.is_none() {
+        out.push(Problem::new(
+            Severity::Blocks,
+            "action",
+            "rule.noDestination",
+            "Add a terminal message or a webhook destination.",
+        ));
+    } else if rule
+        .graph
+        .action
+        .as_ref()
+        .is_some_and(|action| action.message.trim().is_empty())
+    {
         out.push(Problem::new(
             Severity::Blocks,
             "action",
             "action.empty",
             "Enter the message this rule should type.",
         ));
-    } else if let Some(parse) = parse_step(&rule.graph) {
+    } else if let (Some(action), Some(parse)) = (rule.graph.action.as_ref(), parse_step(&rule.graph)) {
         // §2.6's failure, told to the user before it happens: a rule whose own message matches its
         // own pattern reads its own echo. The needle guard handles it, which is why this WARNS —
         // but the guard has a TTL and a cap, and a user who can see the collision can avoid it.
@@ -647,7 +711,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
         // message `HANDOFF now` — was warned about as an echo of itself. Both mirrors had the same
         // bug, so the shared fixture agreed with itself and could not see it.
         if let Ok(re) = compile(&parse.find) {
-            if re.is_match(&rule.graph.action.message) {
+            if re.is_match(&action.message) {
                 out.push(Problem::new(
                     Severity::Warns,
                     "action",
@@ -672,7 +736,21 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     // toggle claims the message inserts a capture, and a rule with no parse step at all captures
     // nothing, exactly like one whose pattern is still empty. `parse_step` is what makes the two
     // spellings indistinguishable to this check.
-    if rule.graph.action.substitute {
+    for (field, message) in [
+        rule.graph
+            .action
+            .as_ref()
+            .filter(|action| action.substitute)
+            .map(|action| ("action", action.message.as_str())),
+        rule.graph
+            .webhook
+            .as_ref()
+            .filter(|webhook| webhook.substitute)
+            .map(|webhook| ("webhook", webhook.body.as_str())),
+    ]
+    .into_iter()
+    .flatten()
+    {
         match parse_step(&rule.graph) {
             // The toggle itself claims the message inserts a capture, which nothing can be true
             // of before a pattern exists — asked regardless of whether a token has actually been
@@ -680,14 +758,14 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             // clause would compare against.
             None => out.push(Problem::new(
                 Severity::Blocks,
-                "action",
+                field,
                 "action.tokenWithoutParse",
                 "This message inserts captured values, but the rule has no pattern to capture them from.",
             )),
             Some(parse) => {
                 if let Ok(compiled) = compile(&parse.find) {
                     let count = compiled.captures_len().saturating_sub(1);
-                    for token in subst::tokens_used(&rule.graph.action.message) {
+                    for token in subst::tokens_used(message) {
                         let bad = match &token {
                             subst::Token::Whole => false,
                             subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
@@ -700,7 +778,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                         }
                         out.push(Problem::new(
                             Severity::Blocks,
-                            "action",
+                            field,
                             "action.unknownToken",
                             format!(
                                 "{token} has nothing to stand for. The pattern in Read a value has \
@@ -710,6 +788,53 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                         ));
                     }
                 }
+            }
+        }
+    }
+
+    // --- webhook ---------------------------------------------------------------------------------
+    if let Some(webhook) = rule.graph.webhook.as_ref() {
+        if webhook.url.trim().is_empty() {
+            out.push(Problem::new(
+                Severity::Blocks,
+                "webhook",
+                "webhook.urlEmpty",
+                "Provide a webhook URL.",
+            ));
+        } else if let Ok(url) = Url::parse(webhook.url.trim()) {
+            if url.scheme() != "https" {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "webhook",
+                    "webhook.urlNotHttps",
+                    "Provide an https webhook URL.",
+                ));
+            }
+        } else {
+            out.push(Problem::new(
+                Severity::Blocks,
+                "webhook",
+                "webhook.urlMalformed",
+                "Provide a well-formed webhook URL.",
+            ));
+        }
+
+        if webhook.body.trim().is_empty() {
+            out.push(Problem::new(
+                Severity::Blocks,
+                "webhook",
+                "webhook.bodyEmpty",
+                "Enter a webhook body.",
+            ));
+        } else if webhook.provider == WebhookProvider::Custom {
+            let rendered_body = rendered_webhook_body(webhook, parse_step(&rule.graph));
+            if serde_json::from_str::<serde_json::Value>(&rendered_body).is_err() {
+                out.push(Problem::new(
+                    Severity::Blocks,
+                    "webhook",
+                    "webhook.bodyNotJson",
+                    "The webhook body must be valid JSON.",
+                ));
             }
         }
     }
@@ -748,13 +873,14 @@ mod tests {
             monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
             parse: Some(ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep }),
             cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "m".into(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".into(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         }
     }
 
@@ -869,6 +995,9 @@ mod tests {
             criterion_value: String::new(),
             follow_new: true,
             target_ids: vec!["tm-1".into()],
+            excluded_ids: vec![],
+            exclude_criterion: None,
+            exclude_criterion_value: String::new(),
             completed_at: None,
             verbose_until: None,
             sort_order: 1,
@@ -934,7 +1063,7 @@ mod tests {
             ),
             (
                 "nothing to type",
-                Box::new(|r: &mut AutomationRule| r.graph.action.message = "   ".into()),
+                Box::new(|r: &mut AutomationRule| r.graph.action_mut().message = "   ".into()),
                 "action",
             ),
         ];
@@ -982,7 +1111,7 @@ mod tests {
         let mut rule = valid_rule();
         rule.graph.parse_mut().find = "HANDOFF".into();
         rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
-        rule.graph.action.message = "HANDOFF now".into();
+        rule.graph.action_mut().message = "HANDOFF now".into();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 1, "{:?}", found);
@@ -1002,7 +1131,7 @@ mod tests {
     fn blocking_problems_come_before_warnings() {
         let mut rule = valid_rule();
         rule.graph.parse_mut().find = r"ctx:(\d+)(%)".into();
-        rule.graph.action.message = String::new();
+        rule.graph.action_mut().message = String::new();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 2, "{:?}", found);
@@ -1055,7 +1184,7 @@ mod tests {
         // about. The count is a floor, not the exact number, so adding a case is not a two-file
         // edit.
         assert!(
-            fixture.cases.len() >= 20,
+            fixture.cases.len() >= 66,
             "the shared fixture has shrunk to {} cases",
             fixture.cases.len()
         );
@@ -1089,6 +1218,7 @@ mod tests {
         for code in [
             "targets.empty",
             "targets.criterion",
+            "targets.excludeValueEmpty",
             "monitor.interval",
             "parse.empty",
             "parse.uncompilable",
@@ -1109,6 +1239,12 @@ mod tests {
             "action.echo",
             "action.tokenWithoutParse",
             "action.unknownToken",
+            "rule.noDestination",
+            "webhook.urlEmpty",
+            "webhook.urlMalformed",
+            "webhook.urlNotHttps",
+            "webhook.bodyEmpty",
+            "webhook.bodyNotJson",
         ] {
             assert!(codes.contains(code), "no fixture case produces `{code}`");
         }
@@ -1248,7 +1384,7 @@ mod tests {
         rule.graph.parse = None;
         rule.graph.cond = None;
         rule.graph.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
-        rule.graph.action.message = "resume".into();
+        rule.graph.action_mut().message = "resume".into();
 
         let found = problems(&rule);
         assert_eq!(
@@ -1440,6 +1576,9 @@ mod tests {
             criterion_value: String::new(),
             follow_new: true,
             target_ids: vec![],
+            excluded_ids: vec![],
+            exclude_criterion: None,
+            exclude_criterion_value: String::new(),
             completed_at: None,
             verbose_until: None,
             sort_order: 0,
@@ -1449,7 +1588,7 @@ mod tests {
             updated_at: 0,
         };
         rule.graph.cond = Some(CondStep { finds: Finds::Event, ..Default::default() });
-        rule.graph.action.message = "anything at all".into();
+        rule.graph.action_mut().message = "anything at all".into();
 
         let found = problems(&rule);
         assert_eq!(found.len(), 1, "only the empty pattern, no echo warning: {found:?}");

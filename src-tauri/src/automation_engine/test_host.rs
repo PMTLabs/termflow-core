@@ -31,6 +31,11 @@ pub(crate) struct FakeHost {
     pub(crate) store: Arc<AutomationStore>,
     pub(crate) leaves: Mutex<HashMap<String, String>>,
     pub(crate) roster: Mutex<Vec<RosterRow>>,
+    /// Process-derived command lines, made visible only when the caller asks the roster for the
+    /// criterion that requires a process scan. This gives targeting tests the same request/populate
+    /// seam as `AppState::roster` without taking a real machine snapshot.
+    pub(crate) scanned_command_lines: Mutex<HashMap<String, Vec<String>>>,
+    pub(crate) roster_criteria: Mutex<Vec<Vec<Criterion>>>,
     pub(crate) text: Mutex<HashMap<String, String>>,
     /// Every `tail` the engine asked for, in order — **the screen reads, recorded**.
     ///
@@ -67,6 +72,8 @@ impl FakeHost {
             store: Arc::new(AutomationStore::new_in_memory()),
             leaves: Mutex::new(HashMap::new()),
             roster: Mutex::new(Vec::new()),
+            scanned_command_lines: Mutex::new(HashMap::new()),
+            roster_criteria: Mutex::new(Vec::new()),
             text: Mutex::new(HashMap::new()),
             tails: Mutex::new(Vec::new()),
             writes: Mutex::new(Vec::new()),
@@ -136,6 +143,10 @@ impl FakeHost {
     pub(crate) fn announced(&self) -> Vec<String> {
         self.changed.lock().unwrap().iter().flatten().cloned().collect()
     }
+
+    pub(crate) fn last_roster_criteria(&self) -> Vec<Criterion> {
+        self.roster_criteria.lock().unwrap().last().cloned().unwrap_or_default()
+    }
 }
 
 impl EngineHost for FakeHost {
@@ -146,8 +157,22 @@ impl EngineHost for FakeHost {
         }
         self.leaves.lock().unwrap().get(tm).cloned()
     }
-    fn roster(&self, _criteria: &[Criterion]) -> Vec<RosterRow> {
-        self.roster.lock().unwrap().clone()
+    fn roster(&self, criteria: &[Criterion]) -> Vec<RosterRow> {
+        self.roster_criteria.lock().unwrap().push(criteria.to_vec());
+        let mut rows = self.roster.lock().unwrap().clone();
+        if criteria.contains(&Criterion::CommandContains) {
+            let scanned = self.scanned_command_lines.lock().unwrap();
+            for row in &mut rows {
+                if let Some(lines) = row
+                    .terminal_id
+                    .as_deref()
+                    .and_then(|terminal_id| scanned.get(terminal_id))
+                {
+                    row.command_lines = lines.clone();
+                }
+            }
+        }
+        rows
     }
     fn live_processes(&self) -> Vec<String> {
         self.leaves.lock().unwrap().values().cloned().collect()
@@ -205,6 +230,9 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
         criterion_value: String::new(),
         follow_new: true,
         target_ids: vec![],
+        excluded_ids: vec![],
+        exclude_criterion: None,
+        exclude_criterion_value: String::new(),
         completed_at: None,
         verbose_until: None,
         sort_order: 1,
@@ -220,13 +248,14 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
                 keep: Keep::Brackets,
             }),
             cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "prepare to do context-hand-off".into(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".into(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         },
         created_at: 1_000,
         updated_at: 1_000,
@@ -310,7 +339,7 @@ pub(crate) fn log_kinds(store: &AutomationStore) -> Vec<String> {
 /// the write log by their contents rather than by the order they happen to arrive in.
 pub(crate) fn ctx_rule_saying(id: &str, message: &str, sort_order: i64) -> AutomationRule {
     let mut rule = ctx_rule(id);
-    rule.graph.action.message = message.into();
+    rule.graph.action_mut().message = message.into();
     rule.sort_order = sort_order;
     rule
 }
@@ -331,7 +360,7 @@ pub(crate) fn schedule_only_rule(id: &str) -> AutomationRule {
     rule.graph.timer = Some(TimerStep {
         mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
     });
-    rule.graph.action.message = "stand-up notes?".into();
+    rule.graph.action_mut().message = "stand-up notes?".into();
     rule
 }
 

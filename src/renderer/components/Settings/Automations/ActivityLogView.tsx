@@ -22,6 +22,7 @@ import {
     passesFilter,
     rowTime,
 } from './activityLog';
+import { redactWebhookLogEntry } from '../../Automation/webhookRedaction';
 
 /**
  * How long *Log every check* stays on before it turns itself off again.
@@ -66,15 +67,20 @@ export const ActivityLogView: React.FC<ActivityLogViewProps> = ({
     const isVerbose =
         rule?.verboseUntil !== null && rule?.verboseUntil !== undefined && rule.verboseUntil > now;
 
+    const redactedEntries = useMemo(
+        () => entries.map(redactWebhookLogEntry),
+        [entries],
+    );
+
     const rows = useMemo(
-        () => collapseRuns(entries.filter((e) => passesFilter(e, filter))),
-        [entries, filter],
+        () => collapseRuns(redactedEntries.filter((e) => passesFilter(e, filter))),
+        [redactedEntries, filter],
     );
 
     const copy = () => {
         // Expanded, always: a log pasted into a bug report with seven decisions replaced by the
         // words "7 identical decisions collapsed" has lost the timestamps that made it evidence.
-        void navigator.clipboard?.writeText(logCopyText(entries));
+        void navigator.clipboard?.writeText(logCopyText(redactedEntries));
     };
 
     return (

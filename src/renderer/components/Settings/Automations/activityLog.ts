@@ -12,6 +12,7 @@
  * rewrite the past, which is the same mistake as looking a terminal's name up instead of storing it.
  */
 import type { AutomationLogEntry, AutomationLogKind } from '../../../types/electron';
+import { redactWebhookLogEntry } from '../../Automation/webhookRedaction';
 
 /** The word the log column shows, in the mockup's own vocabulary. */
 export const LOG_KIND_LABEL: Record<AutomationLogKind, string> = {
@@ -162,9 +163,10 @@ export function collapsedDetail(row: LogRow): string {
 export function logCopyText(entries: AutomationLogEntry[]): string {
     return entries
         .map((e) => {
-            const who = e.terminalId ?? '—';
-            const name = e.terminalName ? ` ${e.terminalName}` : '';
-            return `${clockTime(e.at)}\t${who}${name}\t${LOG_KIND_LABEL[e.kind]}\t${e.detail}`;
+            const safe = redactWebhookLogEntry(e);
+            const who = safe.terminalId ?? '—';
+            const name = safe.terminalName ? ` ${safe.terminalName}` : '';
+            return `${clockTime(safe.at)}\t${who}${name}\t${LOG_KIND_LABEL[safe.kind]}\t${safe.detail}`;
         })
         .join('\n');
 }

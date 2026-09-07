@@ -6,7 +6,11 @@
  * here, because they are one decision.
  */
 import React from 'react';
-import type { AutomationCriterion, WatchableTerminal } from '../../../types/electron';
+import type {
+    AutomationCriterion,
+    AutomationTargetPreview,
+    WatchableTerminal,
+} from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { AuTerminalPicker } from '../AuTerminalPicker';
@@ -47,7 +51,29 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
 }) => {
     const { rule } = draft;
     const { monitor } = rule.graph;
-    const matching = terminals.filter((t) => t.alive).length;
+    const [targetPreview, setTargetPreview] = React.useState<AutomationTargetPreview | null>(null);
+    const previewTargets = typeof window === 'undefined'
+        ? undefined
+        : window.electronAPI?.previewAutomationTargets;
+
+    React.useEffect(() => {
+        if (rule.targetMode !== 'rule' || !previewTargets) {
+            setTargetPreview(null);
+            return undefined;
+        }
+
+        let current = true;
+        void previewTargets(rule, terminals)
+            .then((preview) => {
+                if (current) setTargetPreview(preview);
+            })
+            .catch(() => {
+                if (current) setTargetPreview(null);
+            });
+        return () => {
+            current = false;
+        };
+    }, [previewTargets, rule, terminals]);
 
     return (
         <>
@@ -112,16 +138,63 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                         </AuHelp>
                     </AuField>
 
-                    <div className="au-termcount">
-                        Open right now <span className="au-n">{matching}</span>
-                        <span className="au-as"> · refreshed every few seconds</span>
-                    </div>
-                    <AuHelp>
-                        This count is every terminal that is open, not every terminal this rule
-                        matches — matching is decided in the engine, against the command line and
-                        working folder it can see, and the rule&apos;s own row reports what it
-                        actually watches.
-                    </AuHelp>
+                    <AuField label="Except these">
+                        <AuTerminalPicker
+                            rows={terminals}
+                            picked={rule.excludedIds ?? []}
+                            error={terminalsError}
+                            loading={terminalsLoading}
+                            onToggle={(id) => dispatch({ type: 'toggleExcludedTarget', id })}
+                            onSet={(ids) => dispatch({ type: 'excludedTargets', ids })}
+                        />
+                    </AuField>
+
+                    <AuField label="… and anything matching this exception">
+                        <div className="au-frow">
+                            <select
+                                className="au-finput"
+                                style={{ flex: 1.15 }}
+                                aria-label="What the exception must match"
+                                value={rule.excludeCriterion ?? ''}
+                                onChange={(e) =>
+                                    dispatch({
+                                        type: 'excludeCriterion',
+                                        criterion: e.target.value === ''
+                                            ? null
+                                            : e.target.value as AutomationCriterion,
+                                    })}
+                            >
+                                <option value="">No matching exception</option>
+                                {CRITERIA.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                        {c.label}
+                                    </option>
+                                ))}
+                            </select>
+                            {rule.excludeCriterion != null
+                                && rule.excludeCriterion !== 'allTerminals' && (
+                                <input
+                                    className="au-finput"
+                                    style={{ flex: 1 }}
+                                    aria-label="Value the exception must match"
+                                    value={rule.excludeCriterionValue ?? ''}
+                                    onChange={(e) =>
+                                        dispatch({ type: 'excludeCriterionValue', value: e.target.value })}
+                                />
+                            )}
+                        </div>
+                    </AuField>
+
+                    {targetPreview === null ? (
+                        <div className="au-termcount">Resolving matching terminals…</div>
+                    ) : (
+                        <div className="au-termcount" aria-live="polite">
+                            Matching <span className="au-n">{targetPreview.matched.length}</span>
+                            {' - '}excluded <span className="au-n">{targetPreview.excluded.length}</span>
+                            {' = '}watching <span className="au-n">{targetPreview.watching.length}</span>
+                            {targetPreview.watching.length === 0 && ' — nothing is being watched'}
+                        </div>
+                    )}
                 </>
             ) : (
                 <AuTerminalPicker

@@ -876,13 +876,14 @@ mod tests {
                 keep: Keep::Brackets,
             }),
             cond: Some(CondStep { finds, op, threshold, ..Default::default() }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "prepare to do context-hand-off".to_string(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".to_string(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         }
     }
 

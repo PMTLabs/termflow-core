@@ -385,8 +385,8 @@ export interface ElectronAPI {
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
 
-  // Terminal Automations (Plan 028) — the fourteen commands of `automation_commands.rs`.
-  // The first eleven are in the order that file declares them; the three id-only writers
+  // Terminal Automations (Plan 028) — the fifteen commands of `automation_commands.rs`.
+  // The first twelve are in the order that file declares them; the three id-only writers
   // that replaced a whole-rule `saveAutomation` — `addAutomationTarget`,
   // `removeAutomationTarget`, `setAutomationVerbose` — are listed last here as the newest
   // of them. All optional and all Tauri-only: the store is
@@ -403,7 +403,12 @@ export interface ElectronAPI {
   listWatchableTerminals?: (
     ruleId: string | null,
     includeIds: string[] | null,
+    criteria: AutomationCriterion[],
   ) => Promise<WatchableTerminal[]>;
+  previewAutomationTargets?: (
+    rule: AutomationRule,
+    terminals: WatchableTerminal[],
+  ) => Promise<AutomationTargetPreview>;
   dryRunAutomation?: (rule: AutomationRule, terminalId: string) => Promise<DryRunReport>;
   saveAutomation?: (rule: AutomationRule, origin: string) => Promise<AutomationSaveResult>;
   deleteAutomation?: (id: string, origin: string) => Promise<boolean>;
@@ -607,6 +612,17 @@ export interface AutomationActionStep {
   substitute?: boolean;
 }
 
+export type AutomationWebhookProvider = 'discord' | 'teams' | 'slack' | 'custom';
+
+export interface AutomationWebhookStep {
+  provider: AutomationWebhookProvider;
+  /** Secret credential: carried over persistence and IPC, never rendered, logged, errored, or exported. */
+  url: string;
+  /** Plain message for preset providers; raw request body for `custom`. */
+  body: string;
+  substitute?: boolean;
+}
+
 /**
  * Optional fifth step — "Wait" in every user-facing string. **Never write the bare word "Timer" in
  * UI copy** — `AutomationCadence`'s `'timer'` already means the monitor's poll interval, a
@@ -645,7 +661,10 @@ export interface AutomationGraph {
   cond?: AutomationCondStep;
   /** Absent on every rule saved before this milestone and on every rule that does not use it. */
   timer?: AutomationTimerStep;
-  action: AutomationActionStep;
+  /** Optional terminal destination. Absence must stay absence: an empty action can submit Enter. */
+  action?: AutomationActionStep;
+  /** Optional webhook destination. Its URL is a secret and must never be used as display text. */
+  webhook?: AutomationWebhookStep;
   /**
    * Where the editor's four cards sit on its canvas. View state, and the engine never reads it —
    * it rides in the rule so that ONE save writes the whole document. Absent on any rule written
@@ -668,6 +687,12 @@ export interface AutomationRule {
   followNew: boolean;
   /** Durable `tm-` leaves. Never `pc-` process ids, which are per-run. */
   targetIds: string[];
+  /** Rule-mode terminal ids removed after the criterion resolves. */
+  excludedIds?: string[];
+  /** An optional rule-mode selector whose matches are removed from the watched set. */
+  excludeCriterion?: AutomationCriterion | null;
+  /** The optional selector's value; `allTerminals` deliberately leaves it blank. */
+  excludeCriterionValue?: string;
 
   completedAt?: number | null;
   verboseUntil?: number | null;
@@ -713,7 +738,7 @@ export interface AutomationLogEntry {
  */
 export interface DryRunStep {
   /**
-   * `monitor` | `parse` | `cond` | `timer` | `action` — **not always all five, and not one fixed
+   * `monitor` | `parse` | `cond` | `timer` | `action` | `webhook` — **not always all five, and not one fixed
    * count.** A plain rule (no wait step) reports the original four, in the graph's order. A DELAY
    * rule (`timer.mode.afterMatch`) inserts `timer` between `cond` and `action`, five steps. A
    * SCHEDULE rule (`timer.mode.dailyAt`) has no `monitor`, `parse` or `cond` at all — it reads
@@ -723,7 +748,7 @@ export interface DryRunStep {
    * graph's order": that was already only true for a rule with no wait step, and plan 032 §6–§7 is
    * what made it stop being true for the other two shapes.
    */
-  kind: 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
+  kind: 'monitor' | 'parse' | 'cond' | 'timer' | 'action' | 'webhook';
   /**
    * `skipped` is a step that never ran because an earlier one failed. It is not a pass and must
    * not be drawn as one.
@@ -791,5 +816,16 @@ export interface WatchableTerminal {
   pid?: number | null;
   /** The working folder, from OSC or the process snapshot. `folder` in §7.8's prose. */
   cwd?: string | null;
+  /** The tab/pane label that `Tab name contains` resolves against. */
+  displayLabel?: string | null;
+  /** The foreground process chain that `Command contains` resolves against. */
+  commandLines?: string[];
   alive: boolean;
+}
+
+/** The backend-owned target resolution the editor renders; every field is an id list, never a count. */
+export interface AutomationTargetPreview {
+  matched: string[];
+  excluded: string[];
+  watching: string[];
 }

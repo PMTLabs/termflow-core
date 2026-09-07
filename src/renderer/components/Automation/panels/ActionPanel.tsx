@@ -80,6 +80,7 @@ export function sampleFromPattern(find: string, keep: AutomationKeep): Record<st
 export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch, sample }) => {
     const { parse, action } = draft.rule.graph;
     const messageRef = React.useRef<HTMLInputElement | null>(null);
+    if (!action) return null;
 
     // **This panel survives an absent parse step, and must**: `action` is the one step every rule
     // has (plan 032 §3.1), so a schedule rule reaches here with no pattern behind it. No pattern is
@@ -137,7 +138,7 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
 
     function insertToken(token: string) {
         const el = messageRef.current;
-        const value = action.message;
+        const value = action?.message ?? '';
         const start = el?.selectionStart ?? value.length;
         const end = el?.selectionEnd ?? value.length;
         const next = value.slice(0, start) + token + value.slice(end);

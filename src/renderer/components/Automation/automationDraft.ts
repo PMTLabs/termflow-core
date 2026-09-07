@@ -99,6 +99,7 @@ export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
     // `draft.present`, not a reason to give one kind two default positions.
     timer: { x: AU_GAP_X * 3, y: 0 },
     action: { x: AU_GAP_X * 4, y: 0 },
+    webhook: { x: AU_GAP_X * 5, y: 0 },
 };
 
 /**
@@ -397,15 +398,11 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
     // whose whole point is that it is empty. The two new-rule openings are saying something the
     // graph cannot.
     //
-    // `action` is drawn unconditionally because §3.1 keeps it required — there is no absence to
-    // detect — and the wait is drawn on the same rule as the other three now, rather than as the
-    // exception it used to be: a rule that has one gets its card, a rule that does not can be
-    // offered one by the palette.
     const present: StepKind[] = opening === 'blank'
         ? []
         : opening === 'seeded'
             ? ['monitor']
-            : STEP_ORDER.filter((s) => s === 'action' || rule.graph[s] != null);
+            : STEP_ORDER.filter((s) => rule.graph[s] != null);
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -440,11 +437,26 @@ function graphAsWritten(
     graph: AutomationRule['graph'],
     present: readonly StepKind[],
 ): AutomationRule['graph'] {
-    if (INPUT_STEPS.some((s) => present.includes(s))) return graph;
-    // The KEYS go, not `undefined` values: §3.1's own note says the backend omits an absent step
-    // rather than sending `null`, so an absent step must not decode as a present-but-empty one.
-    const { monitor: _m, parse: _p, cond: _c, ...rest } = graph;
-    return rest;
+    const keepInput = INPUT_STEPS.some((s) => present.includes(s));
+    const keepAction = present.includes('action');
+    const keepWebhook = present.includes('webhook');
+    const graphHasInput = INPUT_STEPS.some((step) => step in graph);
+    // Preserve the graph object whenever it already says exactly what the canvas says. Besides
+    // avoiding churn, that preserves property order for the dirty check's wire-shaped baseline.
+    if (
+        (keepInput || !graphHasInput)
+        && (keepAction || !('action' in graph))
+        && (keepWebhook || !('webhook' in graph))
+    ) return graph;
+    // The KEYS go, not `undefined` values. In particular, an action scaffold hidden by the canvas
+    // must not survive serialisation and submit an Enter in a supposedly webhook-only rule.
+    const { monitor, parse, cond, action, webhook, ...rest } = graph;
+    return {
+        ...rest,
+        ...(keepInput ? { monitor, parse, cond } : {}),
+        ...(keepAction ? { action } : {}),
+        ...(keepWebhook ? { webhook } : {}),
+    };
 }
 
 /**
@@ -522,8 +534,8 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  * second one: any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
  * the partial cases.
  *
- * `action` is never omitted — §3.1 keeps it required on the DTO — and `timer` needs no rule here,
- * because `addStep` materialises it into the graph exactly when the canvas reveals it.
+ * The two destinations are omitted independently when their cards are absent; `timer` needs no rule
+ * here, because `addStep` materialises it into the graph exactly when the canvas reveals it.
  *
  * **`op`/`threshold` are dropped from the row that carries clauses, and only from that row.** §5.3
  * makes the pair v1-only — read at load, folded into `clauses` by `fold_v1_clauses`, never written
@@ -567,11 +579,11 @@ export function isDirty(draft: AutomationDraft): boolean {
 /**
  * The rule as a string, with the one field whose ORDER means nothing put in a fixed one.
  *
- * `targetIds` is a set: `write_rule` replaces the pick set row by row and the engine resolves it
- * with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from `['tm-2','tm-1']`. The
- * picker's toggle appends, though, so unticking a terminal and ticking it straight back rotated the
- * array — and the draft then read dirty forever, with a *Leave without saving?* dialog over an
- * identical rule.
+ * `targetIds` and `excludedIds` are sets: `write_rule` replaces each set row by row and the engine
+ * resolves them with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from
+ * `['tm-2','tm-1']`. The picker's toggle appends, though, so unticking a terminal and ticking it
+ * straight back rotated the array — and the draft then read dirty forever, with a *Leave without
+ * saving?* dialog over an identical rule.
  *
  * **Both sides go through this**, which is the whole point: normalising one side of a comparison and
  * not the other can only invent differences (`transform-on-one-side-of-a-comparison`). And it
@@ -593,7 +605,12 @@ function comparable(rule: AutomationRule): string {
               ),
           }
         : rule.graph;
-    return JSON.stringify({ ...rule, graph, targetIds: [...rule.targetIds].sort() });
+    return JSON.stringify({
+        ...rule,
+        graph,
+        targetIds: [...rule.targetIds].sort(),
+        excludedIds: [...(rule.excludedIds ?? [])].sort(),
+    });
 }
 
 export type DraftAction =
@@ -613,6 +630,10 @@ export type DraftAction =
     | { type: 'followNew'; followNew: boolean }
     | { type: 'targets'; ids: string[] }
     | { type: 'toggleTarget'; id: string }
+    | { type: 'excludedTargets'; ids: string[] }
+    | { type: 'toggleExcludedTarget'; id: string }
+    | { type: 'excludeCriterion'; criterion: AutomationRule['criterion'] | null }
+    | { type: 'excludeCriterionValue'; value: string }
     | { type: 'monitor'; patch: Partial<AutomationMonitorStep> }
     | { type: 'preset'; preset: AutomationParseStep['preset'] }
     | { type: 'literal'; literal: string }
@@ -636,7 +657,8 @@ export type DraftAction =
      * expressible-but-refused is the shape that saves clean and comes back broken.
      */
     | { type: 'timer'; mode: AutomationTimerMode }
-    | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
+    | { type: 'action'; patch: Partial<NonNullable<AutomationRule['graph']['action']>> }
+    | { type: 'webhook'; patch: Partial<NonNullable<AutomationRule['graph']['webhook']>> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
     | { type: 'moveStep'; step: StepKind; pos: NodePos }
@@ -716,7 +738,16 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
             ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
             : rule;
     }
-    if (step === 'action' || INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
+    if (step === 'action') {
+        const action = rule.graph.action ?? blankDraft().graph.action;
+        return action ? { ...rule, graph: { ...rule.graph, action } } : rule;
+    }
+    if (step === 'webhook') {
+        return rule.graph.webhook == null
+            ? { ...rule, graph: { ...rule.graph, webhook: { provider: 'discord', url: '', body: '' } } }
+            : rule;
+    }
+    if (INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
     const blank = blankDraft().graph;
     return {
         ...rule,
@@ -759,6 +790,21 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                     ? rule.targetIds.filter((id) => id !== action.id)
                     : [...rule.targetIds, action.id],
             });
+        case 'excludedTargets':
+            return withRule(draft, { ...rule, excludedIds: [...action.ids] });
+        case 'toggleExcludedTarget': {
+            const excludedIds = rule.excludedIds ?? [];
+            return withRule(draft, {
+                ...rule,
+                excludedIds: excludedIds.includes(action.id)
+                    ? excludedIds.filter((id) => id !== action.id)
+                    : [...excludedIds, action.id],
+            });
+        }
+        case 'excludeCriterion':
+            return withRule(draft, { ...rule, excludeCriterion: action.criterion });
+        case 'excludeCriterionValue':
+            return withRule(draft, { ...rule, excludeCriterionValue: action.value });
         // **A patch to a step the rule does not have is a no-op, never a materialisation.** Plan
         // 032 §3.1 lets a schedule rule carry no monitor/parse/cond at all, and these six actions
         // come from panels that are only mounted for a step the rule HAS. Filling the gap in from
@@ -812,7 +858,15 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             return { ...draft, rule: next, wires: defaultWires(draft.present, timerShapeOf(next)) };
         }
         case 'action':
-            return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
+            return rule.graph.action
+                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch } })
+                : draft;
+        case 'webhook':
+            // A panel patch cannot materialise a destination. In particular, it must never make
+            // an ActionStep: an empty action can still submit Enter to a live terminal.
+            return rule.graph.webhook
+                ? withGraph(draft, { webhook: { ...rule.graph.webhook, ...action.patch } })
+                : draft;
         case 'select':
             return { ...draft, selected: action.step };
         case 'addStep': {
@@ -854,6 +908,22 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
         case 'addWire':
             return { ...draft, wires: [...draft.wires, action.wire] };
         case 'removeWire':
+            // A destination card has exactly one incoming wire, so its wire chip is its remove
+            // gesture. Removing it must remove the destination too: merely hiding the card while
+            // retaining `action` would leave a live terminal send on a webhook-only canvas.
+            if (action.wire.to.step === 'action' || action.wire.to.step === 'webhook') {
+                const destination = action.wire.to.step;
+                const { [destination]: _removed, ...graph } = rule.graph;
+                const present = draft.present.filter((step) => step !== destination);
+                const next = { ...rule, graph };
+                return {
+                    ...draft,
+                    rule: next,
+                    present,
+                    wires: defaultWires(present, timerShapeOf(next)),
+                    selected: draft.selected === destination ? null : draft.selected,
+                };
+            }
             return {
                 ...draft,
                 wires: draft.wires.filter(

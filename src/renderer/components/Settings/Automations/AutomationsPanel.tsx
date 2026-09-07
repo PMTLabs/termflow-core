@@ -16,6 +16,7 @@ import { AutomationRow } from './AutomationRow';
 import { TemplateGallery } from './TemplateGallery';
 import { ActivityLogView } from './ActivityLogView';
 import { AutomationEditor } from '../../Automation/AutomationEditor';
+import { redactWebhookError } from '../../Automation/webhookRedaction';
 import type { CanvasOpening } from '../../Automation/automationDraft';
 import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
@@ -80,7 +81,7 @@ export const AutomationsPanel: React.FC = () => {
             await fn();
             await refresh();
         } catch (e) {
-            setActionError(`${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+            setActionError(`${what} failed: ${redactWebhookError(e)}`);
         }
     };
 
@@ -106,7 +107,7 @@ export const AutomationsPanel: React.FC = () => {
             }
             await refresh();
         } catch (e) {
-            setActionError(`${what} failed: ${e instanceof Error ? e.message : String(e)}`);
+            setActionError(`${what} failed: ${redactWebhookError(e)}`);
         }
     };
 

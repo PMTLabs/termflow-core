@@ -28,9 +28,9 @@ use rusqlite::Connection;
 /// silently reinterpreting a graph we do not understand is how a rule starts typing the wrong thing
 /// into a terminal. `reload` logs exactly one entry per skipped rule per load. Plan §7.3.
 ///
-/// `2` as of plan 032 §3.2 (task 27): a rule is stamped `2` only when [`schema_version_for`] finds it
-/// actually uses a v2 feature, never merely because this build can write one.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+/// `3` as of the webhook milestone: a rule is stamped only for the newest feature it actually uses,
+/// never merely because this build can write one.
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
 
 // ---------------------------------------------------------------------------------------------
 // The DTO. These serde names are THE AUTHORITY for the whole feature (plan §7.7): the renderer's
@@ -358,6 +358,29 @@ pub struct ActionStep {
     pub substitute: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WebhookProvider { Discord, Teams, Slack, Custom }
+
+/// An optional destination outside the terminal. Its URL is persisted and sent over IPC in the
+/// clear by design, but is never displayed, logged, exported, or put in an error.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookStep {
+    pub provider: WebhookProvider,
+    pub url: String,
+    pub body: String,
+    #[serde(default)]
+    pub substitute: bool,
+}
+
+impl std::fmt::Debug for WebhookStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WebhookStep").field("provider", &self.provider).field("url", &"<redacted>")
+            .field("body", &self.body).field("substitute", &self.substitute).finish()
+    }
+}
+
 fn default_send_to() -> SendTo {
     SendTo::Matched
 }
@@ -468,7 +491,10 @@ pub struct AutomationGraph {
     /// shape and this attribute becomes load-bearing rather than decorative.
     #[serde(default)]
     pub timer: Option<TimerStep>,
-    pub action: ActionStep,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<ActionStep>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<WebhookStep>,
     /// Where the editor's four cards sit on its canvas.
     ///
     /// **View state, deliberately inside the rule's blob.** The plan originally kept the layout out
@@ -503,14 +529,18 @@ pub struct AutomationGraph {
 /// opposite (monotonic, "once v2 always v2") is the more obvious thing to write by accident, which
 /// is why `schema_version_is_stamped_from_what_the_rule_actually_uses` pins the non-sticky case
 /// explicitly rather than leaving it to be implied by the others (task 27 ruling R4).
-pub fn schema_version_for(graph: &AutomationGraph) -> i64 {
+pub fn schema_version_for(rule: &AutomationRule) -> i64 {
+    let graph = &rule.graph;
     let uses_a_v2_feature = graph.timer.is_some()
         || graph.monitor.is_none()
         || graph.parse.is_none()
         || graph.cond.is_none()
         || graph.cond.as_ref().is_some_and(|c| !c.clauses.is_empty())
-        || graph.action.substitute;
-    if uses_a_v2_feature {
+        || graph.action.as_ref().is_some_and(|action| action.substitute);
+    let uses_a_v3_feature = graph.webhook.is_some() || graph.action.is_none()
+        || !rule.excluded_ids.is_empty() || rule.exclude_criterion.is_some()
+        || !rule.exclude_criterion_value.is_empty();
+    if uses_a_v3_feature { 3 } else if uses_a_v2_feature {
         2
     } else {
         1
@@ -540,6 +570,10 @@ impl AutomationGraph {
     #[track_caller]
     pub fn cond_mut(&mut self) -> &mut CondStep {
         self.cond.as_mut().expect("this fixture's rule has a cond step")
+    }
+    #[track_caller]
+    pub fn action_mut(&mut self) -> &mut ActionStep {
+        self.action.as_mut().expect("this fixture's rule has an action step")
     }
     #[track_caller]
     pub fn monitor_ref(&self) -> &MonitorStep {
@@ -592,6 +626,12 @@ pub struct AutomationRule {
     /// a rule saved across a restart would point at nothing. Plan §7.4.
     #[serde(default)]
     pub target_ids: Vec<String>,
+    #[serde(default)]
+    pub excluded_ids: Vec<String>,
+    #[serde(default)]
+    pub exclude_criterion: Option<Criterion>,
+    #[serde(default)]
+    pub exclude_criterion_value: String,
 
     // --- runtime flags that outlive a process ---
     /// Set when a `runs_once` rule fires. `None` means it can still run.
@@ -744,8 +784,12 @@ const LAST_SEEN_THROTTLE_MS: i64 = 5 * 60 * 1000;
 const PINNED_TARGET_IDS_SQL: &str = "SELECT terminal_id FROM automation_targets \
      WHERE rule_id = ?1 AND source = 'pinned' ORDER BY added_at, terminal_id";
 
+const EXCLUDED_TARGET_IDS_SQL: &str = "SELECT terminal_id FROM automation_exclusions \
+     WHERE rule_id = ?1 ORDER BY added_at, terminal_id";
+
 const RULE_COLUMNS: &str ="id, name, enabled, runs_once, target_mode, criterion, criterion_value, \
-     follow_new, completed_at, verbose_until, sort_order, schema_version, graph, created_at, updated_at";
+     exclude_criterion, exclude_criterion_value, follow_new, completed_at, verbose_until, sort_order, \
+     schema_version, graph, created_at, updated_at";
 
 /// Whether an entry is subject to the verbose gate. **Derived from `kind` inside `append`, never
 /// passed in.** A caller that could label its own entry could gate a `Sent` behind the verbose flag
@@ -812,6 +856,8 @@ struct RawRule {
     target_mode: String,
     criterion: String,
     criterion_value: String,
+    exclude_criterion: Option<String>,
+    exclude_criterion_value: Option<String>,
     follow_new: bool,
     completed_at: Option<i64>,
     verbose_until: Option<i64>,
@@ -831,24 +877,29 @@ fn read_rule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawRule> {
         target_mode: r.get(4)?,
         criterion: r.get(5)?,
         criterion_value: r.get(6)?,
-        follow_new: r.get(7)?,
-        completed_at: r.get(8)?,
-        verbose_until: r.get(9)?,
-        sort_order: r.get(10)?,
-        schema_version: r.get(11)?,
-        graph: r.get(12)?,
-        created_at: r.get(13)?,
-        updated_at: r.get(14)?,
+        exclude_criterion: r.get(7)?,
+        exclude_criterion_value: r.get(8)?,
+        follow_new: r.get(9)?,
+        completed_at: r.get(10)?,
+        verbose_until: r.get(11)?,
+        sort_order: r.get(12)?,
+        schema_version: r.get(13)?,
+        graph: r.get(14)?,
+        created_at: r.get(15)?,
+        updated_at: r.get(16)?,
     })
 }
 
 fn hydrate_rule(raw: RawRule) -> Result<AutomationRule, AutomationStoreError> {
     Ok(AutomationRule {
-        graph: serde_json::from_str(&raw.graph).map_err(|e| {
-            AutomationStoreError::Invalid(format!("rule {}: bad graph blob: {e}", raw.id))
-        })?,
+        // Serde can quote the malformed value in its error, and a graph contains the webhook URL.
+        // Keep the decode boundary opaque: list_rules turns this into a skipped-row reason and
+        // reload persists that reason to the activity log.
+        graph: serde_json::from_str(&raw.graph)
+            .map_err(|_| AutomationStoreError::Invalid(format!("rule {}: bad graph blob", raw.id)))?,
         target_mode: enum_from_db(&raw.target_mode)?,
         criterion: enum_from_db(&raw.criterion)?,
+        exclude_criterion: raw.exclude_criterion.as_deref().map(enum_from_db).transpose()?,
         id: raw.id,
         name: raw.name,
         enabled: raw.enabled,
@@ -856,6 +907,8 @@ fn hydrate_rule(raw: RawRule) -> Result<AutomationRule, AutomationStoreError> {
         criterion_value: raw.criterion_value,
         follow_new: raw.follow_new,
         target_ids: Vec::new(),
+        excluded_ids: Vec::new(),
+        exclude_criterion_value: raw.exclude_criterion_value.unwrap_or_default(),
         completed_at: raw.completed_at,
         verbose_until: raw.verbose_until,
         sort_order: raw.sort_order,
@@ -986,6 +1039,25 @@ impl AutomationStore {
         store
     }
 
+    /// Insert a graph which could only have arrived from an older or corrupt store.
+    ///
+    /// This bypasses serialisation deliberately: tests need the real decode path to see whether a
+    /// malformed value reaches a user-facing skipped-row reason.
+    #[cfg(test)]
+    pub(crate) fn insert_raw_graph_for_test(&self, id: &str, graph: &str) {
+        let guard = self.conn.lock().unwrap();
+        let conn = guard.as_ref().expect("in-memory store is connected");
+        conn.execute(
+            "INSERT INTO automation_rules
+               (id, name, enabled, runs_once, target_mode, criterion, criterion_value,
+                follow_new, completed_at, verbose_until, sort_order, schema_version,
+                graph, created_at, updated_at)
+             VALUES (?1, 'bad', 1, 0, 'rule', 'allTerminals', '', 1, NULL, NULL, 2, 1, ?2, 1000, 1000)",
+            rusqlite::params![id, graph],
+        )
+        .expect("insert raw graph");
+    }
+
     fn schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS automation_rules (
@@ -996,6 +1068,8 @@ impl AutomationStore {
                 target_mode     TEXT NOT NULL,
                 criterion       TEXT NOT NULL,
                 criterion_value TEXT NOT NULL,
+                exclude_criterion TEXT,
+                exclude_criterion_value TEXT,
                 follow_new      INTEGER NOT NULL,
                 completed_at    INTEGER,
                 verbose_until   INTEGER,
@@ -1021,6 +1095,15 @@ impl AutomationStore {
                 label_at     INTEGER,
                 last_seen_at INTEGER,
                 added_at     INTEGER NOT NULL,
+                PRIMARY KEY (rule_id, terminal_id)
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS automation_exclusions (
+                rule_id     TEXT NOT NULL,
+                terminal_id TEXT NOT NULL,
+                added_at    INTEGER NOT NULL,
                 PRIMARY KEY (rule_id, terminal_id)
             )",
             [],
@@ -1052,6 +1135,8 @@ impl AutomationStore {
         // build of this branch keeps its old `automation_targets` and every SELECT naming `folder`
         // fails against it. Plan §3.4.
         Self::ensure_column(conn, "automation_targets", "folder", "TEXT")?;
+        Self::ensure_column(conn, "automation_rules", "exclude_criterion", "TEXT")?;
+        Self::ensure_column(conn, "automation_rules", "exclude_criterion_value", "TEXT")?;
         Ok(())
     }
 
@@ -1113,6 +1198,19 @@ impl AutomationStore {
             }
         }
 
+        let mut exclusions: HashMap<String, Vec<String>> = HashMap::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT rule_id, terminal_id FROM automation_exclusions ORDER BY added_at, terminal_id",
+            )?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            for row in rows {
+                let (rule_id, terminal_id) = row?;
+                exclusions.entry(rule_id).or_default().push(terminal_id);
+            }
+        }
+
         let mut stmt = conn.prepare(&format!(
             "SELECT {RULE_COLUMNS} FROM automation_rules ORDER BY sort_order, id"
         ))?;
@@ -1124,6 +1222,7 @@ impl AutomationStore {
             match hydrate_rule(raw) {
                 Ok(mut rule) => {
                     rule.target_ids = targets.remove(&rule.id).unwrap_or_default();
+                    rule.excluded_ids = exclusions.remove(&rule.id).unwrap_or_default();
                     out.push(rule);
                 }
                 // §3.3: a row this build cannot decode is ONE rule that does not run, never
@@ -1497,6 +1596,13 @@ impl AutomationStore {
                     ids.push(row?);
                 }
                 rule.target_ids = ids;
+                let mut stmt = conn.prepare(EXCLUDED_TARGET_IDS_SQL)?;
+                let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
+                let mut ids = Vec::new();
+                for row in rows {
+                    ids.push(row?);
+                }
+                rule.excluded_ids = ids;
                 Ok(Some(rule))
             }
         }
@@ -1600,8 +1706,9 @@ impl AutomationStore {
             .map_err(|e| AutomationStoreError::Invalid(format!("graph is not serialisable: {e}")))?;
         let target_mode = enum_to_db(&rule.target_mode)?;
         let criterion = enum_to_db(&rule.criterion)?;
+        let exclude_criterion = rule.exclude_criterion.as_ref().map(enum_to_db).transpose()?;
         let schema_version = if rule.schema_version <= SUPPORTED_SCHEMA_VERSION {
-            schema_version_for(&rule.graph)
+            schema_version_for(rule)
         } else {
             rule.schema_version
         };
@@ -1614,9 +1721,10 @@ impl AutomationStore {
 
         tx.execute(
             "INSERT INTO automation_rules (
-                 id, name, enabled, runs_once, target_mode, criterion, criterion_value, follow_new,
-                 completed_at, verbose_until, sort_order, schema_version, graph, created_at, updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+                 id, name, enabled, runs_once, target_mode, criterion, criterion_value,
+                 exclude_criterion, exclude_criterion_value, follow_new, completed_at, verbose_until,
+                 sort_order, schema_version, graph, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(id) DO UPDATE SET
                  name            = excluded.name,
                  enabled         = excluded.enabled,
@@ -1624,6 +1732,8 @@ impl AutomationStore {
                  target_mode     = excluded.target_mode,
                  criterion       = excluded.criterion,
                  criterion_value = excluded.criterion_value,
+                 exclude_criterion = excluded.exclude_criterion,
+                 exclude_criterion_value = excluded.exclude_criterion_value,
                  follow_new      = excluded.follow_new,
                  completed_at    = excluded.completed_at,
                  verbose_until   = excluded.verbose_until,
@@ -1639,6 +1749,8 @@ impl AutomationStore {
                 target_mode,
                 criterion,
                 rule.criterion_value,
+                exclude_criterion,
+                rule.exclude_criterion_value,
                 rule.follow_new,
                 rule.completed_at,
                 rule.verbose_until,
@@ -1693,6 +1805,17 @@ impl AutomationStore {
                 rusqlite::params![rule.id, id],
             )?;
         }
+        tx.execute(
+            "DELETE FROM automation_exclusions WHERE rule_id = ?1",
+            [&rule.id],
+        )?;
+        for id in &rule.excluded_ids {
+            tx.execute(
+                "INSERT OR IGNORE INTO automation_exclusions (rule_id, terminal_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![rule.id, id, rule.updated_at],
+            )?;
+        }
         Ok(previous)
     }
 
@@ -1703,6 +1826,7 @@ impl AutomationStore {
             let conn = guard.as_mut().ok_or(AutomationStoreError::Disabled)?;
             let tx = conn.transaction()?;
             tx.execute("DELETE FROM automation_targets WHERE rule_id = ?1", [id])?;
+            tx.execute("DELETE FROM automation_exclusions WHERE rule_id = ?1", [id])?;
             tx.execute("DELETE FROM automation_log WHERE rule_id = ?1", [id])?;
             let n = tx.execute("DELETE FROM automation_rules WHERE id = ?1", [id])?;
             tx.commit()?;
@@ -2307,13 +2431,14 @@ mod tests {
                 threshold: Some(25.0),
                 ..Default::default()
             }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "prepare to do context-hand-off".to_string(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "claude".to_string(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
         }
     }
 
@@ -2330,6 +2455,9 @@ mod tests {
             // A PINNED rule with no targets is one the enable gate refuses, so a fixture that had
             // none was every store test arranging a row the product cannot produce.
             target_ids: vec!["tm-1".to_string()],
+            excluded_ids: vec![],
+            exclude_criterion: None,
+            exclude_criterion_value: String::new(),
             completed_at: None,
             verbose_until: None,
             sort_order: 1,
@@ -2340,20 +2468,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn exclusions_round_trip_through_save_and_list() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-x");
+        r.target_mode = TargetMode::Rule;
+        r.criterion = Criterion::CommandContains;
+        r.criterion_value = "claude".into();
+        r.excluded_ids = vec!["tm-b".into(), "tm-c".into()];
+        r.exclude_criterion = Some(Criterion::WorkingFolderUnder);
+        r.exclude_criterion_value = "~/scratch".into();
+        store.save_rule(&r).unwrap();
+
+        let back = store.list_rules().unwrap().into_iter().find(|x| x.id == "au-x").unwrap();
+        assert_eq!(back.excluded_ids, vec!["tm-b".to_string(), "tm-c".to_string()]);
+        assert_eq!(back.exclude_criterion, Some(Criterion::WorkingFolderUnder));
+        assert_eq!(back.exclude_criterion_value, "~/scratch");
+    }
+
+    /// A terminal can be BOTH a pick and an exclusion, and one must not erase the other. This is the
+    /// test that fails if exclusions are squeezed into `automation_targets.source`, whose primary key
+    /// (`:1024`) has no room for two memberships of one pair.
+    #[test]
+    fn a_terminal_can_be_both_pinned_and_excluded_without_either_erasing_the_other() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-x");
+        r.target_ids = vec!["tm-a".into(), "tm-b".into()];   // picks
+        r.excluded_ids = vec!["tm-b".into()];                // and tm-b is also excluded
+        store.save_rule(&r).unwrap();
+
+        let back = store.list_rules().unwrap().into_iter().find(|x| x.id == "au-x").unwrap();
+        assert_eq!(back.target_ids, vec!["tm-a".to_string(), "tm-b".to_string()]);
+        assert_eq!(back.excluded_ids, vec!["tm-b".to_string()]);
+    }
+
+    /// BOTH loaders, not just the bulk one. `read_rule_on` is the path get_rule, duplicate, enable and
+    /// every target mutation take; if only `list_rules` learns exclusions, a duplicate silently drops
+    /// them and a target edit writes the rule back without them.
+    #[test]
+    fn the_single_rule_loader_returns_exclusions_too() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-x");
+        r.excluded_ids = vec!["tm-b".into()];
+        store.save_rule(&r).unwrap();
+
+        let one = store.get_rule("au-x").unwrap().unwrap();
+        assert_eq!(one.excluded_ids, vec!["tm-b".to_string()], "get_rule must agree with list_rules");
+    }
+
+    /// Exclusions must survive a mutation that rewrites the rule for an unrelated reason.
+    #[test]
+    fn a_target_mutation_preserves_exclusions() {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("au-x");
+        r.excluded_ids = vec!["tm-b".into()];
+        store.save_rule(&r).unwrap();
+        store.add_target_to_rule("au-x", "tm-z", 2_000).unwrap();
+        assert_eq!(store.get_rule("au-x").unwrap().unwrap().excluded_ids, vec!["tm-b".to_string()]);
+    }
+
     /// Insert a row whose `graph` column is arbitrary text, bypassing `save_rule`'s
     /// serialisation. There is no other way to author a row this build cannot decode.
     fn write_raw_graph(store: &AutomationStore, id: &str, graph: &str) {
-        let guard = store.conn.lock().unwrap();
-        let conn = guard.as_ref().unwrap();
-        conn.execute(
-            "INSERT INTO automation_rules
-               (id, name, enabled, runs_once, target_mode, criterion, criterion_value,
-                follow_new, completed_at, verbose_until, sort_order, schema_version,
-                graph, created_at, updated_at)
-             VALUES (?1, 'bad', 1, 0, 'rule', 'allTerminals', '', 1, NULL, NULL, 2, 1, ?2, 1000, 1000)",
-            rusqlite::params![id, graph],
-        )
-        .unwrap();
+        store.insert_raw_graph_for_test(id, graph);
     }
 
     fn rule_named(name: &str) -> AutomationRule {
@@ -2588,8 +2765,14 @@ mod tests {
 
     fn graph_with_substitute() -> AutomationGraph {
         let mut g = graph();
-        g.action.substitute = true;
+        g.action_mut().substitute = true;
         g
+    }
+
+    fn stamped(graph: AutomationGraph) -> i64 {
+        let mut rule = rule("au-stamp");
+        rule.graph = graph;
+        schema_version_for(&rule)
     }
 
     /// One row per term of the predicate, plus the plain rule that must STAY v1. A single row would
@@ -2598,26 +2781,48 @@ mod tests {
     #[test]
     fn schema_version_is_stamped_from_what_the_rule_actually_uses() {
         assert_eq!(
-            schema_version_for(&graph()),
+            stamped(graph()),
             1,
             "a plain four-step rule must still load on an older build"
         );
-        assert_eq!(schema_version_for(&graph_with_timer()), 2);
-        assert_eq!(schema_version_for(&graph_with_no_monitor()), 2);
-        assert_eq!(schema_version_for(&graph_with_no_parse()), 2);
-        assert_eq!(schema_version_for(&graph_with_no_cond()), 2);
-        assert_eq!(schema_version_for(&graph_with_one_clause()), 2);
-        assert_eq!(schema_version_for(&graph_with_substitute()), 2);
+        assert_eq!(stamped(graph_with_timer()), 2);
+        assert_eq!(stamped(graph_with_no_monitor()), 2);
+        assert_eq!(stamped(graph_with_no_parse()), 2);
+        assert_eq!(stamped(graph_with_no_cond()), 2);
+        assert_eq!(stamped(graph_with_one_clause()), 2);
+        assert_eq!(stamped(graph_with_substitute()), 2);
+        let mut webhook = graph();
+        webhook.webhook = Some(WebhookStep { provider: WebhookProvider::Discord, url: "https://example.invalid/hook".into(), body: "build failed".into(), substitute: false });
+        assert_eq!(stamped(webhook.clone()), 3);
+        webhook.webhook = None;
+        assert_eq!(stamped(webhook), 1, "removing the last webhook drops the stamp back");
+        let mut no_action = graph();
+        no_action.action = None;
+        assert_eq!(stamped(no_action), 3);
 
         // R4: not sticky. Dropping the last clause must not leave the rule permanently v2 — the
         // opposite (monotonic) behaviour is the more obvious thing to write by accident.
         let mut g = graph_with_one_clause();
         g.cond.as_mut().unwrap().clauses.clear();
         assert_eq!(
-            schema_version_for(&g),
+            stamped(g),
             1,
             "dropping the last clause makes the rule v1-compatible again"
         );
+    }
+
+    #[test]
+    fn a_rule_with_exclusions_is_stamped_v3_even_on_a_v1_graph() {
+        let mut excluded = rule("au-excluded");
+        excluded.schema_version = 1;
+        excluded.excluded_ids = vec!["tm-secret".into()];
+        assert_eq!(schema_version_for(&excluded), 3);
+        excluded.excluded_ids.clear();
+        assert_eq!(schema_version_for(&excluded), 1);
+        excluded.exclude_criterion_value = "scratch".into();
+        assert_eq!(schema_version_for(&excluded), 3);
+        excluded.exclude_criterion_value.clear();
+        assert_eq!(schema_version_for(&excluded), 1);
     }
 
     /// §3.2's whole point: merely loading and re-saving an old rule must not brick it for a
@@ -2658,7 +2863,26 @@ mod tests {
         }"#;
         let decoded: AutomationGraph =
             serde_json::from_str(raw).expect("a graph missing only a newer optional field must still decode");
-        assert!(!decoded.action.substitute, "a rule from before this field existed must load with it off");
+        assert!(!decoded.action.as_ref().unwrap().substitute, "a rule from before this field existed must load with it off");
+    }
+
+    #[test]
+    fn a_webhook_only_rule_writes_no_action_key() {
+        let mut graph = graph();
+        graph.action = None;
+        graph.webhook = Some(WebhookStep { provider: WebhookProvider::Slack, url: "https://example.invalid/hook".into(), body: "build failed".into(), substitute: false });
+        assert!(!serde_json::to_string(&graph).unwrap().contains("\"action\""));
+    }
+
+    #[test]
+    fn a_graph_with_no_webhook_writes_no_webhook_key() {
+        assert!(!serde_json::to_string(&graph()).unwrap().contains("\"webhook\""));
+    }
+
+    #[test]
+    fn a_v1_rule_still_round_trips_byte_for_byte() {
+        let v1 = r#"{"monitor":{"read":"newOutput","cadence":"onOutput","everyMs":0},"parse":{"preset":"custom","literal":null,"find":"ctx:(\\d+)%","keep":"brackets"},"cond":{"kind":"number","op":"gt","threshold":25.0},"timer":null,"action":{"message":"prepare to do context-hand-off","sendTo":"matched","submit":true,"cliType":"default","substitute":false}}"#;
+        assert_eq!(serde_json::to_string(&serde_json::from_str::<AutomationGraph>(v1).unwrap()).unwrap(), v1);
     }
 
     // -- §10.14b ------------------------------------------------------------------------------
@@ -2977,7 +3201,7 @@ mod tests {
         let store = AutomationStore::new_in_memory();
         let mut bad = rule("au-1");
         bad.enabled = true;
-        bad.graph.action.message = String::new();
+        bad.graph.action_mut().message = String::new();
 
         assert!(store.save_rule_as_of(&bad, 1_000).is_err(), "an enabled rule with no message");
         assert!(store.get_rule("au-1").unwrap().is_none(), "and nothing was written");
@@ -3088,6 +3312,27 @@ mod tests {
             "au-2's history is what survived"
         );
         assert!(store.get_rule("au-2").unwrap().is_some());
+    }
+
+    /// Reusing an id is the observable regression: without `DELETE FROM automation_exclusions`, a
+    /// newly saved rule silently inherits the deleted rule's exception rows.
+    #[test]
+    fn deleting_then_reusing_a_rule_id_does_not_restore_old_exclusions() {
+        let store = AutomationStore::new_in_memory();
+        let mut original = rule("au-x");
+        original.excluded_ids = vec!["tm-excluded-before-delete".into()];
+        store.save_rule(&original).unwrap();
+
+        assert!(store.delete_rule("au-x").unwrap());
+
+        let replacement = rule("au-x");
+        store.save_rule(&replacement).unwrap();
+        let saved = store.get_rule("au-x").unwrap().unwrap();
+        assert!(
+            saved.excluded_ids.is_empty(),
+            "the replacement must not inherit exclusions from the deleted rule: {:?}",
+            saved.excluded_ids
+        );
     }
 
     #[test]
@@ -3422,7 +3667,7 @@ mod tests {
         let mut rule = enableable("au-bad");
         rule.enabled = false;
         rule.target_ids.clear();
-        rule.graph.action.message = String::new();
+        rule.graph.action_mut().message = String::new();
         store.save_rule(&rule).unwrap();
 
         let refused = store.set_enabled_checked("au-bad", true);
@@ -3463,7 +3708,7 @@ mod tests {
         let mut empty = enableable("au-empty");
         empty.enabled = false;
         empty.target_ids.clear();
-        empty.graph.action.message = String::new();
+        empty.graph.action_mut().message = String::new();
         store.save_rule(&empty).unwrap();
 
         store.set_enabled_checked("au-empty", false).unwrap();
@@ -3484,7 +3729,7 @@ mod tests {
 
         let mut broken = enableable("au-1");
         broken.enabled = true;
-        broken.graph.action.message = String::new();
+        broken.graph.action_mut().message = String::new();
         let refused = store.save_rule(&broken);
         assert!(matches!(refused, Err(AutomationStoreError::Invalid(_))), "{:?}", refused);
         assert!(store.get_rule("au-1").unwrap().is_none(), "refused, and yet the row was written");
@@ -4108,6 +4353,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn malformed_webhook_values_never_escape_decode_or_save_errors() {
+        let secret = "https://hooks.example.invalid/credential-token";
+        let malformed = format!(
+            r#"{{"webhook":{{"provider":"{secret}","url":"{secret}","body":"done"}}}}"#
+        );
+
+        // This is the producer, not a hand-written error: serde really does quote the malformed
+        // provider value, which is why forwarding its Display would leak the URL.
+        let raw = serde_json::from_str::<AutomationGraph>(&malformed)
+            .expect_err("a URL is not a webhook provider")
+            .to_string();
+        assert!(raw.contains(secret), "premise: serde produced the secret: {raw}");
+
+        let store = AutomationStore::new_in_memory();
+        write_raw_graph(&store, "au-malformed", &malformed);
+        assert!(store.list_rules().unwrap().is_empty());
+        let skipped = store.take_skipped_rows();
+        assert_eq!(skipped.len(), 1);
+        assert!(!skipped[0].1.contains(secret), "skipped row leaked: {:?}", skipped[0]);
+        assert!(skipped[0].1.contains("bad graph blob"));
+
+        // Save errors also carry the store's Display through the command layer. Exercise the real
+        // enable/save validation with a well-typed, secret-bearing webhook rule rather than
+        // inventing an error text.
+        let mut invalid = rule("au-save");
+        invalid.graph.webhook = Some(WebhookStep {
+            provider: WebhookProvider::Custom,
+            url: secret.to_string(),
+            body: r#"{\"result\": ${value}}"#.to_string(),
+            substitute: true,
+        });
+        invalid.graph.parse.as_mut().expect("parse fixture").find = r"(?<value>\\w+)".to_string();
+        let error = store
+            .save_rule(&invalid)
+            .expect_err("post-substitution custom JSON is refused")
+            .to_string();
+        assert!(!error.contains(secret), "save error leaked: {error}");
+    }
+
     // -----------------------------------------------------------------------------------------
     // Plan 032 §5.2/§5.3 — `finds` (read depth) split from the per-clause `Test` (comparison).
     // -----------------------------------------------------------------------------------------
@@ -4327,13 +4612,14 @@ mod tests {
             timer: Some(TimerStep {
                 mode: TimerMode::DailyAt { minute_of_day: 9 * 60, days: 0b0001_1111 },
             }),
-            action: ActionStep {
+            action: Some(ActionStep {
                 message: "stand-up notes?".to_string(),
                 send_to: SendTo::Matched,
                 submit: true,
                 cli_type: "default".to_string(),
                 substitute: false,
-            },
+            }),
+            webhook: None,
             layout: None,
         };
 

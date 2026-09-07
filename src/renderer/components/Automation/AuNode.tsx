@@ -16,7 +16,7 @@ import { STEP_PORTS } from './automationSteps';
 import { AU_NODE_H, AU_NODE_W, sideOf } from './automationDraft';
 import type { PortSide } from './automationDraft';
 
-/** The five accents, from the mockup's own palette. */
+/** The step glyphs, from the mockup's own palette. */
 export const STEP_GLYPHS: Record<StepKind, string> = {
     monitor: '◉',
     parse: '⌥',
@@ -25,6 +25,7 @@ export const STEP_GLYPHS: Record<StepKind, string> = {
     // both a delay and a time of day, and a stopwatch is the one of the three that reads as either.
     timer: '⏱',
     action: '▶',
+    webhook: '↗',
 };
 
 export interface AuNodeProps {

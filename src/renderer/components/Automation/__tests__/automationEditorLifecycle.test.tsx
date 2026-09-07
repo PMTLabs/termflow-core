@@ -448,6 +448,28 @@ describe('the editor, mounted', () => {
         }
     });
 
+    it('asks the roster for the draft exception criterion, not the saved rule alone', async () => {
+        const api = await openEditorOn(rule({ criterion: 'allTerminals' }));
+        const exception = editor()!.querySelector<HTMLSelectElement>(
+            '[aria-label="What the exception must match"]',
+        )!;
+
+        await act(async () => {
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLSelectElement.prototype, 'value',
+            )!.set!;
+            setter.call(exception, 'commandContains');
+            exception.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        await settle();
+
+        expect(api.listWatchableTerminals.mock.calls.at(-1)).toEqual([
+            'au-1',
+            null,
+            ['allTerminals', 'commandContains'],
+        ]);
+    });
+
     /**
      * **A save that visibly does nothing, on the most common path into this editor.**
      *

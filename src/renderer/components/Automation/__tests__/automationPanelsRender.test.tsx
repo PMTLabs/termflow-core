@@ -102,21 +102,27 @@ describe('the inspector panels — rendered, per template', () => {
 
             // The pattern is a control binding — the field's `value` — and the panel's prose about
             // it is the paraphrase, which has its own tests below.
-            await show(rule, 'parse');
-            expect(fields()).toContain(displayedPattern(parse));
+            if (parse) {
+                await show(rule, 'parse');
+                expect(fields()).toContain(displayedPattern(parse));
+            }
 
-            const condText = await show(rule, 'cond');
-            if (cond.kind === 'number' && cond.threshold !== null && cond.threshold !== undefined) {
-                expect(`${condText} ${fields()}`).toContain(String(cond.threshold));
+            if (cond) {
+                const condText = await show(rule, 'cond');
+                if (cond.kind === 'number' && cond.threshold !== null && cond.threshold !== undefined) {
+                    expect(`${condText} ${fields()}`).toContain(String(cond.threshold));
+                }
             }
 
             // **The DISPLAY, not the field.** Asserting over the two together is what let the first
             // draft of this test survive the very mutation it was written for: the preview span was
             // replaced with a hard-coded string and the textarea still carried the right value, so
             // `contains` found it anyway. A displayed value has to be read where it is displayed.
-            await show(rule, 'action');
-            expect(container.querySelector('.au-cap')?.textContent).toBe(action.message);
-            expect(fields()).toContain(action.message);
+            if (action) {
+                await show(rule, 'action');
+                expect(container.querySelector('.au-cap')?.textContent).toBe(action.message);
+                expect(fields()).toContain(action.message);
+            }
         },
     );
 
@@ -139,24 +145,29 @@ describe('the inspector panels — rendered, per template', () => {
             // that chrome as if it were a leaked value; reading the same `.au-cap` span the
             // per-template loop above reads is the precise oracle for "the value this panel is
             // SHOWING", exactly as that loop's own comment already argues.
-            await show(rule, 'action');
-            // Assert the node EXISTS before reading it — `?? ''` here made every `not.toContain`
-            // below pass vacuously against an empty string whenever the preview was blocked and
-            // `.au-cap` was absent from the DOM altogether.
-            const capNode = container.querySelector('.au-cap');
-            expect(capNode).not.toBeNull();
-            const shownMessage = capNode!.textContent ?? '';
-            for (const other of others) {
-                if (other.graph.action.message === rule.graph.action.message) continue;
-                expect(shownMessage).not.toContain(other.graph.action.message);
+            if (rule.graph.action) {
+                await show(rule, 'action');
+                // Assert the node EXISTS before reading it — `?? ''` here made every `not.toContain`
+                // below pass vacuously against an empty string whenever the preview was blocked and
+                // `.au-cap` was absent from the DOM altogether.
+                const capNode = container.querySelector('.au-cap');
+                expect(capNode).not.toBeNull();
+                const shownMessage = capNode!.textContent ?? '';
+                for (const other of others) {
+                    const otherAction = other.graph.action;
+                    if (!otherAction || otherAction.message === rule.graph.action.message) continue;
+                    expect(shownMessage).not.toContain(otherAction.message);
+                }
             }
 
-            await show(rule, 'parse');
-            const shown = fields();
-            for (const other of others) {
-                const pattern = displayedPattern(other.graph.parse);
-                if (pattern === displayedPattern(rule.graph.parse)) continue;
-                expect(shown).not.toContain(pattern);
+            if (rule.graph.parse) {
+                await show(rule, 'parse');
+                const shown = fields();
+                for (const other of others) {
+                    const otherParse = other.graph.parse;
+                    if (!otherParse || displayedPattern(otherParse) === displayedPattern(rule.graph.parse)) continue;
+                    expect(shown).not.toContain(displayedPattern(otherParse));
+                }
             }
         }
     });
@@ -183,6 +194,8 @@ describe('the inspector panels — rendered, per template', () => {
             // sentence about a missing step both surfaces state in prose.
             timer: ['when'],
             action: ['message', 'send'],
+            // Task 11 adds the canvas card. Its editable inspector is deliberately Task 12.
+            webhook: [],
         };
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         for (const step of STEP_ORDER) {

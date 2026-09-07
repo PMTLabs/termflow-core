@@ -27,17 +27,18 @@
  */
 import type {
     AutomationClause,
+    AutomationCriterion,
     AutomationGraph,
     AutomationParseStep,
     AutomationRule,
     AutomationSource,
 } from '../../types/electron';
-import { tokensUsed } from './automationTokens';
+import { previewSubstitute, tokensUsed } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
 
 /** Which step owns a problem, so the editor can point at the panel that fixes it. */
-export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
+export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 'action' | 'webhook';
 
 /**
  * A stable identity for the RULE that fired.
@@ -50,6 +51,7 @@ export type ProblemField = 'targets' | 'monitor' | 'parse' | 'cond' | 'timer' | 
 export type ProblemCode =
     | 'targets.empty'
     | 'targets.criterion'
+    | 'targets.excludeValueEmpty'
     | 'monitor.interval'
     | 'parse.empty'
     | 'parse.uncompilable'
@@ -67,6 +69,12 @@ export type ProblemCode =
     | 'timer.scheduleWithMonitor'
     | 'timer.neverRuns'
     | 'action.empty'
+    | 'rule.noDestination'
+    | 'webhook.urlEmpty'
+    | 'webhook.urlMalformed'
+    | 'webhook.urlNotHttps'
+    | 'webhook.bodyEmpty'
+    | 'webhook.bodyNotJson'
     | 'action.echo'
     | 'action.tokenWithoutParse'
     | 'action.unknownToken';
@@ -94,6 +102,10 @@ const problem = (
     code: ProblemCode,
     message: string,
 ): Problem => ({ severity, field, code, message });
+
+/** `allTerminals` is the one selector that deliberately has no companion value field. */
+const criterionNeedsValue = (criterion: AutomationCriterion): boolean =>
+    criterion !== 'allTerminals';
 
 /**
  * Compile a user pattern the way the browser will run it for the live preview.
@@ -222,6 +234,41 @@ export function sourceText(source: AutomationSource): string {
 function parseStep(graph: AutomationGraph): AutomationParseStep | null {
     const parse = graph.parse;
     return parse && parse.find.trim().length > 0 ? parse : null;
+}
+
+function webhookSampleValues(groups: { count: number; names: Set<string> }): Record<string, string> {
+    const sample: Record<string, string> = {};
+    for (let index = 0; index <= groups.count; index += 1) {
+        sample[String(index)] = `[g${index}]`;
+    }
+    for (const name of groups.names) {
+        sample[name] = `[${name}]`;
+    }
+    return sample;
+}
+
+function renderWebhookBodyForValidation(
+    webhook: NonNullable<AutomationGraph['webhook']>,
+    parse: AutomationParseStep | null,
+): string {
+    if (!webhook.substitute || !parse || webhook.body.trim().length === 0) {
+        return webhook.body;
+    }
+
+    const groups = groupsOf(parse.find);
+    if (compilePattern(parse.find) === null) {
+        return webhook.body;
+    }
+
+    const sample = webhookSampleValues(groups);
+    const rendered = previewSubstitute(webhook.body, groups, sample);
+    if (!rendered.ok) {
+        return webhook.body;
+    }
+
+    return rendered.parts
+        .map((p) => (p.kind === 'text' ? p.text : p.token))
+        .join('');
 }
 
 /**
@@ -423,9 +470,10 @@ export const MINUTES_PER_DAY = 24 * 60;
 function neverRunsProblem(graph: AutomationGraph): Problem | null {
     const hasInputSteps = Boolean(graph.monitor) && Boolean(graph.parse) && Boolean(graph.cond);
     const scheduled = Boolean(graph.timer && 'dailyAt' in graph.timer.mode);
-    // A blank message defers to `action.empty` alone — see the Rust mirror's doc for why (a brand
-    // new draft with nothing drawn is not a claim about an undrawn Wait card).
-    if (hasInputSteps || scheduled || graph.action.message.trim().length === 0) return null;
+    // A blank terminal message defers to `action.empty` alone; an absent terminal destination is
+    // valid when a webhook is present, and must not be made into an action to satisfy this guard.
+    const hasTerminalDestination = (graph.action?.message.trim().length ?? 0) !== 0;
+    if (hasInputSteps || scheduled || graph.webhook || !hasTerminalDestination) return null;
     const message = graph.timer
         ? 'This rule waits, but nothing will ever start the wait: it has no Watch output step to '
             + 'match against. Add one, or switch this Wait to run at a time of day instead.'
@@ -603,7 +651,7 @@ export function patternProblems(graph: AutomationGraph): Problem[] {
  */
 export function problems(rule: AutomationRule): Problem[] {
     const out: Problem[] = [];
-    const { monitor, parse, cond, action } = rule.graph;
+    const { monitor, parse, cond, action, webhook } = rule.graph;
 
     // --- target ----------------------------------------------------------------------------------
     // Only a PINNED rule can be empty in a way validation can see. A criterion rule that currently
@@ -620,15 +668,33 @@ export function problems(rule: AutomationRule): Problem[] {
                 ),
             );
         }
-    } else if (rule.criterion !== 'allTerminals' && rule.criterionValue.trim().length === 0) {
-        out.push(
-            problem(
-                'blocks',
-                'targets',
-                'targets.criterion',
-                'Fill in what the terminals must match, or watch all terminals instead.',
-            ),
-        );
+    } else {
+        if (criterionNeedsValue(rule.criterion) && rule.criterionValue.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'targets',
+                    'targets.criterion',
+                    'Fill in what the terminals must match, or watch all terminals instead.',
+                ),
+            );
+        }
+
+        if (
+            rule.excludeCriterion !== null
+            && rule.excludeCriterion !== undefined
+            && criterionNeedsValue(rule.excludeCriterion)
+            && (rule.excludeCriterionValue ?? '').trim().length === 0
+        ) {
+            out.push(
+                problem(
+                    'blocks',
+                    'targets',
+                    'targets.excludeValueEmpty',
+                    'Fill in what the exclusion must match, or exclude all terminals instead.',
+                ),
+            );
+        }
     }
 
     // --- interval --------------------------------------------------------------------------------
@@ -694,7 +760,16 @@ export function problems(rule: AutomationRule): Problem[] {
     out.push(...timerProblems(rule.graph));
 
     // --- message ---------------------------------------------------------------------------------
-    if (action.message.trim().length === 0) {
+    if (!action && !webhook) {
+        out.push(
+            problem(
+                'blocks',
+                'action',
+                'rule.noDestination',
+                'Add a terminal message or a webhook destination.',
+            ),
+        );
+    } else if (action?.message.trim().length === 0) {
         out.push(
             problem(
                 'blocks',
@@ -703,7 +778,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 'Enter the message this rule should type.',
             ),
         );
-    } else if (parse && parse.find.trim().length > 0) {
+    } else if (action && parse && parse.find.trim().length > 0) {
         // §2.6's failure, told to the user before it happens. The emptiness guard above is
         // load-bearing: an empty regex matches every position of every string, so without it every
         // draft with a message and no pattern yet is told its message matches a pattern it does not
@@ -727,6 +802,67 @@ export function problems(rule: AutomationRule): Problem[] {
         }
     }
 
+    if (webhook) {
+        if (webhook.url.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'webhook',
+                    'webhook.urlEmpty',
+                    'Provide a webhook URL.',
+                ),
+            );
+        } else {
+            try {
+                const parsed = new URL(webhook.url.trim());
+                if (parsed.protocol !== 'https:') {
+                    out.push(
+                        problem(
+                            'blocks',
+                            'webhook',
+                            'webhook.urlNotHttps',
+                            'Provide an https webhook URL.',
+                        ),
+                    );
+                }
+            } catch {
+                out.push(
+                    problem(
+                        'blocks',
+                        'webhook',
+                        'webhook.urlMalformed',
+                        'Provide a well-formed webhook URL.',
+                    ),
+                );
+            }
+        }
+
+        if (webhook.body.trim().length === 0) {
+            out.push(
+                problem(
+                    'blocks',
+                    'webhook',
+                    'webhook.bodyEmpty',
+                    'Enter a webhook body.',
+                ),
+            );
+        } else if (webhook.provider === 'custom') {
+            const rendered = renderWebhookBodyForValidation(webhook, parseStep(rule.graph));
+            try {
+                JSON.parse(rendered);
+            } catch {
+                out.push(
+                    problem(
+                        'blocks',
+                        'webhook',
+                        'webhook.bodyNotJson',
+                        'The webhook body must be valid JSON.',
+                    ),
+                );
+            }
+        }
+    }
+
     // --- token substitution ----------------------------------------------------------------------
     // §4.4, opt-in via `ActionStep.substitute` (plan 032 §4.2). Without this, a message naming a
     // token the pattern cannot supply reaches `subst::substitute` only at SEND time, where §4.4's
@@ -740,7 +876,11 @@ export function problems(rule: AutomationRule): Problem[] {
     // toggle claims the message inserts a capture, and a rule with no parse step at all captures
     // nothing, exactly like one whose pattern is still empty. `parseStep` is what makes the two
     // spellings indistinguishable to this check.
-    if (action.substitute) {
+    for (const destination of [
+        action?.substitute ? { field: 'action' as const, message: action.message } : null,
+        webhook?.substitute ? { field: 'webhook' as const, message: webhook.body } : null,
+    ]) {
+        if (!destination) continue;
         const sourcing = parseStep(rule.graph);
         if (!sourcing) {
             // The toggle itself claims the message inserts a capture, which nothing can be true of
@@ -750,14 +890,14 @@ export function problems(rule: AutomationRule): Problem[] {
             out.push(
                 problem(
                     'blocks',
-                    'action',
+                    destination.field,
                     'action.tokenWithoutParse',
                     'This message inserts captured values, but the rule has no pattern to capture them from.',
                 ),
             );
         } else if (compilePattern(sourcing.find) !== null) {
             const groups = groupsOf(sourcing.find);
-            for (const t of tokensUsed(action.message)) {
+            for (const t of tokensUsed(destination.message)) {
                 const bad = t.kind === 'group'
                     ? !tokenSupplied(groups, t.n, null)
                     : !tokenSupplied(groups, null, t.name);
@@ -765,7 +905,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 out.push(
                     problem(
                         'blocks',
-                        'action',
+                        destination.field,
                         'action.unknownToken',
                         `${t.text} has nothing to stand for. The pattern in Read a value has `
                             + `${groups.count} bracketed group${groups.count === 1 ? '' : 's'}, so the highest you can use is $${groups.count}.`,
@@ -804,6 +944,7 @@ export function problemsFor(list: Problem[], field: ProblemField): Problem[] {
 export const BADGES: Record<ProblemCode, string> = {
     'targets.empty': 'needs terminals',
     'targets.criterion': 'needs something to match',
+    'targets.excludeValueEmpty': 'needs something to exclude',
     'monitor.interval': 'checks too often',
     'parse.empty': 'needs a pattern',
     'parse.uncompilable': 'pattern not understood',
@@ -821,6 +962,12 @@ export const BADGES: Record<ProblemCode, string> = {
     'timer.scheduleWithMonitor': 'the watch is ignored',
     'timer.neverRuns': 'this rule can never run',
     'action.empty': 'needs a message',
+    'rule.noDestination': 'needs a destination',
+    'webhook.urlEmpty': 'needs a webhook URL',
+    'webhook.urlMalformed': 'needs a valid webhook URL',
+    'webhook.urlNotHttps': 'needs an https webhook',
+    'webhook.bodyEmpty': 'needs a webhook body',
+    'webhook.bodyNotJson': 'webhook body is not valid JSON',
     'action.echo': 'may read its own message',
     'action.tokenWithoutParse': 'needs a pattern to capture from',
     'action.unknownToken': 'names a value the pattern has not got',

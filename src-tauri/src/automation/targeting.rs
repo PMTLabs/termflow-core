@@ -121,6 +121,50 @@ pub fn resolve(criterion: Criterion, value: &str, rows: &[RosterRow]) -> BTreeSe
         .collect()
 }
 
+/// The three target sets the editor needs to explain a rule.
+///
+/// `matched` is the unfiltered target set, `excluded` is the part of that set the rule filters
+/// out, and `watching` is the remainder. They are sets rather than counts because matching the
+/// wrong terminal can leave every displayed count unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetResolution {
+    pub matched: BTreeSet<String>,
+    pub excluded: BTreeSet<String>,
+    pub watching: BTreeSet<String>,
+}
+
+/// Resolve one rule's target sets for both the evaluator and the editor preview.
+///
+/// `previous` preserves the evaluator's frozen-set behaviour. The preview passes `None`, which
+/// answers what the draft resolves to now; the evaluator passes its stored set. Keeping those two
+/// callers here gives them one matcher and one exclusion gate.
+pub fn resolve_target_sets(
+    rule: &AutomationRule,
+    rows: &[RosterRow],
+    previous: Option<&BTreeSet<String>>,
+) -> TargetResolution {
+    let matched = match rule.target_mode {
+        TargetMode::Pinned => rule.target_ids.iter().cloned().collect(),
+        TargetMode::Rule => match (rule.follow_new, previous) {
+            (false, Some(frozen)) if !frozen.is_empty() => frozen.clone(),
+            _ => resolve(rule.criterion, &rule.criterion_value, rows),
+        },
+    };
+
+    let excluded = if rule.target_mode == TargetMode::Rule {
+        let mut candidates: BTreeSet<String> = rule.excluded_ids.iter().cloned().collect();
+        if let Some(criterion) = rule.exclude_criterion {
+            candidates.extend(resolve(criterion, &rule.exclude_criterion_value, rows));
+        }
+        matched.intersection(&candidates).cloned().collect()
+    } else {
+        BTreeSet::new()
+    };
+    let watching = matched.difference(&excluded).cloned().collect();
+
+    TargetResolution { matched, excluded, watching }
+}
+
 /// What changed between two ticks of the watched set.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SetDelta {
@@ -165,13 +209,7 @@ pub fn watched_set(
     rows: &[RosterRow],
     previous: Option<&BTreeSet<String>>,
 ) -> BTreeSet<String> {
-    match rule.target_mode {
-        TargetMode::Pinned => rule.target_ids.iter().cloned().collect(),
-        TargetMode::Rule => match (rule.follow_new, previous) {
-            (false, Some(frozen)) if !frozen.is_empty() => frozen.clone(),
-            _ => resolve(rule.criterion, &rule.criterion_value, rows),
-        },
-    }
+    resolve_target_sets(rule, rows, previous).watching
 }
 
 #[cfg(test)]
@@ -466,6 +504,9 @@ mod tests {
             criterion_value: value.into(),
             follow_new,
             target_ids: vec!["tm-pinned".into()],
+            excluded_ids: vec![],
+            exclude_criterion: None,
+            exclude_criterion_value: String::new(),
             completed_at: None,
             verbose_until: None,
             sort_order: 0,
@@ -481,13 +522,14 @@ mod tests {
                     keep: Keep::Brackets,
                 }),
                 cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
-                action: ActionStep {
+                action: Some(ActionStep {
                     message: "m".into(),
                     send_to: SendTo::Matched,
                     submit: true,
                     cli_type: "default".into(),
                     substitute: false,
-                },
+                }),
+                webhook: None,
             },
             created_at: 0,
             updated_at: 0,
@@ -563,6 +605,70 @@ mod tests {
     fn a_pinned_rule_watches_its_ids_even_when_none_are_live() {
         let pinned = rule(TargetMode::Pinned, Criterion::AllTerminals, "", true);
         assert_eq!(ids(watched_set(&pinned, &[], None)), vec!["tm-pinned"]);
+    }
+
+    #[test]
+    fn a_pinned_rule_ignores_exclusions_entirely() {
+        let rows = vec![row(Some("tm-a"), None, None, Some("claude"))];
+        let mut r = rule(TargetMode::Pinned, Criterion::CommandContains, "claude", true);
+        r.target_ids = vec!["tm-a".into()];
+        r.excluded_ids = vec!["tm-a".into()];
+        assert_eq!(
+            ids(watched_set(&r, &rows, None)),
+            vec!["tm-a"],
+            "a hand-picked set says what it means; exclusions do not apply"
+        );
+    }
+
+    #[test]
+    fn an_exclusion_pattern_removes_everything_it_matches() {
+        let rows = vec![
+            row(Some("tm-scratch"), None, Some("~/scratch/project"), None),
+            row(Some("tm-work"), None, Some("~/work/termflow"), None),
+        ];
+        let mut r = rule(TargetMode::Rule, Criterion::AllTerminals, "", true);
+        r.exclude_criterion = Some(Criterion::WorkingFolderUnder);
+        r.exclude_criterion_value = "~/scratch".into();
+
+        assert_eq!(ids(watched_set(&r, &rows, None)), vec!["tm-work"]);
+    }
+
+    #[test]
+    fn the_two_exclusion_kinds_union_rather_than_override() {
+        let rows = vec![
+            row(Some("tm-id"), None, Some("~/work/termflow"), None),
+            row(Some("tm-pattern"), None, Some("~/scratch/project"), None),
+            row(Some("tm-kept"), None, Some("~/work/other"), None),
+        ];
+        let mut r = rule(TargetMode::Rule, Criterion::AllTerminals, "", true);
+        r.excluded_ids = vec!["tm-id".into()];
+        r.exclude_criterion = Some(Criterion::WorkingFolderUnder);
+        r.exclude_criterion_value = "~/scratch".into();
+
+        assert_eq!(ids(watched_set(&r, &rows, None)), vec!["tm-kept"]);
+    }
+
+    /// Counts alone let the editor and the engine disagree while both "pass": excluding tm-b
+    /// instead of tm-c gives the same three numbers. Assert the SETS.
+    #[test]
+    fn the_preview_resolves_the_same_ids_the_engine_watches() {
+        let rows = [
+            row(Some("tm-a"), None, None, Some("node worker-a")),
+            row(Some("tm-b"), None, None, Some("node worker-b")),
+            row(Some("tm-c"), None, None, Some("node worker-c")),
+        ];
+        let mut r = rule(TargetMode::Rule, Criterion::CommandContains, "node", true);
+        r.excluded_ids = vec!["tm-b".into()];
+
+        let preview = resolve_target_sets(&r, &rows, None);
+        assert_eq!(ids(preview.matched), vec!["tm-a", "tm-b", "tm-c"]);
+        assert_eq!(ids(preview.excluded), vec!["tm-b"]);
+        assert_eq!(ids(preview.watching.clone()), vec!["tm-a", "tm-c"]);
+        assert_eq!(
+            ids(watched_set(&r, &rows, None)),
+            ids(preview.watching),
+            "the evaluator must use the preview's resolution, not merely have the same count"
+        );
     }
 
     // -----------------------------------------------------------------------------------------
