@@ -53,15 +53,31 @@ describe('AUTOMATION_TEMPLATES', () => {
         }
     });
 
-    it('gives each template its OWN pattern, comparison and message', () => {
+    /**
+     * NOT "each its OWN", which this test claimed while asserting something weaker. `backoff` is
+     * deliberately `ratelimit` plus a Teams webhook — spec C4's fan-out — so it shares that
+     * template's pattern AND its message. The old name was true of the original six and quietly
+     * became false when the tenth arrived.
+     *
+     * The counts stay EXACT, so a second collision still fails; and the one permitted duplicate is
+     * named, so `length - 1` cannot be satisfied by some other pair colliding instead.
+     *
+     * Comparisons are left out of the claim because they *cannot* be distinct: every text rule's
+     * comparison is the same `{ text, null, null }` triple. That both kinds occur is the strongest
+     * true statement available, and it is what the assertion below actually makes.
+     */
+    it('gives each template its own pattern and message, bar one deliberate duplicate', () => {
         const patterns = AUTOMATION_TEMPLATES.flatMap((t) => (
             t.rule.graph.parse ? [t.rule.graph.parse.find] : []
         ));
         const messages = AUTOMATION_TEMPLATES.flatMap((t) => (
             t.rule.graph.action ? [t.rule.graph.action.message] : []
         ));
-        expect(new Set(patterns).size).toBe(8);
-        expect(new Set(messages).size).toBe(8);
+        expect(new Set(patterns).size).toBe(patterns.length - 1);
+        expect(new Set(messages).size).toBe(messages.length - 1);
+        expect(byId('backoff').rule.graph.parse?.find).toBe(byId('ratelimit').rule.graph.parse?.find);
+        expect(byId('backoff').rule.graph.action?.message)
+            .toBe(byId('ratelimit').rule.graph.action?.message);
         // At least one of each comparison shape, so the set is not ten numeric rules wearing
         // different names.
         const kinds = AUTOMATION_TEMPLATES.flatMap((t) => (
