@@ -226,7 +226,9 @@
 
 .au-editor .au-mbody {
     display: grid;
-    grid-template-columns: 224px minmax(0, 1fr) 340px;
+    /* The third track is `auto` and the dock carries its own inline width: one number drives
+       the column, where a track plus a variable would be two places for it to disagree. */
+    grid-template-columns: 224px minmax(0, 1fr) auto;
     flex: 1;
     min-height: 0;
 }
@@ -236,7 +238,7 @@
    narrower than the query believes. */
 @container aumodal (max-width: 1180px) {
     .au-editor .au-mbody {
-        grid-template-columns: 180px minmax(0, 1fr) 280px;
+        grid-template-columns: 180px minmax(0, 1fr) auto;
     }
 }
 
@@ -915,12 +917,84 @@
 
 /* --------------------------------------------------------------- inspector --- */
 
+/*
+ * The DOCK is the grid child; the `<aside>` inside it scrolls. `min-height: 0` on both, or the
+ * aside's `overflow-y: auto` never engages inside a grid row and the whole editor grows a
+ * scrollbar instead of the panel.
+ */
+.au-editor .au-idock {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid #2b2d33;
+    background: #191a1f;
+}
+
+/* The grip overhangs the border on both sides: a 1px edge is not a pointer target, and the panel
+   must not lose a pixel of content to make room for one. */
+.au-editor .au-igrip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    width: 7px;
+    z-index: 2;
+    cursor: col-resize;
+}
+
+.au-editor .au-igrip:hover,
+.au-editor .au-igrip:focus-visible {
+    background: rgba(90, 169, 201, 0.35);
+    outline: none;
+}
+
+/*
+ * The collapse button sits in the panel's top-left corner, above the grip in z-order so the two
+ * cannot fight over one press. In the collapsed rail it is the only thing there, which is the
+ * whole reason the rail exists: a zero-width column has nothing left to click.
+ */
+.au-editor .au-icollapse {
+    position: absolute;
+    top: 8px;
+    left: 4px;
+    z-index: 3;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #23252b;
+    border: 1px solid #33353c;
+    border-radius: 5px;
+    color: #9298a3;
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.au-editor .au-icollapse:hover {
+    background: #2c2f37;
+    color: #e6e6e8;
+}
+
+.au-editor .au-idock.collapsed .au-icollapse {
+    left: 3px;
+}
+
 .au-editor .au-inspect {
     display: flex;
     flex-direction: column;
-    border-left: 1px solid #2b2d33;
+    flex: 1;
+    min-height: 0;
     background: #191a1f;
     overflow-y: auto;
+}
+
+/* Clear of the collapse button, which is absolutely positioned over this row. */
+.au-editor .au-idock .au-ihead {
+    padding-left: 32px;
 }
 
 .au-editor .au-inspect-none {

@@ -568,4 +568,43 @@ describe('the editor, mounted', () => {
             clearSpy.mockRestore();
         }
     });
+
+    /**
+     * **Collapsing the settings panel must not be able to strand a selection.**
+     *
+     * The panel holds the only editor for whichever step is selected, so a click on a card while it
+     * is hidden would select something the user can neither see nor change. That is the half of the
+     * collapse feature that cannot live in `AuInspectorDock` — the dock knows nothing about
+     * selection — and it is why collapsed is a rail with a reopen button rather than a zero-width
+     * column: two independent ways back, one automatic and one deliberate.
+     */
+    it('opens the settings panel again when a card is clicked', async () => {
+        await openEditorOn(rule());
+
+        const hide = document.querySelector<HTMLButtonElement>('.au-icollapse')!;
+        await act(async () => hide.click());
+        expect(document.querySelector('.au-idock.collapsed')).not.toBeNull();
+        expect(document.querySelector('.au-inspect')).toBeNull();
+
+        await selectStep('parse');
+        expect(document.querySelector('.au-idock.collapsed')).toBeNull();
+        expect(document.querySelector('.au-inspect')).not.toBeNull();
+    });
+
+    /**
+     * ...but clicking the BACKGROUND deselects, and re-opening the panel to announce that nothing
+     * is selected is the opposite of what that click asked for.
+     */
+    it('leaves the panel collapsed when the click deselects', async () => {
+        await openEditorOn(rule());
+
+        await act(async () => document.querySelector<HTMLButtonElement>('.au-icollapse')!.click());
+        await act(async () => {
+            document.querySelector<HTMLElement>('.au-canvas')!.dispatchEvent(
+                new MouseEvent('pointerdown', { bubbles: true, buttons: 1 }),
+            );
+        });
+
+        expect(document.querySelector('.au-idock.collapsed')).not.toBeNull();
+    });
 });

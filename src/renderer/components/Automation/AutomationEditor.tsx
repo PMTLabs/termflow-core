@@ -61,6 +61,11 @@ import { listSteps } from './AuNodeMenu';
 import type { CanvasOpening, NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
+import {
+    AU_INSPECT_DEFAULT,
+    AuInspectorDock,
+    clampInspectWidth,
+} from './AuInspectorDock';
 import { AuPalette } from './AuPalette';
 import { AuInspector } from './AuInspector';
 import { AuDrawer } from './AuDrawer';
@@ -131,6 +136,40 @@ export interface AutomationEditorProps {
     onOpenFullLog: (ruleId: string) => void;
     /** Something changed on disk — the panel refetches. */
     onChanged: () => Promise<void> | void;
+}
+
+const INSPECT_WIDTH_KEY = 'termflow.automation.inspectorWidth';
+const INSPECT_COLLAPSED_KEY = 'termflow.automation.inspectorCollapsed';
+
+/**
+ * `localStorage`, defensively. Every read and write is wrapped: the ACCESSOR itself throws in a
+ * context that blocks site data, and a preference that cannot be stored must cost nothing worse
+ * than the default.
+ */
+function readStored(key: string): string | null {
+    try {
+        return window.localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+function writeStored(key: string, value: string): void {
+    try {
+        window.localStorage.setItem(key, value);
+    } catch {
+        /* a preference that will not persist is not an error worth showing anyone */
+    }
+}
+
+/** Clamped on the way IN as well as out: a stored width predates whatever the bounds are today. */
+function readInspectWidth(): number {
+    const raw = Number(readStored(INSPECT_WIDTH_KEY));
+    return Number.isFinite(raw) && raw > 0 ? clampInspectWidth(raw) : AU_INSPECT_DEFAULT;
+}
+
+function readInspectCollapsed(): boolean {
+    return readStored(INSPECT_COLLAPSED_KEY) === '1';
 }
 
 const toast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -582,6 +621,49 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         }
     }, []);
 
+    /**
+     * The inspector's width and whether it is docked open — **per-viewer convenience, so
+     * `localStorage`**. Neither belongs to the rule: they are not dirty-able, they are not written
+     * by a save, and a second machine editing the same rule has no business inheriting them.
+     *
+     * Read through a lazy initialiser so the parse happens once rather than on every render, and
+     * every access is guarded: a private window, cleared site data or a browser set to block site
+     * data throws on the ACCESSOR itself, and an editor that will not open because a preference
+     * could not be read is a worse failure than one that opens at its default width.
+     */
+    const [inspectWidth, setInspectWidth] = useState(() => readInspectWidth());
+    const [inspectCollapsed, setInspectCollapsed] = useState(() => readInspectCollapsed());
+
+    const resizeInspector = useCallback((width: number) => {
+        setInspectWidth(width);
+        writeStored(INSPECT_WIDTH_KEY, String(width));
+    }, []);
+
+    const toggleInspector = useCallback(() => {
+        setInspectCollapsed((was) => {
+            writeStored(INSPECT_COLLAPSED_KEY, was ? '0' : '1');
+            return !was;
+        });
+    }, []);
+
+    /**
+     * **Selecting a card opens the panel**, which is the half that makes collapsing safe: the
+     * inspector holds the only editor for the selected step, so a click on a card while it was
+     * hidden would otherwise select something the user cannot see or change.
+     *
+     * Only a real step does it — clicking the canvas background deselects, and re-opening the
+     * panel to say *"nothing selected"* is the opposite of what the click asked for.
+     */
+    const selectStep = useCallback((step: StepKind | null) => {
+        dispatch({ type: 'select', step });
+        if (step !== null) {
+            setInspectCollapsed((was) => {
+                if (was) writeStored(INSPECT_COLLAPSED_KEY, '0');
+                return false;
+            });
+        }
+    }, []);
+
     const toWorldRef = useRef<(x: number, y: number) => NodePos | null>(() => null);
     // Stable, because `AuCanvas` calls it from an effect: a new identity every render would make
     // that effect re-run on every frame of a drag.
@@ -775,7 +857,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         faces={faces}
                         states={states}
                         chips={chips}
-                        onSelect={(step) => dispatch({ type: 'select', step })}
+                        onSelect={selectStep}
                         onMove={(step, pos) => dispatch({ type: 'moveStep', step, pos })}
                         onConnect={(wire) => dispatch({ type: 'addWire', wire })}
                         onDisconnect={(wire) => dispatch({ type: 'removeWire', wire })}
@@ -803,34 +885,41 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         )}
                     </AuCanvas>
 
-                    <AuInspector
-                        draft={draft}
-                        problems={problems}
-                        pairs={pairs}
-                        now={now}
-                        terminals={terminals}
-                        terminalsError={terminalsError}
-                        terminalsLoading={terminalsLoading}
-                        report={report}
-                        onRearm={
-                            draft.rule.id.length > 0
-                                ? () => {
-                                    void (async () => {
-                                        try {
-                                            await api?.rearmAutomation?.(draft.rule.id, null);
-                                            await onChanged();
-                                            toast('Re-armed — it can fire again on the next crossing.', 'success');
-                                        } catch (e) {
-                            toast(`Could not re-arm: ${redactWebhookError(e)}`, 'error');
-                                        }
-                                    })();
-                                }
-                                : null
-                        }
-                        onTest={() => void runDryRun()}
-                        onFocusStep={(step) => dispatch({ type: 'select', step })}
-                        dispatch={dispatch}
-                    />
+                    <AuInspectorDock
+                        width={inspectWidth}
+                        collapsed={inspectCollapsed}
+                        onWidth={resizeInspector}
+                        onToggle={toggleInspector}
+                    >
+                        <AuInspector
+                            draft={draft}
+                            problems={problems}
+                            pairs={pairs}
+                            now={now}
+                            terminals={terminals}
+                            terminalsError={terminalsError}
+                            terminalsLoading={terminalsLoading}
+                            report={report}
+                            onRearm={
+                                draft.rule.id.length > 0
+                                    ? () => {
+                                        void (async () => {
+                                            try {
+                                                await api?.rearmAutomation?.(draft.rule.id, null);
+                                                await onChanged();
+                                                toast('Re-armed — it can fire again on the next crossing.', 'success');
+                                            } catch (e) {
+                                toast(`Could not re-arm: ${redactWebhookError(e)}`, 'error');
+                                            }
+                                        })();
+                                    }
+                                    : null
+                            }
+                            onTest={() => void runDryRun()}
+                            onFocusStep={selectStep}
+                            dispatch={dispatch}
+                        />
+                    </AuInspectorDock>
                 </div>
 
             </div>
