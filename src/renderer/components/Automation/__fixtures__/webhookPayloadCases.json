@@ -29,6 +29,18 @@
       "provider": "discord",
       "message": "quote: \"; slash: \\; newline:\n{\"injected\":true}",
       "expected": "{\"content\":\"quote: \\\"; slash: \\\\; newline:\\n{\\\"injected\\\":true}\"}"
+    },
+    {
+      "name": "slack escapes JSON syntax inside a message",
+      "provider": "slack",
+      "message": "quote: \"; slash: \\; newline:\n{\"injected\":true}",
+      "expected": "{\"text\":\"quote: \\\"; slash: \\\\; newline:\\n{\\\"injected\\\":true}\"}"
+    },
+    {
+      "name": "teams escapes JSON syntax inside a message",
+      "provider": "teams",
+      "message": "quote: \"; slash: \\; newline:\n{\"injected\":true}",
+      "expected": "{\"@context\":\"http://schema.org/extensions\",\"@type\":\"MessageCard\",\"text\":\"quote: \\\"; slash: \\\\; newline:\\n{\\\"injected\\\":true}\"}"
     }
   ]
 }

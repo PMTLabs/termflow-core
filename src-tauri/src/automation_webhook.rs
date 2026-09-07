@@ -247,8 +247,8 @@ mod tests {
     }
 
     /// The renderer preview has its own implementation, so the exact bytes for every provider live
-    /// in one fixture both sides read. `payload` stays private to this module in production; this
-    /// dry-run producer calls it too, so the preview and sender cannot drift on payload bytes.
+    /// in one fixture both sides read. The sender and dry-run producer share `payload`, so they
+    /// cannot drift on payload bytes either.
     #[test]
     fn payload_matches_the_shared_fixture() {
         #[derive(serde::Deserialize)]
@@ -267,7 +267,7 @@ mod tests {
             "../../src/renderer/components/Automation/__fixtures__/webhookPayloadCases.json"
         );
         let fixture: Fixture = serde_json::from_str(raw).expect("the shared payload fixture parses");
-        assert_eq!(fixture.cases.len(), 5, "all provider and escaping cases stay covered");
+        assert_eq!(fixture.cases.len(), 7, "all provider and escaping cases stay covered");
 
         for case in fixture.cases {
             let actual = String::from_utf8(payload(case.provider, &case.message))

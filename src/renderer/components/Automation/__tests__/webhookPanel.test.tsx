@@ -113,7 +113,7 @@ describe('the webhook inspector', () => {
     });
 
     it('previewWebhookPayload matches the shared fixture', () => {
-        expect(payloadCases).toHaveLength(5);
+        expect(payloadCases).toHaveLength(7);
         for (const payloadCase of payloadCases) {
             expect(previewWebhookPayload(payloadCase.provider, payloadCase.message))
                 .toBe(payloadCase.expected);
