@@ -1059,6 +1059,21 @@
 
 .au-editor .au-radio,
 .au-editor .au-checkrow {
+    /*
+     * The height of the FIRST line's box — `font-size` x `line-height`, both stated just below.
+     * (Kept a separate declaration rather than becoming the `line-height` itself: as a length it
+     * would inherit into `.au-rsub`, whose smaller font-size currently derives its own leading from
+     * the unitless 1.45.)
+     *
+     * The marks centre on THIS, not on the row. `align-items: flex-start` is right — most of these
+     * rows carry a second, smaller line, and centring the whole block puts the control halfway down
+     * a two-line paragraph — but on its own it pins the mark's TOP to the text's top, which sits it
+     * visibly above the title's centre. That is what this row is for.
+     *
+     * In `rem`, deliberately: `.au-cmark` sets its own `font-size`, so an `em` here would resolve
+     * against 0.75rem for the checkbox and 0.9rem for the radio and quietly disagree.
+     */
+    --au-rowline: calc(0.9rem * 1.45);
     display: flex;
     align-items: flex-start;
     gap: 8px;
@@ -1093,7 +1108,9 @@
     flex: 0 0 auto;
     width: 12px;
     height: 12px;
-    margin-top: 2px;
+    /* Centred on the title's line box. `box-sizing: border-box` is global, so 12px is the whole
+       mark including its border. */
+    margin-top: calc((var(--au-rowline) - 12px) / 2);
     border: 1.5px solid #59606b;
     border-radius: 50%;
 }
@@ -1125,7 +1142,8 @@
     height: 13px;
     display: grid;
     place-items: center;
-    margin-top: 1px;
+    /* As `.au-rmark`, for a 13px box. */
+    margin-top: calc((var(--au-rowline) - 13px) / 2);
     font-size: 0.75rem;
     color: transparent;
     border: 1.5px solid #59606b;
