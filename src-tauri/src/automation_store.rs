@@ -2881,8 +2881,8 @@ mod tests {
 
     #[test]
     fn a_v1_rule_still_round_trips_byte_for_byte() {
-        let v1 = r#"{"kind":"number","op":"gt","threshold":25.0}"#;
-        assert_eq!(serde_json::to_string(&serde_json::from_str::<CondStep>(v1).unwrap()).unwrap(), v1);
+        let v1 = r#"{"monitor":{"read":"newOutput","cadence":"onOutput","everyMs":0},"parse":{"preset":"custom","literal":null,"find":"ctx:(\\d+)%","keep":"brackets"},"cond":{"kind":"number","op":"gt","threshold":25.0},"timer":null,"action":{"message":"prepare to do context-hand-off","sendTo":"matched","submit":true,"cliType":"default","substitute":false}}"#;
+        assert_eq!(serde_json::to_string(&serde_json::from_str::<AutomationGraph>(v1).unwrap()).unwrap(), v1);
     }
 
     // -- §10.14b ------------------------------------------------------------------------------
