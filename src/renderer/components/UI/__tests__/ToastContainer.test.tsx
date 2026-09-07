@@ -20,6 +20,10 @@ jest.mock('../ToastContainer.css', () => ({}));
 
 // eslint-disable-next-line import/first
 import { ToastContainer } from '../ToastContainer';
+import {
+    clearAutomationEditorGuard,
+    registerAutomationEditorGuard,
+} from '../../../services/automationEditorGuard';
 
 function makeStore() {
     return configureStore({ reducer: { ui: uiReducer } });
@@ -298,6 +302,35 @@ describe('ToastContainer — collapsed stack', () => {
             store.dispatch(addToast({ message: 'hi', sticky: true }));
         });
         expect(toastRoot().classList.contains('toast-container--canvas')).toBe(true);
+    });
+
+    /*
+     * The automation editor is a 95vw x 95vh dialog whose header holds Enabled, Test, Save and
+     * Delete, directly under the toasts' default corner. A toast is transient, so the second of two
+     * clicks aimed at one lands on the control it was covering.
+     *
+     * Driven through `registerAutomationEditorGuard`, which is what the editor itself calls on
+     * mount, rather than through the open-request host: the Settings page opens its editor without
+     * touching that host, so a test keyed on the host would pass while one of the two homes stayed
+     * broken.
+     */
+    it('moves out of the toast corner the automation editor needs, while one is mounted', () => {
+        const store = makeStore();
+        mount(store);
+        addSticky(store, 'solo');
+        expect(toastRoot().classList.contains('toast-container--automation')).toBe(false);
+
+        act(() => {
+            registerAutomationEditorGuard({
+                isDirty: () => false,
+                save: () => Promise.resolve(true),
+                discard: () => {},
+            });
+        });
+        expect(toastRoot().classList.contains('toast-container--automation')).toBe(true);
+
+        act(() => clearAutomationEditorGuard());
+        expect(toastRoot().classList.contains('toast-container--automation')).toBe(false);
     });
 
     it('shows a relative "time ago" label that updates as time passes', () => {

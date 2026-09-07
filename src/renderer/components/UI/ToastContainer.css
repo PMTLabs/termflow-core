@@ -17,6 +17,26 @@
   top: 96px;
 }
 
+/*
+ * The automation editor is a 95vw x 95vh dialog, so there is no margin to hide in: a toast at the
+ * default top-right sits on the editor's own header, over Enabled / Test / Save / Delete. A toast
+ * is transient, so the second of two clicks aimed at one lands on the control it was covering.
+ *
+ * Bottom-LEFT is the corner with nothing to hit: the palette rail ends in the *This rule* summary,
+ * which is text. (When the activity drawer is open it reaches this corner — the drawer is opened
+ * deliberately and closed again, and nothing in its bottom-left is destructive.)
+ *
+ * Declared AFTER `--canvas` and overriding all four offsets, not just `top`: the editor can be
+ * opened from Canvas Mode, so both modifiers can be on the same element, and equal specificity
+ * makes source order the tie-break.
+ */
+.toast-container--automation {
+  top: auto;
+  right: auto;
+  bottom: 24px;
+  left: 24px;
+}
+
 .toast-stack {
   display: flex;
   flex-direction: column;

@@ -40,12 +40,37 @@ export interface AutomationEditorGuard {
 
 let guard: AutomationEditorGuard | null = null;
 
+/**
+ * Subscribers to `isAutomationEditorMounted()`, so a surface OUTSIDE the editor can move out of its
+ * way while it is open — `ToastContainer` does, because the editor's own header controls sit exactly
+ * where the toasts land.
+ *
+ * Separate from the emit in `automationEditorHost.ts`: that one announces which rule was REQUESTED,
+ * and the Settings page's editor is not opened through it at all. Mount is the honest signal for
+ * "an editor is on screen", because it is the editor itself that registers, so both of its homes
+ * are covered without either caller having to remember to say so.
+ */
+const mountedListeners = new Set<() => void>();
+
+function emitMounted(): void {
+    mountedListeners.forEach((listener) => listener());
+}
+
+export function subscribeAutomationEditorMounted(listener: () => void): () => void {
+    mountedListeners.add(listener);
+    return () => {
+        mountedListeners.delete(listener);
+    };
+}
+
 export function registerAutomationEditorGuard(g: AutomationEditorGuard): void {
     guard = g;
+    emitMounted();
 }
 
 export function clearAutomationEditorGuard(): void {
     guard = null;
+    emitMounted();
 }
 
 export function isAutomationEditorDirty(): boolean {
