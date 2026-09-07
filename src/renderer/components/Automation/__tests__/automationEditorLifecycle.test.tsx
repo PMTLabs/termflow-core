@@ -450,16 +450,18 @@ describe('the editor, mounted', () => {
 
     it('asks the roster for the draft exception criterion, not the saved rule alone', async () => {
         const api = await openEditorOn(rule({ criterion: 'allTerminals' }));
-        const exception = editor()!.querySelector<HTMLSelectElement>(
+        const exception = editor()!.querySelector<HTMLButtonElement>(
             '[aria-label="What the exception must match"]',
         )!;
 
+        // `AuSelect`, not a `<select>`: its list portals to `body` and commits on `mousedown`, so
+        // the row is opened and clicked rather than having a value assigned to it.
+        await act(async () => { exception.click(); });
+        const row = document.body.querySelector<HTMLElement>(
+            '.au-selmenu[aria-label="What the exception must match"] [data-value="commandContains"]',
+        )!;
         await act(async () => {
-            const setter = Object.getOwnPropertyDescriptor(
-                window.HTMLSelectElement.prototype, 'value',
-            )!.set!;
-            setter.call(exception, 'commandContains');
-            exception.dispatchEvent(new Event('change', { bubbles: true }));
+            row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
         });
         await settle();
 

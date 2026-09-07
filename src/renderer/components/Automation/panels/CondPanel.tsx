@@ -47,6 +47,7 @@ import type { ClauseCaptures, Truth } from '../automationClauseTruth';
 import { automationRowState, describeLastFired } from '../../Settings/Automations/automationState';
 import { AuField, AuHelp, AuRadio } from './AuFields';
 import { sampleFromPattern } from './ActionPanel';
+import { AuSelect } from '../AuSelect';
 
 export interface CondPanelProps {
     draft: AutomationDraft;
@@ -314,51 +315,44 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                             // eslint-disable-next-line react/no-array-index-key
                             <div className="au-clause" key={i}>
                                 <div className="au-crow">
-                                    <select
-                                        className="au-finput"
-                                        aria-label="Which captured value"
+                                    <AuSelect
+                                        ariaLabel="Which captured value"
                                         value={sourceKey(clause.source)}
-                                        onChange={(e) =>
-                                            updateClause(i, { source: sourceFromKey(e.target.value) })}
-                                    >
-                                        {tokens.map((t) => (
-                                            <option key={t.key} value={t.key}>
-                                                {t.label}
-                                            </option>
-                                        ))}
-                                        {/* A clause can carry a token the pattern no longer produces — a
-                                            group removed after the clause was written. It stays selected
-                                            (never silently swapped for `$0`) so the pattern-vs-clause
-                                            mismatch is what `cond.unknownToken` reports, not something
-                                            this dropdown quietly hid. */}
-                                        {!tokens.some((t) => t.key === sourceKey(clause.source)) && (
-                                            <option value={sourceKey(clause.source)}>
-                                                {sourceText(clause.source)}
-                                            </option>
-                                        )}
-                                    </select>
-                                    <select
-                                        className="au-finput"
-                                        aria-label="How to compare"
+                                        options={[
+                                            ...tokens.map((t) => ({ value: t.key, label: t.label })),
+                                            /* A clause can carry a token the pattern no longer produces — a
+                                               group removed after the clause was written. It stays selected
+                                               (never silently swapped for `$0`) so the pattern-vs-clause
+                                               mismatch is what `cond.unknownToken` reports, not something
+                                               this dropdown quietly hid. */
+                                            ...(tokens.some((t) => t.key === sourceKey(clause.source))
+                                                ? []
+                                                : [{
+                                                    value: sourceKey(clause.source),
+                                                    label: sourceText(clause.source),
+                                                }]),
+                                        ]}
+                                        onChange={(value) =>
+                                            updateClause(i, { source: sourceFromKey(value) })}
+                                    />
+                                    <AuSelect
+                                        ariaLabel="How to compare"
                                         value={opKeyOf(clause.test)}
-                                        onChange={(e) =>
-                                            updateClause(i, { test: withOp(clause.test, e.target.value) })}
-                                    >
-                                        <optgroup label="Text">
-                                            {TEXT_OPS.map((op) => (
-                                                <option key={op} value={`text:${op}`}>
-                                                    {TEXT_OP_LABELS[op]}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                        <optgroup label="Number">
-                                            {NUM_OPS.map((op) => (
-                                                <option key={op} value={`number:${op}`}>
-                                                    {NUM_OP_LABELS[op]}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                    </select>
+                                        options={[
+                                            ...TEXT_OPS.map((op) => ({
+                                                value: `text:${op}`,
+                                                label: TEXT_OP_LABELS[op],
+                                                group: 'Text',
+                                            })),
+                                            ...NUM_OPS.map((op) => ({
+                                                value: `number:${op}`,
+                                                label: NUM_OP_LABELS[op],
+                                                group: 'Number',
+                                            })),
+                                        ]}
+                                        onChange={(value) =>
+                                            updateClause(i, { test: withOp(clause.test, value) })}
+                                    />
                                     {valueNeeded ? (
                                         <input
                                             className="au-finput"

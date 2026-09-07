@@ -1796,3 +1796,83 @@
     font-size: 0.8rem;
     color: #6a6e77;
 }
+
+/* ------------------------------------------------------------------ AuSelect --- */
+
+/*
+ * `.au-sel` is the trigger and keeps `.au-finput`'s box, so it drops into the layouts the
+ * `<select>`s it replaces already sat in.
+ *
+ * `.au-selmenu` is NOT namespaced under `.au-editor`, which every other rule in this file is. It
+ * cannot be: the list portals to `body` so that neither the inspector column's `overflow-y: auto`
+ * nor `.au-modal`'s `overflow: hidden` can clip it, and a descendant selector would then match
+ * nothing. Its own `au-` prefix is what keeps it from colliding.
+ *
+ * z-index sits in the stack this file's header documents: above the editor's 9990, below the 9999
+ * a ConfirmDialog opened over it needs.
+ */
+.au-editor .au-sel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.au-editor .au-seltext {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.au-editor .au-selchev {
+    flex: 0 0 auto;
+    color: #7d818c;
+}
+
+.au-selmenu {
+    position: fixed;
+    z-index: 9995;
+    overflow-y: auto;
+    padding: 4px;
+    background: #1c1d22;
+    border: 1px solid #3a3c44;
+    border-radius: 7px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    font-size: 0.95rem;
+    color: #cfd2d8;
+}
+
+.au-selopt {
+    padding: 6px 9px;
+    border-radius: 5px;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.au-selopt.on {
+    color: #fff;
+}
+
+/* Hover and keyboard share ONE highlight: `onMouseEnter` moves `active`, so a pointer and the
+   arrow keys cannot disagree about which row is about to be chosen. */
+.au-selopt.active {
+    background: #2c2f37;
+    color: #fff;
+}
+
+.au-selgroup {
+    padding: 6px 9px 3px;
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #7d818c;
+}
+
+.au-selopt.dead {
+    color: #6b6f78;
+    cursor: not-allowed;
+}

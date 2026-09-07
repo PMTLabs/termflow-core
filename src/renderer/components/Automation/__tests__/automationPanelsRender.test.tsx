@@ -752,16 +752,34 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         expect(group!.getAttribute('aria-label')).toMatch(/combine/i);
     });
 
+    /**
+     * `AuSelect` replaced the panels' `<select>`s (its list portals to `body` so the window edge
+     * cannot clip it), so a dropdown is opened before its rows exist and each row carries its key in
+     * `data-value` rather than in an `<option>`'s `value`.
+     */
+    const openSelect = async (label: string) => {
+        const trigger = container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+        // ENSURE open, never toggle: the trigger flips state, and a re-render inside one test keeps
+        // the component instance, so a second blind click closed the list and read back no rows.
+        if (trigger.getAttribute('aria-expanded') === 'true') return;
+        await act(async () => { trigger.click(); });
+    };
+    const rowsOf = (label: string) => [...document.body.querySelectorAll<HTMLElement>(
+        `.au-selmenu[aria-label="${label}"] .au-selopt`,
+    )];
+    const pickRow = async (label: string, match: RegExp) => {
+        const row = rowsOf(label).find((el) => match.test(el.textContent ?? ''))!;
+        expect(row).toBeTruthy();
+        await act(async () => {
+            row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        });
+    };
+
     it('clears the operand when a row switches between text and number', async () => {
         const dispatch = jest.fn();
         await renderCond([clause('$1', 'is', '529')], { dispatch });
-        const opSelect = container.querySelector<HTMLSelectElement>('[aria-label="How to compare"]')!;
-        const overOption = [...opSelect.options].find((o) => /is over/i.test(o.textContent ?? ''))!;
-        expect(overOption).toBeTruthy();
-        await act(async () => {
-            opSelect.value = overOption.value;
-            opSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        });
+        await openSelect('How to compare');
+        await pickRow('How to compare', /is over/i);
         expect(dispatch).toHaveBeenCalledTimes(1);
         const action = dispatch.mock.calls[0][0] as { type: string; clauses: AutomationClause[] };
         expect(action.type).toBe('clauses');
@@ -791,8 +809,8 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
 
     it('offers only tokens the pattern actually produces', async () => {
         await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
-        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
-        const opts = [...select.options].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const opts = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         expect(opts).toHaveLength(2);
         expect(opts[0]).toContain('$0');
         expect(opts[1]).toContain('$1');
@@ -810,8 +828,8 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
      */
     it('offers the pattern\'s named groups as well as its numbered ones', async () => {
         await renderCond([clause('$1', 'is', 'x')], { find: 'err (?<code>\\d+) (?<why>\\w+)' });
-        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
-        const opts = [...select.options].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const opts = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         // Each option carries the value it holds in the live preview (§5.9), so `${why}` is never
         // picked blind — `sayPattern`'s own worked example for this pattern is `err 63 abc`.
         expect(opts).toEqual([
@@ -822,7 +840,7 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
             '${why} — "abc"',
         ]);
         // And the VALUES are the keys `sourceFromKey` round-trips, not the labels.
-        expect([...select.options].map((o) => o.value)).toEqual([
+        expect(rowsOf('Which captured value').map((o) => o.getAttribute('data-value'))).toEqual([
             'whole',
             'group:1',
             'group:2',
@@ -835,8 +853,9 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         // The paired negative: an unconditional `${…}` row, or one built from a stale name set,
         // would satisfy the test above and break this.
         await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
-        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
-        expect([...select.options].map((o) => o.value)).toEqual(['whole', 'group:1']);
+        await openSelect('Which captured value');
+        expect(rowsOf('Which captured value').map((o) => o.getAttribute('data-value')))
+            .toEqual(['whole', 'group:1']);
     });
 
     /* ------------------------------------------------------ task 28: §5.9's other two bullets --- */
@@ -849,17 +868,15 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
 
     it('shows what $0 holds, and keeps its words when there is nothing to show', async () => {
         await renderCond([clause('$1', 'is', 'x')], { find: 'ctx:(\\d+)%' });
-        const opts = [...container.querySelectorAll<HTMLOptionElement>(
-            '[aria-label="Which captured value"] option',
-        )].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const opts = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         expect(opts).toEqual(['$0 — "ctx:63%"', '$1 — "63"']);
 
         // …and a pattern with no worked example to read falls back to the words, never to a blank
         // or an invented value.
         await renderCond([clause('$1', 'is', 'x')], { find: 'FAILED (\\d+) tests in (\\S+)' });
-        const bare = [...container.querySelectorAll<HTMLOptionElement>(
-            '[aria-label="Which captured value"] option',
-        )].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const bare = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         expect(bare).toEqual(['$0 — the whole match', '$1', '$2']);
     });
 

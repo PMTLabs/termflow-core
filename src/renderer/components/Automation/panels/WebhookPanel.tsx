@@ -12,6 +12,7 @@ import { compilePattern, groupsOf } from '../automationValidation';
 import { previewSubstitute } from '../automationTokens';
 import { sampleFromPattern } from './ActionPanel';
 import { AuCheck, AuField, AuHelp } from './AuFields';
+import { AuSelect } from '../AuSelect';
 
 export interface WebhookPanelProps {
     draft: AutomationDraft;
@@ -89,20 +90,20 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
     return (
         <>
             <AuField label="Provider">
-                <select
-                    className="au-finput"
-                    aria-label="Webhook provider"
+                <AuSelect
+                    ariaLabel="Webhook provider"
                     value={webhook.provider}
-                    onChange={(e) => dispatch({
+                    options={[
+                        { value: 'discord', label: 'Discord' },
+                        { value: 'slack', label: 'Slack' },
+                        { value: 'teams', label: 'Microsoft Teams' },
+                        { value: 'custom', label: 'Custom JSON' },
+                    ]}
+                    onChange={(value) => dispatch({
                         type: 'webhook',
-                        patch: { provider: e.target.value as AutomationWebhookProvider },
+                        patch: { provider: value as AutomationWebhookProvider },
                     })}
-                >
-                    <option value="discord">Discord</option>
-                    <option value="slack">Slack</option>
-                    <option value="teams">Microsoft Teams</option>
-                    <option value="custom">Custom JSON</option>
-                </select>
+                />
             </AuField>
 
             <AuField label="Webhook URL">

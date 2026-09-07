@@ -15,6 +15,7 @@ import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { AuTerminalPicker } from '../AuTerminalPicker';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
+import { AuSelect } from '../AuSelect';
 
 const CRITERIA: Array<{ id: AutomationCriterion; label: string }> = [
     { id: 'commandContains', label: 'Command contains' },
@@ -98,23 +99,17 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                 <>
                     <AuField label="Rule">
                         <div className="au-frow">
-                            <select
-                                className="au-finput"
+                            <AuSelect
                                 style={{ flex: 1.15 }}
-                                aria-label="What the terminals must match"
+                                ariaLabel="What the terminals must match"
                                 value={rule.criterion}
-                                onChange={(e) =>
+                                options={CRITERIA.map((c) => ({ value: c.id, label: c.label }))}
+                                onChange={(value) =>
                                     dispatch({
                                         type: 'criterion',
-                                        criterion: e.target.value as AutomationCriterion,
+                                        criterion: value as AutomationCriterion,
                                     })}
-                            >
-                                {CRITERIA.map((c) => (
-                                    <option key={c.id} value={c.id}>
-                                        {c.label}
-                                    </option>
-                                ))}
-                            </select>
+                            />
                             {rule.criterion !== 'allTerminals' && (
                                 <input
                                     className="au-finput"
@@ -151,26 +146,22 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
 
                     <AuField label="… and anything matching this exception">
                         <div className="au-frow">
-                            <select
-                                className="au-finput"
+                            <AuSelect
                                 style={{ flex: 1.15 }}
-                                aria-label="What the exception must match"
+                                ariaLabel="What the exception must match"
                                 value={rule.excludeCriterion ?? ''}
-                                onChange={(e) =>
+                                options={[
+                                    { value: '', label: 'No matching exception' },
+                                    ...CRITERIA.map((c) => ({ value: c.id, label: c.label })),
+                                ]}
+                                onChange={(value) =>
                                     dispatch({
                                         type: 'excludeCriterion',
-                                        criterion: e.target.value === ''
+                                        criterion: value === ''
                                             ? null
-                                            : e.target.value as AutomationCriterion,
+                                            : value as AutomationCriterion,
                                     })}
-                            >
-                                <option value="">No matching exception</option>
-                                {CRITERIA.map((c) => (
-                                    <option key={c.id} value={c.id}>
-                                        {c.label}
-                                    </option>
-                                ))}
-                            </select>
+                            />
                             {rule.excludeCriterion != null
                                 && rule.excludeCriterion !== 'allTerminals' && (
                                 <input
@@ -258,30 +249,27 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                 />
                 {monitor.cadence === 'timer' && (
                     <div className="au-frow" style={{ marginTop: 8 }}>
-                        <select
-                            className="au-finput"
-                            aria-label="How often to check"
-                            value={monitor.everyMs}
-                            onChange={(e) =>
+                        <AuSelect
+                            ariaLabel="How often to check"
+                            value={String(monitor.everyMs)}
+                            options={[
+                                /* A stored interval that is not on the list — an older rule, or one
+                                   written by a script — keeps its own row rather than being silently
+                                   snapped to the nearest offered value. */
+                                ...(INTERVALS.some((i) => i.ms === monitor.everyMs)
+                                    ? []
+                                    : [{
+                                        value: String(monitor.everyMs),
+                                        label: `Every ${Math.round(monitor.everyMs / 1000)} seconds`,
+                                    }]),
+                                ...INTERVALS.map((i) => ({ value: String(i.ms), label: i.label })),
+                            ]}
+                            onChange={(value) =>
                                 dispatch({
                                     type: 'monitor',
-                                    patch: { everyMs: Number(e.target.value) },
+                                    patch: { everyMs: Number(value) },
                                 })}
-                        >
-                            {/* A stored interval that is not on the list — an older rule, or one
-                                written by a script — keeps its own row rather than being silently
-                                snapped to the nearest offered value. */}
-                            {!INTERVALS.some((i) => i.ms === monitor.everyMs) && (
-                                <option value={monitor.everyMs}>
-                                    Every {Math.round(monitor.everyMs / 1000)} seconds
-                                </option>
-                            )}
-                            {INTERVALS.map((i) => (
-                                <option key={i.ms} value={i.ms}>
-                                    {i.label}
-                                </option>
-                            ))}
-                        </select>
+                        />
                     </div>
                 )}
             </AuField>
