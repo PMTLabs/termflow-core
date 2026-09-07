@@ -1180,6 +1180,19 @@
     gap: 5px;
 }
 
+/*
+ * The token chips sat flush against the message box above them, reading as part of its border.
+ * `6px` is `.au-fhelp`'s gap, which is the same relationship: a row that explains the control above it.
+ *
+ * Deliberately `.au-finput + `, not `.au-tokens` on its own. Three panels use this row, and only two
+ * of them put it under an input — in `ParsePanel` it is the field's FIRST child, directly after
+ * `.au-flabel`, which already carries `margin-bottom: 6px`. An unqualified rule would fix the two
+ * that touch and silently double the gap on the third.
+ */
+.au-editor .au-finput + .au-tokens {
+    margin-top: 6px;
+}
+
 .au-editor .au-token {
     padding: 4px 9px;
     font-size: 0.85rem;
