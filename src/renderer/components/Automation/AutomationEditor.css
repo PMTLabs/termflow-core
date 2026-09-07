@@ -186,7 +186,26 @@
     color: #ffaea8;
 }
 
+/*
+ * Self-contained on purpose (`display`/hover backgrounds included, not left for the cascade to
+ * find), the same invariant `GlobalAutomationEditor`'s own header comment states for this file:
+ * the dialog "inherits nothing from the panel that is not on screen." `AutomationsPanel.css`
+ * declares its OWN unscoped `.au-btn`/`.au-btn.primary`/`.au-btn.primary:hover` — unscoped
+ * because it targets the Settings list row's buttons, but a plain class selector matches this
+ * dialog's buttons too the instant that stylesheet is loaded anywhere in the app, which is always
+ * (webpack injects CSS once, not per-component). Two symptoms of the one cause were live at once:
+ * - `.au-btn { display: inline-flex; align-items: center }` there, with no `justify-content`, was
+ *   the ONLY rule setting `display` at all — this file never had — so it won uncontested and left
+ *   Save's label at flex-start instead of the `text-align: center` below being able to touch it.
+ * - `.au-btn.primary` and `.au-editor .au-btn.primary` tie in specificity for the base (green)
+ *   colour, so the 3-class selector here always won there — but `.au-btn.primary:hover` (also 3
+ *   classes) ties AGAINST the *base* rule during hover, not against a hover rule of its own, and a
+ *   tie is decided by bundle order: Save read green while idle and blue only while hovered.
+ */
 .au-editor .au-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     padding: 5px 11px;
     font-size: 0.9rem;
     color: #cccccc;
@@ -197,6 +216,7 @@
 }
 
 .au-editor .au-btn:hover:not(:disabled) {
+    background: #2b2d34;
     border-color: #5a5d68;
     color: #fff;
 }
@@ -211,15 +231,34 @@
     font-size: 0.85rem;
 }
 
+/* Blue, not green — one accent for every primary action in the app, and one state whichever way
+   it's touched, matching `AutomationsPanel.css`'s own `.au-btn.primary` colours rather than
+   inventing a second "primary" for this dialog alone. */
 .au-editor .au-btn.primary {
-    background: #2f6b39;
-    border-color: #3d8a4a;
+    background: #007acc;
+    border-color: #007acc;
     color: #fff;
+    /* `Save` -> `Saving…` is wider, and this is the last thing in the header before the edge — a
+       width that follows the label pushed Cancel/Delete/Duplicate/Test left and back on every
+       click, the toolbar visibly jumping. Measured in headless Chromium at the app's own font
+       stack (-apple-system/Segoe UI, 0.9rem): "Saving…" needs ~5.72em against "Save"'s ~3.5em,
+       so 6em covers the longer label plus its own padding with a little headroom, and the box
+       never changes size. */
+    min-width: 6em;
+}
+
+.au-editor .au-btn.primary:hover:not(:disabled) {
+    background: #1b8ad6;
+    border-color: #1b8ad6;
 }
 
 .au-editor .au-btn.danger {
     color: #ffaea8;
     border-color: #6e2b28;
+}
+
+.au-editor .au-btn.danger:hover:not(:disabled) {
+    background: rgba(248, 81, 73, 0.16);
 }
 
 /* -------------------------------------------------------------------- body --- */

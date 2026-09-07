@@ -833,6 +833,12 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                     >
                         Delete
                     </button>
+                    {/* Same exit as the ✕: `requestClose` already asks before discarding unsaved
+                        changes, so a second implementation here would be a second place for that
+                        guard to drift out of sync with. */}
+                    <button type="button" className="au-btn" onClick={requestClose}>
+                        Cancel
+                    </button>
                     <button
                         type="button"
                         className="au-btn primary"

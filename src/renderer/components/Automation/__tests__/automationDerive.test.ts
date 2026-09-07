@@ -612,6 +612,24 @@ describe('automationDerive — the palette summary', () => {
         expect(summary).toContain(sentence.subject);
         expect(sentence.subject).toBe('09:00 on weekdays');
     });
+
+    /**
+     * The Wait step's own clause landed in `describeRule` (§6.2) but not in `ruleSummary` — the
+     * two read the SAME `delayClause(timer)`, so a rule that waits must say so on both surfaces,
+     * exactly as `ruleSentenceBothSurfaces.test.tsx` pins for the list row and the gallery card.
+     */
+    it('names the wait step in the rail summary, same words as the Settings row', () => {
+        const base = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const rule = {
+            ...base,
+            graph: { ...base.graph, timer: { mode: { afterMatch: { delayMs: 30_000 } } } },
+        };
+
+        const summary = ruleSummary(rule);
+        const sentence = describeRule(rule);
+        expect(sentence.waitClause).toBe('wait 30 seconds');
+        expect(summary).toContain(sentence.waitClause as string);
+    });
 });
 
 /**

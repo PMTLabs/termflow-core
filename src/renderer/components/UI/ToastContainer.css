@@ -22,19 +22,20 @@
  * default top-right sits on the editor's own header, over Enabled / Test / Save / Delete. A toast
  * is transient, so the second of two clicks aimed at one lands on the control it was covering.
  *
- * Bottom-LEFT is the corner with nothing to hit: the palette rail ends in the *This rule* summary,
- * which is text. (When the activity drawer is open it reaches this corner — the drawer is opened
- * deliberately and closed again, and nothing in its bottom-left is destructive.)
+ * Bottom-CENTER is the edge with nothing to hit: the canvas floor, below every node and below the
+ * palette/inspector rails on either side.
  *
  * Declared AFTER `--canvas` and overriding all four offsets, not just `top`: the editor can be
  * opened from Canvas Mode, so both modifiers can be on the same element, and equal specificity
- * makes source order the tie-break.
+ * makes source order the tie-break. `left: 50%` + `translateX(-50%)` centers it regardless of the
+ * stack's own width, which changes as toasts collapse into the summary chip.
  */
 .toast-container--automation {
   top: auto;
   right: auto;
   bottom: 24px;
-  left: 24px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .toast-stack {
@@ -202,6 +203,26 @@
   }
   to {
     transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* The bottom-center toast (.toast-container--automation) sits below its stack, not beside it, so
+   sliding in from the right — a leftover from the top-right/canvas positions — cut across the
+   canvas instead of rising out of the edge nothing is anchored to. Float up from the bottom
+   instead: `slideIn`'s `translateX` would otherwise win the cascade since both rules share
+   specificity and this one is declared after it. */
+.toast-container--automation .toast-item {
+  animation-name: slideInUp;
+}
+
+@keyframes slideInUp {
+  from {
+    transform: translateY(16px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
     opacity: 1;
   }
 }

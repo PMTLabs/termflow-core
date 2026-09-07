@@ -670,9 +670,12 @@ export function ruleSummary(rule: AutomationRule): string {
     const monitor = stepValues(rule, 'monitor');
     const parse = stepValues(rule, 'parse');
     const cond = stepValues(rule, 'cond');
-    return `Watching ${monitor.terminals.text} · ${whenPhrase(rule, parse.find.text, cond)} · ${
-        destination.verb
-    } ${destination.message}`;
+    // Same clause `describeRule` reads for the list row (§1.1) — a Wait step between the condition
+    // and the send must not go unsaid on one surface while the other names it.
+    const wait = delayClause(timer);
+    return `Watching ${monitor.terminals.text} · ${whenPhrase(rule, parse.find.text, cond)}${
+        wait ? ` · ${wait}` : ''
+    } · ${destination.verb} ${destination.message}`;
 }
 
 /**
