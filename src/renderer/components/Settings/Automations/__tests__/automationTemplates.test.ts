@@ -1,10 +1,10 @@
 /**
- * §10.26 — the six built-in templates.
+ * §10.26 — the ten built-in templates.
  *
- * Exactly six, unique ids and titles, every draft pointed at **no terminals**, and each template's
+ * Exactly ten, unique ids and titles, every draft pointed at **no terminals**, and each template's
  * values different from every other's. That last one is the guard against the failure mode this
- * whole feature's design keeps circling: a table of six entries that are secretly one entry copied
- * six times, which passes every per-item assertion and ships a gallery of identical rules.
+ * whole feature's design keeps circling: a table of ten entries that are secretly one entry copied
+ * ten times, which passes every per-item assertion and ships a gallery of identical rules.
  *
  * *(Plan §10.26 says "empty `monitor.ids`". The DTO settled targeting as `rule.targetIds` — ids are
  * columns, not part of the graph blob — so that is the field asserted; the plan is corrected in
@@ -13,11 +13,17 @@
 import { AUTOMATION_TEMPLATES, blankDraft, draftFromTemplate } from '../automationTemplates';
 import type { AutomationTemplate } from '../automationTemplates';
 
+const byId = (id: string): AutomationTemplate => {
+    const template = AUTOMATION_TEMPLATES.find((t) => t.id === id);
+    if (!template) throw new Error(`Missing template: ${id}`);
+    return template;
+};
+
 describe('AUTOMATION_TEMPLATES', () => {
-    it('has exactly six, with unique ids and unique titles', () => {
-        expect(AUTOMATION_TEMPLATES).toHaveLength(6);
-        expect(new Set(AUTOMATION_TEMPLATES.map((t) => t.id)).size).toBe(6);
-        expect(new Set(AUTOMATION_TEMPLATES.map((t) => t.title)).size).toBe(6);
+    it('has exactly ten, with unique ids and unique titles', () => {
+        expect(AUTOMATION_TEMPLATES).toHaveLength(10);
+        expect(new Set(AUTOMATION_TEMPLATES.map((t) => t.id)).size).toBe(10);
+        expect(new Set(AUTOMATION_TEMPLATES.map((t) => t.title)).size).toBe(10);
     });
 
     it('names the fields you will change on every card', () => {
@@ -48,13 +54,19 @@ describe('AUTOMATION_TEMPLATES', () => {
     });
 
     it('gives each template its OWN pattern, comparison and message', () => {
-        const patterns = AUTOMATION_TEMPLATES.map((t) => t.rule.graph.parse.find);
-        const messages = AUTOMATION_TEMPLATES.map((t) => t.rule.graph.action.message);
-        expect(new Set(patterns).size).toBe(6);
-        expect(new Set(messages).size).toBe(6);
-        // At least one of each comparison shape, so the set is not six numeric rules wearing
+        const patterns = AUTOMATION_TEMPLATES.flatMap((t) => (
+            t.rule.graph.parse ? [t.rule.graph.parse.find] : []
+        ));
+        const messages = AUTOMATION_TEMPLATES.flatMap((t) => (
+            t.rule.graph.action ? [t.rule.graph.action.message] : []
+        ));
+        expect(new Set(patterns).size).toBe(8);
+        expect(new Set(messages).size).toBe(8);
+        // At least one of each comparison shape, so the set is not ten numeric rules wearing
         // different names.
-        const kinds = AUTOMATION_TEMPLATES.map((t) => t.rule.graph.cond.kind);
+        const kinds = AUTOMATION_TEMPLATES.flatMap((t) => (
+            t.rule.graph.cond ? [t.rule.graph.cond.kind] : []
+        ));
         expect(kinds).toContain('number');
         expect(kinds).toContain('text');
     });
@@ -63,47 +75,79 @@ describe('AUTOMATION_TEMPLATES', () => {
         // A template that ships an uncompilable pattern is a rule the engine refuses at load, and
         // the gallery would offer it anyway.
         for (const t of AUTOMATION_TEMPLATES) {
-            expect(() => new RegExp(t.rule.graph.parse.find)).not.toThrow();
+            if (t.rule.graph.parse) expect(() => new RegExp(t.rule.graph.parse.find)).not.toThrow();
         }
     });
 
     it('every numeric template captures a group, and every bracket-keeping one has one', () => {
         for (const t of AUTOMATION_TEMPLATES) {
-            if (t.rule.graph.parse.keep !== 'brackets') continue;
+            const parse = t.rule.graph.parse;
+            if (!parse || parse.keep !== 'brackets') continue;
             // `Keep: the number in brackets` reads capture group 1. Without a group the engine has
             // nothing to keep, and the save gate refuses it — so a template must not ship one.
-            expect(new RegExp(t.rule.graph.parse.find).exec('') === null).toBe(true);
-            expect(t.rule.graph.parse.find).toMatch(/\((?!\?)/);
+            expect(new RegExp(parse.find).exec('') === null).toBe(true);
+            expect(parse.find).toMatch(/\((?!\?)/);
         }
     });
 
     it('keeps the literal AND the escaped pattern for an exact-words template', () => {
         // Re-opening the rule must show the user's own text back, not `proceed\?`, which they would
         // then helpfully "fix".
-        const prompt = AUTOMATION_TEMPLATES.find((t) => t.id === 'prompt')!;
-        expect(prompt.rule.graph.parse.literal).toBe('Do you want to proceed?');
-        expect(prompt.rule.graph.parse.find).toBe('Do you want to proceed\\?');
+        const parse = byId('prompt').rule.graph.parse;
+        if (!parse) throw new Error('Prompt template needs a parse step');
+        expect(parse.literal).toBe('Do you want to proceed?');
+        expect(parse.find).toBe('Do you want to proceed\\?');
     });
 
     it('has exactly one template that deliberately does not press Enter', () => {
-        const quiet = AUTOMATION_TEMPLATES.filter((t) => !t.rule.graph.action.submit);
+        const quiet = AUTOMATION_TEMPLATES.filter((t) => t.rule.graph.action?.submit === false);
         expect(quiet.map((t) => t.id)).toEqual(['prompt']);
     });
 
+    it('builddiscord is webhook-only, with a Discord provider and a capturing pattern', () => {
+        const t = byId('builddiscord');
+        expect(t.rule.graph.action).toBeUndefined();
+        expect(t.rule.graph.webhook?.provider).toBe('discord');
+        expect(t.rule.graph.parse?.find).toMatch(/\\d/);
+        expect(t.rule.graph.webhook?.substitute).toBe(true);
+    });
+
+    it('backoff has BOTH destinations', () => {
+        const graph = byId('backoff').rule.graph;
+        expect(graph.action?.message).toBe('/wait 60');
+        expect(graph.webhook?.provider).toBe('teams');
+    });
+
+    it('nightly and settle cover both Wait modes, by id', () => {
+        expect(byId('nightly').rule.graph.timer?.mode).toEqual({
+            dailyAt: { minuteOfDay: 2 * 60, days: 0b0001_1111 },
+        });
+        expect(byId('settle').rule.graph.timer?.mode).toEqual({
+            afterMatch: { delayMs: 30_000 },
+        });
+    });
+
+    it('no template ships a real webhook URL', () => {
+        for (const t of AUTOMATION_TEMPLATES) expect(t.rule.graph.webhook?.url ?? '').toBe('');
+    });
+
     it('hands out a deep copy, so editing one draft cannot poison the next', () => {
-        const first = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const first = draftFromTemplate(byId('ctx'));
+        if (!first.graph.action) throw new Error('Context template needs an action step');
         first.graph.action.message = 'mutated';
         first.targetIds.push('tm-1');
-        const second = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
+        const second = draftFromTemplate(byId('ctx'));
+        if (!second.graph.action) throw new Error('Context template needs an action step');
         expect(second.graph.action.message).not.toBe('mutated');
         expect(second.targetIds).toEqual([]);
     });
 
     it('clones a template with no action without creating one', () => {
-        const { action: _action, ...graph } = AUTOMATION_TEMPLATES[0].rule.graph;
+        const base = byId('ctx');
+        const { action: _action, ...graph } = base.rule.graph;
         const withoutAction: AutomationTemplate = {
-            ...AUTOMATION_TEMPLATES[0],
-            rule: { ...AUTOMATION_TEMPLATES[0].rule, graph },
+            ...base,
+            rule: { ...base.rule, graph },
         };
 
         expect(() => draftFromTemplate(withoutAction)).not.toThrow();
@@ -124,11 +168,12 @@ describe('AUTOMATION_TEMPLATES', () => {
      * says nothing about a key the source has and the copy never mentions.
      */
     it('carries every graph field a rule can have, not just the four a template happens to set', () => {
-        const base = AUTOMATION_TEMPLATES[0];
+        const base = byId('ctx');
         const full: AutomationTemplate = {
             ...base,
             rule: {
                 ...base.rule,
+                excludedIds: ['tm-excluded'],
                 graph: {
                     ...base.rule.graph,
                     cond: {
@@ -140,6 +185,12 @@ describe('AUTOMATION_TEMPLATES', () => {
                     },
                     // The two the field-by-field rebuild dropped.
                     timer: { mode: { afterMatch: { delayMs: 30_000 } } },
+                    webhook: {
+                        provider: 'discord',
+                        url: '',
+                        body: 'Build failed — $1 red',
+                        substitute: true,
+                    },
                     layout: {
                         monitor: { x: 11, y: 12 },
                         parse: { x: 21, y: 22 },
@@ -157,12 +208,21 @@ describe('AUTOMATION_TEMPLATES', () => {
         // **And it is a COPY, which deep equality cannot see.** A nested member left shared with
         // the frozen module-level template satisfies both assertions above and still lets an
         // editor reach back into it — which is the entire reason this function exists.
-        clone.graph.timer!.mode = { afterMatch: { delayMs: 1 } };
-        clone.graph.layout!.monitor.x = 999;
-        clone.graph.cond!.clauses![0].test = { number: { op: 'gt', value: 1 } };
+        const { timer, webhook, layout, cond } = clone.graph;
+        const excludedIds = clone.excludedIds;
+        if (!timer || !webhook || !layout || !cond?.clauses || !excludedIds) {
+            throw new Error('Full graph clone lost a nested step');
+        }
+        timer.mode = { afterMatch: { delayMs: 1 } };
+        webhook.body = 'mutated';
+        layout.monitor.x = 999;
+        cond.clauses[0].test = { number: { op: 'gt', value: 1 } };
+        excludedIds.push('tm-another');
         expect(full.rule.graph.timer).toEqual({ mode: { afterMatch: { delayMs: 30_000 } } });
+        expect(full.rule.graph.webhook!.body).toBe('Build failed — $1 red');
         expect(full.rule.graph.layout!.monitor).toEqual({ x: 11, y: 12 });
         expect(full.rule.graph.cond!.clauses![0].test).toEqual({ number: { op: 'lt', value: 90 } });
+        expect(full.rule.excludedIds).toEqual(['tm-excluded']);
     });
 });
 
