@@ -492,6 +492,11 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         expect(dead).toEqual(['$2']);
     });
 
+    /**
+     * The patch carries `substitute: true` alongside the text, and that is the fix for a reported
+     * defect rather than an incidental extra field: a chip that inserted a reference into a message
+     * sent verbatim produced literal `$1` on the wire. See `tokenSubstitutionAffordance.test.tsx`.
+     */
     it('clicking a chip inserts it into the message at the cursor', async () => {
         const dispatch = jest.fn();
         const { messageInput } = await renderAction({ message: 'fix ', substitute: false }, { dispatch });
@@ -501,7 +506,10 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         const chip = [...container.querySelectorAll('.au-tokens .au-token')]
             .find((el) => el.textContent === '$1') as HTMLButtonElement;
         await act(async () => chip.click());
-        expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { message: 'fix $1' } });
+        expect(dispatch).toHaveBeenCalledWith({
+            type: 'action',
+            patch: { message: 'fix $1', substitute: true },
+        });
     });
 
     it('uses a braced token for group 10 and the next dead boundary, while leaving single digits bare', async () => {

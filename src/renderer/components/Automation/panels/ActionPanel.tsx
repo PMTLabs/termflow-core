@@ -19,7 +19,7 @@ import type { AutomationKeep, AutomationSendTo } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { SEND_PHRASES } from '../automationDerive';
-import { compilePattern, groupsOf } from '../automationValidation';
+import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
 import { previewSubstitute } from '../automationTokens';
 import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
@@ -135,14 +135,22 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
         { text: groupToken(groups.count + 1), dead: true },
         { text: '$$', dead: false },
     ];
+    // The tokens typed into the message that this pattern COULD fill in — see `resolvableTokens`.
+    // Only asked while substitution is off, the one state they can go out literal in.
+    const typed = substitute ? [] : resolvableTokens(action.message, parse?.find ?? '');
 
+    /**
+     * Insert a token **and turn substitution on**, in one patch — see `WebhookPanel`'s twin, where
+     * the mismatch was reported. The chips and the toggle disagreed: clicking `$1` inserted a
+     * reference into a message sent verbatim, so the rule typed the characters `$1`.
+     */
     function insertToken(token: string) {
         const el = messageRef.current;
         const value = action?.message ?? '';
         const start = el?.selectionStart ?? value.length;
         const end = el?.selectionEnd ?? value.length;
         const next = value.slice(0, start) + token + value.slice(end);
-        dispatch({ type: 'action', patch: { message: next } });
+        dispatch({ type: 'action', patch: { message: next, substitute: true } });
         const restoreCaret = () => {
             const input = messageRef.current;
             if (!input) return;
@@ -187,12 +195,24 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                         </>
                     ) : (
                         <>
-                            Click a token to insert it. With <b>Insert captured values</b> off,
-                            below, it types as the literal characters shown — turn that on to
-                            substitute a captured value instead.
+                            Click a token to insert it — that also turns on <b>Insert captured
+                            values</b> below, which is what resolves it.
                         </>
                     )}
                 </AuHelp>
+                {/*
+                  * The case the chips cannot fix, because the token was TYPED. Shown only when the
+                  * message actually names one while the toggle is off, so it stays silent for a
+                  * message that merely contains a dollar sign — and silent for `awk '{print $1}'`
+                  * only once that is what the user meant, which is what the toggle says.
+                  */}
+                {!substitute && typed.length > 0 && (
+                    <AuHelp warn>
+                        {typed.map((t) => t.text).join(', ')} will be typed as literal text.
+                        Turn on <b>Insert captured values</b> below to send what the pattern
+                        captured instead.
+                    </AuHelp>
+                )}
             </AuField>
 
             <AuCheck

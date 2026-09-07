@@ -8,7 +8,7 @@
 import React from 'react';
 import type { AutomationWebhookProvider } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
-import { compilePattern, groupsOf } from '../automationValidation';
+import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
 import { previewSubstitute } from '../automationTokens';
 import { sampleFromPattern } from './ActionPanel';
 import { AuCheck, AuField, AuHelp } from './AuFields';
@@ -78,13 +78,31 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
         { text: '$$', dead: false },
     ];
     const body = webhook.body;
+    // The tokens written in the body that this pattern COULD fill in — see `resolvableTokens`.
+    const typed = substitute ? [] : resolvableTokens(body, find);
 
+    /**
+     * Insert a token **and turn substitution on**, in one patch.
+     *
+     * The chips and the toggle used to disagree: clicking `$0` inserted a token into a body that
+     * was posted verbatim, so the value never left the rule and Discord showed the literal `$0`.
+     * Reported from a live build. A control whose whole purpose is to reference a captured value
+     * cannot leave the switch that resolves it off — that is an affordance for something the rule
+     * will not do.
+     *
+     * One patch rather than two dispatches, so the two fields can never land apart. The toggle is
+     * directly below and visibly moves, so this is not a hidden change of state; the off position
+     * is still one click away for a body that wants a literal `$`.
+     */
     function insertToken(token: string) {
         const el = bodyRef.current;
         const value = body;
         const start = el?.selectionStart ?? value.length;
         const end = el?.selectionEnd ?? value.length;
-        dispatch({ type: 'webhook', patch: { body: value.slice(0, start) + token + value.slice(end) } });
+        dispatch({
+            type: 'webhook',
+            patch: { body: value.slice(0, start) + token + value.slice(end), substitute: true },
+        });
     }
 
     return (
@@ -151,7 +169,30 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
                         </button>
                     ))}
                 </div>
-                <AuHelp>Click a token to insert it. <code>$$</code> writes a dollar sign.</AuHelp>
+                <AuHelp>
+                    {substitute ? (
+                        <>
+                            Click a token to insert it. <code>$$</code> writes a dollar sign.
+                        </>
+                    ) : (
+                        <>
+                            Click a token to insert it — that also turns on <b>Insert captured
+                            values</b> below, which is what resolves it.
+                        </>
+                    )}
+                </AuHelp>
+                {/*
+                  * The case the chips cannot fix, because the token was TYPED. Shown only when the
+                  * body actually names one while the toggle is off, so it never fires on a body
+                  * that simply contains a dollar sign.
+                  */}
+                {!substitute && typed.length > 0 && (
+                    <AuHelp warn>
+                        {typed.map((t) => t.text).join(', ')} will be posted as literal text.
+                        Turn on <b>Insert captured values</b> below to send what the pattern
+                        captured instead.
+                    </AuHelp>
+                )}
             </AuField>
 
             <AuCheck

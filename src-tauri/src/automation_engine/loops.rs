@@ -150,6 +150,40 @@ mod task8_tests {
         (url, received)
     }
 
+    /// A one-request endpoint that KEEPS the request bytes.
+    ///
+    /// `webhook_endpoint` only reports that something arrived, which is enough for the delivery
+    /// tests and is exactly not enough for a substitution one: a rule that posts its template
+    /// verbatim arrives just as reliably as one that posts the resolved body. The bytes are the
+    /// only place the difference exists.
+    fn capturing_webhook_endpoint() -> (String, Receiver<Vec<u8>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback webhook listener");
+        let url = format!(
+            "http://{}",
+            listener.local_addr().expect("listener address")
+        );
+        let (sent, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept webhook request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("read timeout");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content
+Content-Length: 0
+Connection: close
+
+",
+                )
+                .expect("reply");
+            sent.send(buffer[..read].to_vec()).expect("record webhook request");
+        });
+        (url, received)
+    }
+
     fn held_webhook_endpoint() -> (String, Sender<()>, Receiver<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback webhook listener");
         let url = format!(
@@ -409,6 +443,78 @@ mod task8_tests {
             "a webhook must not queue behind a terminal send"
         );
         assert!(crossing.contains("run_send") && crossing.contains("run_webhook"));
+    }
+
+    /// **The webhook destination posts the RESOLVED body**, the exact twin of the test above.
+    ///
+    /// Reported from a live build: *"on Discord I got the $0, not the matched value"*. The
+    /// substitution in `run_webhook` was correct, and nothing covered it — every webhook test until
+    /// now asserted only that a request ARRIVED, which a rule posting its template verbatim does
+    /// just as reliably. `capturing_webhook_endpoint` exists so the assertion can be about the
+    /// bytes, where the difference actually lives.
+    ///
+    /// Driven through `run_crossing` with a hand-built `Captures` rather than through a tick,
+    /// because the two neighbouring webhook tests do: reqwest is real I/O and the tick-driven
+    /// tests run on a paused clock.
+    #[tokio::test]
+    async fn a_crossing_posts_the_resolved_webhook_body() {
+        let (url, posted) = capturing_webhook_endpoint();
+        let (engine, _fake, host) = rig_with_rule_bypassing_the_enable_gate(|graph| {
+            add_discord_webhook(graph, url);
+            let webhook = graph.webhook.as_mut().expect("the webhook just added");
+            webhook.body = "Fix the $1 failing tests in $2".into();
+            webhook.substitute = true;
+        });
+        let mut send = pending(&engine, &host, ArmState::armed(), 4_000);
+        send.captures = Some(Captures {
+            groups: vec![
+                Some("FAILED 17 tests in a.ts".into()),
+                Some("17".into()),
+                Some("a.ts".into()),
+            ],
+            named: Default::default(),
+        });
+
+        run_crossing(engine.clone(), host.clone(), send).await;
+
+        let request = posted
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the webhook was never posted");
+        let text = String::from_utf8_lossy(&request);
+        assert!(
+            text.contains("Fix the 17 failing tests in a.ts"),
+            "the resolved body never reached the wire: {text}"
+        );
+        // The complaint in its own words: the token itself must not survive the send.
+        assert!(!text.contains("$1"), "a raw token was posted: {text}");
+    }
+
+    /// The other half of the pair, and the reason the flag is worth having: with substitution off
+    /// the body is posted EXACTLY as typed. Asserted so that "resolved" above cannot be satisfied
+    /// by a sender that always substitutes — a webhook body is sometimes JSON a user wrote by
+    /// hand, and `$` is not always a token.
+    #[tokio::test]
+    async fn a_webhook_that_opted_out_posts_its_body_verbatim() {
+        let (url, posted) = capturing_webhook_endpoint();
+        let (engine, _fake, host) = rig_with_rule_bypassing_the_enable_gate(|graph| {
+            add_discord_webhook(graph, url);
+            let webhook = graph.webhook.as_mut().expect("the webhook just added");
+            webhook.body = "Fix the $1 failing tests in $2".into();
+            webhook.substitute = false;
+        });
+        let mut send = pending(&engine, &host, ArmState::armed(), 4_000);
+        send.captures = Some(Captures {
+            groups: vec![Some("FAILED 17 tests in a.ts".into()), Some("17".into())],
+            named: Default::default(),
+        });
+
+        run_crossing(engine.clone(), host.clone(), send).await;
+
+        let request = posted
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the webhook was never posted");
+        let text = String::from_utf8_lossy(&request);
+        assert!(text.contains("$1"), "the opted-out body was rewritten: {text}");
     }
 }
 

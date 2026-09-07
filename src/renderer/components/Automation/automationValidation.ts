@@ -34,6 +34,7 @@ import type {
     AutomationSource,
 } from '../../types/electron';
 import { previewSubstitute, tokensUsed } from './automationTokens';
+import type { Token } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
 
@@ -206,6 +207,33 @@ function tokenSupplied(
     if (group !== null) return group <= groups.count;
     if (name !== null) return groups.names.has(name);
     return true; // $0 / Source::Whole is always the whole match.
+}
+
+/**
+ * The tokens in `message` that this pattern **could actually fill in**.
+ *
+ * For the panels' *"with substitution off, this goes out as literal text"* note, and the filter is
+ * the whole of its usefulness. `tokensUsed` alone reports `$5` in *"the build cost $5 of compute"*
+ * — by the grammar it IS a group reference — so a note built on it fires on prose, and a note
+ * that fires on prose is one users learn to look past. Asking whether the pattern supplies the
+ * token turns it into a much narrower claim: *you wrote something this rule could have filled in,
+ * and it will not*.
+ *
+ * `tokenSupplied` rather than a second reading of the group count, so the note and
+ * `action.unknownToken` can never disagree about what `$2` means — the drift this module's own
+ * header keeps warning about.
+ *
+ * Empty for a pattern that is blank or will not compile: nothing is supplyable then, and
+ * `parse.empty` / `parse.uncompilable` are already saying so on the step that owns it.
+ */
+export function resolvableTokens(message: string, find: string): Token[] {
+    if (find.trim().length === 0 || compilePattern(find) === null) return [];
+    const groups = groupsOf(find);
+    return tokensUsed(message).filter((token) => (
+        token.kind === 'group'
+            ? tokenSupplied(groups, token.n, null)
+            : tokenSupplied(groups, null, token.name)
+    ));
 }
 
 /**
