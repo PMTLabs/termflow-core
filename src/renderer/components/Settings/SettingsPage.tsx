@@ -377,6 +377,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Deep-link navigation (Plan 010): the tray "Peers…" item opens Settings and
     // asks us to jump to a section. A freshly-opened tab reads the pending category
     // on mount; an already-open tab receives a DOM event. Ignore unknown ids.
+    //
+    // `categoryAttemptedRef` makes the persisted-category fallback below run at most
+    // ONCE, on mount: `requestCategoryChange` is a `useCallback` that changes identity
+    // on nearly every settings edit (it closes over `isDirty`/`resnapshot`), which would
+    // otherwise re-run this effect on every edit and re-apply the LAST persisted
+    // category over whatever the user has since clicked to. `categoryHydrated` is a
+    // separate flag (state, not the ref) — it only flips once the restore attempt has
+    // actually FINISHED, so the persist effect below never writes the default
+    // 'appearance' back over a not-yet-read saved value.
+    const categoryAttemptedRef = useRef(false);
+    const [categoryHydrated, setCategoryHydrated] = useState(false);
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
@@ -385,6 +396,22 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
             requestCategoryChange(pending);
+            categoryAttemptedRef.current = true;
+            setCategoryHydrated(true);
+        } else if (!categoryAttemptedRef.current) {
+            // No explicit deep link — reopen the category the user last had open, so a
+            // dev restart (`bun run dev:tauri`) lands back where they were instead of
+            // always defaulting to Appearance.
+            categoryAttemptedRef.current = true;
+            void (async () => {
+                try {
+                    const saved = await window.electronAPI?.getConfigValue?.('settingsLastCategory');
+                    if (typeof saved === 'string' && isCategory(saved)) {
+                        requestCategoryChange(saved);
+                    }
+                } catch { /* keep the default */ }
+                finally { setCategoryHydrated(true); }
+            })();
         }
         const handler = (e: Event) => {
             const cat = (e as CustomEvent).detail;
@@ -395,6 +422,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         window.addEventListener('settings:goto-category', handler);
         return () => window.removeEventListener('settings:goto-category', handler);
     }, [requestCategoryChange]);
+
+    // Persist the active category on every change, so the restore above has something
+    // to read next launch. Gated on `categoryHydrated` — otherwise the very first
+    // render's default ('appearance') would win the race and overwrite the saved value
+    // before it was ever read back.
+    useEffect(() => {
+        if (!categoryHydrated) return;
+        window.electronAPI?.setConfigValue?.('settingsLastCategory', activeCategory);
+    }, [activeCategory, categoryHydrated]);
 
     // Hydrate the launch-at-login toggle from the actual OS registration (the plugin is
     // the source of truth). Runs on mount AND every time the user enters the Startup

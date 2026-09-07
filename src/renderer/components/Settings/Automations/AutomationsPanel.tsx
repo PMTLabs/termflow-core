@@ -9,7 +9,7 @@
  * renders under a bare `createRoot` with no Provider, which is what makes §10.28 a cheap test
  * rather than a fixture exercise.
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { AutomationRule } from '../../../types/electron';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
 import { AutomationRow } from './AutomationRow';
@@ -196,13 +196,69 @@ export const AutomationsPanel: React.FC = () => {
     // log" link (`plan/028` item D). Consumed exactly once on mount, before anything can navigate
     // away from it; `openSettingsTab` returns before this panel exists, so a DOM event would race
     // the mount and the value is handed over instead.
+    //
+    // `navClaimedRef` also gates the persisted-view restore below: an explicit external request is
+    // a live user action made just now and must win outright over a stale snapshot from before a
+    // restart. `viewHydrated` is a separate flag (state, not the ref) that only flips once a
+    // restore decision has actually been MADE, so the persist effect further down never writes the
+    // default 'list' back over a not-yet-read saved value.
+    const navClaimedRef = useRef(false);
+    const [viewHydrated, setViewHydrated] = useState(false);
     useEffect(() => {
         const pending = consumePendingAutomationLog();
-        if (pending) showLog(pending);
+        if (pending) {
+            navClaimedRef.current = true;
+            showLog(pending);
+            setViewHydrated(true);
+        }
         // Mount only, and `showLog` is a fresh closure every render — listing it would re-run this
         // on every render and re-open the log over whatever the user had navigated to.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+
+    // Reopen the sub-view the user last had open — a saved rule's editor, a log, or the template
+    // gallery — so a dev restart (`bun run dev:tauri`) lands back where they were instead of always
+    // on the list (the same motivation as SettingsPage's category restore). Waits for `loading` to
+    // clear so an 'editor' restore has `rules` to look its saved id up in — the rule may since have
+    // been deleted in another window, in which case there is nothing to reopen and it stays on the
+    // list. Runs at most once (`navClaimedRef`).
+    useEffect(() => {
+        if (navClaimedRef.current || loading) return;
+        navClaimedRef.current = true;
+        void (async () => {
+            try {
+                const saved = await api?.getConfigValue?.('automationsLastView');
+                if (!saved || typeof saved !== 'object') return;
+                const kind = (saved as { kind?: unknown }).kind;
+                const ruleId = (saved as { ruleId?: unknown }).ruleId;
+                if (kind === 'gallery') {
+                    setView({ kind: 'gallery' });
+                } else if (kind === 'log') {
+                    showLog(typeof ruleId === 'string' ? ruleId : null);
+                } else if (kind === 'editor' && typeof ruleId === 'string') {
+                    const rule = rules.find((r) => r.id === ruleId);
+                    if (rule) openEditor(rule);
+                }
+            } catch { /* keep the list */ }
+            finally { setViewHydrated(true); }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [loading]);
+
+    // Persist the sub-view — and, for a saved rule's editor or a log, which rule — on every change,
+    // so the restore above has something to read next launch. An unsaved editor draft
+    // (`opening !== 'saved'`, a blank card or a picked template) has no content to reopen after a
+    // restart, so it persists as the list instead of a view this panel could never rebuild.
+    useEffect(() => {
+        if (!viewHydrated) return;
+        const persisted =
+            view.kind === 'editor'
+                ? (view.opening === 'saved' ? { kind: 'editor', ruleId: view.draft.id } : { kind: 'list' })
+                : view.kind === 'log'
+                    ? { kind: 'log', ruleId: view.ruleId }
+                    : { kind: view.kind };
+        api?.setConfigValue?.('automationsLastView', persisted);
+    }, [view, viewHydrated]);
 
     const backToList = () => {
         setLogScope(null);
