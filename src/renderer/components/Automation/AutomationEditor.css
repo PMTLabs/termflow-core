@@ -342,6 +342,20 @@
     color: #5fa377;
 }
 
+/*
+ * The mockup predates webhooks — §015 still says "No webhooks" — so this hue is chosen rather than
+ * quoted, on the same three surfaces and in the same shape as the five above. Without it the glyph
+ * inherited the body colour and rendered near-black on the dark rail, which is what it looked like:
+ * an icon that had been switched off. A teal sits in the widest gap left between `action`'s green
+ * and `monitor`'s blue, so the outbound step does not read as either.
+ */
+.au-editor .au-palitem.webhook .au-palico,
+.au-editor .au-node.webhook .au-nico,
+.au-editor .au-gi.webhook {
+    background: rgba(79, 168, 148, 0.16);
+    color: #4fa894;
+}
+
 .au-editor .au-paltext {
     display: flex;
     flex-direction: column;
@@ -758,19 +772,6 @@
     flex-direction: column;
     background: #17181c;
     border-top: 1px solid #2b2d33;
-}
-
-.au-editor .au-drawertab {
-    position: absolute;
-    right: 12px;
-    bottom: 42px;
-    padding: 4px 10px;
-    font-size: 0.85rem;
-    color: #a9adb6;
-    background: #1c1d22;
-    border: 1px solid #33353c;
-    border-radius: 7px;
-    cursor: pointer;
 }
 
 .au-editor .au-dhead {

@@ -802,11 +802,6 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                     />
                 </div>
 
-                {drawer === null && (
-                    <button type="button" className="au-drawertab" onClick={() => setDrawer('test')}>
-                        Test run &amp; activity
-                    </button>
-                )}
             </div>
 
             {paletteDrag.ghost && (
