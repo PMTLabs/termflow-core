@@ -101,7 +101,12 @@ pub enum ReadDepth {
 /// the leaf once per pair before calling it and never resolves inside — a function that silently
 /// accepts either id space is how the next call site gets it wrong. Plan §7.4.
 pub trait ScreenSource {
-    fn tail(&self, process_id: &str, depth: ReadDepth) -> Option<String>;
+    /// `skip_typed_line` is the rule's `monitor.skip_typed_line`, carried here rather than folded
+    /// into `ReadDepth` because it is not a depth: `depth_for` decides HOW FAR BACK to read, and
+    /// this decides whether one line of what it finds counts as output at all. Widening the depth
+    /// enum would put both answers in one table and double its rows for a dimension that does not
+    /// interact with either of the other two.
+    fn tail(&self, process_id: &str, depth: ReadDepth, skip_typed_line: bool) -> Option<String>;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -716,7 +721,11 @@ pub fn evaluate(
     process_id: &str,
     now_ms: i64,
 ) -> Option<Evaluation> {
-    evaluate_text(steps, re, echoes, prev, &|d| src.tail(process_id, d), now_ms)
+    // The ONE place a `ScreenSource` becomes a reader, so the rule's opt-out is applied here rather
+    // than inside `evaluate_text`: a caller that supplies its own reader is by definition holding
+    // text that came from somewhere else, and a second gate there could only disagree with this one.
+    let skip_typed_line = steps.monitor.skip_typed_line;
+    evaluate_text(steps, re, echoes, prev, &|d| src.tail(process_id, d, skip_typed_line), now_ms)
 }
 
 /// `evaluate` over an already-resolved reader, for a caller that has the text by another route.
@@ -868,7 +877,7 @@ mod tests {
         AutomationGraph {
             layout: None,
             timer: None,
-            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0, skip_typed_line: false }),
             parse: Some(ParseStep {
                 preset: ParsePreset::Custom,
                 literal: None,
@@ -924,6 +933,12 @@ mod tests {
         fn feed(&self, line: &str) {
             self.parser.borrow_mut().process(format!("{}\r\n", line).as_bytes());
         }
+        /// Text left sitting under the cursor: a command typed and NOT submitted. The only
+        /// difference from `feed` is the missing newline, which is the whole of what separates a
+        /// keystroke echo from output as far as any of this can tell.
+        fn type_without_enter(&self, text: &str) {
+            self.parser.borrow_mut().process(text.as_bytes());
+        }
         fn depths(&self) -> Vec<ReadDepth> {
             self.asked.borrow().clone()
         }
@@ -933,7 +948,7 @@ mod tests {
     }
 
     impl ScreenSource for VtSource {
-        fn tail(&self, _process_id: &str, depth: ReadDepth) -> Option<String> {
+        fn tail(&self, _process_id: &str, depth: ReadDepth, skip_typed_line: bool) -> Option<String> {
             self.asked.borrow_mut().push(depth);
             let mut parser = self.parser.borrow_mut();
             let screen = parser.screen_mut();
@@ -941,7 +956,10 @@ mod tests {
                 ReadDepth::Window(n) => n,
                 ReadDepth::VisibleScreen => screen.size().0 as usize,
             };
-            Some(crate::state::render_tail_lines(screen, max))
+            // Passed THROUGH, not swallowed: the fake exists to resolve a depth exactly as
+            // `AppState` does, and a fake that ignored the flag would let `evaluate` stop
+            // forwarding it with every test here still green.
+            Some(crate::state::render_tail_lines(screen, max, skip_typed_line))
         }
     }
 
@@ -1716,7 +1734,7 @@ mod tests {
             "check 5 must re-arm: `FAILED` has left the screen even though scrollback still holds it"
         );
         // The proof that this was a DEPTH decision and not an empty terminal.
-        let deep = src.tail("pc-1", ReadDepth::Window(200)).unwrap();
+        let deep = src.tail("pc-1", ReadDepth::Window(200), false).unwrap();
         assert!(deep.contains("FAILED 3 test"), "scrollback must still hold the line");
         // 6 — nothing matching.
         assert_eq!(step(&src, &mut state, 6), Decision::Checked);
@@ -1895,7 +1913,7 @@ mod tests {
             let guarded = if entry == "evaluate" {
                 evaluate(ins(&g), &r, &needles, fired.next, &src, "pc-1", 2).unwrap()
             } else {
-                evaluate_text(ins(&g), &r, &needles, fired.next, &|d| src.tail("pc-1", d), 2).unwrap()
+                evaluate_text(ins(&g), &r, &needles, fired.next, &|d| src.tail("pc-1", d, false), 2).unwrap()
             };
             assert_eq!(
                 guarded.decision,
@@ -1909,7 +1927,7 @@ mod tests {
             let unguarded = if entry == "evaluate" {
                 evaluate(ins(&g), &r, NO_ECHOES, fired.next, &src, "pc-1", 2).unwrap()
             } else {
-                evaluate_text(ins(&g), &r, NO_ECHOES, fired.next, &|d| src.tail("pc-1", d), 2).unwrap()
+                evaluate_text(ins(&g), &r, NO_ECHOES, fired.next, &|d| src.tail("pc-1", d, false), 2).unwrap()
             };
             assert_eq!(unguarded.decision, Decision::Held, "{}: premise", entry);
         }
@@ -2036,7 +2054,7 @@ mod tests {
 
         // The line is still well inside the 200-line window.
         assert!(
-            src.tail("pc-1", ReadDepth::Window(200)).unwrap().contains("FAILED 3 test"),
+            src.tail("pc-1", ReadDepth::Window(200), false).unwrap().contains("FAILED 3 test"),
             "premise: the match is still in scrollback"
         );
 
@@ -2052,6 +2070,41 @@ mod tests {
             vec![ReadDepth::VisibleScreen],
             "and it must ask the screen to do it"
         );
+    }
+
+    /// `monitor.skip_typed_line` reaches the read — the whole point of the field.
+    ///
+    /// This is the DESTINATION check. The rendering half is pinned in `state.rs`'s own
+    /// `tail_read_tests`, and every one of those would stay green if `evaluate` quietly stopped
+    /// forwarding the flag: the failure of a plumbing bug is a feature that does nothing, which is
+    /// invisible from either end on its own. Driving a real `vt100::Parser` is what makes "the
+    /// command is only typed, not submitted" a fact about a terminal rather than about a fixture.
+    #[test]
+    fn a_rule_that_skips_the_typed_line_does_not_read_it() {
+        let src = VtSource::new(6, 40);
+        let mut g = failed_rule();
+        let r = re(&g.parse_ref().find);
+        src.feed("running tests");
+        src.type_without_enter("$ grep 'FAILED 3 tests' log.txt");
+
+        // Off — the reported bug, and the premise for the other half: the words ARE on the screen,
+        // and nothing about them says the user has not pressed Enter yet.
+        let read = evaluate(ins(&g), &r, NO_ECHOES, ArmState::Unseen, &src, "pc-1", 1).unwrap();
+        assert_eq!(read.outcome, Outcome::Presence(true), "premise: it matches what was typed");
+
+        g.monitor_mut().skip_typed_line = true;
+        let skipped = evaluate(ins(&g), &r, NO_ECHOES, ArmState::Unseen, &src, "pc-1", 1).unwrap();
+        assert_eq!(
+            skipped.outcome,
+            Outcome::Presence(false),
+            "the rule opted out and the typed line was read anyway"
+        );
+
+        // And the opt-out costs it nothing once the command is actually submitted.
+        src.feed("");
+        src.feed("FAILED 3 tests in 2 files");
+        let submitted = evaluate(ins(&g), &r, NO_ECHOES, ArmState::Unseen, &src, "pc-1", 2).unwrap();
+        assert_eq!(submitted.outcome, Outcome::Presence(true), "real output must still match");
     }
 
     /// A terminal that is not live yields no evaluation, no log line and an untouched arm state.

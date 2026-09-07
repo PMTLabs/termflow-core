@@ -874,6 +874,7 @@ mod tests {
                     read: ReadMode::NewOutput,
                     cadence: Cadence::OnOutput,
                     every_ms: 0,
+                    skip_typed_line: false,
                 }),
                 parse: Some(ParseStep {
                     preset: ParsePreset::Custom,

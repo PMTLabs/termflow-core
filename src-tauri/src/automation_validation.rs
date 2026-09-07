@@ -889,7 +889,7 @@ mod tests {
         AutomationGraph {
             layout: None,
             timer: None,
-            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0, skip_typed_line: false }),
             parse: Some(ParseStep { preset: ParsePreset::Custom, literal: None, find: find.into(), keep }),
             cond: Some(CondStep { finds: Finds::Reading, op: Some(CompareOp::Gt), threshold: Some(25.0), ..Default::default() }),
             action: Some(ActionStep {

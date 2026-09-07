@@ -514,7 +514,7 @@ mod tests {
             graph: AutomationGraph {
                 layout: None,
                 timer: None,
-                monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+                monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0, skip_typed_line: false }),
                 parse: Some(ParseStep {
                     preset: ParsePreset::Custom,
                     literal: None,

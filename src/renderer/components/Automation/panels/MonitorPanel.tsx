@@ -231,6 +231,18 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                     sub="Re-reads the visible screen each check — better for status lines that update in place"
                     onPick={() => dispatch({ type: 'monitor', patch: { read: 'onScreen' } })}
                 />
+                {/* Under both radios rather than beside one: it narrows whichever of them is
+                    picked, and a shell echoing a half-typed command reaches `newOutput` exactly as
+                    an input box reaches `onScreen`. */}
+                <AuCheck
+                    on={monitor.skipTypedLine === true}
+                    label="Ignore the line being typed"
+                    sub="A command you are still typing is on the screen like anything else. Skips the line the cursor is on, so it cannot fire the rule — everything else is still read, including a status line below it."
+                    onToggle={() => dispatch({
+                        type: 'monitor',
+                        patch: { skipTypedLine: !monitor.skipTypedLine },
+                    })}
+                />
             </AuField>
 
             <AuField label="How often to check">

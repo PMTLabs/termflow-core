@@ -570,6 +570,14 @@ export interface AutomationMonitorStep {
   cadence: AutomationCadence;
   /** Only meaningful for `cadence: 'timer'`. */
   everyMs: number;
+  /**
+   * Drop the logical line the cursor sits on, so a command still being TYPED cannot fire the rule.
+   *
+   * **Optional, and absent when off** — the backend omits it, so a rule that never ticks the box
+   * keeps a blob an older build reads byte for byte. Only the cursor's own line goes: a TUI's
+   * status line sits BELOW the input box and is usually the very text such a rule watches for.
+   */
+  skipTypedLine?: boolean;
 }
 
 export interface AutomationParseStep {

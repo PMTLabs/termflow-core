@@ -177,7 +177,7 @@ impl EngineHost for FakeHost {
     fn live_processes(&self) -> Vec<String> {
         self.leaves.lock().unwrap().values().cloned().collect()
     }
-    fn tail(&self, pc: &str, _depth: ReadDepth) -> Option<String> {
+    fn tail(&self, pc: &str, _depth: ReadDepth, _skip_typed_line: bool) -> Option<String> {
         // Recorded BEFORE the lookup, so a process with no text still counts as a read attempt —
         // §4.5's dormant terminal is a `None` here, and a path that reaches this port has read.
         self.tails.lock().unwrap().push(pc.to_string());
@@ -240,7 +240,7 @@ pub(crate) fn ctx_rule(id: &str) -> AutomationRule {
         graph: AutomationGraph {
             layout: None,
             timer: None,
-            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0 }),
+            monitor: Some(MonitorStep { read: ReadMode::NewOutput, cadence: Cadence::OnOutput, every_ms: 0, skip_typed_line: false }),
             parse: Some(ParseStep {
                 preset: ParsePreset::Custom,
                 literal: None,

@@ -270,6 +270,28 @@ pub struct MonitorStep {
     pub cadence: Cadence,
     /// Only meaningful for `Cadence::Timer`.
     pub every_ms: i64,
+    /// Drop the logical line the cursor sits on, so a command still being TYPED cannot fire the
+    /// rule. Reported: a rule matching `deploy` fired the moment the word appeared under the
+    /// user's fingers, before Enter — the screen genuinely contains the text either way, and the
+    /// engine has no other signal that separates an echoed keystroke from output.
+    ///
+    /// **Opt-in, and it has to be.** The cursor's line is real output for plenty of terminals — a
+    /// full-screen TUI parks the cursor wherever it likes, and a rule reading the row it happens
+    /// to rest on would silently lose its match. Off is what every rule written before this field
+    /// did, and what every rule that never ticks the box keeps doing.
+    ///
+    /// **Only that one logical line**, never "the cursor's line and everything below": the
+    /// reported use is an agentic CLI whose status line sits UNDER the input box, which is the
+    /// text the rule is watching for. Dropping the tail of the screen would take the value with
+    /// the noise.
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub skip_typed_line: bool,
+}
+
+/// Off is the default, so it is not written — a rule that never ticks the box keeps a blob an
+/// older build decodes byte for byte. Same reason as `is_default_join`.
+fn is_off(flag: &bool) -> bool {
+    !*flag
 }
 
 /// Step 2 — "Read a value". Plan §2.2b, §6.4b.
@@ -539,7 +561,11 @@ pub fn schema_version_for(rule: &AutomationRule) -> i64 {
         || graph.action.as_ref().is_some_and(|action| action.substitute);
     let uses_a_v3_feature = graph.webhook.is_some() || graph.action.is_none()
         || !rule.excluded_ids.is_empty() || rule.exclude_criterion.is_some()
-        || !rule.exclude_criterion_value.is_empty();
+        || !rule.exclude_criterion_value.is_empty()
+        // Ships in this same milestone. An older build decodes the rule fine and ignores the key,
+        // which is the case the stamp exists to signal: it would read the line the user is still
+        // typing and fire on it — the exact behaviour the box was ticked to stop.
+        || graph.monitor.as_ref().is_some_and(|monitor| monitor.skip_typed_line);
     if uses_a_v3_feature { 3 } else if uses_a_v2_feature {
         2
     } else {
@@ -2418,6 +2444,7 @@ mod tests {
                 read: ReadMode::NewOutput,
                 cadence: Cadence::OnOutput,
                 every_ms: 30_000,
+                skip_typed_line: false,
             }),
             parse: Some(ParseStep {
                 preset: ParsePreset::Percentage,
@@ -2769,6 +2796,12 @@ mod tests {
         g
     }
 
+    fn graph_with_skip_typed_line() -> AutomationGraph {
+        let mut g = graph();
+        g.monitor_mut().skip_typed_line = true;
+        g
+    }
+
     fn stamped(graph: AutomationGraph) -> i64 {
         let mut rule = rule("au-stamp");
         rule.graph = graph;
@@ -2799,6 +2832,10 @@ mod tests {
         let mut no_action = graph();
         no_action.action = None;
         assert_eq!(stamped(no_action), 3);
+        // Ships in the same milestone as the two above. An older build decodes such a rule
+        // perfectly and ignores the key — it reads the line the user is still typing and fires on
+        // it, which is precisely what ticking the box was meant to stop.
+        assert_eq!(stamped(graph_with_skip_typed_line()), 3);
 
         // R4: not sticky. Dropping the last clause must not leave the rule permanently v2 — the
         // opposite (monotonic) behaviour is the more obvious thing to write by accident.
@@ -4574,6 +4611,28 @@ mod tests {
             let s = serde_json::to_string(&t).unwrap();
             assert_eq!(serde_json::from_str::<TimerStep>(&s).unwrap(), t, "round trip of {s}");
         }
+    }
+
+    /// `skipTypedLine` behaves the way every other added field on this wire has to: absent decodes
+    /// off, off writes nothing, and on survives a round trip.
+    ///
+    /// The middle one is the load-bearing clause and the reason this field is
+    /// `skip_serializing_if` where `substitute` is not. `MonitorStep` is on EVERY watching rule, so
+    /// a field that always serialised would rewrite every stored blob the first time this build
+    /// touched it — `a_v1_rule_still_round_trips_byte_for_byte` is the same claim from the other
+    /// end, and would have caught it as a failure rather than as a decision.
+    #[test]
+    fn skip_typed_line_defaults_off_writes_nothing_off_and_round_trips_on() {
+        let older = r#"{"read":"newOutput","cadence":"onOutput","everyMs":0}"#;
+        let decoded: MonitorStep = serde_json::from_str(older)
+            .expect("a monitor step written before this field existed must still decode");
+        assert!(!decoded.skip_typed_line, "an older rule must not acquire the opt-in from a default");
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), older, "and must not gain the key");
+
+        let on = MonitorStep { skip_typed_line: true, ..decoded };
+        let s = serde_json::to_string(&on).unwrap();
+        assert!(s.contains(r#""skipTypedLine":true"#), "written when it is actually used: {s}");
+        assert_eq!(serde_json::from_str::<MonitorStep>(&s).unwrap(), on, "round trip of {s}");
     }
 
     /// The whole reason `timer` is `#[serde(default)]`: a rule saved by a build before this
