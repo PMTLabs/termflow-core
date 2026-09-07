@@ -773,8 +773,28 @@ impl AutomationEngine {
         let mut rules = HashMap::new();
         for live in self.snapshot_live() {
             let id = &live.rule.id;
-            let watched = self.runtime.watched_for(id);
             let missing_for = missing.get(id).unwrap_or(&empty);
+            // **A rule that has never been resolved is absent, not a rule watching nothing.**
+            //
+            // The row treats these as opposite: an absent rule is `waiting` ("the engine has not
+            // reported this rule"), an empty one is the *Nothing to watch* error ("running, and
+            // nothing matches"). Every live rule was reported here from the moment it went live,
+            // and `watched_for` returns an empty set for a rule the targeting loop has not reached
+            // yet — so between a reload and the next targeting pass, up to `TARGETING_TICK_MS`,
+            // every rule-mode rule claimed nothing matched it.
+            //
+            // That window opens on the two occasions a user is most likely to be looking: app
+            // start, and the reload that follows their own save. Saving a `Command contains` rule
+            // with a matching terminal already open showed *"No open terminal matches ..."* for two
+            // seconds, and the pill was `Error` while it did.
+            //
+            // `missing` is parked by the same pass, so it cannot be present while `watched` is
+            // absent — but reporting the rule when it somehow is loses nothing, and hiding a known
+            // missing terminal would.
+            if !self.runtime.has_resolved(id) && missing_for.is_empty() {
+                continue;
+            }
+            let watched = self.runtime.watched_for(id);
             let mut pairs = HashMap::new();
             for tm in watched.iter().chain(missing_for.iter()) {
                 let (fired_count, last_fired_at) = match self.runtime.fire_record(id, tm) {
@@ -2112,6 +2132,41 @@ mod tests {
         assert_eq!(p.fired_count, 0);
         assert_eq!(p.last_fired_at, None);
         assert!(!p.missing);
+    }
+
+    /// The three states of a rule's matched set, as a table — because two of them are an empty map
+    /// and the row treats them as opposites.
+    ///
+    /// Never resolved => ABSENT, which the row reads as `waiting`. Resolved to nothing => PRESENT
+    /// and empty, which is the *Nothing to watch* error. Resolved to something => the pairs.
+    ///
+    /// The middle row is the one that makes the first row safe: hiding an unresolved rule must not
+    /// also hide a rule that genuinely matches no terminal, or the error becomes unreachable.
+    #[test]
+    fn a_rule_is_absent_until_targeting_resolves_it_and_empty_only_when_nothing_matches() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-a", r"ctx:(\d+)%")).unwrap();
+        let engine = AutomationEngine::new(0);
+        engine.reload(&store, 1_000).unwrap();
+
+        assert!(
+            !engine.state_payload(&HashMap::new()).rules.contains_key("au-a"),
+            "a live rule the targeting loop has not reached yet must not claim nothing matches it",
+        );
+
+        engine.runtime.set_watched("au-a", HashSet::new());
+        let resolved_to_nothing = engine.state_payload(&HashMap::new());
+        assert_eq!(
+            resolved_to_nothing.rules.get("au-a").map(|p| p.len()),
+            Some(0),
+            "resolved-and-matching-nothing is still reported, as an empty map",
+        );
+
+        engine.runtime.set_watched("au-a", ["tm-1".to_string()].into());
+        assert_eq!(
+            engine.state_payload(&HashMap::new()).rules["au-a"].len(),
+            1,
+        );
     }
 
     /// Every field moves for the right reason — and `fired_count` survives a re-arm, which is what

@@ -589,6 +589,16 @@ impl AutomationRuntime {
         self.watched.get(rule_id).map(|e| e.value().clone()).unwrap_or_default()
     }
 
+    /// Has the targeting loop resolved this rule's matched set even once?
+    ///
+    /// `watched_for` cannot answer this: it flattens a MISSING entry and an entry holding an empty
+    /// set into the same empty set, and those two mean opposite things to the row that reads them.
+    /// The targeting pass calls `set_watched` for every live rule, empty result included, so an
+    /// absent key means "not resolved yet" and only that.
+    pub fn has_resolved(&self, rule_id: &str) -> bool {
+        self.watched.contains_key(rule_id)
+    }
+
     pub fn watches(&self, rule_id: &str, tm: &str) -> bool {
         self.watched.get(rule_id).map(|e| e.value().contains(tm)).unwrap_or(false)
     }
