@@ -1095,7 +1095,22 @@
     color: #d9c08a;
 }
 
+/*
+ * `display: block`, and that is the fix for a bullet that appeared beside the LAST line of a
+ * problem rather than the first.
+ *
+ * A `<button>` is `inline-block`, and an inline-block's baseline is the baseline of its **last**
+ * line box. So a two-line problem gave the `li` a single line box whose baseline sat on the second
+ * line, and an outside marker is placed on that baseline — the bullet ended up next to `webhook
+ * destination.` while the words it belonged to sat above it, unmarked. A one-line problem has no
+ * symptom, which is why only the longer of the two looked wrong.
+ *
+ * As a block the button's first line IS the item's first line, so the marker has nowhere else to
+ * go. Full width is a bonus rather than a cost: the whole row becomes the click target for the
+ * step it focuses.
+ */
 .au-editor .au-problems li button {
+    display: block;
     padding: 0;
     text-align: left;
     color: inherit;
