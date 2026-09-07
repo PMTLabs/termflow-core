@@ -992,8 +992,19 @@
     overflow-y: auto;
 }
 
-/* Clear of the collapse button, which is absolutely positioned over this row. */
-.au-editor .au-idock .au-ihead {
+/*
+ * The gutter the collapse button sits in, reserved on WHATEVER is at the top of the panel.
+ *
+ * Written as `> :first-child` and not as a list of the classes that happen to go there: the button
+ * is absolutely positioned over the panel's top-left corner, so it collides with the first row of
+ * every state the inspector has. Naming `.au-ihead` covered the selected state and left the empty
+ * one — `.au-inspect-none`, a different element — with `Nothing selected` drawn under the button.
+ * A third state would have been the same bug a third time.
+ *
+ * 32px, against the button's own 4 + 22 + 2 of border. `auInspectorDock.test.tsx` derives that sum
+ * from these rules rather than restating it, so moving the button without moving the gutter fails.
+ */
+.au-editor .au-idock .au-inspect > :first-child {
     padding-left: 32px;
 }
 
@@ -1666,6 +1677,17 @@
     background: currentColor;
 }
 
+/*
+ * *Re-arm now* sits straight after the state pill in the RIGHT NOW group, and JSX siblings with no
+ * literal text between them produce no whitespace text node — so the two inline-flex boxes were
+ * drawn touching. Adjacent-sibling, not a gap on the group: when a rule HAS fired, the block
+ * `.au-rightnow` line comes between them and the button starts its own line, where a left margin
+ * would only indent it away from the edge everything else lines up on.
+ */
+.au-editor .au-pill + .au-btn {
+    margin-left: 8px;
+}
+
 .au-editor .au-pill.fired,
 .au-editor .au-pill.sim {
     color: #7fd18f;
@@ -1960,6 +1982,108 @@
 .au-selopt.dead {
     color: #6b6f78;
     cursor: not-allowed;
+}
+
+/* ----------------------------------------------------------------- AuInfo --- */
+
+/*
+ * The icon lives INSIDE `.au-flabel`, which is uppercase, letter-spaced and 0.8rem. None of that
+ * should reach the glyph or the panel: `text-transform` and `letter-spacing` are reset here, and
+ * the panel is unnamespaced below because it portals to `body` and never sees the label at all.
+ */
+.au-editor .au-info {
+    margin-left: 7px;
+    width: 15px;
+    height: 15px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    vertical-align: -2px;
+    background: transparent;
+    border: 1px solid #4a4d56;
+    border-radius: 999px;
+    color: #8d929c;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 10px;
+    font-style: italic;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+    text-transform: none;
+    cursor: pointer;
+}
+
+.au-editor .au-info:hover,
+.au-editor .au-info.on {
+    border-color: #5aa9c9;
+    color: #cfe8f2;
+}
+
+/*
+ * NOT namespaced under `.au-editor`, for the reason `.au-selmenu` above gives: the panel is
+ * portalled to `body`, so a descendant selector rooted at the editor never reaches it. Same z-index
+ * as the select menu, which it can never be open alongside — an outside press closes either.
+ *
+ * **A medium, regular reading size (0.9rem / 1.55), deliberately.** This is prose with headings,
+ * lists and code in it, not a label: at the 0.8rem uppercase of the field it sits under, none of it
+ * would be worth opening.
+ */
+.au-infopop {
+    position: fixed;
+    z-index: 9995;
+    box-sizing: border-box;
+    width: 320px;
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 12px 14px;
+    background: #1c1d22;
+    border: 1px solid #3a3c44;
+    border-radius: 8px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    font-size: 0.9rem;
+    font-weight: 400;
+    line-height: 1.55;
+    color: #c2c6ce;
+}
+
+.au-infopop h4 {
+    margin: 12px 0 5px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #e6e6e8;
+}
+
+.au-infopop p {
+    margin: 0 0 8px;
+}
+
+.au-infopop p:last-child {
+    margin-bottom: 0;
+}
+
+/* The two framing sentences: the question to ask, and the trap. Set apart from the examples they
+   bracket, since they are what the examples are FOR. */
+.au-infopop .au-infolead {
+    color: #9aa0aa;
+}
+
+.au-infopop ul {
+    margin: 0 0 8px;
+    padding-left: 18px;
+}
+
+.au-infopop li {
+    margin-bottom: 3px;
+}
+
+.au-infopop code {
+    padding: 1px 5px;
+    background: #26282f;
+    border-radius: 4px;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 0.85rem;
+    color: #d7e3b8;
 }
 
 /* ------------------------------------------------------------- AuNodeMenu --- */

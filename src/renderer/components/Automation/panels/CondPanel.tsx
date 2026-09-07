@@ -48,6 +48,7 @@ import { automationRowState, describeLastFired } from '../../Settings/Automation
 import { AuField, AuHelp, AuRadio } from './AuFields';
 import { sampleFromPattern } from './ActionPanel';
 import { AuSelect } from '../AuSelect';
+import { AuInfo } from '../AuInfo';
 
 export interface CondPanelProps {
     draft: AutomationDraft;
@@ -59,6 +60,48 @@ export interface CondPanelProps {
     dispatch: (action: DraftAction) => void;
 }
 
+
+/**
+ * The worked examples behind the field's ⓘ.
+ *
+ * The distinction the two radios draw is the one people get wrong, and their own subtitles argue it
+ * from the mechanism — *re-arms when the printed value changes* against *re-arms when it leaves the
+ * visible screen*. That is the right thing to say once someone already knows which is which. These
+ * are for before that: three lines a terminal actually prints, per kind, and the question to ask of
+ * a line to place it.
+ */
+const FindsExamples: React.FC = () => (
+    <>
+        <p className="au-infolead">
+            The test is whether the line is still <b>true</b> once it stops being printed.
+        </p>
+        <h4>A reading that stays true</h4>
+        <ul>
+            <li><code>ctx:63%</code> — a context meter a TUI redraws in place</li>
+            <li><code>Battery: 18%</code></li>
+            <li><code>queue depth 412</code></li>
+        </ul>
+        <p>
+            63% is still the usage even if nothing reprints it, so the rule keeps reading back
+            through the last 200 lines and re-arms when a <i>new</i> value is printed.
+        </p>
+        <h4>Something that happened</h4>
+        <ul>
+            <li><code>FAILED 3 tests</code></li>
+            <li><code>error: connection refused</code></li>
+            <li><code>Build succeeded in 41s</code></li>
+        </ul>
+        <p>
+            These happened once. Finding one in scrollback an hour later would not mean it is
+            happening now, so the rule re-arms as soon as it leaves the visible screen.
+        </p>
+        <p className="au-infolead">
+            A line can be both shapes at once: <code>API error 529 . retry in 60s</code> carries a
+            number and is still an <i>event</i>. Pick by the question above, not by whether you can
+            see a digit.
+        </p>
+    </>
+);
 const TEXT_OPS: AutomationTextOp[] = [
     'is',
     'isNot',
@@ -279,7 +322,7 @@ export const CondPanel: React.FC<CondPanelProps> = ({
 
     return (
         <>
-            <AuField label="What this pattern finds">
+            <AuField label="What this pattern finds" info={<AuInfo label="Examples of each kind"><FindsExamples /></AuInfo>}>
                 <AuRadio
                     name="au-condfinds"
                     on={cond.kind === 'number'}

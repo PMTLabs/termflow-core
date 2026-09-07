@@ -49,9 +49,17 @@ const MAX_LIST_H = 260;
 const GAP = 4;
 const EDGE = 8;
 
-type Placement =
-    | { side: 'below'; top: number; left: number; width: number; maxHeight: number }
-    | { side: 'above'; bottom: number; left: number; width: number; maxHeight: number };
+/**
+ * The list is **at least** as wide as its trigger and as wide as its content needs, bounded by the
+ * window.
+ *
+ * A fixed `width: trigger` was the trigger's width exactly, and `.au-selopt` ellipses what does not
+ * fit — so `does not equal` opened as `does not e…`, which is the one thing a list of options must
+ * never do. Growing rightwards is enough for every select here: they sit in the inspector column at
+ * the right of the window, and the whole width of that column is room the portalled list can use.
+ */
+type Span = { left: number; minWidth: number; maxWidth: number; maxHeight: number };
+type Placement = ({ side: 'below'; top: number } | { side: 'above'; bottom: number }) & Span;
 
 export const AuSelect: React.FC<AuSelectProps> = ({
     value,
@@ -80,12 +88,19 @@ export const AuSelect: React.FC<AuSelectProps> = ({
         // common case where both fit reading the way every other menu in the app does.
         const flip = below < MIN_LIST_H && above > below;
         const room = Math.max(MIN_LIST_H, Math.min(MAX_LIST_H, flip ? above : below));
+        const span: Span = {
+            left: r.left,
+            // Never narrower than the control it belongs to, never wider than the window can show.
+            minWidth: r.width,
+            maxWidth: Math.max(r.width, window.innerWidth - r.left - EDGE),
+            maxHeight: room,
+        };
         setPlacement(
             flip
                 // Anchored by its BOTTOM, so a list shorter than the room available still sits
                 // against the trigger instead of floating above it.
-                ? { side: 'above', bottom: window.innerHeight - r.top + GAP, left: r.left, width: r.width, maxHeight: room }
-                : { side: 'below', top: r.bottom + GAP, left: r.left, width: r.width, maxHeight: room },
+                ? { side: 'above', bottom: window.innerHeight - r.top + GAP, ...span }
+                : { side: 'below', top: r.bottom + GAP, ...span },
         );
     }, []);
 
@@ -207,7 +222,10 @@ export const AuSelect: React.FC<AuSelectProps> = ({
                     tabIndex={-1}
                     style={{
                         left: placement.left,
-                        width: placement.width,
+                        // No `width`: a fixed-position box with none shrink-wraps its content, so
+                        // these two bounds are what decide it.
+                        minWidth: placement.minWidth,
+                        maxWidth: placement.maxWidth,
                         maxHeight: placement.maxHeight,
                         ...(placement.side === 'below'
                             ? { top: placement.top }

@@ -71,6 +71,42 @@ describe('AuSelect', () => {
         expect(menu().style.top).toBe('');
     });
 
+    /**
+     * Reported: `does not equal` opened as `does not e…`. The list carried `width: trigger.width`,
+     * which is the one width guaranteed to be too small — an option longer than the closed control
+     * is exactly why the list is being opened.
+     *
+     * The assertion is on the BOUNDS rather than on a measured pixel, because jsdom lays nothing
+     * out and a rendered width would be 0 either way. A `width` is what makes text clip, so its
+     * absence is the property: `minWidth` keeps the list from being narrower than its trigger and
+     * `maxWidth` keeps it inside the window, and between them the box shrink-wraps its content.
+     */
+    it('is never narrower than its trigger and never fixed to it', async () => {
+        await renderAt(100);
+        expect(menu().style.minWidth).toBe('200px');
+        expect(menu().style.width).toBe('');
+        // 1024 (jsdom) - 40 left - 8 edge. Room the portalled list may grow into, which for these
+        // selects is the whole of the inspector column they sit at the right of.
+        expect(menu().style.maxWidth).toBe('976px');
+    });
+
+    /** A trigger wider than the room beside it still gets its own width, never a negative bound. */
+    it('never bounds the list below the width of its own trigger', async () => {
+        await act(async () => {
+            root.render(
+                <AuSelect value="a" options={OPTIONS} ariaLabel="How often to check" onChange={jest.fn()} />,
+            );
+        });
+        const trigger = container.querySelector<HTMLButtonElement>('[aria-label="How often to check"]')!;
+        jest.spyOn(trigger, 'getBoundingClientRect').mockReturnValue({
+            top: 100, bottom: 130, left: 1000, right: 1200, width: 200, height: 30, x: 1000, y: 100,
+            toJSON: () => ({}),
+        } as DOMRect);
+        await act(async () => { trigger.click(); });
+        expect(menu().style.maxWidth).toBe('200px');
+        expect(menu().style.minWidth).toBe('200px');
+    });
+
     it('escapes the clipping ancestors by portalling out of its own tree', async () => {
         await renderAt(100);
         expect(container.querySelector('.au-selmenu')).toBeNull();
