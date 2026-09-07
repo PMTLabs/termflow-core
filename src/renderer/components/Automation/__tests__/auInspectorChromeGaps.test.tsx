@@ -53,15 +53,48 @@ describe('the collapse button clears whatever is at the top of the panel', () =>
     const button = ruleBody('.au-editor .au-icollapse');
 
     it('reserves at least the button\'s own extent, derived from the button', () => {
-        const left = px(button, 'left');
+        const right = px(button, 'right');
         const width = px(button, 'width');
-        expect(left).not.toBeNull();
+        expect(right).not.toBeNull();
         expect(width).not.toBeNull();
 
-        const gutter = px(ruleBody('.au-editor .au-idock .au-inspect > :first-child'), 'padding-left');
+        const gutter = px(ruleBody('.au-editor .au-idock .au-inspect > :first-child'), 'padding-right');
         expect(gutter).not.toBeNull();
         // `+ 2` for the button's 1px border on each side. Anything less and text runs under it.
-        expect(gutter!).toBeGreaterThanOrEqual(left! + width! + 2);
+        expect(gutter!).toBeGreaterThanOrEqual(right! + width! + 2);
+    });
+
+    /**
+     * The button and the gutter must name the SAME edge. Moving one and not the other leaves a
+     * panel that reserves space where nothing sits and draws text under the button anyway — which
+     * is not a visibly broken stylesheet, just a wrong one.
+     */
+    it('reserves the edge the button is actually on', () => {
+        const first = ruleBody('.au-editor .au-idock .au-inspect > :first-child')!;
+        const onRight = px(button, 'right') !== null;
+        expect(px(first, 'padding-right') !== null).toBe(onRight);
+        expect(px(first, 'padding-left') !== null).toBe(!onRight);
+    });
+
+    /**
+     * `.au-inspect` scrolls, and its scrollbar runs down the right edge — the same edge the button
+     * now sits on. Inset past it, or the top of the scrollbar is unreachable. 10px is what
+     * `index.css` sets app-wide.
+     */
+    it('clears the scrollbar it now shares an edge with', () => {
+        expect(px(button, 'right')!).toBeGreaterThanOrEqual(10);
+    });
+
+    /**
+     * Except in the collapsed rail, which has no scrollbar and is only 30px wide — the inset plus
+     * the button would not fit inside it.
+     */
+    it('drops the inset in the rail, where it would not fit', () => {
+        const rail = px(ruleBody('.au-editor .au-idock.collapsed .au-icollapse'), 'right');
+        const width = px(button, 'width')!;
+        expect(rail).not.toBeNull();
+        // AU_INSPECT_RAIL is 30.
+        expect(rail! + width + 2).toBeLessThanOrEqual(30);
     });
 
     /**
@@ -134,8 +167,37 @@ describe('what the gutter rule lands on', () => {
     });
 });
 
+/**
+ * Two complaints about this pair, one cause: as inline-flex boxes with no whitespace node between
+ * them they were drawn touching, and being different heights and font sizes they were aligned on a
+ * baseline they do not share, so the button rode high. A flex row answers both without either
+ * answer depending on font metrics — which is why it is asserted as a row and not as two lengths.
+ */
 describe('the state pill and its re-arm button', () => {
-    it('are held apart, since no whitespace node separates them', () => {
-        expect(px(ruleBody('.au-editor .au-pill + .au-btn'), 'margin-left')).toBeGreaterThan(0);
+    const row = ruleBody('.au-editor .au-nowrow');
+
+    it('sit on one row, centred on each other and held apart', () => {
+        expect(row).toMatch(/display:\s*flex/);
+        expect(row).toMatch(/align-items:\s*center/);
+        expect(px(row, 'gap')).toBeGreaterThan(0);
+    });
+
+    /** The panel resizes down to 300px, where a long pill plus a button is two lines. */
+    it('wrap rather than overflow a narrow panel', () => {
+        expect(row).toMatch(/flex-wrap:\s*wrap/);
+    });
+});
+
+/**
+ * The same alignment problem in the other place it appeared: a 15px icon beside 0.8rem uppercase
+ * text, aligned on a baseline neither shares. The label centres its items rather than picking a
+ * `vertical-align` length that can only be right for one font size.
+ */
+describe('an info icon in a field label', () => {
+    it('is centred against the label rather than hung off its baseline', () => {
+        const label = ruleBody('.au-editor .au-flabel');
+        expect(label).toMatch(/display:\s*flex/);
+        expect(label).toMatch(/align-items:\s*center/);
+        expect(ruleBody('.au-editor .au-info')).not.toMatch(/vertical-align/);
     });
 });

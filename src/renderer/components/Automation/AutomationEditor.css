@@ -950,14 +950,19 @@
 }
 
 /*
- * The collapse button sits in the panel's top-left corner, above the grip in z-order so the two
- * cannot fight over one press. In the collapsed rail it is the only thing there, which is the
- * whole reason the rail exists: a zero-width column has nothing left to click.
+ * The collapse button sits in the panel's top-RIGHT corner, where the header has room and the
+ * resize grip does not: the two used to share the left edge and needed a z-index to settle which
+ * got the press. In the collapsed rail it is the only thing there, which is the whole reason the
+ * rail exists — a zero-width column has nothing left to click.
+ *
+ * **12px, not 4.** `.au-inspect` is `overflow-y: auto` and its scrollbar runs down this same edge;
+ * at 4px the button would cover the top of it, and the scrollbar is the one thing that space is
+ * not empty of. The rail overrides it back, having no scrollbar and no room for the inset.
  */
 .au-editor .au-icollapse {
     position: absolute;
     top: 8px;
-    left: 4px;
+    right: 12px;
     z-index: 3;
     width: 22px;
     height: 22px;
@@ -980,7 +985,7 @@
 }
 
 .au-editor .au-idock.collapsed .au-icollapse {
-    left: 3px;
+    right: 3px;
 }
 
 .au-editor .au-inspect {
@@ -996,16 +1001,17 @@
  * The gutter the collapse button sits in, reserved on WHATEVER is at the top of the panel.
  *
  * Written as `> :first-child` and not as a list of the classes that happen to go there: the button
- * is absolutely positioned over the panel's top-left corner, so it collides with the first row of
- * every state the inspector has. Naming `.au-ihead` covered the selected state and left the empty
- * one — `.au-inspect-none`, a different element — with `Nothing selected` drawn under the button.
- * A third state would have been the same bug a third time.
+ * is absolutely positioned over the panel's top corner, so it collides with the first row of every
+ * state the inspector has. Naming `.au-ihead` covered the selected state and left the empty one —
+ * `.au-inspect-none`, a different element — with `Nothing selected` drawn under the button. A third
+ * state would have been the same bug a third time.
  *
- * 32px, against the button's own 4 + 22 + 2 of border. `auInspectorDock.test.tsx` derives that sum
- * from these rules rather than restating it, so moving the button without moving the gutter fails.
+ * On the RIGHT since the button moved there, and 36px against its own 12 + 22 + 2 of border.
+ * `auInspectorChromeGaps.test.tsx` derives that sum from the button's own rule rather than
+ * restating it — moving the button again without moving the gutter fails there.
  */
 .au-editor .au-idock .au-inspect > :first-child {
-    padding-left: 32px;
+    padding-right: 36px;
 }
 
 .au-editor .au-inspect-none {
@@ -1109,8 +1115,18 @@
     margin-bottom: 16px;
 }
 
+/*
+ * `flex`, not `block`, and only so that an `AuInfo` icon in the label lines up with the words.
+ *
+ * A 15px inline-flex box beside 0.8rem uppercase text is aligned on a baseline the two do not
+ * share — the icon's comes from its own glyph — and no `vertical-align` length is right for both
+ * font sizes at once, which is how it ended up sitting below the caps. `align-items: center`
+ * centres it against the line box instead and asks nothing of either font's metrics. A label with
+ * no icon is a single anonymous item and renders exactly as it did.
+ */
 .au-editor .au-flabel {
-    display: block;
+    display: flex;
+    align-items: center;
     margin-bottom: 6px;
     font-size: 0.8rem;
     letter-spacing: 0.06em;
@@ -1678,14 +1694,22 @@
 }
 
 /*
- * *Re-arm now* sits straight after the state pill in the RIGHT NOW group, and JSX siblings with no
- * literal text between them produce no whitespace text node — so the two inline-flex boxes were
- * drawn touching. Adjacent-sibling, not a gap on the group: when a rule HAS fired, the block
- * `.au-rightnow` line comes between them and the button starts its own line, where a left margin
- * would only indent it away from the edge everything else lines up on.
+ * The state pill and *Re-arm now*, on one row.
+ *
+ * Two problems, one cause, which is why this is a flex row and not two more declarations. JSX
+ * siblings with no literal text between them produce no whitespace node, so the boxes were drawn
+ * touching; and as inline-flex boxes of different heights and font sizes they were aligned on a
+ * baseline they do not share, so the button rode high against the pill. `gap` answers the first and
+ * `align-items: center` answers the second without either of them depending on font metrics.
+ *
+ * It wraps, because the panel is resizable down to 300px and a long pill plus a button does not
+ * always fit on one line.
  */
-.au-editor .au-pill + .au-btn {
-    margin-left: 8px;
+.au-editor .au-nowrow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
 }
 
 .au-editor .au-pill.fired,
@@ -1999,7 +2023,7 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    vertical-align: -2px;
+    flex: none;
     background: transparent;
     border: 1px solid #4a4d56;
     border-radius: 999px;

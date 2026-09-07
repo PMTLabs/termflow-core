@@ -522,19 +522,24 @@ export const CondPanel: React.FC<CondPanelProps> = ({
 
             {live && (
                 <AuField label="Right now">
-                    <span className={`au-pill ${live.id}`}>
-                        <span className="au-pd" />
-                        {live.pillText}
-                    </span>
+                    {/* The state and the one action on it, together on a row of their own. The
+                        *Fired …* line moves below both rather than between them: it is detail
+                        about the state, and it was what separated the pill from its own button. */}
+                    <div className="au-nowrow">
+                        <span className={`au-pill ${live.id}`}>
+                            <span className="au-pd" />
+                            {live.pillText}
+                        </span>
+                        {onRearm && (
+                            <button type="button" className="au-btn sm" onClick={onRearm}>
+                                Re-arm now
+                            </button>
+                        )}
+                    </div>
                     {lastFired !== null && (
                         <div className="au-rightnow">
                             Fired {describeLastFired(lastFired, now)}.
                         </div>
-                    )}
-                    {onRearm && (
-                        <button type="button" className="au-btn sm" onClick={onRearm}>
-                            Re-arm now
-                        </button>
                     )}
                 </AuField>
             )}
