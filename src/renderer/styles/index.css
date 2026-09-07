@@ -15,3 +15,57 @@ body {
   width: 100vw;
   height: 100vh;
 }
+/*
+ * ---------------------------------------------------------------- scrollbars ---
+ *
+ * ONE rule for the whole app, and it is deliberately unscoped.
+ *
+ * Ten stylesheets had grown their own near-identical copy — the automation editor, the pane
+ * context menu, the playback viewer, search filters and results, and so on — which meant every
+ * scrollable surface was styled if and only if someone remembered it. The one that got noticed
+ * proves the shape of the failure: `.au-editor ::-webkit-scrollbar` covers everything INSIDE the
+ * editor, and the editor's own dropdown portals to `body` to escape a clipping ancestor, so it
+ * landed outside the selector and drew a bare Win32 scrollbar in the middle of a dark modal.
+ * A descendant selector cannot follow a portal; a global one has nothing to follow.
+ *
+ * Breadth is safe here in a way `* { }` never is: the only thing these pseudo-elements can match
+ * is a scrollbar. The per-component copies that remain are now redundant rather than wrong, and
+ * are left alone — deleting styling that already looks right is churn, and any of them may be
+ * deliberately different.
+ *
+ * `scrollbar-width`/`scrollbar-color` are the standard properties; WebKit ignores them and uses
+ * the pseudo-elements below, so both are stated rather than either alone.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3a3c44 transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* `border` rather than a narrower `width`: it insets the thumb from the track without shrinking
+   the hit area. Transparent + `background-clip: padding-box` so the inset shows whatever ground
+   the scrolling surface sits on, instead of pinning one panel's background colour app-wide —
+   which is the single thing that stopped the editor's copy from being liftable as it stood. */
+::-webkit-scrollbar-thumb {
+  background: #3a3c44;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4f535e;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

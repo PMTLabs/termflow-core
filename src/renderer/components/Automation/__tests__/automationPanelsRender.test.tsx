@@ -102,21 +102,27 @@ describe('the inspector panels — rendered, per template', () => {
 
             // The pattern is a control binding — the field's `value` — and the panel's prose about
             // it is the paraphrase, which has its own tests below.
-            await show(rule, 'parse');
-            expect(fields()).toContain(displayedPattern(parse));
+            if (parse) {
+                await show(rule, 'parse');
+                expect(fields()).toContain(displayedPattern(parse));
+            }
 
-            const condText = await show(rule, 'cond');
-            if (cond.kind === 'number' && cond.threshold !== null && cond.threshold !== undefined) {
-                expect(`${condText} ${fields()}`).toContain(String(cond.threshold));
+            if (cond) {
+                const condText = await show(rule, 'cond');
+                if (cond.kind === 'number' && cond.threshold !== null && cond.threshold !== undefined) {
+                    expect(`${condText} ${fields()}`).toContain(String(cond.threshold));
+                }
             }
 
             // **The DISPLAY, not the field.** Asserting over the two together is what let the first
             // draft of this test survive the very mutation it was written for: the preview span was
             // replaced with a hard-coded string and the textarea still carried the right value, so
             // `contains` found it anyway. A displayed value has to be read where it is displayed.
-            await show(rule, 'action');
-            expect(container.querySelector('.au-cap')?.textContent).toBe(action.message);
-            expect(fields()).toContain(action.message);
+            if (action) {
+                await show(rule, 'action');
+                expect(container.querySelector('.au-cap')?.textContent).toBe(action.message);
+                expect(fields()).toContain(action.message);
+            }
         },
     );
 
@@ -139,24 +145,29 @@ describe('the inspector panels — rendered, per template', () => {
             // that chrome as if it were a leaked value; reading the same `.au-cap` span the
             // per-template loop above reads is the precise oracle for "the value this panel is
             // SHOWING", exactly as that loop's own comment already argues.
-            await show(rule, 'action');
-            // Assert the node EXISTS before reading it — `?? ''` here made every `not.toContain`
-            // below pass vacuously against an empty string whenever the preview was blocked and
-            // `.au-cap` was absent from the DOM altogether.
-            const capNode = container.querySelector('.au-cap');
-            expect(capNode).not.toBeNull();
-            const shownMessage = capNode!.textContent ?? '';
-            for (const other of others) {
-                if (other.graph.action.message === rule.graph.action.message) continue;
-                expect(shownMessage).not.toContain(other.graph.action.message);
+            if (rule.graph.action) {
+                await show(rule, 'action');
+                // Assert the node EXISTS before reading it — `?? ''` here made every `not.toContain`
+                // below pass vacuously against an empty string whenever the preview was blocked and
+                // `.au-cap` was absent from the DOM altogether.
+                const capNode = container.querySelector('.au-cap');
+                expect(capNode).not.toBeNull();
+                const shownMessage = capNode!.textContent ?? '';
+                for (const other of others) {
+                    const otherAction = other.graph.action;
+                    if (!otherAction || otherAction.message === rule.graph.action.message) continue;
+                    expect(shownMessage).not.toContain(otherAction.message);
+                }
             }
 
-            await show(rule, 'parse');
-            const shown = fields();
-            for (const other of others) {
-                const pattern = displayedPattern(other.graph.parse);
-                if (pattern === displayedPattern(rule.graph.parse)) continue;
-                expect(shown).not.toContain(pattern);
+            if (rule.graph.parse) {
+                await show(rule, 'parse');
+                const shown = fields();
+                for (const other of others) {
+                    const otherParse = other.graph.parse;
+                    if (!otherParse || displayedPattern(otherParse) === displayedPattern(rule.graph.parse)) continue;
+                    expect(shown).not.toContain(displayedPattern(otherParse));
+                }
             }
         }
     });
@@ -183,6 +194,8 @@ describe('the inspector panels — rendered, per template', () => {
             // sentence about a missing step both surfaces state in prose.
             timer: ['when'],
             action: ['message', 'send'],
+            // Task 11 adds the canvas card. Its editable inspector is deliberately Task 12.
+            webhook: [],
         };
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         for (const step of STEP_ORDER) {
@@ -479,6 +492,11 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         expect(dead).toEqual(['$2']);
     });
 
+    /**
+     * The patch carries `substitute: true` alongside the text, and that is the fix for a reported
+     * defect rather than an incidental extra field: a chip that inserted a reference into a message
+     * sent verbatim produced literal `$1` on the wire. See `tokenSubstitutionAffordance.test.tsx`.
+     */
     it('clicking a chip inserts it into the message at the cursor', async () => {
         const dispatch = jest.fn();
         const { messageInput } = await renderAction({ message: 'fix ', substitute: false }, { dispatch });
@@ -488,7 +506,10 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         const chip = [...container.querySelectorAll('.au-tokens .au-token')]
             .find((el) => el.textContent === '$1') as HTMLButtonElement;
         await act(async () => chip.click());
-        expect(dispatch).toHaveBeenCalledWith({ type: 'action', patch: { message: 'fix $1' } });
+        expect(dispatch).toHaveBeenCalledWith({
+            type: 'action',
+            patch: { message: 'fix $1', substitute: true },
+        });
     });
 
     it('uses a braced token for group 10 and the next dead boundary, while leaving single digits bare', async () => {
@@ -739,16 +760,34 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         expect(group!.getAttribute('aria-label')).toMatch(/combine/i);
     });
 
+    /**
+     * `AuSelect` replaced the panels' `<select>`s (its list portals to `body` so the window edge
+     * cannot clip it), so a dropdown is opened before its rows exist and each row carries its key in
+     * `data-value` rather than in an `<option>`'s `value`.
+     */
+    const openSelect = async (label: string) => {
+        const trigger = container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+        // ENSURE open, never toggle: the trigger flips state, and a re-render inside one test keeps
+        // the component instance, so a second blind click closed the list and read back no rows.
+        if (trigger.getAttribute('aria-expanded') === 'true') return;
+        await act(async () => { trigger.click(); });
+    };
+    const rowsOf = (label: string) => [...document.body.querySelectorAll<HTMLElement>(
+        `.au-selmenu[aria-label="${label}"] .au-selopt`,
+    )];
+    const pickRow = async (label: string, match: RegExp) => {
+        const row = rowsOf(label).find((el) => match.test(el.textContent ?? ''))!;
+        expect(row).toBeTruthy();
+        await act(async () => {
+            row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        });
+    };
+
     it('clears the operand when a row switches between text and number', async () => {
         const dispatch = jest.fn();
         await renderCond([clause('$1', 'is', '529')], { dispatch });
-        const opSelect = container.querySelector<HTMLSelectElement>('[aria-label="How to compare"]')!;
-        const overOption = [...opSelect.options].find((o) => /is over/i.test(o.textContent ?? ''))!;
-        expect(overOption).toBeTruthy();
-        await act(async () => {
-            opSelect.value = overOption.value;
-            opSelect.dispatchEvent(new Event('change', { bubbles: true }));
-        });
+        await openSelect('How to compare');
+        await pickRow('How to compare', /is over/i);
         expect(dispatch).toHaveBeenCalledTimes(1);
         const action = dispatch.mock.calls[0][0] as { type: string; clauses: AutomationClause[] };
         expect(action.type).toBe('clauses');
@@ -778,8 +817,8 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
 
     it('offers only tokens the pattern actually produces', async () => {
         await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
-        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
-        const opts = [...select.options].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const opts = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         expect(opts).toHaveLength(2);
         expect(opts[0]).toContain('$0');
         expect(opts[1]).toContain('$1');
@@ -797,8 +836,8 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
      */
     it('offers the pattern\'s named groups as well as its numbered ones', async () => {
         await renderCond([clause('$1', 'is', 'x')], { find: 'err (?<code>\\d+) (?<why>\\w+)' });
-        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
-        const opts = [...select.options].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const opts = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         // Each option carries the value it holds in the live preview (§5.9), so `${why}` is never
         // picked blind — `sayPattern`'s own worked example for this pattern is `err 63 abc`.
         expect(opts).toEqual([
@@ -809,7 +848,7 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
             '${why} — "abc"',
         ]);
         // And the VALUES are the keys `sourceFromKey` round-trips, not the labels.
-        expect([...select.options].map((o) => o.value)).toEqual([
+        expect(rowsOf('Which captured value').map((o) => o.getAttribute('data-value'))).toEqual([
             'whole',
             'group:1',
             'group:2',
@@ -822,8 +861,9 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
         // The paired negative: an unconditional `${…}` row, or one built from a stale name set,
         // would satisfy the test above and break this.
         await renderCond([clause('$1', 'is', 'x')], { find: 'a(\\d+)b' });
-        const select = container.querySelector<HTMLSelectElement>('[aria-label="Which captured value"]')!;
-        expect([...select.options].map((o) => o.value)).toEqual(['whole', 'group:1']);
+        await openSelect('Which captured value');
+        expect(rowsOf('Which captured value').map((o) => o.getAttribute('data-value')))
+            .toEqual(['whole', 'group:1']);
     });
 
     /* ------------------------------------------------------ task 28: §5.9's other two bullets --- */
@@ -836,17 +876,15 @@ describe('CondPanel — the finds radio, the clause list, the join (mockup §06)
 
     it('shows what $0 holds, and keeps its words when there is nothing to show', async () => {
         await renderCond([clause('$1', 'is', 'x')], { find: 'ctx:(\\d+)%' });
-        const opts = [...container.querySelectorAll<HTMLOptionElement>(
-            '[aria-label="Which captured value"] option',
-        )].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const opts = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         expect(opts).toEqual(['$0 — "ctx:63%"', '$1 — "63"']);
 
         // …and a pattern with no worked example to read falls back to the words, never to a blank
         // or an invented value.
         await renderCond([clause('$1', 'is', 'x')], { find: 'FAILED (\\d+) tests in (\\S+)' });
-        const bare = [...container.querySelectorAll<HTMLOptionElement>(
-            '[aria-label="Which captured value"] option',
-        )].map((o) => o.textContent ?? '');
+        await openSelect('Which captured value');
+        const bare = rowsOf('Which captured value').map((o) => o.textContent ?? '');
         expect(bare).toEqual(['$0 — the whole match', '$1', '$2']);
     });
 

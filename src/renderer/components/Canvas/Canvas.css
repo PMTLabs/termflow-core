@@ -504,9 +504,17 @@
 
 /* Scoped to `.canvas-menu` rather than added to `PaneContextMenu.css`, whose classes these
    menus borrow but do not own — the pane and tab menus share that file and have no
-   destructive row. */
-.canvas-menu .context-menu-item.danger { color: var(--danger-color, #e81123); }
-.canvas-menu .context-menu-item.danger:hover:not(:disabled) { color: var(--danger-color, #e81123); }
+   destructive row.
+
+   NOT `--danger-color`, and that is the point. `#e81123` is a strong red for a FILL — a button
+   whose background it becomes, with white text over it — and it is the wrong red for TEXT on a
+   #2d2d30 menu, where it lands at 3.3:1 and reads as a dim maroon rather than as a warning.
+   Reported on the automation canvas's Delete row, and the Canvas Mode node menu's Close row had
+   it too: one colour, two menus, one fix. #ffaea8 is the red the automation editor already uses
+   for its blocking-problem text (~10 sites in `AutomationEditor.css`), so this borrows an answer
+   rather than inventing an eleventh. 7.8:1 on the menu, 5.5:1 on the #094771 hover. */
+.canvas-menu .context-menu-item.danger { color: #ffaea8; }
+.canvas-menu .context-menu-item.danger:hover:not(:disabled) { color: #ffaea8; }
 
 /* The shell-profile list (items 3 and 4). A workspace can have a dozen profiles configured, so
    it scrolls rather than growing past the window — a menu opened near the bottom edge would

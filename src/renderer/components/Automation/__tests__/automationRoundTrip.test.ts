@@ -29,7 +29,8 @@ import { problems } from '../automationValidation';
 import { STEP_ORDER, canAddStep, defaultWires } from '../automationSteps';
 
 /** The steps an ordinary v1 rule has, and therefore the cards it opens with — the wait is opt-in. */
-const WITHOUT_TIMER = STEP_ORDER.filter((s) => s !== 'timer');
+const WITHOUT_TIMER = STEP_ORDER.filter((s) => s !== 'timer' && s !== 'webhook');
+const WITH_TIMER = STEP_ORDER.filter((s) => s !== 'webhook');
 import type { AutomationRule } from '../../../types/electron';
 
 /** The wire hop, exactly as `invoke` performs it. */
@@ -124,6 +125,7 @@ describe('draft ⇄ row', () => {
                     // asserting the default rather than the carried value.
                     timer: { x: 51, y: 52 },
                     action: { x: 41, y: 42 },
+                    webhook: { x: 61, y: 62 },
                 },
             },
         };
@@ -296,8 +298,8 @@ describe('draftFromRule', () => {
         const withWait = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         withWait.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
         const draft = draftFromRule(withWait);
-        expect(draft.present).toEqual([...STEP_ORDER]);
-        expect(draft.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+        expect(draft.present).toEqual(WITH_TIMER);
+        expect(draft.wires).toEqual(defaultWires(WITH_TIMER, 'afterMatch'));
         expect(canAddStep(draft.present, 'timer')).not.toBeNull();
 
         // And without one, the palette can still offer it.
@@ -314,7 +316,7 @@ describe('draftFromRule', () => {
         const schedule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         schedule.graph.timer = { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } };
         const draft = draftFromRule(schedule);
-        expect(draft.present).toEqual([...STEP_ORDER]);
+        expect(draft.present).toEqual(WITH_TIMER);
         expect(draft.wires.map((w) => `${w.from.step}.${w.from.port}->${w.to.step}.${w.to.port}`))
             .toEqual(['timer.out->action.in']);
     });
@@ -495,7 +497,10 @@ describe('draftFromRule', () => {
             ...blankDraft(),
             targetMode: 'pinned',
             targetIds: [],
-            graph: { ...blankDraft().graph, layout: DEFAULT_LAYOUT },
+            graph: (() => {
+                const { action: _action, ...graph } = blankDraft().graph;
+                return { ...graph, layout: DEFAULT_LAYOUT };
+            })(),
         });
     });
 
@@ -711,8 +716,8 @@ describe('the reducer', () => {
 
         // The wait step drops in fifth wherever it is dropped, and re-draws the chain THROUGH it.
         d = draftReducer(d, { type: 'addStep', step: 'timer' });
-        expect(d.present).toEqual([...STEP_ORDER]);
-        expect(d.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+        expect(d.present).toEqual(WITH_TIMER);
+        expect(d.wires).toEqual(defaultWires(WITH_TIMER, 'afterMatch'));
     });
 
     /**
@@ -727,7 +732,7 @@ describe('the reducer', () => {
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         rule.graph.timer = { mode: { afterMatch: { delayMs: 30_000 } } };
         const opened = draftFromRule(rule);
-        expect(opened.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+        expect(opened.wires).toEqual(defaultWires(WITH_TIMER, 'afterMatch'));
 
         const scheduled = draftReducer(opened, {
             type: 'timer',
@@ -736,11 +741,11 @@ describe('the reducer', () => {
         expect(scheduled.rule.graph.timer).toEqual({
             mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } },
         });
-        expect(scheduled.wires).toEqual(defaultWires(STEP_ORDER, 'dailyAt'));
+        expect(scheduled.wires).toEqual(defaultWires(WITH_TIMER, 'dailyAt'));
 
         // And back, so this is a re-derivation rather than a one-way collapse.
         const back = draftReducer(scheduled, { type: 'timer', mode: { afterMatch: { delayMs: 5_000 } } });
-        expect(back.wires).toEqual(defaultWires(STEP_ORDER, 'afterMatch'));
+        expect(back.wires).toEqual(defaultWires(WITH_TIMER, 'afterMatch'));
     });
 
     /**

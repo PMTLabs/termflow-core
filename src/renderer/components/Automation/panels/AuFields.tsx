@@ -6,12 +6,19 @@
  */
 import React from 'react';
 
-export const AuField: React.FC<{ label: string; children: React.ReactNode }> = ({
-    label,
-    children,
-}) => (
+export const AuField: React.FC<{
+    label: string;
+    /** An `AuInfo` for this field, drawn against the label. Optional — most fields say enough. */
+    info?: React.ReactNode;
+    children: React.ReactNode;
+}> = ({ label, info, children }) => (
     <div className="au-fgroup">
-        <span className="au-flabel">{label}</span>
+        {/* Inside the label rather than beside it, so the icon travels with the words it explains
+            and `.au-flabel`'s own block/margin rules keep applying to every field unchanged. */}
+        <span className="au-flabel">
+            {label}
+            {info}
+        </span>
         {children}
     </div>
 );

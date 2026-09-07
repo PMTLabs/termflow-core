@@ -226,7 +226,9 @@
 
 .au-editor .au-mbody {
     display: grid;
-    grid-template-columns: 224px minmax(0, 1fr) 340px;
+    /* The third track is `auto` and the dock carries its own inline width: one number drives
+       the column, where a track plus a variable would be two places for it to disagree. */
+    grid-template-columns: 224px minmax(0, 1fr) auto;
     flex: 1;
     min-height: 0;
 }
@@ -236,7 +238,7 @@
    narrower than the query believes. */
 @container aumodal (max-width: 1180px) {
     .au-editor .au-mbody {
-        grid-template-columns: 180px minmax(0, 1fr) 280px;
+        grid-template-columns: 180px minmax(0, 1fr) auto;
     }
 }
 
@@ -340,6 +342,20 @@
 .au-editor .au-gi.action {
     background: rgba(95, 163, 119, 0.16);
     color: #5fa377;
+}
+
+/*
+ * The mockup predates webhooks — §015 still says "No webhooks" — so this hue is chosen rather than
+ * quoted, on the same three surfaces and in the same shape as the five above. Without it the glyph
+ * inherited the body colour and rendered near-black on the dark rail, which is what it looked like:
+ * an icon that had been switched off. A teal sits in the widest gap left between `action`'s green
+ * and `monitor`'s blue, so the outbound step does not read as either.
+ */
+.au-editor .au-palitem.webhook .au-palico,
+.au-editor .au-node.webhook .au-nico,
+.au-editor .au-gi.webhook {
+    background: rgba(79, 168, 148, 0.16);
+    color: #4fa894;
 }
 
 .au-editor .au-paltext {
@@ -473,6 +489,17 @@
 
 .au-editor .au-node.invalid {
     border-color: #6e2b28;
+}
+
+/*
+ * The card is a tab stop now — that is what aims the Delete key — so it needs a ring that is not
+ * the selection border. `:focus-visible`, so a mouse click gets the `.on` border alone and only a
+ * keyboard arrival draws this; `outline-offset` puts it clear of the 10px radius rather than
+ * tracing it, and an outline rather than a box-shadow so `.on`'s own shadow still shows through.
+ */
+.au-editor .au-node:focus-visible {
+    outline: 2px solid #5aa9c9;
+    outline-offset: 3px;
 }
 
 .au-editor .au-nrail {
@@ -760,19 +787,6 @@
     border-top: 1px solid #2b2d33;
 }
 
-.au-editor .au-drawertab {
-    position: absolute;
-    right: 12px;
-    bottom: 42px;
-    padding: 4px 10px;
-    font-size: 0.85rem;
-    color: #a9adb6;
-    background: #1c1d22;
-    border: 1px solid #33353c;
-    border-radius: 7px;
-    cursor: pointer;
-}
-
 .au-editor .au-dhead {
     display: flex;
     align-items: center;
@@ -903,12 +917,101 @@
 
 /* --------------------------------------------------------------- inspector --- */
 
+/*
+ * The DOCK is the grid child; the `<aside>` inside it scrolls. `min-height: 0` on both, or the
+ * aside's `overflow-y: auto` never engages inside a grid row and the whole editor grows a
+ * scrollbar instead of the panel.
+ */
+.au-editor .au-idock {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid #2b2d33;
+    background: #191a1f;
+}
+
+/* The grip overhangs the border on both sides: a 1px edge is not a pointer target, and the panel
+   must not lose a pixel of content to make room for one. */
+.au-editor .au-igrip {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    width: 7px;
+    z-index: 2;
+    cursor: col-resize;
+}
+
+.au-editor .au-igrip:hover,
+.au-editor .au-igrip:focus-visible {
+    background: rgba(90, 169, 201, 0.35);
+    outline: none;
+}
+
+/*
+ * The collapse button sits in the panel's top-RIGHT corner, where the header has room and the
+ * resize grip does not: the two used to share the left edge and needed a z-index to settle which
+ * got the press. In the collapsed rail it is the only thing there, which is the whole reason the
+ * rail exists — a zero-width column has nothing left to click.
+ *
+ * **12px, not 4.** `.au-inspect` is `overflow-y: auto` and its scrollbar runs down this same edge;
+ * at 4px the button would cover the top of it, and the scrollbar is the one thing that space is
+ * not empty of. The rail overrides it back, having no scrollbar and no room for the inset.
+ */
+.au-editor .au-icollapse {
+    position: absolute;
+    top: 8px;
+    right: 12px;
+    z-index: 3;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #23252b;
+    border: 1px solid #33353c;
+    border-radius: 5px;
+    color: #9298a3;
+    font-size: 0.95rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.au-editor .au-icollapse:hover {
+    background: #2c2f37;
+    color: #e6e6e8;
+}
+
+.au-editor .au-idock.collapsed .au-icollapse {
+    right: 3px;
+}
+
 .au-editor .au-inspect {
     display: flex;
     flex-direction: column;
-    border-left: 1px solid #2b2d33;
+    flex: 1;
+    min-height: 0;
     background: #191a1f;
     overflow-y: auto;
+}
+
+/*
+ * The gutter the collapse button sits in, reserved on WHATEVER is at the top of the panel.
+ *
+ * Written as `> :first-child` and not as a list of the classes that happen to go there: the button
+ * is absolutely positioned over the panel's top corner, so it collides with the first row of every
+ * state the inspector has. Naming `.au-ihead` covered the selected state and left the empty one —
+ * `.au-inspect-none`, a different element — with `Nothing selected` drawn under the button. A third
+ * state would have been the same bug a third time.
+ *
+ * On the RIGHT since the button moved there, and 36px against its own 12 + 22 + 2 of border.
+ * `auInspectorChromeGaps.test.tsx` derives that sum from the button's own rule rather than
+ * restating it — moving the button again without moving the gutter fails there.
+ */
+.au-editor .au-idock .au-inspect > :first-child {
+    padding-right: 36px;
 }
 
 .au-editor .au-inspect-none {
@@ -1012,8 +1115,18 @@
     margin-bottom: 16px;
 }
 
+/*
+ * `flex`, not `block`, and only so that an `AuInfo` icon in the label lines up with the words.
+ *
+ * A 15px inline-flex box beside 0.8rem uppercase text is aligned on a baseline the two do not
+ * share — the icon's comes from its own glyph — and no `vertical-align` length is right for both
+ * font sizes at once, which is how it ended up sitting below the caps. `align-items: center`
+ * centres it against the line box instead and asks nothing of either font's metrics. A label with
+ * no icon is a single anonymous item and renders exactly as it did.
+ */
 .au-editor .au-flabel {
-    display: block;
+    display: flex;
+    align-items: center;
     margin-bottom: 6px;
     font-size: 0.8rem;
     letter-spacing: 0.06em;
@@ -1040,8 +1153,39 @@
     gap: 7px;
 }
 
+.au-editor .au-frow .au-mini {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    font-size: 0.85rem;
+    color: #a9adb6;
+    background: #1c1d22;
+    border: 1px solid #34363e;
+    border-radius: 7px;
+    cursor: pointer;
+}
+
+.au-editor .au-frow .au-mini:hover {
+    color: #fff;
+    background: #2c2f37;
+}
+
 .au-editor .au-radio,
 .au-editor .au-checkrow {
+    /*
+     * The height of the FIRST line's box — `font-size` x `line-height`, both stated just below.
+     * (Kept a separate declaration rather than becoming the `line-height` itself: as a length it
+     * would inherit into `.au-rsub`, whose smaller font-size currently derives its own leading from
+     * the unitless 1.45.)
+     *
+     * The marks centre on THIS, not on the row. `align-items: flex-start` is right — most of these
+     * rows carry a second, smaller line, and centring the whole block puts the control halfway down
+     * a two-line paragraph — but on its own it pins the mark's TOP to the text's top, which sits it
+     * visibly above the title's centre. That is what this row is for.
+     *
+     * In `rem`, deliberately: `.au-cmark` sets its own `font-size`, so an `em` here would resolve
+     * against 0.75rem for the checkbox and 0.9rem for the radio and quietly disagree.
+     */
+    --au-rowline: calc(0.9rem * 1.45);
     display: flex;
     align-items: flex-start;
     gap: 8px;
@@ -1076,7 +1220,9 @@
     flex: 0 0 auto;
     width: 12px;
     height: 12px;
-    margin-top: 2px;
+    /* Centred on the title's line box. `box-sizing: border-box` is global, so 12px is the whole
+       mark including its border. */
+    margin-top: calc((var(--au-rowline) - 12px) / 2);
     border: 1.5px solid #59606b;
     border-radius: 50%;
 }
@@ -1108,7 +1254,8 @@
     height: 13px;
     display: grid;
     place-items: center;
-    margin-top: 1px;
+    /* As `.au-rmark`, for a 13px box. */
+    margin-top: calc((var(--au-rowline) - 13px) / 2);
     font-size: 0.75rem;
     color: transparent;
     border: 1.5px solid #59606b;
@@ -1143,6 +1290,19 @@
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
+}
+
+/*
+ * The token chips sat flush against the message box above them, reading as part of its border.
+ * `6px` is `.au-fhelp`'s gap, which is the same relationship: a row that explains the control above it.
+ *
+ * Deliberately `.au-finput + `, not `.au-tokens` on its own. Three panels use this row, and only two
+ * of them put it under an input — in `ParsePanel` it is the field's FIRST child, directly after
+ * `.au-flabel`, which already carries `margin-bottom: 6px`. An unqualified rule would fix the two
+ * that touch and silently double the gap on the third.
+ */
+.au-editor .au-finput + .au-tokens {
+    margin-top: 6px;
 }
 
 .au-editor .au-token {
@@ -1533,6 +1693,25 @@
     background: currentColor;
 }
 
+/*
+ * The state pill and *Re-arm now*, on one row.
+ *
+ * Two problems, one cause, which is why this is a flex row and not two more declarations. JSX
+ * siblings with no literal text between them produce no whitespace node, so the boxes were drawn
+ * touching; and as inline-flex boxes of different heights and font sizes they were aligned on a
+ * baseline they do not share, so the button rode high against the pill. `gap` answers the first and
+ * `align-items: center` answers the second without either of them depending on font metrics.
+ *
+ * It wraps, because the panel is resizable down to 300px and a long pill plus a button does not
+ * always fit on one line.
+ */
+.au-editor .au-nowrow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
 .au-editor .au-pill.fired,
 .au-editor .au-pill.sim {
     color: #7fd18f;
@@ -1747,4 +1926,202 @@
 .au-hovcard .au-hovwait {
     font-size: 0.8rem;
     color: #6a6e77;
+}
+
+/* ------------------------------------------------------------------ AuSelect --- */
+
+/*
+ * `.au-sel` is the trigger and keeps `.au-finput`'s box, so it drops into the layouts the
+ * `<select>`s it replaces already sat in.
+ *
+ * `.au-selmenu` is NOT namespaced under `.au-editor`, which every other rule in this file is. It
+ * cannot be: the list portals to `body` so that neither the inspector column's `overflow-y: auto`
+ * nor `.au-modal`'s `overflow: hidden` can clip it, and a descendant selector would then match
+ * nothing. Its own `au-` prefix is what keeps it from colliding.
+ *
+ * z-index sits in the stack this file's header documents: above the editor's 9990, below the 9999
+ * a ConfirmDialog opened over it needs.
+ */
+.au-editor .au-sel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    text-align: left;
+    cursor: pointer;
+}
+
+.au-editor .au-seltext {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.au-editor .au-selchev {
+    flex: 0 0 auto;
+    color: #7d818c;
+}
+
+.au-selmenu {
+    position: fixed;
+    z-index: 9995;
+    overflow-y: auto;
+    padding: 4px;
+    background: #1c1d22;
+    border: 1px solid #3a3c44;
+    border-radius: 7px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    font-size: 0.95rem;
+    color: #cfd2d8;
+}
+
+.au-selopt {
+    padding: 6px 9px;
+    border-radius: 5px;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.au-selopt.on {
+    color: #fff;
+}
+
+/* Hover and keyboard share ONE highlight: `onMouseEnter` moves `active`, so a pointer and the
+   arrow keys cannot disagree about which row is about to be chosen. */
+.au-selopt.active {
+    background: #2c2f37;
+    color: #fff;
+}
+
+.au-selgroup {
+    padding: 6px 9px 3px;
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #7d818c;
+}
+
+.au-selopt.dead {
+    color: #6b6f78;
+    cursor: not-allowed;
+}
+
+/* ----------------------------------------------------------------- AuInfo --- */
+
+/*
+ * The icon lives INSIDE `.au-flabel`, which is uppercase, letter-spaced and 0.8rem. None of that
+ * should reach the glyph or the panel: `text-transform` and `letter-spacing` are reset here, and
+ * the panel is unnamespaced below because it portals to `body` and never sees the label at all.
+ */
+.au-editor .au-info {
+    margin-left: 7px;
+    width: 15px;
+    height: 15px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    background: transparent;
+    border: 1px solid #4a4d56;
+    border-radius: 999px;
+    color: #8d929c;
+    font-family: Georgia, 'Times New Roman', serif;
+    font-size: 10px;
+    font-style: italic;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: 0;
+    text-transform: none;
+    cursor: pointer;
+}
+
+.au-editor .au-info:hover,
+.au-editor .au-info.on {
+    border-color: #5aa9c9;
+    color: #cfe8f2;
+}
+
+/*
+ * NOT namespaced under `.au-editor`, for the reason `.au-selmenu` above gives: the panel is
+ * portalled to `body`, so a descendant selector rooted at the editor never reaches it. Same z-index
+ * as the select menu, which it can never be open alongside — an outside press closes either.
+ *
+ * **A medium, regular reading size (0.9rem / 1.55), deliberately.** This is prose with headings,
+ * lists and code in it, not a label: at the 0.8rem uppercase of the field it sits under, none of it
+ * would be worth opening.
+ */
+.au-infopop {
+    position: fixed;
+    z-index: 9995;
+    box-sizing: border-box;
+    width: 320px;
+    max-height: 300px;
+    overflow-y: auto;
+    padding: 12px 14px;
+    background: #1c1d22;
+    border: 1px solid #3a3c44;
+    border-radius: 8px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.55);
+    font-size: 0.9rem;
+    font-weight: 400;
+    line-height: 1.55;
+    color: #c2c6ce;
+}
+
+.au-infopop h4 {
+    margin: 12px 0 5px;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #e6e6e8;
+}
+
+.au-infopop p {
+    margin: 0 0 8px;
+}
+
+.au-infopop p:last-child {
+    margin-bottom: 0;
+}
+
+/* The two framing sentences: the question to ask, and the trap. Set apart from the examples they
+   bracket, since they are what the examples are FOR. */
+.au-infopop .au-infolead {
+    color: #9aa0aa;
+}
+
+.au-infopop ul {
+    margin: 0 0 8px;
+    padding-left: 18px;
+}
+
+.au-infopop li {
+    margin-bottom: 3px;
+}
+
+.au-infopop code {
+    padding: 1px 5px;
+    background: #26282f;
+    border-radius: 4px;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 0.85rem;
+    color: #d7e3b8;
+}
+
+/* ------------------------------------------------------------- AuNodeMenu --- */
+
+/*
+ * `CanvasMenu` borrows `PaneContextMenu.css`, whose `.pane-context-menu` sits at z-index 1000 — a
+ * layer chosen for a menu over the terminal grid, and one this 9990 modal would paint straight
+ * over. Unnamespaced and lifted for the same reason `.au-selmenu` above is: the menu portals to
+ * `body`, so a `.au-editor` descendant selector would match nothing.
+ *
+ * A step above `.au-selmenu`'s 9995 and still below the 9999 a ConfirmDialog opened over the editor
+ * needs. The two can never be open together — the select's own outside-mousedown closes it before
+ * a right-click lands — so the order between them states the stack rather than fixing anything.
+ */
+.pane-context-menu.au-nodemenu {
+    z-index: 9996;
 }

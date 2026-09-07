@@ -43,7 +43,7 @@ pub trait EngineHost: Send + Sync {
     fn live_processes(&self) -> Vec<String>;
 
     /// Matchable text for one terminal — the `ScreenSource` port, by another name.
-    fn tail(&self, pc: &str, depth: ReadDepth) -> Option<String>;
+    fn tail(&self, pc: &str, depth: ReadDepth, skip_typed_line: bool) -> Option<String>;
 
     /// One terminal-bound write — the `TerminalWriter` port, by another name.
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String>;
@@ -85,8 +85,8 @@ pub trait EngineHost: Send + Sync {
 pub struct HostPort<'a>(pub &'a dyn EngineHost);
 
 impl ScreenSource for HostPort<'_> {
-    fn tail(&self, process_id: &str, depth: ReadDepth) -> Option<String> {
-        self.0.tail(process_id, depth)
+    fn tail(&self, process_id: &str, depth: ReadDepth, skip_typed_line: bool) -> Option<String> {
+        self.0.tail(process_id, depth, skip_typed_line)
     }
 }
 

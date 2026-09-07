@@ -1,5 +1,5 @@
 /**
- * The six built-in templates (mockup §02), frozen in the renderer — the `COLOR_SCHEMAS` precedent.
+ * The ten built-in templates (mockup §02), frozen in the renderer — the `COLOR_SCHEMAS` precedent.
  *
  * **A template never reaches the engine until the user switches it on.** It lands as an unsaved
  * draft with `enabled: false`, and that — not validation — is the safety property: nothing a
@@ -11,7 +11,7 @@
  * enableable straight away**, and what the user changes is the threshold or the message.
  *
  * *(This comment used to say a fresh template "always has exactly one problem left to fix", and so
- * did the gallery's own note and plan §10.19. It is not true of any of the six: only a **pinned**
+ * did the gallery's own note and plan §10.19. It was not true of any of the original six: only a **pinned**
  * rule can be empty in a way validation can see, and none of these are pinned. M5's own validation
  * test is what made the claim testable, and it failed on all six.)*
  *
@@ -78,6 +78,7 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
                     sendTo: 'matched',
                     submit: true,
                     cliType: 'default',
+                    substitute: true,
                 },
             },
         },
@@ -113,6 +114,7 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
                     sendTo: 'matched',
                     submit: true,
                     cliType: 'default',
+                    substitute: true,
                 },
             },
         },
@@ -143,6 +145,7 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
                     sendTo: 'matched',
                     submit: true,
                     cliType: 'default',
+                    substitute: true,
                 },
             },
         },
@@ -182,6 +185,7 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
                     // The whole point of this template: the text lands in the composer unsubmitted.
                     submit: false,
                     cliType: 'default',
+                    substitute: true,
                 },
             },
         },
@@ -212,7 +216,7 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
                     keep: 'brackets',
                 },
                 cond: { kind: 'number', op: 'lt', threshold: 5 },
-                action: { message: 'df -h', sendTo: 'matched', submit: true, cliType: 'default' },
+                action: { message: 'df -h', sendTo: 'matched', submit: true, cliType: 'default', substitute: true },
             },
         },
     },
@@ -242,7 +246,148 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
                     keep: 'brackets',
                 },
                 cond: { kind: 'number', op: 'lt', threshold: 20 },
-                action: { message: '/compact', sendTo: 'matched', submit: true, cliType: 'default' },
+                action: { message: '/compact', sendTo: 'matched', submit: true, cliType: 'default', substitute: true },
+            },
+        },
+    },
+    {
+        id: 'nightly',
+        title: 'Nightly deploy window',
+        accent: 'action',
+        why:
+            'No pattern and nothing to watch — the clock is the whole trigger. If the machine was '
+            + 'asleep when the minute passed it writes a Held row saying so, rather than delivering a '
+            + 'stale instruction on wake.',
+        youllChange: ['time', 'message'],
+        rule: {
+            name: 'Nightly deploy window',
+            enabled: false,
+            runsOnce: false,
+            targetMode: 'rule',
+            criterion: 'allTerminals',
+            criterionValue: '',
+            followNew: true,
+            targetIds: [],
+            graph: {
+                timer: { mode: { dailyAt: { minuteOfDay: 2 * 60, days: 0b0001_1111 } } },
+                action: {
+                    message: '/run nightly deploy',
+                    sendTo: 'matched',
+                    submit: true,
+                    cliType: 'default',
+                    substitute: true,
+                },
+            },
+        },
+    },
+    {
+        id: 'settle',
+        title: 'Let it settle, then retry',
+        accent: 'action',
+        why:
+            'Gives a flaky endpoint time to come back before trying again, instead of retrying on '
+            + 'the same instant it failed. The wait sits between the verdict and the send, so one '
+            + 'crossing still produces exactly one retry.',
+        youllChange: ['delay', 'message'],
+        rule: {
+            name: 'Let it settle, then retry',
+            enabled: false,
+            runsOnce: false,
+            targetMode: 'rule',
+            criterion: 'allTerminals',
+            criterionValue: '',
+            followNew: true,
+            targetIds: [],
+            graph: {
+                monitor: { read: 'newOutput', cadence: 'onOutput', everyMs: EVERY_30S },
+                parse: {
+                    preset: 'exactWords',
+                    literal: 'connection refused',
+                    find: 'connection refused',
+                    keep: 'whole',
+                },
+                cond: { kind: 'text', op: null, threshold: null },
+                timer: { mode: { afterMatch: { delayMs: EVERY_30S } } },
+                action: { message: '/retry', sendTo: 'matched', submit: true, cliType: 'default', substitute: true },
+            },
+        },
+    },
+    {
+        id: 'builddiscord',
+        title: 'Build failure to Discord',
+        accent: 'parse',
+        why:
+            'Announces the failure in a channel and types nothing at all. The first template with '
+            + 'no terminal send — which is what you want when the build runs unattended and nobody is '
+            + 'watching the tab.',
+        youllChange: ['webhook URL', 'message'],
+        rule: {
+            name: 'Build failure to Discord',
+            enabled: false,
+            runsOnce: false,
+            targetMode: 'rule',
+            criterion: 'allTerminals',
+            criterionValue: '',
+            followNew: true,
+            targetIds: [],
+            graph: {
+                monitor: { read: 'newOutput', cadence: 'onOutput', everyMs: EVERY_30S },
+                parse: {
+                    preset: 'custom',
+                    literal: null,
+                    find: 'FAILED (\\d+) tests?',
+                    keep: 'whole',
+                },
+                cond: { kind: 'text', op: null, threshold: null },
+                webhook: {
+                    provider: 'discord',
+                    url: '',
+                    body: 'Build failed — $1 red',
+                    substitute: true,
+                },
+            },
+        },
+    },
+    {
+        id: 'backoff',
+        title: 'Back off, and tell the team',
+        accent: 'cond',
+        why:
+            'Both destinations off one yes: the agent backs off and the channel learns the provider '
+            + 'is throttling. Either half can fail without disturbing the other — the log gets a row '
+            + 'for each.',
+        youllChange: ['webhook URL', 'message'],
+        rule: {
+            name: 'Back off, and tell the team',
+            enabled: false,
+            runsOnce: false,
+            targetMode: 'rule',
+            criterion: 'commandContains',
+            criterionValue: 'claude',
+            followNew: true,
+            targetIds: [],
+            graph: {
+                monitor: { read: 'newOutput', cadence: 'onOutput', everyMs: EVERY_30S },
+                parse: {
+                    preset: 'exactWords',
+                    literal: '429 Too Many',
+                    find: '429 Too Many',
+                    keep: 'whole',
+                },
+                cond: { kind: 'text', op: null, threshold: null },
+                action: {
+                    message: '/wait 60',
+                    sendTo: 'matched',
+                    submit: true,
+                    cliType: 'default',
+                    substitute: true,
+                },
+                webhook: {
+                    provider: 'teams',
+                    url: '',
+                    body: '429 Too Many',
+                    substitute: true,
+                },
             },
         },
     },
@@ -258,7 +403,8 @@ export const AUTOMATION_TEMPLATES: readonly AutomationTemplate[] = Object.freeze
  *
  * `targetIds` is empty **by construction**, not by omission — but that is not a problem the rule
  * has: every template targets by CRITERION, and only a pinned rule can be empty in a way validation
- * can see. All six report zero problems, which `automationValidation.test.ts` asserts.
+ * can see. Templates without a webhook report zero problems; the two webhook templates report
+ * only their deliberately blank webhook URL.
  */
 export function draftFromTemplate(template: AutomationTemplate): AutomationRule {
     return {
@@ -274,9 +420,9 @@ export function draftFromTemplate(template: AutomationTemplate): AutomationRule 
 }
 
 /**
- * A blank draft — the gallery's seventh card.
+ * A blank draft — the gallery's eleventh card.
  *
- * Not a seventh template: it has no starter pattern, no message and no criterion, so the six-item
+ * Not an eleventh template: it has no starter pattern, no message and no criterion, so the ten-item
  * table above stays a table of *rules that already work*.
  */
 export function blankDraft(): AutomationRule {
@@ -298,7 +444,7 @@ export function blankDraft(): AutomationRule {
             monitor: { read: 'newOutput', cadence: 'onOutput', everyMs: EVERY_30S },
             parse: { preset: 'custom', literal: null, find: '', keep: 'whole' },
             cond: { kind: 'text', op: null, threshold: null },
-            action: { message: '', sendTo: 'matched', submit: true, cliType: 'default' },
+            action: { message: '', sendTo: 'matched', submit: true, cliType: 'default', substitute: true },
         },
         createdAt: 0,
         updatedAt: 0,
@@ -330,7 +476,13 @@ function structuredCloneRule(rule: TemplateRule): TemplateRule {
     if (graph.parse) graph.parse = deep(graph.parse);
     if (graph.cond) graph.cond = deep(graph.cond);
     if (graph.timer) graph.timer = deep(graph.timer);
-    graph.action = deep(graph.action);
+    if (graph.action) graph.action = deep(graph.action);
+    if (graph.webhook) graph.webhook = deep(graph.webhook);
     if (graph.layout) graph.layout = deep(graph.layout);
-    return { ...rule, targetIds: [...rule.targetIds], graph };
+    return {
+        ...rule,
+        targetIds: [...rule.targetIds],
+        ...(rule.excludedIds ? { excludedIds: [...rule.excludedIds] } : {}),
+        graph,
+    };
 }

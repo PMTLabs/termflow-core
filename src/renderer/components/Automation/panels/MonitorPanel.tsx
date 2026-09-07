@@ -6,11 +6,16 @@
  * here, because they are one decision.
  */
 import React from 'react';
-import type { AutomationCriterion, WatchableTerminal } from '../../../types/electron';
+import type {
+    AutomationCriterion,
+    AutomationTargetPreview,
+    WatchableTerminal,
+} from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { AuTerminalPicker } from '../AuTerminalPicker';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
+import { AuSelect } from '../AuSelect';
 
 const CRITERIA: Array<{ id: AutomationCriterion; label: string }> = [
     { id: 'commandContains', label: 'Command contains' },
@@ -47,7 +52,29 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
 }) => {
     const { rule } = draft;
     const { monitor } = rule.graph;
-    const matching = terminals.filter((t) => t.alive).length;
+    const [targetPreview, setTargetPreview] = React.useState<AutomationTargetPreview | null>(null);
+    const previewTargets = typeof window === 'undefined'
+        ? undefined
+        : window.electronAPI?.previewAutomationTargets;
+
+    React.useEffect(() => {
+        if (rule.targetMode !== 'rule' || !previewTargets) {
+            setTargetPreview(null);
+            return undefined;
+        }
+
+        let current = true;
+        void previewTargets(rule, terminals)
+            .then((preview) => {
+                if (current) setTargetPreview(preview);
+            })
+            .catch(() => {
+                if (current) setTargetPreview(null);
+            });
+        return () => {
+            current = false;
+        };
+    }, [previewTargets, rule, terminals]);
 
     return (
         <>
@@ -72,23 +99,17 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                 <>
                     <AuField label="Rule">
                         <div className="au-frow">
-                            <select
-                                className="au-finput"
+                            <AuSelect
                                 style={{ flex: 1.15 }}
-                                aria-label="What the terminals must match"
+                                ariaLabel="What the terminals must match"
                                 value={rule.criterion}
-                                onChange={(e) =>
+                                options={CRITERIA.map((c) => ({ value: c.id, label: c.label }))}
+                                onChange={(value) =>
                                     dispatch({
                                         type: 'criterion',
-                                        criterion: e.target.value as AutomationCriterion,
+                                        criterion: value as AutomationCriterion,
                                     })}
-                            >
-                                {CRITERIA.map((c) => (
-                                    <option key={c.id} value={c.id}>
-                                        {c.label}
-                                    </option>
-                                ))}
-                            </select>
+                            />
                             {rule.criterion !== 'allTerminals' && (
                                 <input
                                     className="au-finput"
@@ -112,16 +133,59 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                         </AuHelp>
                     </AuField>
 
-                    <div className="au-termcount">
-                        Open right now <span className="au-n">{matching}</span>
-                        <span className="au-as"> · refreshed every few seconds</span>
-                    </div>
-                    <AuHelp>
-                        This count is every terminal that is open, not every terminal this rule
-                        matches — matching is decided in the engine, against the command line and
-                        working folder it can see, and the rule&apos;s own row reports what it
-                        actually watches.
-                    </AuHelp>
+                    <AuField label="Except these">
+                        <AuTerminalPicker
+                            rows={terminals}
+                            picked={rule.excludedIds ?? []}
+                            error={terminalsError}
+                            loading={terminalsLoading}
+                            onToggle={(id) => dispatch({ type: 'toggleExcludedTarget', id })}
+                            onSet={(ids) => dispatch({ type: 'excludedTargets', ids })}
+                        />
+                    </AuField>
+
+                    <AuField label="… and anything matching this exception">
+                        <div className="au-frow">
+                            <AuSelect
+                                style={{ flex: 1.15 }}
+                                ariaLabel="What the exception must match"
+                                value={rule.excludeCriterion ?? ''}
+                                options={[
+                                    { value: '', label: 'No matching exception' },
+                                    ...CRITERIA.map((c) => ({ value: c.id, label: c.label })),
+                                ]}
+                                onChange={(value) =>
+                                    dispatch({
+                                        type: 'excludeCriterion',
+                                        criterion: value === ''
+                                            ? null
+                                            : value as AutomationCriterion,
+                                    })}
+                            />
+                            {rule.excludeCriterion != null
+                                && rule.excludeCriterion !== 'allTerminals' && (
+                                <input
+                                    className="au-finput"
+                                    style={{ flex: 1 }}
+                                    aria-label="Value the exception must match"
+                                    value={rule.excludeCriterionValue ?? ''}
+                                    onChange={(e) =>
+                                        dispatch({ type: 'excludeCriterionValue', value: e.target.value })}
+                                />
+                            )}
+                        </div>
+                    </AuField>
+
+                    {targetPreview === null ? (
+                        <div className="au-termcount">Resolving matching terminals…</div>
+                    ) : (
+                        <div className="au-termcount" aria-live="polite">
+                            Matching <span className="au-n">{targetPreview.matched.length}</span>
+                            {' - '}excluded <span className="au-n">{targetPreview.excluded.length}</span>
+                            {' = '}watching <span className="au-n">{targetPreview.watching.length}</span>
+                            {targetPreview.watching.length === 0 && ' — nothing is being watched'}
+                        </div>
+                    )}
                 </>
             ) : (
                 <AuTerminalPicker
@@ -167,6 +231,18 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                     sub="Re-reads the visible screen each check — better for status lines that update in place"
                     onPick={() => dispatch({ type: 'monitor', patch: { read: 'onScreen' } })}
                 />
+                {/* Under both radios rather than beside one: it narrows whichever of them is
+                    picked, and a shell echoing a half-typed command reaches `newOutput` exactly as
+                    an input box reaches `onScreen`. */}
+                <AuCheck
+                    on={monitor.skipTypedLine === true}
+                    label="Ignore the line being typed"
+                    sub="A command you are still typing is on the screen like anything else. Skips the line the cursor is on, so it cannot fire the rule — everything else is still read, including a status line below it."
+                    onToggle={() => dispatch({
+                        type: 'monitor',
+                        patch: { skipTypedLine: !monitor.skipTypedLine },
+                    })}
+                />
             </AuField>
 
             <AuField label="How often to check">
@@ -185,30 +261,27 @@ export const MonitorPanel: React.FC<MonitorPanelProps> = ({
                 />
                 {monitor.cadence === 'timer' && (
                     <div className="au-frow" style={{ marginTop: 8 }}>
-                        <select
-                            className="au-finput"
-                            aria-label="How often to check"
-                            value={monitor.everyMs}
-                            onChange={(e) =>
+                        <AuSelect
+                            ariaLabel="How often to check"
+                            value={String(monitor.everyMs)}
+                            options={[
+                                /* A stored interval that is not on the list — an older rule, or one
+                                   written by a script — keeps its own row rather than being silently
+                                   snapped to the nearest offered value. */
+                                ...(INTERVALS.some((i) => i.ms === monitor.everyMs)
+                                    ? []
+                                    : [{
+                                        value: String(monitor.everyMs),
+                                        label: `Every ${Math.round(monitor.everyMs / 1000)} seconds`,
+                                    }]),
+                                ...INTERVALS.map((i) => ({ value: String(i.ms), label: i.label })),
+                            ]}
+                            onChange={(value) =>
                                 dispatch({
                                     type: 'monitor',
-                                    patch: { everyMs: Number(e.target.value) },
+                                    patch: { everyMs: Number(value) },
                                 })}
-                        >
-                            {/* A stored interval that is not on the list — an older rule, or one
-                                written by a script — keeps its own row rather than being silently
-                                snapped to the nearest offered value. */}
-                            {!INTERVALS.some((i) => i.ms === monitor.everyMs) && (
-                                <option value={monitor.everyMs}>
-                                    Every {Math.round(monitor.everyMs / 1000)} seconds
-                                </option>
-                            )}
-                            {INTERVALS.map((i) => (
-                                <option key={i.ms} value={i.ms}>
-                                    {i.label}
-                                </option>
-                            ))}
-                        </select>
+                        />
                     </div>
                 )}
             </AuField>

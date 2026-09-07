@@ -1,10 +1,14 @@
 import { createPortal } from 'react-dom';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../../store';
 import { removeToast, dismissAllToasts, Toast as ToastType } from '../../store/slices/uiSlice';
 import { CANVAS_SHELL_TYPE } from '../../services/tabKinds';
 import { runToastAction } from '../../services/toastActions';
+import {
+    isAutomationEditorMounted,
+    subscribeAutomationEditorMounted,
+} from '../../services/automationEditorGuard';
 import './ToastContainer.css';
 
 // Mirrors SearchResults.tsx's formatTimestamp — same thresholds, kept local since toasts
@@ -92,6 +96,20 @@ export const ToastContainer: React.FC = () => {
         const activeTab = tabsState?.tabs?.find(t => t.id === tabsState.activeTabId);
         return activeTab?.shellType === CANVAS_SHELL_TYPE;
     });
+    /*
+     * The automation editor is a 95vw x 95vh dialog whose header carries Enabled, Test, Save and
+     * Delete — under the top-right corner these toasts occupy. Overlapping them is not just untidy:
+     * the toast is transient, so the second of two clicks aimed at it lands on whatever it was
+     * covering, which there is a destructive button.
+     *
+     * Read from the MOUNT registry rather than the open-request host, because the Settings page
+     * opens its editor without going through that host at all — see `automationEditorGuard.ts`.
+     */
+    const isAutomationEditorOpen = useSyncExternalStore(
+        subscribeAutomationEditorMounted,
+        isAutomationEditorMounted,
+        isAutomationEditorMounted,
+    );
     const dispatch = useDispatch();
     const [expanded, setExpanded] = useState(false);
     const stackRef = useRef<HTMLDivElement>(null);
@@ -125,7 +143,11 @@ export const ToastContainer: React.FC = () => {
     }, [isStacked]);
 
     const newestFirst = [...toasts].reverse();
-    const containerClass = `toast-container${isCanvasActive ? ' toast-container--canvas' : ''}`;
+    const containerClass = [
+        'toast-container',
+        isCanvasActive ? 'toast-container--canvas' : '',
+        isAutomationEditorOpen ? 'toast-container--automation' : '',
+    ].filter(Boolean).join(' ');
 
     // Shared between the collapsed and expanded headers so "clear everything" is always
     // one click away — not gated behind first finding and clicking expand.

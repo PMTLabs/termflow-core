@@ -68,6 +68,7 @@ describe('AuCanvas — wire routing follows the cards', () => {
                     onMove={() => {}}
                     onConnect={() => {}}
                     onDisconnect={() => {}}
+                    onRemove={() => {}}
                     onRefuse={() => {}}
                     onViewportReady={() => {}}
                 />,
@@ -140,6 +141,7 @@ describe('AuCanvas — wire routing follows the cards', () => {
                     onMove={() => {}}
                     onConnect={() => {}}
                     onDisconnect={() => {}}
+                    onRemove={() => {}}
                     onRefuse={() => {}}
                     onViewportReady={() => {}}
                 />,

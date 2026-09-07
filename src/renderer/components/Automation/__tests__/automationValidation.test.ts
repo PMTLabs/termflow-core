@@ -67,7 +67,7 @@ describe('automationValidation — the shared fixture', () => {
         // "at least 20" and this test would stay green. `all.length` is DERIVED from `BADGES`
         // (never hand-typed), so bumping this number is the one place a new code cannot be added
         // silently — it forces a look at whether the fixture actually covers it.
-        expect(all.length).toBe(22);
+        expect(all.length).toBe(29);
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
     });
 });
@@ -82,6 +82,18 @@ describe('automationValidation — the words the user reads', () => {
         const noTerminals: AutomationRule = { ...base(), targetMode: 'pinned', targetIds: [] };
         expect(find(noTerminals, 'targets.empty')?.message).toBe(
             'Pick at least one terminal for this rule to watch.',
+        );
+
+        const noExclusionValue: AutomationRule = {
+            ...base(),
+            targetMode: 'rule',
+            criterion: 'allTerminals',
+            criterionValue: '',
+            excludeCriterion: 'commandContains',
+            excludeCriterionValue: '   ',
+        };
+        expect(find(noExclusionValue, 'targets.excludeValueEmpty')?.message).toBe(
+            'Fill in what the exclusion must match, or exclude all terminals instead.',
         );
 
         const noPattern: AutomationRule = {
@@ -384,19 +396,23 @@ describe('automationValidation — the words the user reads', () => {
     });
 });
 
-describe('automationValidation — the six templates', () => {
+describe('automationValidation — the ten templates', () => {
     // §10.19 said "all six report EXACTLY ONE problem (target) before terminals are picked, and zero
     // after", and so did the gallery's own note and `automationTemplates.ts`. **All three were wrong,
     // and this test is what made the claim testable.** Every template targets by CRITERION, which is
     // a complete choice — mockup §04's first panel draws exactly that for the context reminder — and
-    // only a PINNED rule can be empty in a way validation can see. None of the six are pinned.
+    // only a PINNED rule can be empty in a way validation can see. None of the templates are pinned.
+    // The two webhook templates deliberately carry blank URLs rather than someone else's endpoint,
+    // so their one `webhook.urlEmpty` problem remains until the user provides their own.
     //
     // The safety property is `enabled: false`, asserted below. That is the one that matters: nothing
     // a template does can happen without one deliberate act.
     it.each(AUTOMATION_TEMPLATES.map((t) => [t.title, t] as const))(
-        '%s is valid and enableable as it ships',
+        '%s has only its expected shipping validation problem',
         (_title, template) => {
-            expect(problems(draftFromTemplate(template))).toEqual([]);
+            expect(problems(draftFromTemplate(template)).map((p) => p.code)).toEqual(
+                template.rule.graph.webhook ? ['webhook.urlEmpty'] : [],
+            );
         },
     );
 
@@ -410,12 +426,14 @@ describe('automationValidation — the six templates', () => {
         },
     );
 
-    it('but a template SWITCHED to pinned then has the one problem, and says which', () => {
+    it('but a template SWITCHED to pinned then identifies its missing targets', () => {
         // The paired positive for the two above: without it they pass on a `problems` that returns
         // an empty list for everything.
         for (const template of AUTOMATION_TEMPLATES) {
             const pinned = { ...draftFromTemplate(template), targetMode: 'pinned' as const };
-            expect(problems(pinned).map((p) => p.code)).toEqual(['targets.empty']);
+            expect(problems(pinned).map((p) => p.code)).toEqual(
+                template.rule.graph.webhook ? ['targets.empty', 'webhook.urlEmpty'] : ['targets.empty'],
+            );
         }
     });
 });

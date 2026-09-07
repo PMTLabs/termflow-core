@@ -773,8 +773,28 @@ impl AutomationEngine {
         let mut rules = HashMap::new();
         for live in self.snapshot_live() {
             let id = &live.rule.id;
-            let watched = self.runtime.watched_for(id);
             let missing_for = missing.get(id).unwrap_or(&empty);
+            // **A rule that has never been resolved is absent, not a rule watching nothing.**
+            //
+            // The row treats these as opposite: an absent rule is `waiting` ("the engine has not
+            // reported this rule"), an empty one is the *Nothing to watch* error ("running, and
+            // nothing matches"). Every live rule was reported here from the moment it went live,
+            // and `watched_for` returns an empty set for a rule the targeting loop has not reached
+            // yet — so between a reload and the next targeting pass, up to `TARGETING_TICK_MS`,
+            // every rule-mode rule claimed nothing matched it.
+            //
+            // That window opens on the two occasions a user is most likely to be looking: app
+            // start, and the reload that follows their own save. Saving a `Command contains` rule
+            // with a matching terminal already open showed *"No open terminal matches ..."* for two
+            // seconds, and the pill was `Error` while it did.
+            //
+            // `missing` is parked by the same pass, so it cannot be present while `watched` is
+            // absent — but reporting the rule when it somehow is loses nothing, and hiding a known
+            // missing terminal would.
+            if !self.runtime.has_resolved(id) && missing_for.is_empty() {
+                continue;
+            }
+            let watched = self.runtime.watched_for(id);
             let mut pairs = HashMap::new();
             for tm in watched.iter().chain(missing_for.iter()) {
                 let (fired_count, last_fired_at) = match self.runtime.fire_record(id, tm) {
@@ -840,6 +860,9 @@ mod tests {
             criterion_value: String::new(),
             follow_new: true,
             target_ids: vec!["tm-1".to_string()],
+            excluded_ids: vec![],
+            exclude_criterion: None,
+            exclude_criterion_value: String::new(),
             completed_at: None,
             verbose_until: None,
             sort_order: 1,
@@ -851,6 +874,7 @@ mod tests {
                     read: ReadMode::NewOutput,
                     cadence: Cadence::OnOutput,
                     every_ms: 0,
+                    skip_typed_line: false,
                 }),
                 parse: Some(ParseStep {
                     preset: ParsePreset::Custom,
@@ -864,13 +888,14 @@ mod tests {
                     threshold: Some(25.0),
                     ..Default::default()
                 }),
-                action: ActionStep {
+                action: Some(ActionStep {
                     message: "prepare to do context-hand-off".to_string(),
                     send_to: SendTo::Matched,
                     submit: true,
                     cli_type: "default".to_string(),
                     substitute: false,
-                },
+                }),
+                webhook: None,
             },
             created_at: 1_000,
             updated_at: 1_000,
@@ -989,6 +1014,25 @@ mod tests {
         assert_eq!(rows.len(), 2, "a disabled or completed rule is normal, not a failure: {:?}", rows);
         assert!(rows[0].contains("could not be understood"), "{}", rows[0]);
         assert!(rows[1].contains("needs a newer version"), "{}", rows[1]);
+    }
+
+    #[test]
+    fn reload_logs_a_real_malformed_webhook_value_without_its_url() {
+        let secret = "https://hooks.example.invalid/reload-credential";
+        let malformed = format!(
+            r#"{{"webhook":{{"provider":"{secret}","url":"{secret}","body":"done"}}}}"#
+        );
+        let store = AutomationStore::new_in_memory();
+        store.insert_raw_graph_for_test("au-malformed", &malformed);
+
+        let engine = AutomationEngine::new(0);
+        let report = engine.reload(&store, 7_000).expect("reload malformed row");
+        assert_eq!(report.skipped.len(), 1, "the malformed row was really skipped");
+        assert!(!report.skipped[0].1.contains(secret), "reload reason leaked: {:?}", report.skipped);
+
+        let rows = log_rows(&store);
+        assert_eq!(rows.len(), 1, "reload wrote its real activity row");
+        assert!(!rows[0].contains(secret), "activity detail leaked: {}", rows[0]);
     }
 
     /// **A schedule rule has no pattern, and no pattern is not a broken pattern** (plan 032 §6.4).
@@ -1967,6 +2011,67 @@ mod tests {
         assert_eq!(engine.runtime.arm_state("au-a", "tm-1"), ArmState::Fired { at_ms: 500 });
     }
 
+    /// "Un-ticking puts it back." An exclusion is a filter over the matched set, never a deletion from
+    /// it — and this must hold on a FROZEN (`follow_new: false`) rule, which is the case that can bake
+    /// the exclusion in. Spec §B3. Distinct timestamps are load-bearing: reload compares `updated_at`,
+    /// not content, so a same-millisecond save would not clear the set and the test would pass
+    /// vacuously.
+    #[test]
+    fn lifting_an_exclusion_restores_the_terminal_on_a_frozen_rule() {
+        let fake = Arc::new(
+            crate::automation_engine::test_host::FakeHost::new()
+                .with_terminal("tm-a", "pc-a", "a")
+                .with_terminal("tm-b", "pc-b", "b"),
+        );
+        let host: Arc<dyn crate::automation_engine::host::EngineHost> = fake.clone();
+        let engine = Arc::new(AutomationEngine::new(0));
+
+        let mut r = rule("au-frozen", r"ctx:(\d+)%");
+        r.target_mode = TargetMode::Rule;
+        r.criterion = Criterion::AllTerminals;
+        r.criterion_value.clear();
+        r.follow_new = false;
+        r.updated_at = 1_000;
+        fake.store.save_rule(&r).unwrap();
+        engine.reload(&fake.store, 1_000).unwrap();
+        crate::automation_engine::loops::targeting_tick(&engine, &host, 1_000);
+        assert_eq!(
+            engine.runtime.watched_for("au-frozen"),
+            HashSet::from(["tm-a".to_string(), "tm-b".to_string()]),
+            "premise: the frozen base set contains both terminals"
+        );
+
+        r.excluded_ids = vec!["tm-b".into()];
+        r.updated_at = 2_000;
+        fake.store.save_rule(&r).unwrap();
+        engine.reload(&fake.store, 2_000).unwrap();
+        assert!(
+            engine.runtime.watched_for("au-frozen").is_empty(),
+            "the changed timestamp must clear the frozen set before the next targeting pass"
+        );
+        crate::automation_engine::loops::targeting_tick(&engine, &host, 2_000);
+        assert_eq!(
+            engine.runtime.watched_for("au-frozen"),
+            HashSet::from(["tm-a".to_string()]),
+            "the exclusion filters tm-b from the frozen base set"
+        );
+
+        r.excluded_ids.clear();
+        r.updated_at = 3_000;
+        fake.store.save_rule(&r).unwrap();
+        engine.reload(&fake.store, 3_000).unwrap();
+        assert!(
+            engine.runtime.watched_for("au-frozen").is_empty(),
+            "lifting the exclusion must also clear the filtered frozen set"
+        );
+        crate::automation_engine::loops::targeting_tick(&engine, &host, 3_000);
+        assert_eq!(
+            engine.runtime.watched_for("au-frozen"),
+            HashSet::from(["tm-a".to_string(), "tm-b".to_string()]),
+            "the original matched terminal returns after a real save and reload"
+        );
+    }
+
     // -----------------------------------------------------------------------------------------
     // §7.8 — completion is an in-memory event first
     // -----------------------------------------------------------------------------------------
@@ -2028,6 +2133,41 @@ mod tests {
         assert_eq!(p.fired_count, 0);
         assert_eq!(p.last_fired_at, None);
         assert!(!p.missing);
+    }
+
+    /// The three states of a rule's matched set, as a table — because two of them are an empty map
+    /// and the row treats them as opposites.
+    ///
+    /// Never resolved => ABSENT, which the row reads as `waiting`. Resolved to nothing => PRESENT
+    /// and empty, which is the *Nothing to watch* error. Resolved to something => the pairs.
+    ///
+    /// The middle row is the one that makes the first row safe: hiding an unresolved rule must not
+    /// also hide a rule that genuinely matches no terminal, or the error becomes unreachable.
+    #[test]
+    fn a_rule_is_absent_until_targeting_resolves_it_and_empty_only_when_nothing_matches() {
+        let store = AutomationStore::new_in_memory();
+        store.save_rule(&rule("au-a", r"ctx:(\d+)%")).unwrap();
+        let engine = AutomationEngine::new(0);
+        engine.reload(&store, 1_000).unwrap();
+
+        assert!(
+            !engine.state_payload(&HashMap::new()).rules.contains_key("au-a"),
+            "a live rule the targeting loop has not reached yet must not claim nothing matches it",
+        );
+
+        engine.runtime.set_watched("au-a", HashSet::new());
+        let resolved_to_nothing = engine.state_payload(&HashMap::new());
+        assert_eq!(
+            resolved_to_nothing.rules.get("au-a").map(|p| p.len()),
+            Some(0),
+            "resolved-and-matching-nothing is still reported, as an empty map",
+        );
+
+        engine.runtime.set_watched("au-a", ["tm-1".to_string()].into());
+        assert_eq!(
+            engine.state_payload(&HashMap::new()).rules["au-a"].len(),
+            1,
+        );
     }
 
     /// Every field moves for the right reason — and `fired_count` survives a re-arm, which is what

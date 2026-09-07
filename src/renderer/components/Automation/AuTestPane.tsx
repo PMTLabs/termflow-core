@@ -17,6 +17,7 @@ import React from 'react';
 import type { DryRunReport, WatchableTerminal } from '../../types/electron';
 import { STEP_LABELS } from './automationSteps';
 import type { StepKind } from './automationSteps';
+import { AuSelect } from './AuSelect';
 
 const VERDICTS: Record<DryRunReport['verdict'], { label: string; tone: string }> = {
     'would-fire': { label: 'Would fire', tone: 'sim' },
@@ -39,8 +40,8 @@ const VERDICTS: Record<DryRunReport['verdict'], { label: string; tone: string }>
 function pillFor(report: DryRunReport): { label: string; tone: string } {
     const base = VERDICTS[report.verdict];
     if (report.verdict !== 'would-fire') return base;
-    const actionFailed = report.steps.find((s) => s.kind === 'action')?.status === 'failed';
-    if (!actionFailed) return base;
+    const destinationFailed = report.steps.find((s) => s.kind === 'action' || s.kind === 'webhook')?.status === 'failed';
+    if (!destinationFailed) return base;
     return { label: 'Would fire — but nothing would be sent', tone: base.tone };
 }
 
@@ -72,20 +73,19 @@ export const AuTestPane: React.FC<AuTestPaneProps> = ({
         <div className="au-dtestbar">
             <label className="au-dtestpick">
                 <span>Test against</span>
-                <select
-                    className="au-finput"
-                    aria-label="Terminal to test against"
+                <AuSelect
+                    ariaLabel="Terminal to test against"
                     value={chosen ?? ''}
-                    onChange={(e) => onChoose(e.target.value)}
-                >
-                    <option value="">choose a terminal…</option>
-                    {terminals.map((t) => (
-                        <option key={t.terminalId} value={t.terminalId} disabled={!t.alive}>
-                            {t.terminalId} — {t.label ?? 'unnamed'}
-                            {t.alive ? '' : ' (not open)'}
-                        </option>
-                    ))}
-                </select>
+                    options={[
+                        { value: '', label: 'choose a terminal…' },
+                        ...terminals.map((t) => ({
+                            value: t.terminalId,
+                            label: `${t.terminalId} — ${t.label ?? 'unnamed'}${t.alive ? '' : ' (not open)'}`,
+                            disabled: !t.alive,
+                        })),
+                    ]}
+                    onChange={onChoose}
+                />
             </label>
             <span className="au-grow" />
             {report && (

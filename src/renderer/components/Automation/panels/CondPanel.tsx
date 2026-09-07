@@ -47,6 +47,8 @@ import type { ClauseCaptures, Truth } from '../automationClauseTruth';
 import { automationRowState, describeLastFired } from '../../Settings/Automations/automationState';
 import { AuField, AuHelp, AuRadio } from './AuFields';
 import { sampleFromPattern } from './ActionPanel';
+import { AuSelect } from '../AuSelect';
+import { AuInfo } from '../AuInfo';
 
 export interface CondPanelProps {
     draft: AutomationDraft;
@@ -58,6 +60,48 @@ export interface CondPanelProps {
     dispatch: (action: DraftAction) => void;
 }
 
+
+/**
+ * The worked examples behind the field's ⓘ.
+ *
+ * The distinction the two radios draw is the one people get wrong, and their own subtitles argue it
+ * from the mechanism — *re-arms when the printed value changes* against *re-arms when it leaves the
+ * visible screen*. That is the right thing to say once someone already knows which is which. These
+ * are for before that: three lines a terminal actually prints, per kind, and the question to ask of
+ * a line to place it.
+ */
+const FindsExamples: React.FC = () => (
+    <>
+        <p className="au-infolead">
+            The test is whether the line is still <b>true</b> once it stops being printed.
+        </p>
+        <h4>A reading that stays true</h4>
+        <ul>
+            <li><code>ctx:63%</code> — a context meter a TUI redraws in place</li>
+            <li><code>Battery: 18%</code></li>
+            <li><code>queue depth 412</code></li>
+        </ul>
+        <p>
+            63% is still the usage even if nothing reprints it, so the rule keeps reading back
+            through the last 200 lines and re-arms when a <i>new</i> value is printed.
+        </p>
+        <h4>Something that happened</h4>
+        <ul>
+            <li><code>FAILED 3 tests</code></li>
+            <li><code>error: connection refused</code></li>
+            <li><code>Build succeeded in 41s</code></li>
+        </ul>
+        <p>
+            These happened once. Finding one in scrollback an hour later would not mean it is
+            happening now, so the rule re-arms as soon as it leaves the visible screen.
+        </p>
+        <p className="au-infolead">
+            A line can be both shapes at once: <code>API error 529 . retry in 60s</code> carries a
+            number and is still an <i>event</i>. Pick by the question above, not by whether you can
+            see a digit.
+        </p>
+    </>
+);
 const TEXT_OPS: AutomationTextOp[] = [
     'is',
     'isNot',
@@ -278,7 +322,7 @@ export const CondPanel: React.FC<CondPanelProps> = ({
 
     return (
         <>
-            <AuField label="What this pattern finds">
+            <AuField label="What this pattern finds" info={<AuInfo label="Examples of each kind"><FindsExamples /></AuInfo>}>
                 <AuRadio
                     name="au-condfinds"
                     on={cond.kind === 'number'}
@@ -314,51 +358,44 @@ export const CondPanel: React.FC<CondPanelProps> = ({
                             // eslint-disable-next-line react/no-array-index-key
                             <div className="au-clause" key={i}>
                                 <div className="au-crow">
-                                    <select
-                                        className="au-finput"
-                                        aria-label="Which captured value"
+                                    <AuSelect
+                                        ariaLabel="Which captured value"
                                         value={sourceKey(clause.source)}
-                                        onChange={(e) =>
-                                            updateClause(i, { source: sourceFromKey(e.target.value) })}
-                                    >
-                                        {tokens.map((t) => (
-                                            <option key={t.key} value={t.key}>
-                                                {t.label}
-                                            </option>
-                                        ))}
-                                        {/* A clause can carry a token the pattern no longer produces — a
-                                            group removed after the clause was written. It stays selected
-                                            (never silently swapped for `$0`) so the pattern-vs-clause
-                                            mismatch is what `cond.unknownToken` reports, not something
-                                            this dropdown quietly hid. */}
-                                        {!tokens.some((t) => t.key === sourceKey(clause.source)) && (
-                                            <option value={sourceKey(clause.source)}>
-                                                {sourceText(clause.source)}
-                                            </option>
-                                        )}
-                                    </select>
-                                    <select
-                                        className="au-finput"
-                                        aria-label="How to compare"
+                                        options={[
+                                            ...tokens.map((t) => ({ value: t.key, label: t.label })),
+                                            /* A clause can carry a token the pattern no longer produces — a
+                                               group removed after the clause was written. It stays selected
+                                               (never silently swapped for `$0`) so the pattern-vs-clause
+                                               mismatch is what `cond.unknownToken` reports, not something
+                                               this dropdown quietly hid. */
+                                            ...(tokens.some((t) => t.key === sourceKey(clause.source))
+                                                ? []
+                                                : [{
+                                                    value: sourceKey(clause.source),
+                                                    label: sourceText(clause.source),
+                                                }]),
+                                        ]}
+                                        onChange={(value) =>
+                                            updateClause(i, { source: sourceFromKey(value) })}
+                                    />
+                                    <AuSelect
+                                        ariaLabel="How to compare"
                                         value={opKeyOf(clause.test)}
-                                        onChange={(e) =>
-                                            updateClause(i, { test: withOp(clause.test, e.target.value) })}
-                                    >
-                                        <optgroup label="Text">
-                                            {TEXT_OPS.map((op) => (
-                                                <option key={op} value={`text:${op}`}>
-                                                    {TEXT_OP_LABELS[op]}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                        <optgroup label="Number">
-                                            {NUM_OPS.map((op) => (
-                                                <option key={op} value={`number:${op}`}>
-                                                    {NUM_OP_LABELS[op]}
-                                                </option>
-                                            ))}
-                                        </optgroup>
-                                    </select>
+                                        options={[
+                                            ...TEXT_OPS.map((op) => ({
+                                                value: `text:${op}`,
+                                                label: TEXT_OP_LABELS[op],
+                                                group: 'Text',
+                                            })),
+                                            ...NUM_OPS.map((op) => ({
+                                                value: `number:${op}`,
+                                                label: NUM_OP_LABELS[op],
+                                                group: 'Number',
+                                            })),
+                                        ]}
+                                        onChange={(value) =>
+                                            updateClause(i, { test: withOp(clause.test, value) })}
+                                    />
                                     {valueNeeded ? (
                                         <input
                                             className="au-finput"
@@ -485,19 +522,24 @@ export const CondPanel: React.FC<CondPanelProps> = ({
 
             {live && (
                 <AuField label="Right now">
-                    <span className={`au-pill ${live.id}`}>
-                        <span className="au-pd" />
-                        {live.pillText}
-                    </span>
+                    {/* The state and the one action on it, together on a row of their own. The
+                        *Fired …* line moves below both rather than between them: it is detail
+                        about the state, and it was what separated the pill from its own button. */}
+                    <div className="au-nowrow">
+                        <span className={`au-pill ${live.id}`}>
+                            <span className="au-pd" />
+                            {live.pillText}
+                        </span>
+                        {onRearm && (
+                            <button type="button" className="au-btn sm" onClick={onRearm}>
+                                Re-arm now
+                            </button>
+                        )}
+                    </div>
                     {lastFired !== null && (
                         <div className="au-rightnow">
                             Fired {describeLastFired(lastFired, now)}.
                         </div>
-                    )}
-                    {onRearm && (
-                        <button type="button" className="au-btn sm" onClick={onRearm}>
-                            Re-arm now
-                        </button>
                     )}
                 </AuField>
             )}

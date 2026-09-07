@@ -19,8 +19,8 @@ import type { AutomationKeep, AutomationSendTo } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { SEND_PHRASES } from '../automationDerive';
-import { compilePattern, groupsOf } from '../automationValidation';
-import { previewSubstitute } from '../automationTokens';
+import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
+import { previewSubstitute, tokensUsed } from '../automationTokens';
 import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
@@ -80,6 +80,7 @@ export function sampleFromPattern(find: string, keep: AutomationKeep): Record<st
 export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch, sample }) => {
     const { parse, action } = draft.rule.graph;
     const messageRef = React.useRef<HTMLInputElement | null>(null);
+    if (!action) return null;
 
     // **This panel survives an absent parse step, and must**: `action` is the one step every rule
     // has (plan 032 §3.1), so a schedule rule reaches here with no pattern behind it. No pattern is
@@ -98,7 +99,14 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     const effectiveSample = sample ?? (parse ? sampleFromPattern(parse.find, parse.keep) : {});
     const substitute = action.substitute === true;
 
-    const preview = !substitute
+    // **Whether the message NAMES a token**, which is not the same question as whether the flag is
+    // on — and the difference started mattering when the flag became the default. A schedule rule
+    // has no pattern by construction, so a flag-on message with no token in it was previewed as
+    // *"Nothing would be sent — there is no pattern yet"* about a send that is perfectly fine.
+    // The same narrowing `action.tokenWithoutParse` took, for the same reason.
+    const usesTokens = tokensUsed(action.message).length > 0;
+
+    const preview = !substitute || !usesTokens
         ? {
             blocked: false as const,
             // From the MODEL (`stepValues(rule,'action').message`), so an empty message previews
@@ -134,14 +142,22 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
         { text: groupToken(groups.count + 1), dead: true },
         { text: '$$', dead: false },
     ];
+    // The tokens typed into the message that this pattern COULD fill in — see `resolvableTokens`.
+    // Only asked while substitution is off, the one state they can go out literal in.
+    const typed = substitute ? [] : resolvableTokens(action.message, parse?.find ?? '');
 
+    /**
+     * Insert a token **and turn substitution on**, in one patch — see `WebhookPanel`'s twin, where
+     * the mismatch was reported. The chips and the toggle disagreed: clicking `$1` inserted a
+     * reference into a message sent verbatim, so the rule typed the characters `$1`.
+     */
     function insertToken(token: string) {
         const el = messageRef.current;
-        const value = action.message;
+        const value = action?.message ?? '';
         const start = el?.selectionStart ?? value.length;
         const end = el?.selectionEnd ?? value.length;
         const next = value.slice(0, start) + token + value.slice(end);
-        dispatch({ type: 'action', patch: { message: next } });
+        dispatch({ type: 'action', patch: { message: next, substitute: true } });
         const restoreCaret = () => {
             const input = messageRef.current;
             if (!input) return;
@@ -186,12 +202,24 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                         </>
                     ) : (
                         <>
-                            Click a token to insert it. With <b>Insert captured values</b> off,
-                            below, it types as the literal characters shown — turn that on to
-                            substitute a captured value instead.
+                            Click a token to insert it — that also turns on <b>Insert captured
+                            values</b> below, which is what resolves it.
                         </>
                     )}
                 </AuHelp>
+                {/*
+                  * The case the chips cannot fix, because the token was TYPED. Shown only when the
+                  * message actually names one while the toggle is off, so it stays silent for a
+                  * message that merely contains a dollar sign — and silent for `awk '{print $1}'`
+                  * only once that is what the user meant, which is what the toggle says.
+                  */}
+                {!substitute && typed.length > 0 && (
+                    <AuHelp warn>
+                        {typed.map((t) => t.text).join(', ')} will be typed as literal text.
+                        Turn on <b>Insert captured values</b> below to send what the pattern
+                        captured instead.
+                    </AuHelp>
+                )}
             </AuField>
 
             <AuCheck

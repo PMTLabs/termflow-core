@@ -25,6 +25,7 @@ use tauri::{Emitter, State};
 
 use crate::automation::events::{ChangedPayload, AUTOMATION_CHANGED};
 use crate::automation::roster::{TargetSnapshot, WatchableTerminal};
+use crate::automation::targeting::resolve_target_sets;
 use crate::automation_engine::dry::DryRunReport;
 use crate::automation_engine::host::EngineHost;
 use crate::automation_store::{
@@ -41,6 +42,13 @@ fn now_ms() -> i64 {
 /// from *rejected* from *SQLite said no* — the three the panel renders differently.
 fn to_string_err(e: AutomationStoreError) -> String {
     e.to_string()
+}
+
+/// Decode an IPC rule without forwarding serde's rendering of the submitted value. A malformed
+/// webhook object may contain its endpoint in that rendering, while callers only need to know that
+/// the draft was malformed.
+fn decode_automation_rule(value: serde_json::Value) -> Result<AutomationRule, String> {
+    serde_json::from_value(value).map_err(|_| "automation rule is malformed".to_string())
 }
 
 /// One rule-level log row — no terminal, so no name to carry.
@@ -175,20 +183,15 @@ pub async fn list_watchable_terminals(
     state: State<'_, AppState>,
     rule_id: Option<String>,
     include_ids: Option<Vec<String>>,
+    criteria: Vec<Criterion>,
 ) -> Result<Vec<WatchableTerminal>, String> {
     let owned = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let store = owned.automation_store.clone();
-        // Only the criterion of the rule being edited, so opening the picker on a `Terminal ID is`
-        // rule never enumerates the machine's processes (§10.13).
-        let criteria: Vec<Criterion> = match rule_id.as_deref() {
-            Some(id) => store
-                .get_rule(id)
-                .map_err(to_string_err)?
-                .map(|r| vec![r.criterion])
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+        // The editor supplies its CURRENT rule-mode criteria, including the exception. `rule_id`
+        // scopes only the persisted label snapshots below: a saved row is stale while its draft is
+        // being edited, and a new draft has no saved row at all. Keeping those jobs separate means
+        // a command/cwd criterion gets the scan it needs before preview resolution.
         let live = EngineHost::roster(&owned, &criteria);
 
         // §4.3: scoped to the rule when the caller names one — the editor always knows which rule it
@@ -214,6 +217,48 @@ pub async fn list_watchable_terminals(
             &include_ids.unwrap_or_default(),
             &snapshots,
         ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The ids a draft targets right now, split into its unfiltered match, the part excluded, and what
+/// remains to watch. The renderer supplies the roster it is drawing so the preview and its picker
+/// describe one snapshot; matching itself remains in Rust alongside the evaluator.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationTargetPreview {
+    pub matched: Vec<String>,
+    pub excluded: Vec<String>,
+    pub watching: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn preview_automation_targets(
+    rule: AutomationRule,
+    terminals: Vec<WatchableTerminal>,
+) -> Result<AutomationTargetPreview, String> {
+    tokio::task::spawn_blocking(move || {
+        let rows = terminals
+            .into_iter()
+            .filter(|terminal| terminal.alive)
+            .map(|terminal| crate::automation::roster::RosterRow {
+                terminal_id: Some(terminal.terminal_id),
+                process_id: terminal.process_id.unwrap_or_default(),
+                name: String::new(),
+                shell: terminal.shell.unwrap_or_default(),
+                pid: terminal.pid.unwrap_or_default(),
+                display_label: terminal.display_label,
+                cwd: terminal.cwd,
+                command_lines: terminal.command_lines,
+            })
+            .collect::<Vec<_>>();
+        let resolved = resolve_target_sets(&rule, &rows, None);
+        Ok(AutomationTargetPreview {
+            matched: resolved.matched.into_iter().collect(),
+            excluded: resolved.excluded.into_iter().collect(),
+            watching: resolved.watching.into_iter().collect(),
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -260,9 +305,10 @@ fn reload_after_commit(owned: &AppState, at: i64) -> Result<(), String> {
 #[tauri::command]
 pub async fn dry_run_automation(
     state: State<'_, AppState>,
-    rule: AutomationRule,
+    rule: serde_json::Value,
     terminal_id: String,
 ) -> Result<DryRunReport, String> {
+    let rule = decode_automation_rule(rule)?;
     let owned = state.inner().clone();
     tokio::task::spawn_blocking(move || {
         let engine = owned.automations.clone();
@@ -301,11 +347,11 @@ pub struct AutomationSaveResult {
 #[tauri::command]
 pub async fn save_automation(
     state: State<'_, AppState>,
-    rule: AutomationRule,
+    rule: serde_json::Value,
     origin: String,
 ) -> Result<AutomationSaveResult, String> {
     let owned = state.inner().clone();
-    let mut rule = rule;
+    let mut rule = decode_automation_rule(rule)?;
     if rule.id.trim().is_empty() {
         // The same shape `duplicate_automation` mints, and deliberately the same prefix: one id
         // vocabulary, minted in one crate.
@@ -650,7 +696,46 @@ pub async fn rearm_automation(
 
 #[cfg(test)]
 mod source_tests {
-    use super::leaves_to_rearm;
+    use super::{decode_automation_rule, leaves_to_rearm};
+
+    #[test]
+    fn malformed_ipc_rule_errors_do_not_echo_a_webhook_url() {
+        let secret = "https://hooks.example.invalid/ipc-credential";
+        let value = serde_json::json!({
+            "id": "au-ipc",
+            "name": "bad webhook",
+            "enabled": false,
+            "runsOnce": false,
+            "targetMode": "pinned",
+            "criterion": "allTerminals",
+            "criterionValue": "",
+            "followNew": true,
+            "targetIds": [],
+            "excludedIds": [],
+            "completedAt": null,
+            "verboseUntil": null,
+            "sortOrder": 0,
+            "schemaVersion": 3,
+            "graph": { "webhook": {
+                "provider": secret,
+                "url": secret,
+                "body": "done"
+            }},
+            "createdAt": 0,
+            "updatedAt": 0
+        });
+
+        // This is the exact serde decode that Tauri used to perform for the command argument.
+        // Its real error includes the invalid provider, so accepting a typed parameter leaked it.
+        let raw = serde_json::from_value::<crate::automation_store::AutomationRule>(value.clone())
+            .expect_err("a URL is not a webhook provider")
+            .to_string();
+        assert!(raw.contains(secret), "premise: raw IPC decode did not contain the URL: {raw}");
+
+        let safe = decode_automation_rule(value).expect_err("the command rejects malformed IPC");
+        assert_eq!(safe, "automation rule is malformed");
+        assert!(!safe.contains(secret));
+    }
 
     /// `Re-arm now` reaches only pairs the rule actually watches.
     ///
@@ -890,7 +975,7 @@ mod source_tests {
     fn every_command_in_this_module_is_registered_in_lib() {
         let lib = crate::automation_engine::test_host::strip_comments(include_str!("lib.rs"));
         let names: Vec<String> = command_bodies().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names.len(), 14, "the command list changed: {:?}", names);
+        assert_eq!(names.len(), 15, "the command list changed: {:?}", names);
         for name in &names {
             assert!(
                 lib.contains(&format!("automation_commands::{},", name)),

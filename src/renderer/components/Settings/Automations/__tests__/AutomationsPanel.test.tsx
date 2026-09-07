@@ -629,7 +629,7 @@ describe('AutomationsPanel', () => {
         expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
     });
 
-    it('the template gallery shows the six templates plus a blank card', async () => {
+    it('the template gallery shows the ten templates plus a blank card', async () => {
         installApi([]);
         await mount();
 
@@ -638,7 +638,7 @@ describe('AutomationsPanel', () => {
                 .find((b) => b.textContent?.includes('New automation'))!
                 .click();
         });
-        expect(container.querySelectorAll('.au-tplcard')).toHaveLength(7);
+        expect(container.querySelectorAll('.au-tplcard')).toHaveLength(11);
         expect(container.querySelectorAll('.au-tplcard.blank')).toHaveLength(1);
     });
 });

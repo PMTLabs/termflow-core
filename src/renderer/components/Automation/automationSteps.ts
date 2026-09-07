@@ -1,5 +1,5 @@
 /**
- * The five steps, their typed ports, and the one function that decides whether a wire is legal
+ * The six steps, their typed ports, and the one function that decides whether a wire is legal
  * (plan 028 §6.3, plan 032 §6.2/§6.3/§9, mockup §03).
  *
  * **Canvas Mode's ports are undirected 4-compass geometry with no type system**, and the only
@@ -8,7 +8,7 @@
  * §10.21's ordered-pair matrix a cheap and total test rather than a sampling of the interesting
  * cases.
  *
- * **The five step KINDS are fixed; a rule having all five is not.** This file's arithmetic is over
+ * **The six step KINDS are fixed; a rule having all six is not.** This file's arithmetic is over
  * the names — the order, the ports, which pairs may be wired — and none of it reads `rule.graph`.
  * That is what keeps it true while the DTO changes underneath it: plan 032 §3.1 made `monitor`,
  * `parse` and `cond` optional, so a schedule rule (§6.3) is `action` and a `timer` and nothing else.
@@ -31,7 +31,7 @@
  * — but no longer by every schedule rule on open.
  */
 
-export type StepKind = 'monitor' | 'parse' | 'cond' | 'timer' | 'action';
+export type StepKind = 'monitor' | 'parse' | 'cond' | 'timer' | 'action' | 'webhook';
 
 /**
  * Left to right, and also the order the palette lists them and the problem list reports them.
@@ -48,6 +48,7 @@ export const STEP_ORDER: readonly StepKind[] = Object.freeze([
     'cond',
     'timer',
     'action',
+    'webhook',
 ]);
 
 /**
@@ -84,6 +85,7 @@ export const STEP_LABELS: Record<StepKind, string> = {
     cond: 'Compare it',
     timer: 'Wait',
     action: 'Send to terminal',
+    webhook: 'Send to webhook',
 };
 
 /** The line under the title in the inspector head — *Step 2 · find text, pull a number out*. */
@@ -93,6 +95,7 @@ export const STEP_SUBTITLES: Record<StepKind, string> = {
     cond: 'decide yes or no',
     timer: 'hold, or fire on the clock',
     action: 'what happens when it fires',
+    webhook: 'what happens when it fires',
 };
 
 /** What travels on a wire. Three types, and only equal types connect. */
@@ -150,6 +153,7 @@ const PORTS = {
         { id: 'out', dir: 'out', type: 'verdict', label: 'go' },
     ] as const),
     action: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }] as const),
+    webhook: Object.freeze([{ id: 'in', dir: 'in', type: 'verdict', label: 'verdict' }] as const),
 } as const;
 
 export const STEP_PORTS: Record<StepKind, readonly PortSpec[]> = PORTS;
@@ -266,8 +270,8 @@ export function canConnect(
 /**
  * Which step must already be on the canvas before this one makes sense — **any ONE of them**.
  *
- * A list rather than a single kind, because `action` has two drivers and always did in principle:
- * the verdict from `Compare it` on a watching rule, and the wait itself on a schedule rule, which
+ * A list rather than a single kind, because either destination has two drivers in principle: the
+ * verdict from `Compare it` on a watching rule, and the wait itself on a schedule rule, which
  * has no comparison and is not allowed one (§6.3). Named as one predecessor, the palette demanded a
  * `Compare it` that a schedule rule must not carry, so *"a wait and a send"* — the whole of mockup
  * §03's rule — could not be built at all.
@@ -280,6 +284,7 @@ const REQUIRES: Partial<Record<StepKind, readonly StepKind[]>> = {
     parse: ['monitor'],
     cond: ['parse'],
     action: ['cond', 'timer'],
+    webhook: ['cond', 'timer'],
 };
 
 /**
@@ -288,10 +293,12 @@ const REQUIRES: Partial<Record<StepKind, readonly StepKind[]>> = {
  *
  * **`shape` is the wait's mode, and it is here because of what task 29 made possible.** Once
  * `draftFromRule` draws only the steps a rule HAS, a saved schedule rule can be offered a
- * `Watch output` step — and there is no remove gesture and no undo, so an add whose only remedy is
- * a control that does not exist strands the user with the draft or with discarding every other edit
- * they made. The invariant is *the palette must not offer an add that validation will block with no
- * way back*, and exactly one add fails it:
+ * `Watch output` step. This refusal was first written under *"there is no remove gesture and no
+ * undo"*, which `removalGroup` has since made false — so the invariant it enforces is restated on
+ * the ground that survives: **the palette must not offer an add whose only remedy is a control the
+ * user has to go looking for.** A card can now be deleted, but a step that blocks the rule the
+ * instant it lands still teaches the wrong thing about what the palette offers, and the refusal's
+ * own sentence names the control that actually fixes the shape. Exactly one add fails it:
  *
  * - `monitor` on a `dailyAt` rule raises `timer.scheduleWithMonitor`, whose own message offers
  *   *"remove the schedule, or remove the Watch output step"* — and no field anywhere clears it.
@@ -343,29 +350,48 @@ export function canAddStep(
 }
 
 /**
- * **There is still no `canRemoveStep`, and the reason it used to give has expired.**
+ * Which cards come off together when this one is removed — **the three input steps travel as a
+ * group; every other step is alone.**
  *
- * There was one — a mirror of `canAddStep`, with a test, and no caller. What justified deleting it
- * was the sentence *"`present` is session-only canvas state, and a rule's graph carries all four
- * steps whatever is drawn"*. **That second clause is no longer true.** §3.1 made `monitor`, `parse`
- * and `cond` optional, task 29 made `draftFromRule` derive `present` from the graph, and
- * `ruleFromDraft` omits the three input steps as a group when the canvas draws none — so `present`
- * now DOES mean something the saved rule agrees with, which is precisely the condition the old note
- * said a remove would need. A false comment that justifies real behaviour is how C1 got here, so it
- * is corrected rather than left standing.
+ * There used to be nothing here but a note explaining why removal was unimplemented, and both
+ * halves of it have now been overtaken. The first — *"a rule's graph carries all four steps
+ * whatever is drawn"* — died when §3.1 made `monitor`, `parse` and `cond` optional and task 29
+ * made `draftFromRule` derive `present` from the graph. The second said the gesture "needs
+ * designing rather than enabling"; this is that design, and `draftReducer`'s `removeStep` is where
+ * it happens.
  *
- * Remove is still absent, on the remaining half of the argument, which is untouched: taking a card
- * off the canvas has to decide what happens to the DATA behind it. Hiding *Send to terminal* while
- * leaving the message, the Enter and the send-to intact means the rule goes on typing into terminals
- * with nothing on screen to say so — and `action` is not optional on the DTO, so there is no shape
- * for its absence to write. For the three that are optional the question is answerable but not
- * answered here: it is a gesture with a data consequence, and it needs designing rather than
- * enabling.
+ * **A removal deletes the step's graph field**, so nothing survives the card that drew it. That was
+ * the concrete worry the old note raised and it is a real one: hiding *Send to terminal* while
+ * leaving its message, its Enter and its send-to intact would leave the rule typing into terminals
+ * with nothing on screen to say so. The DTO makes the deletion expressible — all six steps are
+ * optional on `AutomationGraph` — so absence is a shape a save can write, not a hole
+ * `graphAsWritten` has to paper over.
  *
- * `addStep` is coherent because it moves the other way: it REVEALS a step and materialises whatever
- * the panel needs to bind to, and everything it reveals is blank and blocking until the user fills
- * it in.
+ * **Why the input steps are a group and not three cards.** `eval::InputSteps::of` answers `None`
+ * unless a graph holds all three, so a strict subset is a rule the engine reads nothing for. That
+ * is the contract `INPUT_STEPS` already documents and `ruleFromDraft` already writes under;
+ * removing one at a time would be a THIRD answer to it, and the one that produces a rule which
+ * looks complete on screen and silently never fires.
+ *
+ * Filtered by `present`, so this is the cards actually on the canvas rather than the cards a
+ * complete rule would have — and it is computed ONCE, for the menu that names them, the reducer
+ * that drops them and the toast that reports them. A menu offering to delete three steps over a
+ * canvas holding two is what a second derivation buys.
+ *
+ * **There is deliberately no `canRemoveStep` refusal to go with `canAddStep`.** Every shape a
+ * removal can reach is one `problems()` already reports on — no destination is
+ * `rule.noDestination`, nothing to trigger the rule is `timer.neverRuns` — so a refusal would be a
+ * second, weaker statement of a rule that already holds for every producer. Aiming at a card that
+ * is not on the canvas returns an empty group, and the reducer treats that as a no-op: the same
+ * discipline its panel patches follow.
  */
+export function removalGroup(
+    present: readonly StepKind[],
+    kind: StepKind,
+): StepKind[] {
+    const group = INPUT_STEPS.includes(kind) ? INPUT_STEPS : [kind];
+    return group.filter((step) => present.includes(step));
+}
 
 /**
  * The wires implied by a set of steps and the wait's mode — the chain, plus the `yes` branch.
@@ -399,6 +425,9 @@ export function defaultWires(
         if (has('action')) {
             out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'action', port: 'in' } });
         }
+        if (has('webhook')) {
+            out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'webhook', port: 'in' } });
+        }
         return out;
     }
 
@@ -415,6 +444,11 @@ export function defaultWires(
         out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'action', port: 'in' } });
     } else if (has('cond') && has('action')) {
         out.push({ from: { step: 'cond', port: 'true' }, to: { step: 'action', port: 'in' } });
+    }
+    if (has('timer') && has('webhook')) {
+        out.push({ from: { step: 'timer', port: 'out' }, to: { step: 'webhook', port: 'in' } });
+    } else if (has('cond') && has('webhook')) {
+        out.push({ from: { step: 'cond', port: 'true' }, to: { step: 'webhook', port: 'in' } });
     }
     return out;
 }

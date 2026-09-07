@@ -56,13 +56,20 @@ import { blockingProblems, problems as validate } from './automationValidation';
 import { WIRE_CHIPS, faceFor, ruleSummary, stateFor } from './automationDerive';
 import type { NodeFace, NodeState } from './automationDerive';
 import type { OutPortKey, StepKind } from './automationSteps';
-import { STEP_ORDER, canAddStep } from './automationSteps';
+import { STEP_ORDER, canAddStep, removalGroup } from './automationSteps';
+import { listSteps } from './AuNodeMenu';
 import type { CanvasOpening, NodePos } from './automationDraft';
 import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
+import {
+    AU_INSPECT_DEFAULT,
+    AuInspectorDock,
+    clampInspectWidth,
+} from './AuInspectorDock';
 import { AuPalette } from './AuPalette';
 import { AuInspector } from './AuInspector';
 import { AuDrawer } from './AuDrawer';
+import { redactWebhookError } from './webhookRedaction';
 import type { DrawerTab } from './AuDrawer';
 import { useAuPaletteDrag } from './useAuPaletteDrag';
 import './auToggle.css';
@@ -129,6 +136,40 @@ export interface AutomationEditorProps {
     onOpenFullLog: (ruleId: string) => void;
     /** Something changed on disk — the panel refetches. */
     onChanged: () => Promise<void> | void;
+}
+
+const INSPECT_WIDTH_KEY = 'termflow.automation.inspectorWidth';
+const INSPECT_COLLAPSED_KEY = 'termflow.automation.inspectorCollapsed';
+
+/**
+ * `localStorage`, defensively. Every read and write is wrapped: the ACCESSOR itself throws in a
+ * context that blocks site data, and a preference that cannot be stored must cost nothing worse
+ * than the default.
+ */
+function readStored(key: string): string | null {
+    try {
+        return window.localStorage.getItem(key);
+    } catch {
+        return null;
+    }
+}
+
+function writeStored(key: string, value: string): void {
+    try {
+        window.localStorage.setItem(key, value);
+    } catch {
+        /* a preference that will not persist is not an error worth showing anyone */
+    }
+}
+
+/** Clamped on the way IN as well as out: a stored width predates whatever the bounds are today. */
+function readInspectWidth(): number {
+    const raw = Number(readStored(INSPECT_WIDTH_KEY));
+    return Number.isFinite(raw) && raw > 0 ? clampInspectWidth(raw) : AU_INSPECT_DEFAULT;
+}
+
+function readInspectCollapsed(): boolean {
+    return readStored(INSPECT_COLLAPSED_KEY) === '1';
 }
 
 const toast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -218,18 +259,31 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             const rows = await api.listWatchableTerminals(
                 draft.rule.id.length > 0 ? draft.rule.id : null,
                 draft.rule.targetIds.length > 0 ? draft.rule.targetIds : null,
+                writing.targetMode === 'rule'
+                    ? [writing.criterion, writing.excludeCriterion].filter(
+                        (criterion): criterion is NonNullable<typeof criterion> => criterion != null,
+                    )
+                    : [],
             );
             setTerminals(rows);
             setTerminalsError(null);
         } catch (e) {
-            setTerminalsError(e instanceof Error ? e.message : String(e));
+            setTerminalsError(redactWebhookError(e));
         } finally {
             setTerminalsLoading(false);
         }
         // The pick set is a dependency because a newly ticked id has to appear in the roster with
-        // its snapshot; the rule id is one because it changes exactly once, on the first save.
+        // its snapshot; the criteria are because they decide whether the roster needs process/cwd
+        // data; the rule id changes exactly once, on the first save.
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [api, draft.rule.id, draft.rule.targetIds.join(',')]);
+    }, [
+        api,
+        draft.rule.id,
+        draft.rule.targetIds.join(','),
+        writing.targetMode,
+        writing.criterion,
+        writing.excludeCriterion,
+    ]);
 
     /**
      * The roster is POLLED, not fetched once.
@@ -254,7 +308,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             setEntries(await api.loadAutomationLog(draft.rule.id, true, DRAWER_LOG_LIMIT));
             setLogError(null);
         } catch (e) {
-            setLogError(e instanceof Error ? e.message : String(e));
+            setLogError(redactWebhookError(e));
         }
     }, [api, draft.rule.id]);
 
@@ -352,7 +406,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         } catch (e) {
             // Reported, and REFUSED. The navigation guard reads this boolean, so swallowing the
             // error here would let a failed save close the editor and take the draft with it.
-            toast(`Could not save: ${e instanceof Error ? e.message : String(e)}`, 'error');
+            toast(`Could not save: ${redactWebhookError(e)}`, 'error');
             return false;
         } finally {
             inFlight.current = false;
@@ -429,7 +483,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             setReport(await api.dryRunAutomation(writing, target));
         } catch (e) {
             setReport(null);
-            setTestError(e instanceof Error ? e.message : String(e));
+            setTestError(redactWebhookError(e));
         } finally {
             setRunning(false);
         }
@@ -477,7 +531,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             // The BACKEND owns "is this rule allowed to run" and re-checks — a refusal here is the
             // authority disagreeing with this renderer's own validation, which is exactly the case
             // the mirror exists for and must not be hidden.
-            toast(`Could not switch it ${enabled ? 'on' : 'off'}: ${e instanceof Error ? e.message : String(e)}`, 'error');
+            toast(`Could not switch it ${enabled ? 'on' : 'off'}: ${redactWebhookError(e)}`, 'error');
         }
     };
 
@@ -536,6 +590,78 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         }
         dispatch({ type: 'addStep', step });
         if (pos) dispatch({ type: 'moveStep', step, pos });
+    }, []);
+
+    /**
+     * **The one place a step is removed**, whatever gesture asked for it — the Delete key on a
+     * focused card, and the card's right-click menu. `addStep`'s own note says why this is a
+     * callback rather than a `dispatch` at each call site, and it is the same reason: the gate
+     * belongs where every gesture goes through it, not in whichever caller was written first.
+     *
+     * It is not, however, the only place a step COMES OFF: pulling a destination's wire chip still
+     * removes it, and that path reaches the same `withoutSteps` inside the reducer. The reducer is
+     * where the two meet, so this callback owns only what the reducer cannot see — telling the
+     * user when the gesture took more cards than it was aimed at.
+     *
+     * **The toast fires only for the group**, never for a single card. A card that vanishes when
+     * you press Delete on it needs no narration; three cards vanishing when you aimed at one is a
+     * surprise, and the message names all three rather than announcing a count.
+     */
+    const removeStep = useCallback((step: StepKind) => {
+        const { draft: current } = latest.current;
+        const group = removalGroup(current.present, step);
+        if (group.length === 0) return;
+        dispatch({ type: 'removeStep', step });
+        if (group.length > 1) {
+            toast(
+                `Removed ${listSteps(group)} — the three reading steps work as one, `
+                    + 'so a rule has all of them or none.',
+                'info',
+            );
+        }
+    }, []);
+
+    /**
+     * The inspector's width and whether it is docked open — **per-viewer convenience, so
+     * `localStorage`**. Neither belongs to the rule: they are not dirty-able, they are not written
+     * by a save, and a second machine editing the same rule has no business inheriting them.
+     *
+     * Read through a lazy initialiser so the parse happens once rather than on every render, and
+     * every access is guarded: a private window, cleared site data or a browser set to block site
+     * data throws on the ACCESSOR itself, and an editor that will not open because a preference
+     * could not be read is a worse failure than one that opens at its default width.
+     */
+    const [inspectWidth, setInspectWidth] = useState(() => readInspectWidth());
+    const [inspectCollapsed, setInspectCollapsed] = useState(() => readInspectCollapsed());
+
+    const resizeInspector = useCallback((width: number) => {
+        setInspectWidth(width);
+        writeStored(INSPECT_WIDTH_KEY, String(width));
+    }, []);
+
+    const toggleInspector = useCallback(() => {
+        setInspectCollapsed((was) => {
+            writeStored(INSPECT_COLLAPSED_KEY, was ? '0' : '1');
+            return !was;
+        });
+    }, []);
+
+    /**
+     * **Selecting a card opens the panel**, which is the half that makes collapsing safe: the
+     * inspector holds the only editor for the selected step, so a click on a card while it was
+     * hidden would otherwise select something the user cannot see or change.
+     *
+     * Only a real step does it — clicking the canvas background deselects, and re-opening the
+     * panel to say *"nothing selected"* is the opposite of what the click asked for.
+     */
+    const selectStep = useCallback((step: StepKind | null) => {
+        dispatch({ type: 'select', step });
+        if (step !== null) {
+            setInspectCollapsed((was) => {
+                if (was) writeStored(INSPECT_COLLAPSED_KEY, '0');
+                return false;
+            });
+        }
     }, []);
 
     const toWorldRef = useRef<(x: number, y: number) => NodePos | null>(() => null);
@@ -692,7 +818,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                                     await onChanged();
                                     toast('Duplicated — the copy is in the list, switched off.', 'success');
                                 } catch (e) {
-                                    toast(`Could not duplicate: ${e instanceof Error ? e.message : String(e)}`, 'error');
+                                    toast(`Could not duplicate: ${redactWebhookError(e)}`, 'error');
                                 }
                             })();
                         }}
@@ -731,10 +857,11 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         faces={faces}
                         states={states}
                         chips={chips}
-                        onSelect={(step) => dispatch({ type: 'select', step })}
+                        onSelect={selectStep}
                         onMove={(step, pos) => dispatch({ type: 'moveStep', step, pos })}
                         onConnect={(wire) => dispatch({ type: 'addWire', wire })}
                         onDisconnect={(wire) => dispatch({ type: 'removeWire', wire })}
+                        onRemove={removeStep}
                         onRefuse={(reason) => toast(reason, 'error')}
                         onViewportReady={takeViewport}
                     >
@@ -758,41 +885,43 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         )}
                     </AuCanvas>
 
-                    <AuInspector
-                        draft={draft}
-                        problems={problems}
-                        pairs={pairs}
-                        now={now}
-                        terminals={terminals}
-                        terminalsError={terminalsError}
-                        terminalsLoading={terminalsLoading}
-                        report={report}
-                        onRearm={
-                            draft.rule.id.length > 0
-                                ? () => {
-                                    void (async () => {
-                                        try {
-                                            await api?.rearmAutomation?.(draft.rule.id, null);
-                                            await onChanged();
-                                            toast('Re-armed — it can fire again on the next crossing.', 'success');
-                                        } catch (e) {
-                                            toast(`Could not re-arm: ${e instanceof Error ? e.message : String(e)}`, 'error');
-                                        }
-                                    })();
-                                }
-                                : null
-                        }
-                        onTest={() => void runDryRun()}
-                        onFocusStep={(step) => dispatch({ type: 'select', step })}
-                        dispatch={dispatch}
-                    />
+                    <AuInspectorDock
+                        width={inspectWidth}
+                        collapsed={inspectCollapsed}
+                        onWidth={resizeInspector}
+                        onToggle={toggleInspector}
+                    >
+                        <AuInspector
+                            draft={draft}
+                            problems={problems}
+                            pairs={pairs}
+                            now={now}
+                            terminals={terminals}
+                            terminalsError={terminalsError}
+                            terminalsLoading={terminalsLoading}
+                            report={report}
+                            onRearm={
+                                draft.rule.id.length > 0
+                                    ? () => {
+                                        void (async () => {
+                                            try {
+                                                await api?.rearmAutomation?.(draft.rule.id, null);
+                                                await onChanged();
+                                                toast('Re-armed — it can fire again on the next crossing.', 'success');
+                                            } catch (e) {
+                                toast(`Could not re-arm: ${redactWebhookError(e)}`, 'error');
+                                            }
+                                        })();
+                                    }
+                                    : null
+                            }
+                            onTest={() => void runDryRun()}
+                            onFocusStep={selectStep}
+                            dispatch={dispatch}
+                        />
+                    </AuInspectorDock>
                 </div>
 
-                {drawer === null && (
-                    <button type="button" className="au-drawertab" onClick={() => setDrawer('test')}>
-                        Test run &amp; activity
-                    </button>
-                )}
             </div>
 
             {paletteDrag.ghost && (
@@ -825,7 +954,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                             await onChanged();
                             onClose();
                         } catch (e) {
-                            toast(`Could not delete: ${e instanceof Error ? e.message : String(e)}`, 'error');
+                            toast(`Could not delete: ${redactWebhookError(e)}`, 'error');
                         }
                     })();
                 }}

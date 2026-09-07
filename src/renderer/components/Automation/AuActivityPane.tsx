@@ -18,6 +18,7 @@
 import React from 'react';
 import type { AutomationLogEntry } from '../../types/electron';
 import { LOG_KIND_CLASS, LOG_KIND_LABEL, clockTime } from '../Settings/Automations/activityLog';
+import { redactWebhookLogEntry } from './webhookRedaction';
 
 export interface AuActivityPaneProps {
     entries: AutomationLogEntry[];
@@ -32,7 +33,11 @@ export const AuActivityPane: React.FC<AuActivityPaneProps> = ({
     error,
     saved,
     onOpenFullLog,
-}) => (
+}) => {
+    // Keep this drawer independent of the Settings log's fetch path while applying the same
+    // last-resort redaction to every field it renders.
+    const redactedEntries = entries.map(redactWebhookLogEntry);
+    return (
     <div className="au-dpane" role="tabpanel" aria-label="Activity">
         {error !== null && (
             <div className="au-logempty au-logfailed" role="alert">
@@ -43,7 +48,7 @@ export const AuActivityPane: React.FC<AuActivityPaneProps> = ({
             </div>
         )}
 
-        {error === null && entries.length === 0 && (
+        {error === null && redactedEntries.length === 0 && (
             <div className="au-logempty">
                 <b>No activity yet.</b>
                 <br />
@@ -53,10 +58,10 @@ export const AuActivityPane: React.FC<AuActivityPaneProps> = ({
             </div>
         )}
 
-        {error === null && entries.length > 0 && (
+        {error === null && redactedEntries.length > 0 && (
             <>
                 <div className="au-logrows">
-                    {entries.map((entry) => (
+                    {redactedEntries.map((entry) => (
                         <div key={entry.id} className={`au-logrow ${LOG_KIND_CLASS[entry.kind]}`}>
                             <span className="au-lgt">{clockTime(entry.at)}</span>
                             <span className="au-lgi">
@@ -78,4 +83,5 @@ export const AuActivityPane: React.FC<AuActivityPaneProps> = ({
             </>
         )}
     </div>
-);
+    );
+};

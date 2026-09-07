@@ -1,5 +1,5 @@
 /**
- * §10.20 — the six-template table, asserted through **both renderers**.
+ * §10.20 — the ten-template table, asserted through **both renderers**.
  *
  * **The direct port of the test that caught the mockup's worst rev-1 bug.** Rev 1 had four
  * hard-coded inspector panels, so five of six templates showed one rule on the canvas and a
@@ -60,19 +60,23 @@ describe('automationDerive — each template carries its OWN values, through bot
             const { parse, cond, action } = rule.graph;
 
             // --- the pattern ---------------------------------------------------------------------
-            const shown = displayedPattern(parse);
-            expect(faceText(rule, 'parse')).toContain(shown);
-            expect(panelText(rule, 'parse')).toContain(shown);
+            if (parse) {
+                const shown = displayedPattern(parse);
+                expect(faceText(rule, 'parse')).toContain(shown);
+                expect(panelText(rule, 'parse')).toContain(shown);
+            }
 
             // --- the threshold -------------------------------------------------------------------
-            if (cond.kind === 'number' && cond.threshold !== null && cond.threshold !== undefined) {
+            if (cond?.kind === 'number' && cond.threshold !== null && cond.threshold !== undefined) {
                 expect(faceText(rule, 'cond')).toContain(String(cond.threshold));
                 expect(panelText(rule, 'cond')).toContain(String(cond.threshold));
             }
 
             // --- the message ---------------------------------------------------------------------
-            expect(faceText(rule, 'action')).toContain(action.message);
-            expect(panelText(rule, 'action')).toContain(action.message);
+            if (action) {
+                expect(faceText(rule, 'action')).toContain(action.message);
+                expect(panelText(rule, 'action')).toContain(action.message);
+            }
         },
     );
 
@@ -505,12 +509,29 @@ describe('automationDerive — missing values are marked, not blank', () => {
 });
 
 describe('automationDerive — the palette summary', () => {
+    it('describes a webhook-only rule as a post, never a terminal send', () => {
+        const { action: _action, ...graph } = draftFromTemplate(AUTOMATION_TEMPLATES[0]).graph;
+        const rule = {
+            ...draftFromTemplate(AUTOMATION_TEMPLATES[0]),
+            graph: {
+                ...graph,
+                webhook: { provider: 'discord' as const, url: 'https://secret.invalid/hook', body: 'done' },
+            },
+        };
+
+        expect(ruleSummary(rule)).toBe(
+            'Watching command contains "claude" · when the value in ctx:(\\d+)% is greater than 25 · post discord',
+        );
+        expect(describeRule(rule).verbSend).toBe('post');
+    });
+
     it('describes each template differently, from the same values', () => {
         const summaries = AUTOMATION_TEMPLATES.map((t) => ruleSummary(draftFromTemplate(t)));
-        expect(new Set(summaries).size).toBe(AUTOMATION_TEMPLATES.length);
+        expect(new Set(summaries).size).toBe(AUTOMATION_TEMPLATES.length - 1);
         // And it is the rule's own message, not a label stored beside it.
         for (const template of AUTOMATION_TEMPLATES) {
-            expect(ruleSummary(draftFromTemplate(template))).toContain(template.rule.graph.action.message);
+            const action = template.rule.graph.action;
+            if (action) expect(ruleSummary(draftFromTemplate(template))).toContain(action.message);
         }
     });
 

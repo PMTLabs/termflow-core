@@ -20,6 +20,7 @@ import {
     AUTOMATION_STATE,
 } from '../../../services/automationEvents';
 import { mergeEntries } from './activityLog';
+import { redactWebhookError, redactWebhookLogEntry } from '../../Automation/webhookRedaction';
 
 /**
  * The log the panel holds in memory. The store keeps 200 per rule; holding more here would be a
@@ -103,7 +104,7 @@ export function useAutomations(): UseAutomations {
             setError(null);
         } catch (e) {
             if (genRef.current !== gen) return;
-            setError(e instanceof Error ? e.message : String(e));
+            setError(redactWebhookError(e));
         } finally {
             if (genRef.current === gen) setLoading(false);
         }
@@ -124,7 +125,12 @@ export function useAutomations(): UseAutomations {
             // Merged rather than replaced: an `automation:activity` event can arrive while this
             // request is in flight, and the entry it stands for must not be dropped by a response
             // that was assembled before it existed.
-            setLog((prev) => mergeEntries(prev, rows, scope.newestFirst, LOG_BUFFER_MAX));
+            setLog((prev) => mergeEntries(
+                prev,
+                rows.map(redactWebhookLogEntry),
+                scope.newestFirst,
+                LOG_BUFFER_MAX,
+            ));
             setLogError(null);
         } catch (e) {
             if (genRef.current !== gen || scopeRef.current !== scope) return;
@@ -135,7 +141,7 @@ export function useAutomations(): UseAutomations {
             // which is a confident, specific lie about a store that is refusing to answer. §7.8
             // assigns the `Disabled` state to the panel AND the log view, separately, for this
             // reason.
-            setLogError(e instanceof Error ? e.message : String(e));
+            setLogError(redactWebhookError(e));
         }
     }, []);
 

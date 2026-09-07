@@ -35,7 +35,7 @@ import type {
     AutomationTimerMode,
 } from '../../types/electron';
 import type { StepKind, TimerShape, Wire } from './automationSteps';
-import { INPUT_STEPS, STEP_ORDER, STEP_PORTS, defaultWires, samePort } from './automationSteps';
+import { INPUT_STEPS, STEP_ORDER, STEP_PORTS, defaultWires, removalGroup, samePort } from './automationSteps';
 import { applyPreset, setFind, setLiteral } from './automationPresets';
 // The gallery's own starting point, used here as the `'template'` opening's dirty BASELINE — the
 // state the gallery was showing before a card was clicked. Same direction `AutomationMenuSection`
@@ -99,6 +99,7 @@ export const DEFAULT_LAYOUT: Record<StepKind, NodePos> = {
     // `draft.present`, not a reason to give one kind two default positions.
     timer: { x: AU_GAP_X * 3, y: 0 },
     action: { x: AU_GAP_X * 4, y: 0 },
+    webhook: { x: AU_GAP_X * 5, y: 0 },
 };
 
 /**
@@ -397,15 +398,11 @@ export function draftFromRule(rule: AutomationRule, opening: CanvasOpening = 'sa
     // whose whole point is that it is empty. The two new-rule openings are saying something the
     // graph cannot.
     //
-    // `action` is drawn unconditionally because §3.1 keeps it required — there is no absence to
-    // detect — and the wait is drawn on the same rule as the other three now, rather than as the
-    // exception it used to be: a rule that has one gets its card, a rule that does not can be
-    // offered one by the palette.
     const present: StepKind[] = opening === 'blank'
         ? []
         : opening === 'seeded'
             ? ['monitor']
-            : STEP_ORDER.filter((s) => s === 'action' || rule.graph[s] != null);
+            : STEP_ORDER.filter((s) => rule.graph[s] != null);
     const layout = layoutOf(rule);
     // **The rule and the baseline are the SAME object, layout already resolved.** A rule saved
     // before this field existed has no `graph.layout`, so the arrangement it opens with is the
@@ -440,11 +437,26 @@ function graphAsWritten(
     graph: AutomationRule['graph'],
     present: readonly StepKind[],
 ): AutomationRule['graph'] {
-    if (INPUT_STEPS.some((s) => present.includes(s))) return graph;
-    // The KEYS go, not `undefined` values: §3.1's own note says the backend omits an absent step
-    // rather than sending `null`, so an absent step must not decode as a present-but-empty one.
-    const { monitor: _m, parse: _p, cond: _c, ...rest } = graph;
-    return rest;
+    const keepInput = INPUT_STEPS.some((s) => present.includes(s));
+    const keepAction = present.includes('action');
+    const keepWebhook = present.includes('webhook');
+    const graphHasInput = INPUT_STEPS.some((step) => step in graph);
+    // Preserve the graph object whenever it already says exactly what the canvas says. Besides
+    // avoiding churn, that preserves property order for the dirty check's wire-shaped baseline.
+    if (
+        (keepInput || !graphHasInput)
+        && (keepAction || !('action' in graph))
+        && (keepWebhook || !('webhook' in graph))
+    ) return graph;
+    // The KEYS go, not `undefined` values. In particular, an action scaffold hidden by the canvas
+    // must not survive serialisation and submit an Enter in a supposedly webhook-only rule.
+    const { monitor, parse, cond, action, webhook, ...rest } = graph;
+    return {
+        ...rest,
+        ...(keepInput ? { monitor, parse, cond } : {}),
+        ...(keepAction ? { action } : {}),
+        ...(keepWebhook ? { webhook } : {}),
+    };
 }
 
 /**
@@ -522,8 +534,8 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  * second one: any canvas keeping one input step keeps all three, and `parse.empty` goes on catching
  * the partial cases.
  *
- * `action` is never omitted — §3.1 keeps it required on the DTO — and `timer` needs no rule here,
- * because `addStep` materialises it into the graph exactly when the canvas reveals it.
+ * The two destinations are omitted independently when their cards are absent; `timer` needs no rule
+ * here, because `addStep` materialises it into the graph exactly when the canvas reveals it.
  *
  * **`op`/`threshold` are dropped from the row that carries clauses, and only from that row.** §5.3
  * makes the pair v1-only — read at load, folded into `clauses` by `fold_v1_clauses`, never written
@@ -567,11 +579,11 @@ export function isDirty(draft: AutomationDraft): boolean {
 /**
  * The rule as a string, with the one field whose ORDER means nothing put in a fixed one.
  *
- * `targetIds` is a set: `write_rule` replaces the pick set row by row and the engine resolves it
- * with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from `['tm-2','tm-1']`. The
- * picker's toggle appends, though, so unticking a terminal and ticking it straight back rotated the
- * array — and the draft then read dirty forever, with a *Leave without saving?* dialog over an
- * identical rule.
+ * `targetIds` and `excludedIds` are sets: `write_rule` replaces each set row by row and the engine
+ * resolves them with a lookup, so nothing downstream can tell `['tm-1','tm-2']` from
+ * `['tm-2','tm-1']`. The picker's toggle appends, though, so unticking a terminal and ticking it
+ * straight back rotated the array — and the draft then read dirty forever, with a *Leave without
+ * saving?* dialog over an identical rule.
  *
  * **Both sides go through this**, which is the whole point: normalising one side of a comparison and
  * not the other can only invent differences (`transform-on-one-side-of-a-comparison`). And it
@@ -593,7 +605,12 @@ function comparable(rule: AutomationRule): string {
               ),
           }
         : rule.graph;
-    return JSON.stringify({ ...rule, graph, targetIds: [...rule.targetIds].sort() });
+    return JSON.stringify({
+        ...rule,
+        graph,
+        targetIds: [...rule.targetIds].sort(),
+        excludedIds: [...(rule.excludedIds ?? [])].sort(),
+    });
 }
 
 export type DraftAction =
@@ -613,6 +630,10 @@ export type DraftAction =
     | { type: 'followNew'; followNew: boolean }
     | { type: 'targets'; ids: string[] }
     | { type: 'toggleTarget'; id: string }
+    | { type: 'excludedTargets'; ids: string[] }
+    | { type: 'toggleExcludedTarget'; id: string }
+    | { type: 'excludeCriterion'; criterion: AutomationRule['criterion'] | null }
+    | { type: 'excludeCriterionValue'; value: string }
     | { type: 'monitor'; patch: Partial<AutomationMonitorStep> }
     | { type: 'preset'; preset: AutomationParseStep['preset'] }
     | { type: 'literal'; literal: string }
@@ -636,9 +657,18 @@ export type DraftAction =
      * expressible-but-refused is the shape that saves clean and comes back broken.
      */
     | { type: 'timer'; mode: AutomationTimerMode }
-    | { type: 'action'; patch: Partial<AutomationRule['graph']['action']> }
+    | { type: 'action'; patch: Partial<NonNullable<AutomationRule['graph']['action']>> }
+    | { type: 'webhook'; patch: Partial<NonNullable<AutomationRule['graph']['webhook']>> }
     | { type: 'select'; step: StepKind | null }
     | { type: 'addStep'; step: StepKind }
+    /**
+     * Take a card OFF the canvas and delete the graph field behind it.
+     *
+     * One step is named, never a list, because the caller does not get to choose the set: the
+     * three input steps come off together and `removalGroup` is the one place that is decided.
+     * An action carrying its own list would let a gesture drop `parse` alone.
+     */
+    | { type: 'removeStep'; step: StepKind }
     | { type: 'moveStep'; step: StepKind; pos: NodePos }
     | { type: 'addWire'; wire: Wire }
     | { type: 'removeWire'; wire: Wire }
@@ -709,6 +739,15 @@ function freeSlot(
  *
  * Returns the rule UNCHANGED when there is nothing to fill in, so `addStep` on a complete rule is
  * still presentation-only and cannot make an unedited draft read dirty.
+ * **A new destination starts with substitution ON** (`blankDraft`'s action carries it too). It was
+ * off, and the chips above it inserted `$0` into a message that was then sent verbatim — the
+ * literal-`$0`-on-Discord defect. Tam: *"Let's enable the insert capture values on by default"*,
+ * new rules and templates only: a SAVED rule carries its own value and keeps it, so nothing that
+ * already exists changes what it types or posts.
+ *
+ * This is what narrowed `action.tokenWithoutParse` to fire on a TOKEN rather than on the flag —
+ * a schedule rule has no parse step at all, and would otherwise open blocked by a default nobody
+ * chose.
  */
 function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
     if (step === 'timer') {
@@ -716,7 +755,16 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
             ? { ...rule, graph: { ...rule.graph, timer: { mode: DEFAULT_TIMER_MODE } } }
             : rule;
     }
-    if (step === 'action' || INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
+    if (step === 'action') {
+        const action = rule.graph.action ?? blankDraft().graph.action;
+        return action ? { ...rule, graph: { ...rule.graph, action } } : rule;
+    }
+    if (step === 'webhook') {
+        return rule.graph.webhook == null
+            ? { ...rule, graph: { ...rule.graph, webhook: { provider: 'discord', url: '', body: '', substitute: true } } }
+            : rule;
+    }
+    if (INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
     const blank = blankDraft().graph;
     return {
         ...rule,
@@ -728,6 +776,42 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
         },
     };
 }
+
+/**
+ * The draft with `steps` gone — **off the canvas AND out of the graph**, which is one operation.
+ *
+ * The pair is the whole of the design `removalGroup` describes. Dropping a card from `present`
+ * alone leaves the step's data behind, and `graphAsWritten` only omits the input group and the two
+ * destinations — a `timer` hidden that way would go on delaying every send with no card on screen
+ * to say so. Deleting the graph field alone leaves a card drawing a step that is not there.
+ *
+ * `layout` is deliberately KEPT. A position is a user choice — it is why `graph.layout` is
+ * persisted at all — so a card the palette puts back returns to where its owner last dragged it
+ * rather than to the default column; `freeSlot` still pushes it clear if something moved into the
+ * slot meanwhile.
+ *
+ * Used by `removeStep` and by `removeWire`'s destination branch, which is the same removal reached
+ * by pulling the wire out instead of by aiming at the card. Two copies of *"and re-derive the
+ * wires, and clear the selection if it pointed at what just went"* is how two gestures end up
+ * leaving different drafts behind.
+ */
+function withoutSteps(draft: AutomationDraft, steps: readonly StepKind[]): AutomationDraft {
+    if (steps.length === 0) return draft;
+    const graph = { ...draft.rule.graph };
+    for (const step of steps) delete graph[step];
+    const present = draft.present.filter((step) => !steps.includes(step));
+    const next = { ...draft.rule, graph };
+    return {
+        ...draft,
+        rule: next,
+        present,
+        // Re-derived, never filtered: removing the wait does not merely drop its two wires, it
+        // reconnects the verdict to the send the wait used to sit between.
+        wires: defaultWires(present, timerShapeOf(next)),
+        selected: draft.selected !== null && steps.includes(draft.selected) ? null : draft.selected,
+    };
+}
+
 
 export function draftReducer(draft: AutomationDraft, action: DraftAction): AutomationDraft {
     const { rule } = draft;
@@ -759,6 +843,21 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
                     ? rule.targetIds.filter((id) => id !== action.id)
                     : [...rule.targetIds, action.id],
             });
+        case 'excludedTargets':
+            return withRule(draft, { ...rule, excludedIds: [...action.ids] });
+        case 'toggleExcludedTarget': {
+            const excludedIds = rule.excludedIds ?? [];
+            return withRule(draft, {
+                ...rule,
+                excludedIds: excludedIds.includes(action.id)
+                    ? excludedIds.filter((id) => id !== action.id)
+                    : [...excludedIds, action.id],
+            });
+        }
+        case 'excludeCriterion':
+            return withRule(draft, { ...rule, excludeCriterion: action.criterion });
+        case 'excludeCriterionValue':
+            return withRule(draft, { ...rule, excludeCriterionValue: action.value });
         // **A patch to a step the rule does not have is a no-op, never a materialisation.** Plan
         // 032 §3.1 lets a schedule rule carry no monitor/parse/cond at all, and these six actions
         // come from panels that are only mounted for a step the rule HAS. Filling the gap in from
@@ -812,7 +911,15 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             return { ...draft, rule: next, wires: defaultWires(draft.present, timerShapeOf(next)) };
         }
         case 'action':
-            return withGraph(draft, { action: { ...rule.graph.action, ...action.patch } });
+            return rule.graph.action
+                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch } })
+                : draft;
+        case 'webhook':
+            // A panel patch cannot materialise a destination. In particular, it must never make
+            // an ActionStep: an empty action can still submit Enter to a live terminal.
+            return rule.graph.webhook
+                ? withGraph(draft, { webhook: { ...rule.graph.webhook, ...action.patch } })
+                : draft;
         case 'select':
             return { ...draft, selected: action.step };
         case 'addStep': {
@@ -853,7 +960,18 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
             return { ...draft, layout: { ...draft.layout, [action.step]: action.pos } };
         case 'addWire':
             return { ...draft, wires: [...draft.wires, action.wire] };
+        case 'removeStep':
+            // The GROUP, not the step: aiming at `Read a value` takes all three reading cards with
+            // it. Aiming at a card that is not on the canvas returns an empty list, which
+            // `withoutSteps` treats as the no-op it is.
+            return withoutSteps(draft, removalGroup(draft.present, action.step));
         case 'removeWire':
+            // A destination card has exactly one incoming wire, so its wire chip is its remove
+            // gesture. Removing it must remove the destination too: merely hiding the card while
+            // retaining `action` would leave a live terminal send on a webhook-only canvas.
+            if (action.wire.to.step === 'action' || action.wire.to.step === 'webhook') {
+                return withoutSteps(draft, [action.wire.to.step]);
+            }
             return {
                 ...draft,
                 wires: draft.wires.filter(

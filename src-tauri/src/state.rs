@@ -985,6 +985,7 @@ impl<R: Runtime> AppState<R> {
         &self,
         process_id: &str,
         depth: crate::automation_engine::eval::ReadDepth,
+        skip_typed_line: bool,
     ) -> Option<String> {
         use crate::automation_engine::eval::ReadDepth;
         let entry = self.terminal_screens.get(process_id)?;
@@ -1000,7 +1001,7 @@ impl<R: Runtime> AppState<R> {
             ReadDepth::Window(n) => n,
             ReadDepth::VisibleScreen => screen.size().0 as usize,
         };
-        tail_text_with(screen, |sc| render_tail_lines(sc, max_lines))
+        tail_text_with(screen, |sc| render_tail_lines(sc, max_lines, skip_typed_line))
     }
 
     /// Escape sequences restoring the terminal's live input modes, appended to
@@ -2125,6 +2126,49 @@ pub(crate) fn tail_windows(
     plan
 }
 
+/// Which records of a tail walk make up the LOGICAL line the cursor sits on, inclusive.
+///
+/// The reported problem this answers: a rule watching for `deploy` fired the instant the word
+/// appeared under the user's fingers, before Enter. The screen genuinely contains that text, and
+/// nothing else distinguishes an echoed keystroke from output — so the rule that opted in says
+/// *the line the cursor is parked on is not output yet*.
+///
+/// **The cursor's line only, never "and everything below".** The reported use is an agentic CLI
+/// whose status line sits UNDER its input box, and that status line is the text such a rule is
+/// watching for: dropping the rest of the screen would take the value along with the noise.
+///
+/// **Both ends of a soft wrap.** One typed line can occupy several records, and it is one line to
+/// the user. The backward walk is the one a long shell command needs; the forward walk is for a
+/// cursor that is not on the last of those records — press Home on a wrapped command and the
+/// cursor sits on its FIRST row — where dropping only from there down would leave the beginning of
+/// the command behind for the pattern to match on.
+///
+/// Pure, and separate from the walk, because that is what makes the span checkable as arithmetic
+/// rather than through a parser: the walk's last `rows` records are the visible screen, so visible
+/// row `cursor_row` is record `recs.len() - rows + cursor_row`. `None` when that lands outside the
+/// walk, which is a terminal with more rows than the read's own `max_lines` — the top of its screen
+/// was never in the records to begin with.
+fn typed_line_span(
+    recs: &[(String, bool)],
+    rows: usize,
+    cursor_row: usize,
+) -> Option<(usize, usize)> {
+    let at = recs.len().checked_add(cursor_row)?.checked_sub(rows)?;
+    if at >= recs.len() {
+        return None;
+    }
+
+    let mut start = at;
+    while start > 0 && recs.get(start - 1).is_some_and(|(_, wrapped)| *wrapped) {
+        start -= 1;
+    }
+    let mut end = at;
+    while end + 1 < recs.len() && recs.get(end).is_some_and(|(_, wrapped)| *wrapped) {
+        end += 1;
+    }
+    Some((start, end))
+}
+
 /// The last `max_lines` rows of a screen's buffer as PLAIN TEXT, soft-wrapped rows joined.
 ///
 /// **Joining wrapped rows is not optional**: a `ctx:63%` straddling column 120 otherwise never
@@ -2146,9 +2190,17 @@ pub(crate) fn tail_windows(
 /// Bounded at `max_lines` because the walk holds the per-terminal parser mutex that `feed_screen`
 /// contends on, and this file's own note above `full_scrollback_snapshot` says holding it across an
 /// O(scrollback) render stalls output delivery for EVERY terminal.
-pub fn render_tail_lines(screen: &mut vt100::Screen, max_lines: usize) -> String {
+///
+/// `skip_typed_line` drops the logical line under the cursor — the rule's own opt-in, so that a
+/// command still being typed is not read as output. See `typed_line_span`.
+pub fn render_tail_lines(screen: &mut vt100::Screen, max_lines: usize, skip_typed_line: bool) -> String {
     let (rows, cols) = screen.size();
     let saved = screen.scrollback();
+
+    // Read BEFORE the walk moves the offset. The cursor belongs to the LIVE screen, and the row it
+    // reports is an index into the visible rows at offset 0 — asking part-way through the paging
+    // would be asking about whichever window happened to be showing.
+    let cursor_row = screen.cursor_position().0 as usize;
 
     screen.set_scrollback(usize::MAX);
     let total_sb = screen.scrollback();
@@ -2167,6 +2219,22 @@ pub fn render_tail_lines(screen: &mut vt100::Screen, max_lines: usize) -> String
     // Unconditional, with no `?` between the set and the restore: reading must never move the user's
     // own scrollback view.
     screen.set_scrollback(saved);
+
+    // BEFORE the trailing blanks go, because the span is addressed by position in the full walk: at
+    // a shell prompt the typed line IS the last non-blank record, and popping first would leave the
+    // arithmetic pointing at whatever survived.
+    if skip_typed_line {
+        if let Some((start, end)) = typed_line_span(&recs, rows as usize, cursor_row) {
+            // `retain` with a counter rather than `drain(start..=end)`: constraint 2 above is that
+            // nothing in this walk may panic, and a range index is exactly the shape that can.
+            let mut i = 0usize;
+            recs.retain(|_| {
+                let keep = i < start || i > end;
+                i += 1;
+                keep
+            });
+        }
+    }
 
     while recs.last().is_some_and(|(t, _)| t.trim().is_empty()) {
         recs.pop();
@@ -2273,8 +2341,9 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
         &self,
         pc: &str,
         depth: crate::automation_engine::eval::ReadDepth,
+        skip_typed_line: bool,
     ) -> Option<String> {
-        self.screen_tail_text(pc, depth)
+        self.screen_tail_text(pc, depth, skip_typed_line)
     }
 
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
@@ -2338,14 +2407,15 @@ impl<R: tauri::Runtime> crate::automation_engine::eval::ScreenSource for AppStat
         &self,
         process_id: &str,
         depth: crate::automation_engine::eval::ReadDepth,
+        skip_typed_line: bool,
     ) -> Option<String> {
-        self.screen_tail_text(process_id, depth)
+        self.screen_tail_text(process_id, depth, skip_typed_line)
     }
 }
 
 #[cfg(test)]
 mod tail_read_tests {
-    use super::{render_tail_lines, tail_text_with, tail_windows};
+    use super::{render_tail_lines, tail_text_with, tail_windows, typed_line_span};
     use std::sync::Mutex;
 
     fn parser(rows: u16, cols: u16) -> vt100::Parser {
@@ -2362,7 +2432,7 @@ mod tail_read_tests {
         let body: Vec<String> = (1..=500).map(|i| format!("line {}", i)).collect();
         p.process(body.join("\r\n").as_bytes());
 
-        let text = render_tail_lines(p.screen_mut(), 200);
+        let text = render_tail_lines(p.screen_mut(), 200, false);
         let got: Vec<&str> = text.lines().collect();
         assert_eq!(got.len(), 200, "exactly `max_lines` rows");
         assert_eq!(got.first().copied(), Some("line 301"));
@@ -2377,7 +2447,7 @@ mod tail_read_tests {
     fn a_short_buffer_returns_only_what_it_holds() {
         let mut p = parser(24, 80);
         p.process(b"alpha\r\nbeta\r\ngamma");
-        let text = render_tail_lines(p.screen_mut(), 200);
+        let text = render_tail_lines(p.screen_mut(), 200, false);
         assert_eq!(text.lines().collect::<Vec<_>>(), vec!["alpha", "beta", "gamma"]);
     }
 
@@ -2386,7 +2456,7 @@ mod tail_read_tests {
     fn trailing_blank_rows_are_dropped() {
         let mut p = parser(24, 80);
         p.process(b"only line\r\n");
-        let text = render_tail_lines(p.screen_mut(), 200);
+        let text = render_tail_lines(p.screen_mut(), 200, false);
         assert_eq!(text, "only line\n");
     }
 
@@ -2397,7 +2467,7 @@ mod tail_read_tests {
         let mut p = parser(10, 20);
         // 18 characters, then `ctx:63%` - the value straddles column 20.
         p.process(b"..................ctx:63%");
-        let joined = render_tail_lines(p.screen_mut(), 200);
+        let joined = render_tail_lines(p.screen_mut(), 200, false);
         assert!(joined.contains("ctx:63%"), "wrapped rows must be joined: {:?}", joined);
         assert_eq!(joined.lines().count(), 1, "one logical line, not two physical rows");
     }
@@ -2408,7 +2478,7 @@ mod tail_read_tests {
     fn a_hard_line_break_is_not_joined() {
         let mut p = parser(10, 20);
         p.process(b"..................ct\r\nx:63%");
-        let text = render_tail_lines(p.screen_mut(), 200);
+        let text = render_tail_lines(p.screen_mut(), 200, false);
         assert!(!text.contains("ctx:63%"), "a hard break is a real line end: {:?}", text);
         assert_eq!(text.lines().count(), 2);
     }
@@ -2423,7 +2493,7 @@ mod tail_read_tests {
         p.screen_mut().set_scrollback(37);
         let before = p.screen().scrollback();
         assert_eq!(before, 37, "premise: the view is scrolled");
-        let _ = render_tail_lines(p.screen_mut(), 50);
+        let _ = render_tail_lines(p.screen_mut(), 50, false);
         assert_eq!(p.screen().scrollback(), 37, "the walk moved the user's view");
     }
 
@@ -2509,6 +2579,115 @@ mod tail_read_tests {
     fn a_degenerate_screen_yields_an_empty_plan() {
         assert!(tail_windows(0, 0, 200).is_empty());
         assert!(tail_windows(500, 24, 0).is_empty());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // "Ignore the line being typed" — `monitor.skip_typed_line`
+    // -----------------------------------------------------------------------------------------
+
+    /// Park the cursor on a 1-based `(row, col)`, the way a shell or a TUI leaves it.
+    fn park(p: &mut vt100::Parser, row: u16, col: u16) {
+        p.process(format!("\x1b[{};{}H", row, col).as_bytes());
+    }
+
+    /// The span, as arithmetic over a walk's records — no parser, no screen.
+    ///
+    /// A table over both dimensions that can be wrong independently: WHERE the cursor is among the
+    /// records, and how far the soft wrap around it reaches. Varying one at a time is how an
+    /// implementation that ignores `rows` passes (every row of a buffer with no scrollback) or one
+    /// that only walks backwards passes (every cursor already at the end of its logical line).
+    #[test]
+    fn typed_line_span_is_a_table_over_position_and_wrapping() {
+        let plain = |n: usize| vec![(String::new(), false); n];
+        // `true` means "this record soft-wraps into the next", so b/c/d are ONE logical line.
+        let wrapped = vec![
+            (String::new(), false), // a
+            (String::new(), true),  // b
+            (String::new(), true),  // c
+            (String::new(), false), // d
+            (String::new(), false), // e
+        ];
+
+        // No scrollback: record index and visible row coincide.
+        for row in 0..5 {
+            assert_eq!(typed_line_span(&plain(5), 5, row), Some((row, row)), "row {}", row);
+        }
+        // With scrollback ahead of it, the visible screen is the LAST `rows` records.
+        assert_eq!(typed_line_span(&plain(8), 5, 2), Some((5, 5)));
+        assert_eq!(typed_line_span(&plain(8), 5, 0), Some((3, 3)));
+
+        // Anywhere inside a wrapped run yields the WHOLE run, from either end of it.
+        assert_eq!(typed_line_span(&wrapped, 5, 1), Some((1, 3)), "from its first row");
+        assert_eq!(typed_line_span(&wrapped, 5, 2), Some((1, 3)), "from its middle");
+        assert_eq!(typed_line_span(&wrapped, 5, 3), Some((1, 3)), "from its last row");
+        // Its neighbours are untouched by it.
+        assert_eq!(typed_line_span(&wrapped, 5, 0), Some((0, 0)));
+        assert_eq!(typed_line_span(&wrapped, 5, 4), Some((4, 4)));
+
+        // A screen taller than the read: its top rows were never in the walk, so a cursor up there
+        // addresses nothing. Nothing is dropped rather than something arbitrary.
+        assert_eq!(typed_line_span(&plain(3), 24, 0), None);
+        assert_eq!(typed_line_span(&plain(3), 24, 20), None);
+        assert_eq!(typed_line_span(&plain(3), 24, 23), Some((2, 2)), "the bottom row still lands");
+        assert_eq!(typed_line_span(&[], 24, 3), None, "an empty walk has no line to drop");
+    }
+
+    /// The reported bug: a command still being typed at a prompt fired the rule before Enter.
+    ///
+    /// Both directions in one test, because the flag is the only difference between them — an
+    /// implementation that ignores it passes either half alone.
+    #[test]
+    fn the_line_being_typed_is_dropped_only_when_the_rule_asks() {
+        let mut p = parser(6, 40);
+        p.process(b"build ok\r\n$ deploy now");
+
+        let read = render_tail_lines(p.screen_mut(), 200, false);
+        assert!(read.contains("deploy now"), "off, the screen is the screen: {:?}", read);
+
+        let skipped = render_tail_lines(p.screen_mut(), 200, true);
+        assert!(!skipped.contains("deploy"), "the typed line survived: {:?}", skipped);
+        assert_eq!(skipped, "build ok\n", "and nothing above it went with it");
+    }
+
+    /// Tam's own qualifier, and the half a naive implementation fails: an agentic CLI draws its
+    /// status line UNDER the input box, and that status line is what the rule is watching for.
+    /// "The cursor's line and everything below" would take the value along with the noise.
+    #[test]
+    fn a_status_line_below_the_cursor_is_still_read() {
+        let mut p = parser(6, 40);
+        p.process(b"build ok\r\n> deploy now\r\nctx:63% . idle");
+        park(&mut p, 2, 13); // back onto `> deploy now`, where a TUI leaves it
+
+        let text = render_tail_lines(p.screen_mut(), 200, true);
+        // Whole-output equality, not three `contains` calls: what makes this test worth writing is
+        // exactly WHICH lines survived, and a `contains` oracle cannot tell "kept the status line"
+        // from "kept the status line and half of something else".
+        assert_eq!(text, "build ok\nctx:63% . idle\n");
+    }
+
+    /// A typed line long enough to wrap is still ONE line to the user, and the cursor may sit on
+    /// any of its rows — press Home on a long command and it sits on the FIRST. Dropping from the
+    /// cursor down would leave the beginning of that command behind for the pattern to match.
+    #[test]
+    fn a_soft_wrapped_typed_line_goes_whole() {
+        let mut p = parser(6, 20);
+        p.process(b"before\r\n$ deploy the whole cluster now");
+        p.process(b"\x1b[5;1Hctx:63%");
+        park(&mut p, 2, 3); // the first physical row of the wrapped command
+
+        let text = render_tail_lines(p.screen_mut(), 200, true);
+        // Whole-output equality, and a mutation run is why. The wrap falls mid-word — the rows are
+        // `$ deploy the whole c` and `luster now` — so `!text.contains("cluster")` was true even
+        // with the continuation row still there, and a backward-only walk passed this test.
+        assert_eq!(text, "before\n\nctx:63%\n");
+    }
+
+    /// A cursor resting on a blank row drops a blank row — never the nearest text above it.
+    #[test]
+    fn a_cursor_on_an_empty_row_costs_nothing() {
+        let mut p = parser(6, 40);
+        p.process(b"ctx:63%\r\n");
+        assert_eq!(render_tail_lines(p.screen_mut(), 200, true), "ctx:63%\n");
     }
 }
 

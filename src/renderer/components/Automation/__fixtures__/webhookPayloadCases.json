@@ -1,0 +1,46 @@
+{
+  "cases": [
+    {
+      "name": "discord wraps a plain message",
+      "provider": "discord",
+      "message": "build failed",
+      "expected": "{\"content\":\"build failed\"}"
+    },
+    {
+      "name": "slack wraps a plain message",
+      "provider": "slack",
+      "message": "build failed",
+      "expected": "{\"text\":\"build failed\"}"
+    },
+    {
+      "name": "teams posts a MessageCard",
+      "provider": "teams",
+      "message": "build failed",
+      "expected": "{\"@context\":\"http://schema.org/extensions\",\"@type\":\"MessageCard\",\"text\":\"build failed\"}"
+    },
+    {
+      "name": "custom posts its body verbatim",
+      "provider": "custom",
+      "message": "{ \"z\" : 1, \"a\" : 2, \"a\" : 3 }\n",
+      "expected": "{ \"z\" : 1, \"a\" : 2, \"a\" : 3 }\n"
+    },
+    {
+      "name": "discord escapes JSON syntax inside a message",
+      "provider": "discord",
+      "message": "quote: \"; slash: \\; newline:\n{\"injected\":true}",
+      "expected": "{\"content\":\"quote: \\\"; slash: \\\\; newline:\\n{\\\"injected\\\":true}\"}"
+    },
+    {
+      "name": "slack escapes JSON syntax inside a message",
+      "provider": "slack",
+      "message": "quote: \"; slash: \\; newline:\n{\"injected\":true}",
+      "expected": "{\"text\":\"quote: \\\"; slash: \\\\; newline:\\n{\\\"injected\\\":true}\"}"
+    },
+    {
+      "name": "teams escapes JSON syntax inside a message",
+      "provider": "teams",
+      "message": "quote: \"; slash: \\; newline:\n{\"injected\":true}",
+      "expected": "{\"@context\":\"http://schema.org/extensions\",\"@type\":\"MessageCard\",\"text\":\"quote: \\\"; slash: \\\\; newline:\\n{\\\"injected\\\":true}\"}"
+    }
+  ]
+}
