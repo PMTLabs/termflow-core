@@ -48,7 +48,7 @@ velopack = { version = "=1.2.0", optional = true }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.9.5", features = ["macos-private-api", "tray-icon", "devtools"] }
+tauri = { version = "2.11.1", features = ["macos-private-api", "tray-icon", "devtools"] }
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 # OS notifications (Plan 010): fire a native "wants to pair" toast when a pairing
@@ -68,7 +68,7 @@ portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 dashmap = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Integrity hash for the update-stable host binary install (RP-1): the host is
