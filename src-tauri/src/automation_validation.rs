@@ -681,8 +681,7 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             "rule.noDestination",
             "Add a terminal message or a webhook destination.",
         ));
-    } else if rule.graph.webhook.is_none()
-        && rule
+    } else if rule
         .graph
         .action
         .as_ref()

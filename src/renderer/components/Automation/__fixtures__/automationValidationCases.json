@@ -3570,6 +3570,63 @@
           "code": "webhook.bodyNotJson"
         }
       ]
+    },
+    {
+      "name": "Webhook — a present blank terminal action is blocked",
+      "why": "A webhook-only rule omits action; a present action with no message would submit a bare Enter, so it must block even when the webhook is valid.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Context handoff reminder",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "commandContains",
+        "criterionValue": "claude",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "monitor": {
+            "read": "newOutput",
+            "cadence": "onOutput",
+            "everyMs": 30000
+          },
+          "parse": {
+            "preset": "custom",
+            "literal": null,
+            "find": "ctx:(\\d+)%",
+            "keep": "brackets"
+          },
+          "cond": {
+            "kind": "number",
+            "op": "gt",
+            "threshold": 25
+          },
+          "action": {
+            "message": "",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default"
+          },
+          "webhook": {
+            "provider": "discord",
+            "url": "https://example.invalid/hook",
+            "body": "build failed"
+          }
+        }
+      },
+      "expected": [
+        {
+          "severity": "blocks",
+          "field": "action",
+          "code": "action.empty"
+        }
+      ]
     }
   ]
 }

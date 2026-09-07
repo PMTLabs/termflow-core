@@ -769,7 +769,7 @@ export function problems(rule: AutomationRule): Problem[] {
                 'Add a terminal message or a webhook destination.',
             ),
         );
-    } else if (action?.message.trim().length === 0 && !webhook) {
+    } else if (action?.message.trim().length === 0) {
         out.push(
             problem(
                 'blocks',
