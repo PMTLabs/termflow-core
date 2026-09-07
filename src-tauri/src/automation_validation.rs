@@ -766,16 +766,21 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
     .flatten()
     {
         match parse_step(&rule.graph) {
-            // The toggle itself claims the message inserts a capture, which nothing can be true
-            // of before a pattern exists — asked regardless of whether a token has actually been
-            // typed yet, the same way the threshold check above is asked regardless of what a
-            // clause would compare against.
-            None => out.push(Problem::new(
+            // **The TOKEN is what claims a capture, not the flag** — and that is a correction.
+            // This used to fire for a flag-on message whatever it contained, on the ground that
+            // *"the toggle itself claims the message inserts a capture"*. True while the flag was
+            // an explicit opt-in a user had to reach for; false the day it became the default, at
+            // which point every schedule rule — which has no parse step by construction (§6.3) —
+            // would have opened blocked by a switch nobody touched. A message naming no token
+            // substitutes to itself: `subst::substitute` returns it unchanged for a `None` capture
+            // set, so there is nothing to report.
+            None if !subst::tokens_used(message).is_empty() => out.push(Problem::new(
                 Severity::Blocks,
                 field,
                 "action.tokenWithoutParse",
                 "This message inserts captured values, but the rule has no pattern to capture them from.",
             )),
+            None => {},
             Some(parse) => {
                 if let Ok(compiled) = compile(&parse.find) {
                     let count = compiled.captures_len().saturating_sub(1);

@@ -20,7 +20,7 @@ import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { SEND_PHRASES } from '../automationDerive';
 import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
-import { previewSubstitute } from '../automationTokens';
+import { previewSubstitute, tokensUsed } from '../automationTokens';
 import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
@@ -99,7 +99,14 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     const effectiveSample = sample ?? (parse ? sampleFromPattern(parse.find, parse.keep) : {});
     const substitute = action.substitute === true;
 
-    const preview = !substitute
+    // **Whether the message NAMES a token**, which is not the same question as whether the flag is
+    // on — and the difference started mattering when the flag became the default. A schedule rule
+    // has no pattern by construction, so a flag-on message with no token in it was previewed as
+    // *"Nothing would be sent — there is no pattern yet"* about a send that is perfectly fine.
+    // The same narrowing `action.tokenWithoutParse` took, for the same reason.
+    const usesTokens = tokensUsed(action.message).length > 0;
+
+    const preview = !substitute || !usesTokens
         ? {
             blocked: false as const,
             // From the MODEL (`stepValues(rule,'action').message`), so an empty message previews

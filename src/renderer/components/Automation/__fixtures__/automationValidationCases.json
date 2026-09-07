@@ -3736,6 +3736,38 @@
           "code": "timer.neverRuns"
         }
       ]
+    },
+    {
+      "name": "substitution on with no token and no pattern is not a problem",
+      "why": "The narrowing that let the flag become the default. It used to fire for a flag-on message whatever it contained, so a schedule rule — which has no parse step by construction — would open blocked by a switch nobody touched. The TOKEN is what claims a capture; a message naming none substitutes to itself.",
+      "rule": {
+        "id": "au-fix",
+        "name": "Nightly deploy",
+        "enabled": false,
+        "runsOnce": false,
+        "targetMode": "rule",
+        "criterion": "allTerminals",
+        "criterionValue": "",
+        "followNew": true,
+        "targetIds": [],
+        "completedAt": null,
+        "verboseUntil": null,
+        "sortOrder": 0,
+        "schemaVersion": 1,
+        "createdAt": 0,
+        "updatedAt": 0,
+        "graph": {
+          "timer": { "mode": { "dailyAt": { "minuteOfDay": 540, "days": 31 } } },
+          "action": {
+            "message": "/run nightly deploy",
+            "sendTo": "matched",
+            "submit": true,
+            "cliType": "default",
+            "substitute": true
+          }
+        }
+      },
+      "expected": []
     }
   ]
 }

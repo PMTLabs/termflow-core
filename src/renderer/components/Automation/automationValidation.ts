@@ -925,10 +925,14 @@ export function problems(rule: AutomationRule): Problem[] {
         if (!destination) continue;
         const sourcing = parseStep(rule.graph);
         if (!sourcing) {
-            // The toggle itself claims the message inserts a capture, which nothing can be true of
-            // before a pattern exists — asked regardless of whether a token has actually been typed
-            // yet, the same way `cond.incomplete` above is asked regardless of what a clause would
-            // compare against.
+            // **The TOKEN is what claims a capture, not the flag** — and that is a correction.
+            // This used to fire for a flag-on message whatever it contained, on the ground that
+            // the toggle itself claimed the message inserts a capture. True while the flag was an
+            // explicit opt-in a user had to reach for; false the day it became the default, at
+            // which point every schedule rule — which has no parse step by construction (§6.3) —
+            // would have opened blocked by a switch nobody touched. A message naming no token
+            // substitutes to itself, so there is nothing to report.
+            if (tokensUsed(destination.message).length === 0) continue;
             out.push(
                 problem(
                     'blocks',

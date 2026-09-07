@@ -9,7 +9,7 @@ import React from 'react';
 import type { AutomationWebhookProvider } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
 import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
-import { previewSubstitute } from '../automationTokens';
+import { previewSubstitute, tokensUsed } from '../automationTokens';
 import { sampleFromPattern } from './ActionPanel';
 import { AuCheck, AuField, AuHelp } from './AuFields';
 import { AuSelect } from '../AuSelect';
@@ -58,13 +58,16 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
     const groups = patternReady ? groupsOf(find) : { count: 0, names: new Set<string>() };
     const substitute = webhook.substitute === true;
     const sample = parse ? sampleFromPattern(parse.find, parse.keep) : null;
-    const rendered = substitute && patternReady
+    // See `ActionPanel`'s twin: the flag being on is not a claim that the body names a token, and
+    // since the flag became the default it is not even a choice the user made.
+    const usesTokens = tokensUsed(webhook.body).length > 0;
+    const rendered = substitute && usesTokens && patternReady
         ? previewSubstitute(webhook.body, groups, sample)
         : null;
     const previewMessage = rendered && rendered.ok
         ? rendered.parts.map((part) => part.kind === 'text' ? part.text : `⟨${part.token}⟩`).join('')
         : webhook.body;
-    const blocked = substitute && (!patternReady || (rendered !== null && !rendered.ok));
+    const blocked = substitute && usesTokens && (!patternReady || (rendered !== null && !rendered.ok));
     const blockedText = !patternReady
         ? 'Nothing would be posted — there is no pattern yet to capture values from.'
         : rendered && !rendered.ok

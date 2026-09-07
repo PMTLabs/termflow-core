@@ -739,6 +739,15 @@ function freeSlot(
  *
  * Returns the rule UNCHANGED when there is nothing to fill in, so `addStep` on a complete rule is
  * still presentation-only and cannot make an unedited draft read dirty.
+ * **A new destination starts with substitution ON** (`blankDraft`'s action carries it too). It was
+ * off, and the chips above it inserted `$0` into a message that was then sent verbatim — the
+ * literal-`$0`-on-Discord defect. Tam: *"Let's enable the insert capture values on by default"*,
+ * new rules and templates only: a SAVED rule carries its own value and keeps it, so nothing that
+ * already exists changes what it types or posts.
+ *
+ * This is what narrowed `action.tokenWithoutParse` to fire on a TOKEN rather than on the flag —
+ * a schedule rule has no parse step at all, and would otherwise open blocked by a default nobody
+ * chose.
  */
 function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
     if (step === 'timer') {
@@ -752,7 +761,7 @@ function materialise(rule: AutomationRule, step: StepKind): AutomationRule {
     }
     if (step === 'webhook') {
         return rule.graph.webhook == null
-            ? { ...rule, graph: { ...rule.graph, webhook: { provider: 'discord', url: '', body: '' } } }
+            ? { ...rule, graph: { ...rule.graph, webhook: { provider: 'discord', url: '', body: '', substitute: true } } }
             : rule;
     }
     if (INPUT_STEPS.every((s) => rule.graph[s] != null)) return rule;
