@@ -942,30 +942,51 @@ mod source_tests {
     /// between a wrong root and a green run.
     #[test]
     fn no_automation_command_lives_outside_this_module() {
-        let mut scanned = 0;
-        for (path, code) in crate::automation_engine::test_host::crate_sources() {
-            // This module is where they are SUPPOSED to live.
-            if path == "automation_commands.rs" {
-                continue;
-            }
-            for body in code.split("#[tauri::command]").skip(1) {
-                scanned += 1;
-                let name = body.split("fn ").nth(1).and_then(|s| s.split('(').next()).unwrap_or("?");
-                assert!(
-                    !body.contains("automation_store") && !body.contains("automations."),
-                    "{}'s `{}` is an automation command living where this feature's source tests \
-                     cannot see it: move it to automation_commands.rs",
-                    path,
-                    name.trim()
-                );
-            }
-        }
+        let sources = crate::automation_engine::test_host::crate_sources();
+        // This module is where they are SUPPOSED to live.
+        let (offenders, scanned) = crate::automation_engine::test_host::automation_commands_in(
+            &sources,
+            &["automation_commands.rs"],
+        );
+        assert!(
+            offenders.is_empty(),
+            "{offenders:?} are automation commands living where this feature's source tests \
+             cannot see them: move them to automation_commands.rs"
+        );
         assert!(
             scanned >= 80,
-            "this scan reached {} command bodies: the walk is pointed somewhere wrong and it is \
-             now asserting a `never` over almost nothing",
-            scanned
+            "this scan reached {scanned} command bodies: the walk is pointed somewhere wrong and \
+             it is now asserting a `never` over almost nothing"
         );
+    }
+
+    /// The negative control for the census above. It asserts an empty result, and a scan that has
+    /// stopped finding anything returns an empty result too — so the clean run only means
+    /// something while the predicate is still shown capable of a dirty one.
+    #[test]
+    fn the_command_census_reports_a_violation_when_there_is_one() {
+        let corpus = vec![
+            (
+                "innocent.rs".to_string(),
+                "#[tauri::command]\npub async fn ping() -> u8 { 1 }".to_string(),
+            ),
+            (
+                "offender.rs".to_string(),
+                "#[tauri::command]\npub async fn sneak() { automations.reload(); }".to_string(),
+            ),
+            (
+                "automation_commands.rs".to_string(),
+                "#[tauri::command]\npub async fn legit() { automations.reload(); }".to_string(),
+            ),
+        ];
+        let (offenders, scanned) =
+            crate::automation_engine::test_host::automation_commands_in(&corpus, &["automation_commands.rs"]);
+        assert_eq!(
+            offenders,
+            vec![("offender.rs", "sneak".to_string())],
+            "the census must name the stray command, and must still exempt this module"
+        );
+        assert_eq!(scanned, 2, "the exempted file must not be counted toward the floor");
     }
 
     /// Every command in this module is REGISTERED, and the count the other tests assert is that list.
@@ -1026,37 +1047,73 @@ mod source_tests {
         // outside a `never` that reported green regardless. Nothing anchored it either — a corpus
         // that cannot produce the needle would have passed identically.
         let sources = crate::automation_engine::test_host::crate_sources();
-        let mut scanned = 0;
+        let engine: Vec<_> = sources
+            .iter()
+            .filter(|(path, _)| is_engine_file(path))
+            .cloned()
+            .collect();
 
-        for (path, body) in &sources {
-            let is_engine = path.starts_with("automation_engine")
-                || path.starts_with("automation/")
-                || path == "automation_commands.rs";
-            if !is_engine {
-                continue;
-            }
-            scanned += 1;
-            assert!(
-                !body.contains(&needle),
-                "{} reaches for that resolver: the one conversion is identity.process_for_leaf",
-                path
-            );
-        }
-
+        let offenders =
+            crate::automation_engine::test_host::files_containing(&engine, &needle, &[]);
         assert!(
-            scanned >= 8,
-            "this scan reached {scanned} engine files: the walk is pointed somewhere wrong"
+            offenders.is_empty(),
+            "{offenders:?} reach for that resolver: the one conversion is \
+             identity.process_for_leaf"
+        );
+        assert!(
+            engine.len() >= 8,
+            "this scan reached {} engine files: the walk is pointed somewhere wrong",
+            engine.len()
         );
 
-        // The corpus must be capable of producing the needle, or the `never` above is a test that
-        // cannot fail. `state.rs` is the file that DEFINES the lenient resolver, and it is outside
-        // the engine — which is the whole shape of the claim.
+        // The claim's other half: the resolver still EXISTS outside the engine. Without this, a
+        // rename would empty the census rather than break it.
         assert!(
-            sources
-                .iter()
-                .any(|(path, body)| path != "automation_commands.rs" && body.contains(&needle)),
-            "`{needle}` no longer appears anywhere in the crate: this census can no longer fail, \
-             and the conversion it is about has been renamed or removed"
+            !crate::automation_engine::test_host::files_containing(
+                &sources,
+                &needle,
+                &["automation_commands.rs"]
+            )
+            .is_empty(),
+            "`{needle}` no longer appears anywhere in the crate: the conversion this census is \
+             about has been renamed or removed"
+        );
+    }
+
+    /// Which files count as "the engine" for the census above. A free function so the negative
+    /// control exercises the same rule the census does, rather than a restatement of it.
+    fn is_engine_file(path: &str) -> bool {
+        path.starts_with("automation_engine")
+            || path.starts_with("automation/")
+            || path == "automation_commands.rs"
+    }
+
+    /// The negative control for the resolver census, covering BOTH halves of it: the predicate
+    /// finds a reaching file, and the engine filter actually selects engine files while excluding
+    /// the one that legitimately defines the resolver.
+    #[test]
+    fn the_resolver_census_reports_a_violation_when_there_is_one() {
+        let needle = format!("{}(", "resolve_ref");
+        let corpus = vec![
+            ("automation_engine/subst.rs".to_string(), format!("let x = s.{needle});")),
+            ("automation_engine/eval.rs".to_string(), "let x = 1;".to_string()),
+            ("state.rs".to_string(), format!("pub fn {needle}&self) {{}}")),
+        ];
+        let engine: Vec<_> = corpus
+            .iter()
+            .filter(|(path, _)| is_engine_file(path))
+            .cloned()
+            .collect();
+
+        assert_eq!(
+            engine.len(),
+            2,
+            "the engine filter must select the engine files and only those"
+        );
+        assert_eq!(
+            crate::automation_engine::test_host::files_containing(&engine, &needle, &[]),
+            vec!["automation_engine/subst.rs"],
+            "the census must name the engine file that reaches for the lenient resolver"
         );
     }
 

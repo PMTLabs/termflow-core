@@ -147,29 +147,53 @@ mod tests {
     /// which is this exact defect and which this test reported green on for its whole life. A
     /// census whose corpus is a list is a census that only ever covers the past; the walk covers a
     /// file because it exists.
+    /// This file DEFINES the gate, so its own `unminimize()` is the one legitimate call.
+    const GATE: &str = "webview_power.rs";
+
+    /// ASSEMBLED, because the census's failure message is itself source text containing the
+    /// needle: a literal would match this very file, leaving the exemption as the only thing
+    /// between the census and failing against itself.
+    fn unminimize_needle() -> String {
+        format!(".{}()", "unminimize")
+    }
+
     #[test]
     fn no_other_file_restores_a_window_directly() {
-        // This file DEFINES the gate, so its own `unminimize()` is the one legitimate call.
-        const GATE: &str = "webview_power.rs";
-        // ASSEMBLED, because the failure message below is itself source text containing the
-        // needle: a literal here matches this test's own file, and the skip above is then the
-        // only thing standing between the census and failing against itself.
-        let needle = format!(".{}()", "unminimize");
-        let mut scanned = 0;
+        let sources = crate::automation_engine::test_host::crate_sources();
+        let offenders = crate::automation_engine::test_host::files_containing(
+            &sources,
+            &unminimize_needle(),
+            &[GATE],
+        );
+        assert!(
+            offenders.is_empty(),
+            "{offenders:?} call .unminimize() directly. Use webview_power::restore_and_focus \
+             instead, or the webview stays invisible and the window restores BLANK."
+        );
+    }
 
-        for (path, src) in crate::automation_engine::test_host::crate_sources() {
-            if path == GATE {
-                continue;
-            }
-            scanned += 1;
-            assert!(
-                !src.contains(&needle),
-                "{path} calls .unminimize() directly. Use webview_power::restore_and_focus \
-                 instead, or the webview stays invisible and the window restores BLANK."
-            );
-        }
-
-        assert!(scanned >= 50, "the scan reached only {scanned} files");
+    /// The negative control for the census above — the half that makes its clean result mean
+    /// something. Same predicate, same needle, a corpus that does contain the violation.
+    ///
+    /// Without this, "no file calls it" and "the scan can no longer find anything" are the same
+    /// green tick. With it, a predicate that stops matching fails HERE, next to the census it
+    /// would otherwise have silently disarmed.
+    #[test]
+    fn the_restore_census_reports_a_violation_when_there_is_one() {
+        let corpus = vec![
+            ("innocent.rs".to_string(), "let _ = window.show();".to_string()),
+            ("offender.rs".to_string(), "let _ = window.unminimize();".to_string()),
+            (GATE.to_string(), "let _ = window.unminimize();".to_string()),
+        ];
+        assert_eq!(
+            crate::automation_engine::test_host::files_containing(
+                &corpus,
+                &unminimize_needle(),
+                &[GATE]
+            ),
+            vec!["offender.rs"],
+            "the census must find a direct call, and must still exempt the gate itself"
+        );
     }
 
     /// Guards the guard, and the half that matters is the SECOND one.

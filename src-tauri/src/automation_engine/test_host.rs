@@ -501,3 +501,62 @@ pub(crate) fn crate_sources() -> Vec<(String, String)> {
     );
     out
 }
+
+/// Paths in `sources`, excluding `exempt`, whose text contains `needle`.
+///
+/// **Split out from its censuses so they can be run against a corpus that DOES contain a
+/// violation.** A source census has exactly one interesting failure mode — passing over a corpus
+/// that could never have produced a hit — and the only thing that settles it is showing the scan
+/// dirty. A mutation does that once, in a transcript, and stops being true the moment anyone edits
+/// the scan. A negative-control pair does it by construction and keeps doing it: the census below
+/// and its `..._reports_a_violation` twin are the same call, and the twin fails if the predicate
+/// ever stops finding what it is for.
+pub(crate) fn files_containing<'a>(
+    sources: &'a [(String, String)],
+    needle: &str,
+    exempt: &[&str],
+) -> Vec<&'a str> {
+    sources
+        .iter()
+        .filter(|(path, _)| !exempt.contains(&path.as_str()))
+        .filter(|(_, src)| src.contains(needle))
+        .map(|(path, _)| path.as_str())
+        .collect()
+}
+
+/// Every `#[tauri::command]` body in `sources` (excluding `exempt`) that touches the automation
+/// store, as `(file, command name)`.
+///
+/// Same reason as [`files_containing`]: the census that calls this asserts an empty result, and an
+/// empty result is what a broken scan returns too.
+pub(crate) fn automation_commands_in<'a>(
+    sources: &'a [(String, String)],
+    exempt: &[&str],
+) -> (Vec<(&'a str, String)>, usize) {
+    // ASSEMBLED. This file is itself part of the corpus the census walks, so a literal marker here
+    // makes the helper match itself: the split yields the rest of this function as a "command
+    // body", and the `automations.` needle a few lines down is in it. That is not a hypothetical —
+    // it failed exactly this way the first time the predicate moved out of the test and into here.
+    let marker = format!("#[{}]", "tauri::command");
+    let mut found = Vec::new();
+    let mut scanned = 0;
+    for (path, code) in sources
+        .iter()
+        .filter(|(path, _)| !exempt.contains(&path.as_str()))
+    {
+        for body in code.split(marker.as_str()).skip(1) {
+            scanned += 1;
+            if body.contains("automation_store") || body.contains("automations.") {
+                let name = body
+                    .split("fn ")
+                    .nth(1)
+                    .and_then(|s| s.split('(').next())
+                    .unwrap_or("?")
+                    .trim()
+                    .to_string();
+                found.push((path.as_str(), name));
+            }
+        }
+    }
+    (found, scanned)
+}
