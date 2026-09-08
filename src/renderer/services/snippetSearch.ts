@@ -282,14 +282,30 @@ export function snippetDisplayLabel(s: Snippet): string {
   return firstLine.slice(0, DISPLAY_LABEL_MAX - 1).trimEnd() + '…';
 }
 
+/** When a snippet was last touched: used if it ever was, otherwise created. `Math.max` rather
+ *  than `lastUsedAt ?? createdAt` so a clock skew that leaves a stale `lastUsedAt` behind a newer
+ *  `createdAt` cannot rank a snippet below its own creation. */
+function lastActivity(s: Snippet): number {
+  return Math.max(s.lastUsedAt ?? 0, s.createdAt);
+}
+
 /** Return a total, immutable browse ordering. Search ranking is intentionally separate. */
 export function sortSnippets(snippets: Snippet[], mode: SnippetSortMode): Snippet[] {
   return [...snippets].sort((a, b) => {
     let result = 0;
     if (mode === 'lastUsed') {
-      const aUsed = a.lastUsedAt !== undefined;
-      const bUsed = b.lastUsedAt !== undefined;
-      result = aUsed !== bUsed ? (aUsed ? -1 : 1) : (b.lastUsedAt ?? b.createdAt) - (a.lastUsedAt ?? a.createdAt);
+      // Most recent ACTIVITY, where creating counts as activity — not "used, then everything
+      // unused beneath it". Those are different orderings and the difference is the whole
+      // value of the default sort: a snippet you just created is the one you are about to
+      // reach for, so it has to be at the top of the list you reach for it FROM. Ranking
+      // never-used snippets strictly below used ones buried every new snippet under the
+      // back-catalogue, which is exactly backwards for the minute after you make one.
+      //
+      // Deliberately NOT solved by stamping `lastUsedAt` at creation: that reads back as a
+      // use that never happened, and Settings would show "Last used: <creation time>" on a
+      // snippet whose own counter says zero. The ordering rule belongs here; the record
+      // stays true.
+      result = lastActivity(b) - lastActivity(a);
     } else if (mode === 'usageCount') {
       result = (b.usageCount ?? 0) - (a.usageCount ?? 0)
         || (b.lastUsedAt ?? -Infinity) - (a.lastUsedAt ?? -Infinity)

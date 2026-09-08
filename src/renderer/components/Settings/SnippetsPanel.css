@@ -71,7 +71,12 @@
      upper-case legible at this size. */
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #ddd;
+  /* A colour of its own, so a folder heading is never mistaken for a snippet label at a
+     glance. Amber rather than the panel's link blue (#6cb6ff): that blue already means
+     "clickable" here (Import/Export, and the tag list on each row), and a heading is not.
+     It also echoes the 📁 glyph the terminal flyout uses for the same folders, so the two
+     surfaces name the same thing in the same colour. */
+  color: #d9a760;
 }
 
 .snippets-folder-rename-input {
@@ -96,6 +101,10 @@
   min-width: 0;
   color: #eee;
   font-weight: 600;
+  /* Overrides `.agent-schema-name`'s 0.85rem. The snippet's text IS the content of this
+     panel — everything else on the row (folder, date, use count) is metadata about it —
+     so it should not be set at the same size as the metadata beside it. */
+  font-size: 0.95rem;
 }
 
 .snippets-tags {

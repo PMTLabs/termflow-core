@@ -181,12 +181,14 @@
 
 .context-menu-flyout-flash {
   position: absolute;
-  /* Anchored to the header's LEFT, under the search box, while the actions that raise it
-     sit at the right. A native tooltip renders under the POINTER, which is over one of
-     those buttons — so keeping the flash at the opposite end means even a tooltip left
-     over from before the click cannot land on top of it. */
-  left: 0;
-  top: calc(100% + 4px);
+  /* ABOVE the header, over the buttons that raise it. Below the header is where the row
+     list starts, so a flash placed there covers the first result — and the list is the
+     thing the user just reordered and is looking at. Above it there is nothing to hide:
+     `.context-menu-flyout` declares no `overflow` (see its comment — that is what lets a
+     nested panel escape), so this is free to sit outside the panel's top edge. It also
+     puts the flash out of reach of a native tooltip, which renders below the pointer. */
+  right: 0;
+  bottom: calc(100% + 4px);
   z-index: 1;
   pointer-events: none;
   white-space: nowrap;

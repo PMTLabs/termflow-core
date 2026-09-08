@@ -92,6 +92,18 @@ describe('SnippetsPanel', () => {
     }
 
     const rows = () => Array.from(container.querySelectorAll('.snippets-row'));
+    /**
+     * The row for a named snippet.
+     *
+     * Prefer this over `rows()[n]` for anything that is not itself an assertion about ORDER.
+     * An index identifies a row by where the current sort happens to put it, so a test about
+     * a snippet's metadata silently retargets the moment the ordering rule changes — which is
+     * exactly what happened when the default sort began counting creation as activity: this
+     * file's use-metadata test started reading the used snippet's row while still asserting
+     * the never-used one's tooltip.
+     */
+    const rowFor = (label: string) =>
+        rows().find((r) => r.querySelector('.snippets-name')!.textContent === label)!;
     const groupLabels = () =>
         Array.from(container.querySelectorAll('.snippets-group-label')).map((el) => el.textContent);
     const click = async (el: Element | null) => {
@@ -168,8 +180,9 @@ describe('SnippetsPanel', () => {
         await mount(store);
         expect(container.textContent).toContain('1 use');
         expect(container.textContent).toContain('0 uses');
-        expect(rows()[1].querySelector('.snippets-uses')!.getAttribute('title')).toBe('Never used');
-        expect(rows()[0].querySelector('.snippets-created')).not.toBeNull();
+        expect(rowFor('Zero').querySelector('.snippets-uses')!.getAttribute('title')).toBe('Never used');
+        expect(rowFor('One').querySelector('.snippets-uses')!.getAttribute('title')).toMatch(/^Last used: /);
+        expect(rowFor('One').querySelector('.snippets-created')).not.toBeNull();
         await click(container.querySelector('[aria-label="Copy One"]'));
         await flush();
         expect(writeClipboardText).toHaveBeenCalledWith('copy this');
