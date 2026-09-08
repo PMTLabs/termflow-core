@@ -502,6 +502,28 @@ pub(crate) fn crate_sources() -> Vec<(String, String)> {
     out
 }
 
+/// Every name in `exempt` must be a file the scan actually walks.
+///
+/// An exemption naming a file outside `sources` is invisible: it never fails, never shows up in a
+/// diff, and reads as a considered decision while covering nothing. A split is what orphans one —
+/// the file it named became a directory of smaller files, and the census went on excusing a name
+/// nobody writes to any more. `d0bcbc8` removed one such exemption from a single census; this is
+/// the same check at the choke point every census passes through, so a new one cannot omit it.
+///
+/// Deliberately only an EXISTENCE check. Whether an exemption must *also* still contain the thing
+/// it excuses is a per-call-site decision, and at least one call site needs it not to: the resolver
+/// census in `automation_commands` assembles its needle precisely so this file does not match it,
+/// and exempts the file anyway so that a literal appearing here later cannot satisfy the anchor.
+fn assert_exemptions_are_live(sources: &[(String, String)], exempt: &[&str], census: &str) {
+    for name in exempt {
+        assert!(
+            sources.iter().any(|(path, _)| path == name),
+            "`{name}` is exempted from the `{census}` census but is not in the scanned set: the \
+             exemption covers nothing and should be deleted rather than carried"
+        );
+    }
+}
+
 /// Paths in `sources`, excluding `exempt`, whose text contains `needle`.
 ///
 /// **Split out from its censuses so they can be run against a corpus that DOES contain a
@@ -516,6 +538,8 @@ pub(crate) fn files_containing<'a>(
     needle: &str,
     exempt: &[&str],
 ) -> Vec<&'a str> {
+    assert_exemptions_are_live(sources, exempt, needle);
+
     sources
         .iter()
         .filter(|(path, _)| !exempt.contains(&path.as_str()))
@@ -537,6 +561,8 @@ pub(crate) fn automation_commands_in<'a>(
     // makes the helper match itself: the split yields the rest of this function as a "command
     // body", and the `automations.` needle a few lines down is in it. That is not a hypothetical —
     // it failed exactly this way the first time the predicate moved out of the test and into here.
+    assert_exemptions_are_live(sources, exempt, "automation command");
+
     let marker = format!("#[{}]", "tauri::command");
     let mut found = Vec::new();
     let mut scanned = 0;
@@ -559,4 +585,49 @@ pub(crate) fn automation_commands_in<'a>(
         }
     }
     (found, scanned)
+}
+
+#[cfg(test)]
+mod exemption_tests {
+    use super::{automation_commands_in, files_containing};
+
+    /// The negative control for the stale-exemption check — the half that makes it mean anything.
+    ///
+    /// A guard against a stale exemption is worth nothing until it is shown to fire, which is the
+    /// same argument the censuses themselves rest on: "no exemption is stale" and "the check can no
+    /// longer detect a stale one" are otherwise the same green tick.
+    #[test]
+    #[should_panic(expected = "is not in the scanned set")]
+    fn an_exemption_naming_a_file_that_is_gone_is_rejected() {
+        let corpus = vec![("kept.rs".to_string(), "let _ = thing();".to_string())];
+        let _ = files_containing(&corpus, "thing(", &["split_away.rs"]);
+    }
+
+    /// **The same control on the OTHER predicate.** Both scanning helpers take an `exempt` list, so
+    /// guarding one and not the other would leave the class half fixed — and the unguarded half is
+    /// the one whose census carries the larger exemption. Two tests rather than one because a
+    /// `#[should_panic]` cannot say WHICH call panicked.
+    #[test]
+    #[should_panic(expected = "is not in the scanned set")]
+    fn a_stale_exemption_is_rejected_by_the_command_census_too() {
+        let corpus = vec![("kept.rs".to_string(), "fn ping() {}".to_string())];
+        let _ = automation_commands_in(&corpus, &["split_away.rs"]);
+    }
+
+    /// The other half: a live exemption still suppresses its own file and nothing else. Without
+    /// this, the checks above could be satisfied by helpers that reject *every* exemption, live
+    /// ones included — which would make the guard fire always and mean nothing.
+    #[test]
+    fn a_live_exemption_suppresses_only_itself() {
+        let corpus = vec![
+            ("gate.rs".to_string(), "let _ = thing();".to_string()),
+            ("offender.rs".to_string(), "let _ = thing();".to_string()),
+            ("quiet.rs".to_string(), "let _ = other();".to_string()),
+        ];
+        assert_eq!(
+            files_containing(&corpus, "thing(", &["gate.rs"]),
+            vec!["offender.rs"],
+            "the exemption must remove the gate and nothing else"
+        );
+    }
 }
