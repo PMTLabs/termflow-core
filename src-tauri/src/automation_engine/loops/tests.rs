@@ -11,8 +11,10 @@ mod runs_once_and_targeting;
 mod review_findings_send_and_log;
 mod review_findings_targeting_and_misc;
 
-// Fixtures shared by more than one of the bucket modules above. (Fixtures used by only one
-// bucket stay local to that bucket's own file.)
+// Fixtures reached by more than one bucket. `pending` and `open_second_terminal` are each imported
+// by three of them directly; `open_terminal` is imported by one, and is here because
+// `open_second_terminal` is built on it — a fixture's second consumer can be another fixture.
+// Anything reached from a single bucket and nothing else stays in that bucket's own file.
 
 /// A crossing that has been decided and not yet written — built exactly the way `evaluate_pair`
 /// builds one, **including advancing the arm state first**, so a test of the rollback is a test of

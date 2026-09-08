@@ -508,7 +508,13 @@ pub(crate) fn crate_sources() -> Vec<(String, String)> {
 /// diff, and reads as a considered decision while covering nothing. A split is what orphans one —
 /// the file it named became a directory of smaller files, and the census went on excusing a name
 /// nobody writes to any more. `d0bcbc8` removed one such exemption from a single census; this is
-/// the same check at the choke point every census passes through, so a new one cannot omit it.
+/// the same check moved into the two helpers, so a census built on either gets it for free.
+///
+/// **It is not reached by every census in the crate**, and the earlier wording here claimed it was.
+/// A census that filters by filename without going through [`files_containing`] or
+/// [`automation_commands_in`] is on its own: `commands/terminal.rs`'s spawn-site audit is the one
+/// that does, and it carries a stronger check of its own (each allowed path must still exist *and*
+/// still contain a spawn call). A third such census would have to be written the same way.
 ///
 /// Deliberately only an EXISTENCE check. Whether an exemption must *also* still contain the thing
 /// it excuses is a per-call-site decision, and at least one call site needs it not to: the resolver
@@ -615,7 +621,7 @@ mod exemption_tests {
     }
 
     /// The other half: a live exemption still suppresses its own file and nothing else. Without
-    /// this, the checks above could be satisfied by helpers that reject *every* exemption, live
+    /// this, the check above could be satisfied by a helper that rejects *every* exemption, live
     /// ones included — which would make the guard fire always and mean nothing.
     #[test]
     fn a_live_exemption_suppresses_only_itself() {
@@ -629,5 +635,42 @@ mod exemption_tests {
             vec!["offender.rs"],
             "the exemption must remove the gate and nothing else"
         );
+    }
+
+    /// **The positive half for the OTHER helper**, which the first version of this module left out.
+    ///
+    /// Both `#[should_panic]` tests are satisfied by a helper that panics on any non-empty exempt
+    /// list, so each needs a partner showing a LIVE exemption is honoured rather than rejected.
+    /// `files_containing` had one and `automation_commands_in` did not — the guard was controlled
+    /// on one of the two helpers it had just been extracted to cover, which is the same class the
+    /// guard itself polices, one level up.
+    ///
+    /// **The corpus markers are ASSEMBLED, and that is not decoration.** This file is walked by the
+    /// real `no_automation_command_lives_outside_this_module` census, so a literal marker here is a
+    /// command body as far as that census is concerned — and the `automations.` needle sits right
+    /// after it. The first version of this test spelled them out and made the census report
+    /// `test_host.rs` as the home of two stray automation commands. The sibling control in
+    /// `automation_commands.rs` can use literals safely only because that file is the one the
+    /// census exempts; this one is not.
+    #[test]
+    fn a_live_exemption_is_honoured_by_the_command_census_too() {
+        let marker = format!("#[{}]", "tauri::command");
+        let corpus = vec![
+            (
+                "gate.rs".to_string(),
+                format!("{marker}\npub async fn legit() {{ automations.reload(); }}"),
+            ),
+            (
+                "offender.rs".to_string(),
+                format!("{marker}\npub async fn sneak() {{ automations.reload(); }}"),
+            ),
+        ];
+        let (found, scanned) = automation_commands_in(&corpus, &["gate.rs"]);
+        assert_eq!(
+            found,
+            vec![("offender.rs", "sneak".to_string())],
+            "the exemption must remove the gate and nothing else"
+        );
+        assert_eq!(scanned, 1, "the exempted file must not be counted toward the floor");
     }
 }
