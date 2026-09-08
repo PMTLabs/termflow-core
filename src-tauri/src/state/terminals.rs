@@ -131,6 +131,13 @@ mod restore_sweep_gate_tests {
             .and_then(|rest| rest.split("    /// Reconnect to an already-running").next())
             .expect("teardown_host_terminal body");
         assert!(!teardown.contains("forget_host_session_claim("), "teardown must not bypass the owner guard");
+        // An absence assertion alone goes vacuous the moment the call is deleted
+        // outright — which would leak the claim and bring back the exit-then-Restart
+        // refusal this retirement exists to prevent. Pin the presence too.
+        assert!(
+            teardown.contains("forget_host_session_claim_if_owner(&key, id)"),
+            "teardown must still retire the claim it owns"
+        );
     }
 }
 
