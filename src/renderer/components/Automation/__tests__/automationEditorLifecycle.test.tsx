@@ -136,12 +136,17 @@ describe('the editor, mounted', () => {
     const byText = (sel: string, text: string) =>
         [...document.querySelectorAll<HTMLButtonElement>(sel)].find((b) => b.textContent === text);
 
-    /** React owns `value`, so a controlled input is driven through the prototype setter. */
-    const type = async (el: HTMLInputElement, text: string) => {
+    /**
+     * React owns `value`, so a controlled input is driven through the prototype setter — and that
+     * setter lives on each element's OWN interface (`HTMLInputElement`/`HTMLTextAreaElement` are
+     * siblings, not parent/child), so it has to be picked by the element actually rendered.
+     */
+    const type = async (el: HTMLInputElement | HTMLTextAreaElement, text: string) => {
         await act(async () => {
-            const setter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype, 'value',
-            )!.set!;
+            const proto = el instanceof window.HTMLTextAreaElement
+                ? window.HTMLTextAreaElement.prototype
+                : window.HTMLInputElement.prototype;
+            const setter = Object.getOwnPropertyDescriptor(proto, 'value')!.set!;
             setter.call(el, text);
             el.dispatchEvent(new Event('input', { bubbles: true }));
         });
@@ -155,7 +160,9 @@ describe('the editor, mounted', () => {
     };
 
     const field = (label: string) =>
-        document.querySelector<HTMLInputElement>(`.au-editor input[aria-label="${label}"]`)!;
+        document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+            `.au-editor input[aria-label="${label}"], .au-editor textarea[aria-label="${label}"]`,
+        )!;
 
     const pressCtrlS = async (repeat = false) => {
         await act(async () => {
