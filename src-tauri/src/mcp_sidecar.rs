@@ -20,20 +20,20 @@ pub(crate) fn classify_sidecar_report(
     reported_owner: Option<&str>,
     own_id: &str,
     observed_build: Option<&str>,
-    expected_build: &str,
+    expected_build: Option<&str>,
 ) -> Option<SidecarAcceptance> {
     let (owned, foreign) = crate::network_commands::classify_health_owner(reported_owner, own_id);
     if owned {
-        return Some(match observed_build {
-            Some(actual) if actual == expected_build => SidecarAcceptance::Verified,
-            Some(_) => SidecarAcceptance::Rejected,
-            None => SidecarAcceptance::Unverified,
+        return Some(match (observed_build, expected_build) {
+            (Some(actual), Some(expected)) if actual == expected => SidecarAcceptance::Verified,
+            (Some(_), Some(_)) => SidecarAcceptance::Rejected,
+            _ => SidecarAcceptance::Unverified,
         });
     }
     foreign.then_some(SidecarAcceptance::Rejected)
 }
 
-async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: &str) -> SidecarAcceptance {
+async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: Option<&str>) -> SidecarAcceptance {
     wait_for_mcp_health_within(port, own_id, expected_build, 10).await
 }
 
@@ -42,7 +42,7 @@ async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: &str) -> S
 async fn wait_for_mcp_health_within(
     port: u16,
     own_id: &str,
-    expected_build: &str,
+    expected_build: Option<&str>,
     attempts: u32,
 ) -> SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
@@ -224,7 +224,7 @@ async fn start_mcp_sidecar(
         }
     });
 
-    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, &build_id).await;
+    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, Some(&build_id)).await;
     log::debug!("[MCP] bundled descriptor={} digest={build_id}", launch_path.display());
     if acceptance == SidecarAcceptance::Rejected {
         // This is the child handle we just spawned, not the listener discovered
@@ -303,7 +303,7 @@ async fn start_mcp_legacy(
     // Node imports a graph of built modules.  There is no single launch artifact
     // descriptor here, so build identity is explicitly unavailable and cannot
     // make this path a successful acceptance/fallback/retry signal.
-    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, "legacy-node-has-no-artifact-descriptor").await;
+    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, None).await;
     if acceptance == SidecarAcceptance::Rejected { shutdown_mcp_generation(&state, generation); }
     let still_current = state.mcp_process.lock()
         .map_err(|_| "MCP process slot lock poisoned while checking spawn generation".to_string())?
@@ -388,7 +388,7 @@ mod respawn_tests {
     #[tokio::test]
     async fn a_health_check_that_never_answers_is_unverified_not_rejected() {
         assert_eq!(
-            wait_for_mcp_health_within(closed_port(), "ours", "expected", 1).await,
+            wait_for_mcp_health_within(closed_port(), "ours", Some("expected"), 1).await,
             SidecarAcceptance::Unverified
         );
     }
@@ -459,7 +459,7 @@ mod respawn_tests {
         // executable while it echoes an arbitrary expected string must therefore
         // be represented as a mismatch and rejected by this classifier.
         assert_eq!(
-            classify_sidecar_report(Some("ours"), "ours", Some("old-self-hash"), "new-expected-hash"),
+            classify_sidecar_report(Some("ours"), "ours", Some("old-self-hash"), Some("new-expected-hash")),
             Some(SidecarAcceptance::Rejected)
         );
     }
@@ -467,7 +467,7 @@ mod respawn_tests {
     #[test]
     fn owner_matched_missing_build_is_usable_but_unverified() {
         assert_eq!(
-            classify_sidecar_report(Some("ours"), "ours", None, "expected"),
+            classify_sidecar_report(Some("ours"), "ours", None, Some("expected")),
             Some(SidecarAcceptance::Unverified)
         );
     }
@@ -475,8 +475,16 @@ mod respawn_tests {
     #[test]
     fn foreign_owner_is_rejected_even_without_a_build_id() {
         assert_eq!(
-            classify_sidecar_report(Some("foreign"), "ours", None, "expected"),
+            classify_sidecar_report(Some("foreign"), "ours", None, Some("expected")),
             Some(SidecarAcceptance::Rejected)
+        );
+    }
+
+    #[test]
+    fn legacy_owner_with_a_reported_build_is_unverified_not_rejected() {
+        assert_eq!(
+            classify_sidecar_report(Some("ours"), "ours", Some("a-real-digest"), None),
+            Some(SidecarAcceptance::Unverified)
         );
     }
 

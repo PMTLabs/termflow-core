@@ -119,7 +119,7 @@ async fn wait_for_fabric_health_within(
                 let health: serde_json::Value = resp.json().await.unwrap_or_default();
                 let observed_owner = health.get("owner_id").and_then(|v| v.as_str());
                 let observed_build = health.get("build_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-                match crate::mcp_sidecar::classify_sidecar_report(observed_owner, owner, observed_build, expected_build) {
+                match crate::mcp_sidecar::classify_sidecar_report(observed_owner, owner, observed_build, Some(expected_build)) {
                     Some(result) => return result,
                     None => log::debug!("[FABRIC] health attempt {attempt} has no owner id yet"),
                 }
@@ -551,7 +551,7 @@ fn stream_identity_is_acceptable(
     reported_owner: Option<&str>, own_id: &str, observed_build: Option<&str>, expected_build: &str,
 ) -> bool {
     matches!(
-        crate::mcp_sidecar::classify_sidecar_report(reported_owner, own_id, observed_build, expected_build),
+        crate::mcp_sidecar::classify_sidecar_report(reported_owner, own_id, observed_build, Some(expected_build)),
         Some(crate::mcp_sidecar::SidecarAcceptance::Verified | crate::mcp_sidecar::SidecarAcceptance::Unverified)
     )
 }
