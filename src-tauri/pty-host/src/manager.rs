@@ -316,10 +316,11 @@ impl SessionManager {
             Control::ListSessions {
                 token: Some(token),
                 ..
-            }
-            | Control::ArmDetach { token, .. } => {
-                self.expected_token.as_deref() == Some(token.as_str())
-            }
+            } => self.expected_token.as_deref() == Some(token.as_str()),
+            // Old clients cannot supply an identity token. Absence is not a
+            // failed authentication, so retain their lifecycle adoption path.
+            Control::ListSessions { token: None, .. } => true,
+            Control::ArmDetach { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
             _ => false,
         }
     }

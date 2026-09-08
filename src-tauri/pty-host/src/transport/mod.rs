@@ -558,6 +558,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tokenless_list_sessions_retires_a_local_hold() {
+        let (mut mgr, hold) = local_hold_manager();
+        let (server, mut client) = tokio::io::duplex(1024);
+        let bytes = termflow_pty_protocol::encode(&Frame::Ctrl(Control::ListSessions {
+            req: 9,
+            token: None,
+        }));
+        let peer = tokio::spawn(async move {
+            tokio::io::AsyncWriteExt::write_all(&mut client, &bytes)
+                .await
+                .unwrap();
+            tokio::io::AsyncWriteExt::shutdown(&mut client).await.unwrap();
+        });
+        let (events, responses, result) = run_connection(
+            &mut mgr,
+            server,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            None,
+            &FakeClock(Arc::new(Mutex::new(Some(Duration::ZERO)))),
+        )
+        .await;
+        peer.await.unwrap();
+        drop((events, responses));
+        assert!(matches!(result, ConnectionResult::Disconnected));
+        assert!(
+            !mgr.local_hold_is_current(hold),
+            "a legacy tokenless ListSessions must retire the local hold"
+        );
+    }
+
+    #[tokio::test]
     async fn wrong_token_arm_detach_cannot_adopt_a_local_hold() {
         let (mut mgr, hold) = local_hold_manager();
         let (server, mut client) = tokio::io::duplex(1024);
