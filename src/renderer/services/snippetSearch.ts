@@ -1,7 +1,19 @@
 // Plan 029 §4.6 — pure search/ranking module for the Snippets flyout submenu.
 // No DOM, no Redux: everything here is exhaustively unit-testable data-in/data-out.
 
-import type { Snippet } from '../store/slices/settingsSlice';
+import type { Snippet, SnippetSortMode } from '../store/slices/settingsSlice';
+
+export const SNIPPET_SORT_MODES: readonly SnippetSortMode[] =
+  ['lastUsed', 'usageCount', 'created', 'updated', 'name'];
+
+export const SNIPPET_SORT_LABELS: Record<SnippetSortMode, string> = {
+  lastUsed: 'Last used', usageCount: 'Usage count', created: 'Created date', updated: 'Updated date', name: 'Name (A–Z)',
+};
+
+export function nextSnippetSortMode(mode: SnippetSortMode): SnippetSortMode {
+  const index = SNIPPET_SORT_MODES.indexOf(mode);
+  return SNIPPET_SORT_MODES[(index + 1) % SNIPPET_SORT_MODES.length];
+}
 
 const DISPLAY_LABEL_MAX = 60;
 
@@ -268,6 +280,41 @@ export function snippetDisplayLabel(s: Snippet): string {
   if (!firstLine) return '(empty snippet)';
   if (firstLine.length <= DISPLAY_LABEL_MAX) return firstLine;
   return firstLine.slice(0, DISPLAY_LABEL_MAX - 1).trimEnd() + '…';
+}
+
+/** When a snippet was last touched: used if it ever was, otherwise created. `Math.max` rather
+ *  than `lastUsedAt ?? createdAt` so a clock skew that leaves a stale `lastUsedAt` behind a newer
+ *  `createdAt` cannot rank a snippet below its own creation. */
+function lastActivity(s: Snippet): number {
+  return Math.max(s.lastUsedAt ?? 0, s.createdAt);
+}
+
+/** Return a total, immutable browse ordering. Search ranking is intentionally separate. */
+export function sortSnippets(snippets: Snippet[], mode: SnippetSortMode): Snippet[] {
+  return [...snippets].sort((a, b) => {
+    let result = 0;
+    if (mode === 'lastUsed') {
+      // Most recent ACTIVITY, where creating counts as activity — not "used, then everything
+      // unused beneath it". Those are different orderings and the difference is the whole
+      // value of the default sort: a snippet you just created is the one you are about to
+      // reach for, so it has to be at the top of the list you reach for it FROM. Ranking
+      // never-used snippets strictly below used ones buried every new snippet under the
+      // back-catalogue, which is exactly backwards for the minute after you make one.
+      //
+      // Deliberately NOT solved by stamping `lastUsedAt` at creation: that reads back as a
+      // use that never happened, and Settings would show "Last used: <creation time>" on a
+      // snippet whose own counter says zero. The ordering rule belongs here; the record
+      // stays true.
+      result = lastActivity(b) - lastActivity(a);
+    } else if (mode === 'usageCount') {
+      result = (b.usageCount ?? 0) - (a.usageCount ?? 0)
+        || (b.lastUsedAt ?? -Infinity) - (a.lastUsedAt ?? -Infinity)
+        || b.createdAt - a.createdAt;
+    } else if (mode === 'created') result = b.createdAt - a.createdAt;
+    else if (mode === 'updated') result = (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt);
+    else result = snippetDisplayLabel(a).localeCompare(snippetDisplayLabel(b), undefined, { sensitivity: 'base' });
+    return result || a.id.localeCompare(b.id);
+  });
 }
 
 /** Derived, de-duplicated, sorted folder vocabulary. Absent/'' folder is "unfiled" and

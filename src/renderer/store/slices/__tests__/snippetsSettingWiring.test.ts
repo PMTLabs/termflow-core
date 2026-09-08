@@ -1,6 +1,6 @@
 import path from 'path';
 import { readSource } from '../../../utils/readSource';
-import { isSnippetsViewMode } from '../settingsSlice';
+import { isSnippetSortMode, isSnippetsViewMode } from '../settingsSlice';
 
 /**
  * plan/029 §3.2 — the snippets setting's nine-link chain, link 8 (hydrate) in particular.
@@ -109,5 +109,19 @@ describe('the snippets view mode survives a restart', () => {
     expect(isSnippetsViewMode('')).toBe(false);
     expect(isSnippetsViewMode(undefined)).toBe(false);
     expect(isSnippetsViewMode(1)).toBe(false);
+  });
+});
+
+describe('the snippets sort mode survives a restart', () => {
+  it('defaults to lastUsed, persists, and hydrates through its guard', () => {
+    expect(SLICE).toMatch(/snippetsSortMode: 'lastUsed',/);
+    expect(SLICE).toMatch(/setConfigValue\('snippetsSortMode',/);
+    expect(APP).toMatch(/if \(isSnippetSortMode\(config\.snippetsSortMode\)\) \{/);
+    expect(APP).toMatch(/dispatch\(setSnippetsSortMode\(config\.snippetsSortMode\)\)/);
+  });
+
+  it('accepts valid persisted values and rejects garbage so default remains lastUsed', () => {
+    expect(isSnippetSortMode('usageCount')).toBe(true);
+    expect(isSnippetSortMode('garbage')).toBe(false);
   });
 });

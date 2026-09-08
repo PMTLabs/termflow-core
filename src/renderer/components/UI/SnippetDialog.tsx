@@ -12,6 +12,8 @@ export interface SnippetDialogProps {
      * preserves `id` and `createdAt`; create mode mints both.
      */
     snippet?: Snippet | null;
+    /** Seed text for CREATE mode only; edit mode keeps the stored snippet text. */
+    initialText?: string;
     /** Full snippet list — used only to derive the folder `<datalist>` vocabulary. */
     snippets: Snippet[];
     /**
@@ -66,6 +68,7 @@ function parseTags(raw: string): string[] {
 export const SnippetDialog: React.FC<SnippetDialogProps> = ({
     isOpen,
     snippet,
+    initialText,
     snippets,
     onSave,
     onCancel,
@@ -94,12 +97,12 @@ export const SnippetDialog: React.FC<SnippetDialogProps> = ({
      */
     useEffect(() => {
         if (!isOpen) return;
-        setText(snippet?.text ?? '');
+        setText(snippet ? snippet.text : (initialText ?? ''));
         setLabel(snippet?.label ?? '');
         setFolder(snippet?.folder ?? '');
         setTagsRaw((snippet?.tags ?? []).join(', '));
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [isOpen, snippet?.id]);
+    }, [isOpen, snippet?.id, initialText]);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const textRef = useRef<HTMLTextAreaElement>(null);

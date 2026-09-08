@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import {
@@ -8,8 +8,10 @@ import {
     removeSnippet,
     renameSnippetFolder,
     setSnippets,
+    setSnippetsSortMode,
 } from '../../store/slices/settingsSlice';
-import { snippetDisplayLabel } from '../../services/snippetSearch';
+import { filterSnippets, SNIPPET_SORT_LABELS, SNIPPET_SORT_MODES, snippetDisplayLabel, sortSnippets } from '../../services/snippetSearch';
+import { writeClipboardText } from '../../utils/clipboard';
 import { exportSnippets, importSnippets, describeImport } from '../../services/snippetPorting';
 import { SnippetDialog } from '../UI/SnippetDialog';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
@@ -18,6 +20,9 @@ import './SnippetsPanel.css';
 /** The unfiled bucket's internal group key. Never a real folder name (flattenFolder
  * in SnippetDialog strips '/' and trims, so it can never produce this token). */
 const UNFILED = '__unfiled__';
+// Large enough that ordinary libraries stay one uninterrupted list, while preventing a bulk import
+// from turning Settings into a needlessly long scroll before the browser can paint the controls.
+const SNIPPETS_PAGE_SIZE = 500;
 
 interface FolderGroup {
     /** '' for the unfiled group; otherwise the folder name. */
@@ -51,6 +56,7 @@ function groupByFolder(snippets: Snippet[]): FolderGroup[] {
 export const SnippetsPanel: React.FC = () => {
     const dispatch = useDispatch<AppDispatch>();
     const snippets = useSelector((s: RootState) => s.settings.snippets);
+    const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
 
     const [dialogOpen, setDialogOpen] = useState(false);
     const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
@@ -59,8 +65,29 @@ export const SnippetsPanel: React.FC = () => {
     const [renameValue, setRenameValue] = useState('');
     const [portBusy, setPortBusy] = useState(false);
     const [resultLine, setResultLine] = useState<string | null>(null);
+    const [search, setSearch] = useState('');
+    const [page, setPage] = useState(1);
 
-    const groups = useMemo(() => groupByFolder(snippets), [snippets]);
+    const filteredSnippets = useMemo(() => search.trim() ? filterSnippets(snippets, search) : snippets, [snippets, search]);
+    const sortedGroups = useMemo(
+        () => groupByFolder(filteredSnippets).map((group) => ({ ...group, snippets: sortSnippets(group.snippets, snippetsSortMode) })),
+        [filteredSnippets, snippetsSortMode],
+    );
+    // Flatten only to count and cut rows. Re-grouping the resulting window intentionally repeats a
+    // folder header when its rows span pages, making each page understandable on its own.
+    const sortedSnippets = useMemo(() => sortedGroups.flatMap((group) => group.snippets), [sortedGroups]);
+    const totalPages = Math.max(1, Math.ceil(sortedSnippets.length / SNIPPETS_PAGE_SIZE));
+    const pageStart = (page - 1) * SNIPPETS_PAGE_SIZE;
+    const pageSnippets = sortedSnippets.slice(pageStart, pageStart + SNIPPETS_PAGE_SIZE);
+    const groups = useMemo(() => groupByFolder(pageSnippets), [pageSnippets]);
+
+    // A new filter or ordering defines a different result set, so retaining an old page number
+    // would commonly present a misleading empty panel instead of the first matching rows.
+    useEffect(() => setPage(1), [search, snippetsSortMode]);
+    // Deletes/import changes can shrink a result set without changing either control above.
+    useEffect(() => {
+        if (page > totalPages) setPage(totalPages);
+    }, [page, totalPages]);
 
     const openCreate = () => {
         setEditingSnippet(null);
@@ -103,6 +130,15 @@ export const SnippetsPanel: React.FC = () => {
     };
     const cancelRename = () => setRenamingFolder(null);
 
+    const copySnippet = async (s: Snippet) => {
+        try {
+            await writeClipboardText(s.text);
+            setResultLine(`Copied “${snippetDisplayLabel(s)}” to the clipboard.`);
+        } catch {
+            setResultLine('Could not copy snippet to the clipboard.');
+        }
+    };
+
     const runExport = async () => {
         setResultLine(null);
         setPortBusy(true);
@@ -144,12 +180,12 @@ export const SnippetsPanel: React.FC = () => {
             </p>
 
             <div className="snippets-toolbar">
-                <button type="button" className="link-btn" onClick={openCreate}>
+                <button type="button" className="snippets-toolbar-btn" onClick={openCreate}>
                     New Snippet
                 </button>
                 <button
                     type="button"
-                    className="link-btn"
+                    className="snippets-toolbar-btn"
                     onClick={() => { void runImport(); }}
                     disabled={portBusy}
                     // The format is detected, never chosen (plan/030 §4.1), so the only place
@@ -159,9 +195,15 @@ export const SnippetsPanel: React.FC = () => {
                 >
                     Import…
                 </button>
-                <button type="button" className="link-btn" onClick={() => { void runExport(); }} disabled={portBusy}>
+                <button type="button" className="snippets-toolbar-btn" onClick={() => { void runExport(); }} disabled={portBusy}>
                     Export…
                 </button>
+                <input className="snippets-search" value={search} onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search name, text, tag, or initials…" aria-label="Search snippets" />
+                <select className="snippets-sort" aria-label="Sort snippets by" value={snippetsSortMode}
+                    onChange={(e) => dispatch(setSnippetsSortMode(e.target.value as typeof snippetsSortMode))}>
+                    {SNIPPET_SORT_MODES.map((mode) => <option key={mode} value={mode}>{SNIPPET_SORT_LABELS[mode]}</option>)}
+                </select>
             </div>
 
             {resultLine && <p className="snippets-result-line">{resultLine}</p>}
@@ -172,6 +214,8 @@ export const SnippetsPanel: React.FC = () => {
                     terminal's right-click Snippets menu. Click "New Snippet" above to add your first
                     one.
                 </p>
+            ) : groups.length === 0 ? (
+                <p className="help-text">No snippets match “{search.trim()}”</p>
             ) : (
                 groups.map((g) => (
                     <div className="snippets-group" key={g.folder || UNFILED}>
@@ -202,11 +246,12 @@ export const SnippetsPanel: React.FC = () => {
                                     {g.folder !== '' && (
                                         <button
                                             type="button"
-                                            className="link-btn"
+                                            className="snippets-icon-btn"
                                             onClick={() => startRename(g.folder)}
+                                            title={`Rename folder ${g.folder}`}
                                             aria-label={`Rename folder ${g.folder}`}
                                         >
-                                            Rename
+                                            ✎
                                         </button>
                                     )}
                                 </>
@@ -219,27 +264,39 @@ export const SnippetsPanel: React.FC = () => {
                                     <span className="agent-schema-name snippets-name">
                                         {snippetDisplayLabel(s)}
                                     </span>
-                                    <span className="snippets-folder-chip">{s.folder?.trim() || 'Unfiled'}</span>
                                     {s.tags && s.tags.length > 0 && (
                                         <span className="snippets-tags">{s.tags.join(', ')}</span>
                                     )}
-                                    <button type="button" className="link-btn" onClick={() => openEdit(s)}>
-                                        Edit
-                                    </button>
+                                    {Number.isFinite(s.createdAt) && (
+                                        <span className="snippets-created" title={new Date(s.createdAt).toLocaleString()}>{new Date(s.createdAt).toLocaleDateString()}</span>
+                                    )}
+                                    <span className="snippets-uses" title={s.lastUsedAt ? `Last used: ${new Date(s.lastUsedAt).toLocaleString()}` : 'Never used'}>
+                                        {(s.usageCount ?? 0) === 1 ? '1 use' : `${s.usageCount ?? 0} uses`}
+                                    </span>
+                                    <button type="button" className="snippets-icon-btn" title={`Copy ${snippetDisplayLabel(s)}`} aria-label={`Copy ${snippetDisplayLabel(s)}`} onClick={() => { void copySnippet(s); }}>📋</button>
+                                    <button type="button" className="snippets-icon-btn" title={`Edit ${snippetDisplayLabel(s)}`} aria-label={`Edit ${snippetDisplayLabel(s)}`} onClick={() => openEdit(s)}>✏️</button>
                                     <button
                                         type="button"
-                                        className="agent-schema-remove"
+                                        className="snippets-icon-btn"
                                         title={`Delete ${snippetDisplayLabel(s)}`}
                                         aria-label={`Delete ${snippetDisplayLabel(s)}`}
                                         onClick={() => setDeleteTarget(s)}
                                     >
-                                        ×
+                                        🗑️
                                     </button>
                                 </div>
                             ))}
                         </div>
                     </div>
                 ))
+            )}
+
+            {sortedSnippets.length > SNIPPETS_PAGE_SIZE && (
+                <div className="snippets-pager" aria-label="Snippet pagination">
+                    <button type="button" className="snippets-toolbar-btn" disabled={page === 1} onClick={() => setPage((current) => current - 1)}>Prev</button>
+                    <span>Page {page} of {totalPages} · rows {pageStart + 1}–{Math.min(pageStart + SNIPPETS_PAGE_SIZE, sortedSnippets.length)} of {sortedSnippets.length}</span>
+                    <button type="button" className="snippets-toolbar-btn" disabled={page === totalPages} onClick={() => setPage((current) => current + 1)}>Next</button>
+                </div>
             )}
 
             <SnippetDialog

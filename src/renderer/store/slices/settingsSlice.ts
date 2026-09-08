@@ -44,6 +44,12 @@ export interface Snippet {
   folder?: string;
   tags?: string[];
   createdAt: number;
+  /** Epoch ms of the last edit that changed this snippet itself. */
+  updatedAt?: number;
+  /** Number of terminal insertions; absent records are old records with zero uses. */
+  usageCount?: number;
+  /** Epoch ms of the most recent terminal insertion; absent means never used. */
+  lastUsedAt?: number;
 }
 
 /**
@@ -82,6 +88,13 @@ export type SnippetsViewMode = 'folders' | 'flat';
 
 export function isSnippetsViewMode(x: unknown): x is SnippetsViewMode {
   return x === 'folders' || x === 'flat';
+}
+
+/** How both snippet surfaces order their browse list: this is a snippet preference, not a surface preference. */
+export type SnippetSortMode = 'lastUsed' | 'usageCount' | 'created' | 'updated' | 'name';
+
+export function isSnippetSortMode(x: unknown): x is SnippetSortMode {
+  return x === 'lastUsed' || x === 'usageCount' || x === 'created' || x === 'updated' || x === 'name';
 }
 
 export const TERMINAL_FONT_WEIGHTS: ReadonlyArray<{ value: TerminalFontWeight; label: string }> = [
@@ -157,6 +170,7 @@ interface SettingsState {
   // rather than kept in component state: the flyout is rebuilt from scratch on every
   // open, so anything held locally would silently reset to the default each time.
   snippetsViewMode: SnippetsViewMode;
+  snippetsSortMode: SnippetSortMode;
   // Backlog 011: command history suggestion popup (capture + popup). Default on.
   // Independent of scrollback history persistence (backlog 009).
   commandSuggestions: boolean;
@@ -244,6 +258,7 @@ const initialState: SettingsState = {
   agentColorSchemes: {},
   snippets: [],
   snippetsViewMode: 'flat',
+  snippetsSortMode: 'lastUsed',
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
@@ -521,6 +536,15 @@ const settingsSlice = createSlice({
       }
     },
 
+    setSnippetsSortMode: (state, action: PayloadAction<SnippetSortMode>) => {
+      state.snippetsSortMode = action.payload;
+      // Like the view mode above, this scalar has none of the nested Immer-draft hazard
+      // `persistSnippets` exists to solve for the snippets array.
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('snippetsSortMode', state.snippetsSortMode);
+      }
+    },
+
     // Bulk-replace the whole snippets list (hydration, import, D9).
     setSnippets: (state, action: PayloadAction<Snippet[]>) => {
       state.snippets = action.payload;
@@ -548,6 +572,15 @@ const settingsSlice = createSlice({
         if (v !== undefined) rec[k] = v;
         else if ((CLEARABLE_SNIPPET_KEYS as readonly string[]).includes(k)) delete rec[k];
       }
+      target.updatedAt = Date.now();
+      persistSnippets(state.snippets);
+    },
+
+    recordSnippetUse: (state, action: PayloadAction<string>) => {
+      const target = state.snippets.find((s) => s.id === action.payload);
+      if (!target) return;
+      target.usageCount = (target.usageCount ?? 0) + 1;
+      target.lastUsedAt = Date.now();
       persistSnippets(state.snippets);
     },
 
@@ -679,8 +712,10 @@ export const {
   removeAgentColorScheme,
   setSnippets,
   setSnippetsViewMode,
+  setSnippetsSortMode,
   addSnippet,
   updateSnippet,
+  recordSnippetUse,
   removeSnippet,
   renameSnippetFolder,
   setCustomKeybindings,

@@ -5,6 +5,8 @@ import {
   snippetDisplayLabel,
   snippetFolders,
   allSnippetTags,
+  sortSnippets,
+  nextSnippetSortMode,
 } from '../snippetSearch';
 import type { Snippet } from '../../store/slices/settingsSlice';
 
@@ -442,5 +444,53 @@ describe('allSnippetTags', () => {
 
   it('empty input returns empty list', () => {
     expect(allSnippetTags([])).toEqual([]);
+  });
+});
+
+describe('sortSnippets', () => {
+  const items = [
+    s({ id: 'a', label: 'Zebra', text: 'a', createdAt: 10, updatedAt: 50, usageCount: 1, lastUsedAt: 100 }),
+    s({ id: 'b', label: 'Alpha', text: 'b', createdAt: 20, updatedAt: 10, usageCount: 3, lastUsedAt: 90 }),
+    s({ id: 'c', label: 'Mike', text: 'c', createdAt: 30, updatedAt: 40, usageCount: 2 }),
+    s({ id: 'd', label: 'Delta', text: 'd', createdAt: 40, usageCount: 0, lastUsedAt: 80 }),
+    s({ id: 'e', label: 'Echo', text: 'e', createdAt: 50 }),
+  ];
+
+  it('gives every mode its own ordering without mutating input, including absent-field fallbacks', () => {
+    expect(sortSnippets(items, 'lastUsed').map(x => x.id)).toEqual(['a', 'b', 'd', 'e', 'c']);
+    expect(sortSnippets(items, 'usageCount').map(x => x.id)).toEqual(['b', 'c', 'a', 'd', 'e']);
+    expect(sortSnippets(items, 'created').map(x => x.id)).toEqual(['e', 'd', 'c', 'b', 'a']);
+    expect(sortSnippets(items, 'updated').map(x => x.id)).toEqual(['a', 'e', 'c', 'd', 'b']);
+    expect(sortSnippets(items, 'name').map(x => x.id)).toEqual(['b', 'd', 'e', 'c', 'a']);
+    expect(items.map(x => x.id)).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  /**
+   * The assertion above cannot see this rule, and that is worth saying out loud: every
+   * `lastUsedAt` in its fixture (80-100) is larger than every `createdAt` (10-50), so
+   * "used first, then unused by creation" and "most recent activity" produce the SAME
+   * five ids. It took a snippet created after the newest use to tell them apart.
+   */
+  it('puts a just-created, never-used snippet above snippets that HAVE been used', () => {
+    // createdAt 200 is later than every lastUsedAt in `items` (the newest is 100).
+    const fresh = s({ id: 'f', label: 'Fresh', text: 'f', createdAt: 200 });
+    const withFresh = [...items, fresh];
+
+    expect(sortSnippets(withFresh, 'lastUsed').map(x => x.id)[0]).toBe('f');
+    // The specific inversion: it outranks 'a', which really was used, at t=100.
+    const order = sortSnippets(withFresh, 'lastUsed').map(x => x.id);
+    expect(order.indexOf('f')).toBeLessThan(order.indexOf('a'));
+
+    // ...and it earns that place ONLY in the activity-based mode. A sort that is about how
+    // much a snippet is used must still rank a zero-use snippet last.
+    expect(sortSnippets(withFresh, 'usageCount').map(x => x.id)[0]).toBe('b');
+    expect(sortSnippets(withFresh, 'usageCount').map(x => x.id).indexOf('f'))
+      .toBeGreaterThan(sortSnippets(withFresh, 'usageCount').map(x => x.id).indexOf('a'));
+  });
+
+  it('uses id as its final tie-break and cycles safely from unknown values', () => {
+    expect(sortSnippets([s({ id: 'z', text: 'same', createdAt: 1 }), s({ id: 'a', text: 'same', createdAt: 1 })], 'created').map(x => x.id)).toEqual(['a', 'z']);
+    expect(nextSnippetSortMode('name')).toBe('lastUsed');
+    expect(nextSnippetSortMode('stale' as any)).toBe('lastUsed');
   });
 });

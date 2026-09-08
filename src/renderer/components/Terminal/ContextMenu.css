@@ -174,7 +174,31 @@
   display: flex;
   align-items: stretch;
   gap: 4px;
+  position: relative;
   margin: 2px 8px 6px;
+  flex-wrap: nowrap;
+}
+
+.context-menu-flyout-flash {
+  position: absolute;
+  /* ABOVE the header, over the buttons that raise it. Below the header is where the row
+     list starts, so a flash placed there covers the first result — and the list is the
+     thing the user just reordered and is looking at. Above it there is nothing to hide:
+     `.context-menu-flyout` declares no `overflow` (see its comment — that is what lets a
+     nested panel escape), so this is free to sit outside the panel's top edge. It also
+     puts the flash out of reach of a native tooltip, which renders below the pointer. */
+  right: 0;
+  bottom: calc(100% + 4px);
+  z-index: 1;
+  pointer-events: none;
+  white-space: nowrap;
+  border: 1px solid var(--menu-border, #454545);
+  border-radius: 3px;
+  background: var(--menu-background, #252526);
+  color: var(--menu-accelerator-color, #969696);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 3px 5px;
 }
 
 .context-menu-flyout-search {
