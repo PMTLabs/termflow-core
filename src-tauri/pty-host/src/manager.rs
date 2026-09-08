@@ -822,4 +822,95 @@ mod tests {
         });
         assert!(m.is_armed());
     }
+
+    fn arm_with(m: &mut SessionManager, purpose: Option<ArmDetachPurpose>) {
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 600,
+            token: "tok".into(),
+            purpose,
+        });
+        assert!(m.is_armed(), "fixture must actually arm");
+    }
+
+    /// The bound only exists if expiry really kills. TWO children, for the same
+    /// reason the unarmed-teardown test uses two: "killed the first one it
+    /// found" is the shape this loop gets wrong.
+    #[test]
+    fn expiring_a_local_hold_kills_every_live_child() {
+        let (mut m, _e, _r) = mgr();
+        m.set_teardown_grace(Duration::from_secs(120));
+        arm_with(&mut m, Some(ArmDetachPurpose::Local));
+        let hold = m
+            .begin_local_absence()
+            .expect("a Local arm must open a bounded window");
+
+        let mut pids = Vec::new();
+        for tab in ["tab-expire-a", "tab-expire-b"] {
+            let sess = Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
+                .expect("spawn a long-lived child");
+            let pid = sess.pid();
+            // Presence before absence: a "gone" oracle passes vacuously if the
+            // child never started.
+            assert!(pid_is_alive(pid), "{tab} must be alive before expiry");
+            m.sessions.insert(tab.into(), sess);
+            pids.push((tab, pid));
+        }
+
+        m.expire_local_hold(hold);
+
+        for (tab, pid) in pids {
+            assert!(
+                !pid_is_alive(pid),
+                "{tab} (pid {pid}) survived hold expiry — the bound is a promise the host does not keep"
+            );
+        }
+    }
+
+    /// A sibling profile's updater arms UNLABELLED. Bounding that would destroy
+    /// terminals whose user never pressed anything, so no window may open.
+    #[test]
+    fn an_unlabelled_arm_never_opens_a_bounded_window() {
+        let (mut m, _e, _r) = mgr();
+        arm_with(&mut m, None);
+        assert!(
+            m.begin_local_absence().is_none(),
+            "an unlabelled (sibling/legacy) arm must never become bounded"
+        );
+    }
+
+    /// REFRESH (plan 3.2): a second confirmed absence starts a FRESH window.
+    /// The retired generation must be inert — otherwise an ordinary pipe drop
+    /// carrying a stale deadline would destroy sessions with no grace at all.
+    #[test]
+    fn a_refreshed_absence_retires_the_earlier_generation() {
+        let (mut m, _e, _r) = mgr();
+        m.set_teardown_grace(Duration::from_secs(120));
+        arm_with(&mut m, Some(ArmDetachPurpose::Local));
+        let stale = m.begin_local_absence().expect("first absence opens a window");
+        let fresh = m.begin_local_absence().expect("a re-drop refreshes the window");
+        assert_ne!(stale, fresh, "a refresh must mint a new generation");
+        assert!(!m.local_hold_is_current(stale), "the old window is retired");
+        assert!(m.local_hold_is_current(fresh), "the new window is the live one");
+
+        let sess = Session::spawn(
+            "tab-refresh".into(),
+            &long_lived_spec(),
+            4096,
+            m.events.clone(),
+            true,
+        )
+        .expect("spawn a long-lived child");
+        let pid = sess.pid();
+        assert!(pid_is_alive(pid), "child must be alive before the stale expiry");
+        m.sessions.insert("tab-refresh".into(), sess);
+
+        // The stale timer firing late must be a no-op, not a teardown.
+        m.expire_local_hold(stale);
+        assert!(
+            pid_is_alive(pid),
+            "a retired generation's timer killed a session it no longer owns"
+        );
+        assert_eq!(m.live_session_count(), 1, "the session must still be held");
+    }
 }

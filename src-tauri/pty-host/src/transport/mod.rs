@@ -505,6 +505,52 @@ mod tests {
         assert!(matches!(result, ConnectionResult::Expired(found) if found == hold));
     }
 
+    /// The other half of plan 3.3: adoption must win when it happens FIRST.
+    /// A client that reconnects and speaks before the deadline retires the
+    /// hold, so a later clock advance well past that deadline must expire
+    /// nothing. Asserting only the expiry direction would pass against a host
+    /// that kills a GUI it had already accepted.
+    #[tokio::test]
+    async fn a_reconnect_that_speaks_first_retires_the_hold() {
+        let (mut mgr, hold) = local_hold_manager();
+        let clock = FakeClock(Arc::new(Mutex::new(Some(Duration::ZERO))));
+        let (server, mut client) = tokio::io::duplex(1024);
+        let bytes = termflow_pty_protocol::encode(&Frame::Ctrl(Control::ListSessions { req: 9 }));
+        let advancing = clock.clone();
+        let peer = tokio::spawn(async move {
+            tokio::io::AsyncWriteExt::write_all(&mut client, &bytes)
+                .await
+                .unwrap();
+            // Adopt first, THEN push active time past the deadline.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            advancing.set(Some(Duration::from_secs(2)));
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::io::AsyncWriteExt::shutdown(&mut client).await.unwrap();
+        });
+        let (events, responses, result) = run_connection(
+            &mut mgr,
+            server,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            Some(HoldDeadline {
+                hold,
+                at: Duration::from_secs(1),
+            }),
+            &clock,
+        )
+        .await;
+        peer.await.unwrap();
+        drop((events, responses));
+        assert!(
+            matches!(result, ConnectionResult::Disconnected),
+            "an adopted connection must end as a plain disconnect, never as an expiry"
+        );
+        assert!(
+            !mgr.local_hold_is_current(hold),
+            "adoption must retire the hold that was watching for it"
+        );
+    }
+
     fn local_hold_manager() -> (SessionManager, LocalHold) {
         let (events, _) = tokio::sync::mpsc::channel(CHAN_CAP);
         let (responses, _) = tokio::sync::mpsc::channel(CHAN_CAP);
