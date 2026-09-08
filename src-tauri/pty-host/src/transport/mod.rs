@@ -118,8 +118,14 @@ struct HoldDeadline {
     at: Duration,
 }
 
+#[derive(Clone, Copy)]
+enum PendingDeadline {
+    AwaitingClock(LocalHold),
+    Established(HoldDeadline),
+}
+
 enum WaitResult {
-    Accepted(Stream, Option<HoldDeadline>),
+    Accepted(Stream, Option<PendingDeadline>),
     Empty,
     Expired(LocalHold),
 }
@@ -130,10 +136,21 @@ enum ConnectionResult {
 
 fn deadline_expired(
     mgr: &SessionManager,
-    deadline: Option<HoldDeadline>,
+    deadline: &mut Option<PendingDeadline>,
     clock: &dyn ActiveClock,
 ) -> Option<LocalHold> {
-    let d = deadline?;
+    let d = match deadline.as_ref().copied()? {
+        PendingDeadline::Established(d) => d,
+        PendingDeadline::AwaitingClock(hold) => {
+            let now = clock.now()?;
+            let d = HoldDeadline {
+                hold,
+                at: now + Duration::from_secs(termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS),
+            };
+            *deadline = Some(PendingDeadline::Established(d));
+            d
+        }
+    };
     // A prior authenticated lifecycle frame, re-arm, or disarm revokes this
     // generation before its old timer can do any damage.
     (mgr.local_hold_is_current(d.hold) && clock.now().is_some_and(|now| now >= d.at))
@@ -214,12 +231,18 @@ pub async fn serve(
                 // Sibling/hotswap arms are unbounded while any child is live.
                 // A Local-purpose arm is deliberately bounded: after 900 seconds
                 // of active time its expiry tears down even live sessions.
-                let deadline = mgr.begin_local_absence().and_then(|hold| {
-                    clock.now().map(|now| HoldDeadline {
+                let deadline = mgr.begin_local_absence().map(|hold| match clock.now() {
+                    Some(now) => PendingDeadline::Established(HoldDeadline {
                         hold,
                         at: now
                             + Duration::from_secs(termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS),
-                    })
+                    }),
+                    None => {
+                        log::warn!(
+                            "could not establish local hold deadline; retrying on later active-clock samples"
+                        );
+                        PendingDeadline::AwaitingClock(hold)
+                    }
                 });
                 match wait_for_reconnect(&mut listener, &mgr, &record, deadline, &*clock).await {
                     WaitResult::Accepted(s, deadline) => {
@@ -250,7 +273,7 @@ async fn wait_for_reconnect(
     listener: &mut Listener,
     mgr: &SessionManager,
     record: &Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
-    deadline: Option<HoldDeadline>,
+    mut deadline: Option<PendingDeadline>,
     clock: &dyn ActiveClock,
 ) -> WaitResult {
     const RECHECK: Duration = Duration::from_millis(500);
@@ -260,7 +283,7 @@ async fn wait_for_reconnect(
         }
         // Re-read active time after every short wakeup. A suspend/resume wakeup
         // is never proof that 900 active seconds passed.
-        if let Some(hold) = deadline_expired(mgr, deadline, clock) {
+        if let Some(hold) = deadline_expired(mgr, &mut deadline, clock) {
             return WaitResult::Expired(hold);
         }
         // Keep the advertisement alive THROUGHOUT the re-accept window: a
@@ -331,7 +354,7 @@ async fn run_connection<S>(
     stream: S,
     events_rx: Receiver<Data>,
     resp_rx: Receiver<Response>,
-    deadline: Option<HoldDeadline>,
+    mut deadline: Option<PendingDeadline>,
     clock: &dyn ActiveClock,
 ) -> (Receiver<Data>, Receiver<Response>, ConnectionResult)
 where
@@ -384,7 +407,7 @@ where
     // whose first frame is `ArmDetach` still ends up armed.
     let mut adopted = false;
     let result = loop {
-        if let Some(hold) = deadline_expired(mgr, deadline, clock) {
+        if let Some(hold) = deadline_expired(mgr, &mut deadline, clock) {
             break ConnectionResult::Expired(hold);
         }
         // `read_frame` performs several sequential `read_exact` calls, so it
@@ -396,7 +419,7 @@ where
             tokio::select! {
                 r = &mut read => match r { Ok(Some(frame)) => break Ok(frame), _ => break Err(ConnectionResult::Disconnected) },
                 _ = tokio::time::sleep(Duration::from_millis(250)) => {
-                    if let Some(hold) = deadline_expired(mgr, deadline, clock) {
+                    if let Some(hold) = deadline_expired(mgr, &mut deadline, clock) {
                         break Err(ConnectionResult::Expired(hold));
                     }
                 }
@@ -413,10 +436,10 @@ where
         if !adopted
             && matches!(&frame, Frame::Ctrl(control) if mgr.authenticates_lifecycle(control))
         {
-            if let Some(d) = deadline {
+            if let Some(PendingDeadline::Established(d)) = deadline {
                 // Expiry wins the tie unless the qualifying frame was already
                 // processed before this active-time sample.
-                if deadline_expired(mgr, Some(d), clock).is_some() {
+                if deadline_expired(mgr, &mut Some(PendingDeadline::Established(d)), clock).is_some() {
                     break ConnectionResult::Expired(d.hold);
                 }
             }
@@ -541,7 +564,7 @@ mod tests {
             &mut mgr, server,
             tokio::sync::mpsc::channel(CHAN_CAP).1,
             tokio::sync::mpsc::channel(CHAN_CAP).1,
-            Some(HoldDeadline { hold, at: Duration::from_secs(1) }), &clock,
+            Some(PendingDeadline::Established(HoldDeadline { hold, at: Duration::from_secs(1) })), &clock,
         ).await;
         advance.await.unwrap();
         drop((events, responses, client));
@@ -578,10 +601,10 @@ mod tests {
             server,
             tokio::sync::mpsc::channel(CHAN_CAP).1,
             tokio::sync::mpsc::channel(CHAN_CAP).1,
-            Some(HoldDeadline {
+            Some(PendingDeadline::Established(HoldDeadline {
                 hold,
                 at: Duration::from_secs(1),
-            }),
+            })),
             &clock,
         )
         .await;
@@ -681,23 +704,23 @@ mod tests {
     fn local_hold_expires_only_after_active_deadline_and_is_cancelled_by_lifecycle_adoption() {
         let (mut mgr, hold) = local_hold_manager();
         let clock = FakeClock(Arc::new(Mutex::new(Some(Duration::from_secs(899)))));
-        let deadline = HoldDeadline {
+        let mut deadline = Some(PendingDeadline::Established(HoldDeadline {
             hold,
             at: Duration::from_secs(900),
-        };
+        }));
         assert!(
-            deadline_expired(&mgr, Some(deadline), &clock).is_none(),
+            deadline_expired(&mgr, &mut deadline, &clock).is_none(),
             "live child hold cannot expire early"
         );
         clock.set(Some(Duration::from_secs(900)));
         assert_eq!(
-            deadline_expired(&mgr, Some(deadline), &clock),
+            deadline_expired(&mgr, &mut deadline, &clock),
             Some(hold),
             "active 900 seconds expires the local hold"
         );
         mgr.on_gui_connect();
         assert!(
-            deadline_expired(&mgr, Some(deadline), &clock).is_none(),
+            deadline_expired(&mgr, &mut deadline, &clock).is_none(),
             "a reconnecting lifecycle frame cancels the old generation"
         );
     }
@@ -720,18 +743,28 @@ mod tests {
 
         let (mgr, hold) = local_hold_manager();
         let clock = FakeClock(Arc::new(Mutex::new(None))); // simulated resume/read failure
-        assert!(
-            deadline_expired(
-                &mgr,
-                Some(HoldDeadline {
+        let mut deadline = Some(PendingDeadline::Established(HoldDeadline {
                     hold,
                     at: Duration::ZERO
-                }),
-                &clock
-            )
-            .is_none(),
+                }));
+        assert!(deadline_expired(&mgr, &mut deadline, &clock).is_none(),
             "a wakeup without a fresh unbiased-time sample cannot destroy sessions"
         );
+    }
+
+    #[test]
+    fn local_absence_with_initial_clock_failure_establishes_and_enforces_its_own_bound() {
+        let (mgr, hold) = local_hold_manager();
+        let clock = FakeClock(Arc::new(Mutex::new(None)));
+        let mut deadline = Some(PendingDeadline::AwaitingClock(hold));
+
+        assert!(deadline_expired(&mgr, &mut deadline, &clock).is_none());
+        clock.set(Some(Duration::from_secs(40)));
+        assert!(deadline_expired(&mgr, &mut deadline, &clock).is_none());
+        clock.set(Some(Duration::from_secs(939)));
+        assert!(deadline_expired(&mgr, &mut deadline, &clock).is_none());
+        clock.set(Some(Duration::from_secs(940)));
+        assert_eq!(deadline_expired(&mgr, &mut deadline, &clock), Some(hold));
     }
 
     /// A per-OS endpoint under a directory we own, unique to this test process.
