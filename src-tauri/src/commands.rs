@@ -3954,20 +3954,33 @@ mod snippet_porting_tests {
     /// reachable from the embedded REST API. `api_server.rs` reuses Tauri command
     /// functions by name (e.g. `commands::spawn_routed`), so a future route that
     /// called either of these would name it here — and turn this test red.
+    ///
+    /// Scoped to the `api_server/` module (not the whole crate, which would also
+    /// match these commands' own definitions right here in `commands.rs`) via
+    /// [`crate::automation_engine::test_host::crate_sources`]'s filesystem walk —
+    /// split-proof, so a future `api_server.rs` split into more files, or a brand
+    /// new file under `api_server/`, stays covered without this guard needing to
+    /// remember a path.
     #[test]
     fn neither_command_is_reachable_from_the_embedded_api_server() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("api_server.rs");
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()));
-        for name in ["export_snippets_file", "import_snippets_file"] {
-            assert!(
-                !src.contains(name),
-                "{name} must stay off the HTTP surface (plan/029 D10): a general \
-                 file read/write reachable from the local REST API or the MCP \
-                 sidecar is exactly what these two narrow commands exist to avoid"
-            );
+        let sources: Vec<_> = crate::automation_engine::test_host::crate_sources()
+            .into_iter()
+            .filter(|(path, _)| path == "api_server.rs" || path.starts_with("api_server/"))
+            .collect();
+        assert!(
+            !sources.is_empty(),
+            "found no api_server sources to audit — this guard must fail loudly, not pass vacuously"
+        );
+        for (path, src) in &sources {
+            for name in ["export_snippets_file", "import_snippets_file"] {
+                assert!(
+                    !src.contains(name),
+                    "{name} must stay off the HTTP surface (plan/029 D10): a general \
+                     file read/write reachable from the local REST API or the MCP \
+                     sidecar is exactly what these two narrow commands exist to avoid \
+                     (found in {path})"
+                );
+            }
         }
     }
 }
