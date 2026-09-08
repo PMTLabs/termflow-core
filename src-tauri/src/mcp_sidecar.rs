@@ -179,16 +179,20 @@ async fn start_mcp_sidecar(
             child,
             terminated: terminated_rx,
         };
-    let installed = state
-        .mcp_process
-        .lock()
-        .map_err(|_| "MCP process slot lock poisoned".to_string())?
-        .install_if_current(generation, handle);
-    if let Err(stale_child) = installed {
-        // A newer spawn claimed ownership while this child was being created.
-        // It is ours, but never became the current slot, so stop only it.
-        crate::shutdown_mcp_handle(stale_child);
-        return Ok(false);
+    let installed = match state.mcp_process.lock() {
+        Ok(mut slot) => slot.install_if_current(generation, handle),
+        Err(_) => {
+            crate::shutdown_mcp_handle(handle);
+            return Err("MCP process slot lock poisoned after spawn; stopped uninstalled child".to_string());
+        }
+    };
+    match installed {
+        Ok(Some(displaced_child)) => crate::shutdown_mcp_handle(displaced_child),
+        Ok(None) => {}
+        Err(stale_child) => {
+            crate::shutdown_mcp_handle(stale_child);
+            return Ok(false);
+        }
     }
 
     let drain_state = state.clone();
@@ -197,12 +201,14 @@ async fn start_mcp_sidecar(
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Terminated(payload) = event {
                 let _ = terminated_tx.send(());
-                if drain_state
-                    .mcp_process
-                    .lock()
-                    .map(|mut slot| slot.clear_if_current(generation))
-                    .unwrap_or(false)
-                {
+                let cleared = match drain_state.mcp_process.lock() {
+                    Ok(mut slot) => slot.clear_if_current(generation),
+                    Err(_) => {
+                        log::error!("[MCP] process slot lock poisoned while recording termination for generation {generation}");
+                        break;
+                    }
+                };
+                if cleared {
                     log::info!(
                         "[MCP] sidecar terminated (code={:?}, signal={:?}); clearing process handle",
                         payload.code,
@@ -225,11 +231,9 @@ async fn start_mcp_sidecar(
         // on the shared port.  Never act on that foreign listener.
         shutdown_mcp_generation(&state, generation);
     }
-    let still_current = state
-        .mcp_process
-        .lock()
-        .map(|slot| slot.is_current(generation))
-        .unwrap_or(false);
+    let still_current = state.mcp_process.lock()
+        .map_err(|_| "MCP process slot lock poisoned while checking spawn generation".to_string())?
+        .is_current(generation);
     Ok(acceptance != SidecarAcceptance::Rejected && still_current)
 }
 
@@ -279,14 +283,21 @@ async fn start_mcp_legacy(
     let pid = child.id();
     log::info!("[MCP] MCP Server spawned with PID: {}", pid);
 
-    let installed = state
-        .mcp_process
-        .lock()
-        .map_err(|_| "MCP process slot lock poisoned".to_string())?
-        .install_if_current(generation, McpProcessHandle::Legacy(child));
-    if let Err(stale_child) = installed {
-        crate::shutdown_mcp_handle(stale_child);
-        return Ok(false);
+    let handle = McpProcessHandle::Legacy(child);
+    let installed = match state.mcp_process.lock() {
+        Ok(mut slot) => slot.install_if_current(generation, handle),
+        Err(_) => {
+            crate::shutdown_mcp_handle(handle);
+            return Err("MCP process slot lock poisoned after spawn; stopped uninstalled child".to_string());
+        }
+    };
+    match installed {
+        Ok(Some(displaced_child)) => crate::shutdown_mcp_handle(displaced_child),
+        Ok(None) => {}
+        Err(stale_child) => {
+            crate::shutdown_mcp_handle(stale_child);
+            return Ok(false);
+        }
     }
 
     // Node imports a graph of built modules.  There is no single launch artifact
@@ -294,11 +305,9 @@ async fn start_mcp_legacy(
     // make this path a successful acceptance/fallback/retry signal.
     let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, "legacy-node-has-no-artifact-descriptor").await;
     if acceptance == SidecarAcceptance::Rejected { shutdown_mcp_generation(&state, generation); }
-    let still_current = state
-        .mcp_process
-        .lock()
-        .map(|slot| slot.is_current(generation))
-        .unwrap_or(false);
+    let still_current = state.mcp_process.lock()
+        .map_err(|_| "MCP process slot lock poisoned while checking spawn generation".to_string())?
+        .is_current(generation);
     Ok(acceptance != SidecarAcceptance::Rejected && still_current)
 }
 

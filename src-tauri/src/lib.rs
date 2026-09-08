@@ -91,21 +91,25 @@ fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
 }
 
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
-    let child = state.mcp_process.lock().ok().and_then(|mut slot| slot.take());
-    if let Some(child) = child {
-        shutdown_mcp_handle(child);
+    match state.mcp_process.lock() {
+        Ok(mut slot) => {
+            if let Some(child) = slot.take() {
+                shutdown_mcp_handle(child);
+            }
+        }
+        Err(_) => log::error!("[MCP] process slot lock poisoned during shutdown; unable to inspect ownership"),
     }
 }
 
 /// Stop only the child that belongs to a lifecycle operation's generation.
 pub(crate) fn shutdown_mcp_generation(state: &AppState, generation: u64) {
-    let child = state
-        .mcp_process
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take_if_current(generation));
-    if let Some(child) = child {
-        shutdown_mcp_handle(child);
+    match state.mcp_process.lock() {
+        Ok(mut slot) => {
+            if let Some(child) = slot.take_if_current(generation) {
+                shutdown_mcp_handle(child);
+            }
+        }
+        Err(_) => log::error!("[MCP] process slot lock poisoned during generation shutdown; unable to inspect ownership"),
     }
 }
 
@@ -640,8 +644,12 @@ pub fn run() {
                     if crate::profile::current().is_primary() {
                         let fabric_state = api_state.clone();
                         tauri::async_runtime::spawn(async move {
+                            // Boot is lifecycle work too: serialize it with a
+                            // concurrent Stop/API-network transition before it
+                            // can claim or install a fabric generation.
+                            let _op = fabric_state.network_op_lock.lock().await;
                             if let Err(e) =
-                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state)
+                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state.clone())
                                     .await
                             {
                                 log::warn!(

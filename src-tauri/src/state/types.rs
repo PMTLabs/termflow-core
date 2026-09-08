@@ -275,10 +275,22 @@ mod generation_slot_tests {
         let old = slot.claim_generation();
         let new = slot.claim_generation();
         assert_eq!(slot.install_if_current(old, "old"), Err("old"));
-        assert_eq!(slot.install_if_current(new, "new"), Ok(()));
+        assert_eq!(slot.install_if_current(new, "new"), Ok(None));
         assert!(!slot.clear_if_current(old));
         assert!(slot.is_present());
         assert_eq!(slot.take_if_current(new), Some("new"));
+    }
+
+    #[test]
+    fn replacement_returns_the_displaced_handle_and_stop_invalidates_a_spawn_claim() {
+        let mut slot = GenerationSlot::new();
+        let first = slot.claim_generation();
+        assert_eq!(slot.install_if_current(first, "first-child"), Ok(None));
+        let replacement = slot.claim_generation();
+        assert_eq!(slot.install_if_current(replacement, "replacement-child"), Ok(Some("first-child")));
+        let in_flight = slot.claim_generation();
+        assert_eq!(slot.take(), Some("replacement-child"));
+        assert_eq!(slot.install_if_current(in_flight, "late-child"), Err("late-child"));
     }
 }
 
@@ -297,10 +309,9 @@ impl<T> GenerationSlot<T> {
 
     /// Installs a spawned child only if no later spawn has claimed the slot.
     /// The caller must terminate the returned stale child itself.
-    pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<(), T> {
+    pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<Option<T>, T> {
         if self.next_generation == generation {
-            self.current = Some((generation, handle));
-            Ok(())
+            Ok(self.current.replace((generation, handle)).map(|(_, displaced)| displaced))
         } else {
             Err(handle)
         }
@@ -330,6 +341,9 @@ impl<T> GenerationSlot<T> {
     }
 
     pub fn take(&mut self) -> Option<T> {
+        // Stop is a lifecycle boundary: a child which has claimed a generation
+        // but has not installed yet must fail installation after this point.
+        self.claim_generation();
         self.current.take().map(|(_, handle)| handle)
     }
 

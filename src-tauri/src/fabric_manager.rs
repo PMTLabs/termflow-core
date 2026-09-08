@@ -193,16 +193,20 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
         .claim_generation();
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[FABRIC] termflow-fabric sidecar spawned");
-    let installed = state
-        .fabric_process
-        .lock()
-        .map_err(|_| "fabric process slot lock poisoned".to_string())?
-        .install_if_current(generation, child);
-    if let Err(stale_child) = installed {
-        // A newer spawn claimed the slot while this one was being created.
-        // This is our child but never the current generation.
-        let _ = stale_child.kill();
-        return Ok(());
+    let installed = match state.fabric_process.lock() {
+        Ok(mut slot) => slot.install_if_current(generation, child),
+        Err(_) => {
+            let _ = child.kill();
+            return Err("fabric process slot lock poisoned after spawn; killed uninstalled child".to_string());
+        }
+    };
+    match installed {
+        Ok(Some(displaced_child)) => { let _ = displaced_child.kill(); }
+        Ok(None) => {}
+        Err(stale_child) => {
+            let _ = stale_child.kill();
+            return Ok(());
+        }
     }
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
@@ -224,12 +228,14 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
                 // old child's Terminated arrives after that, this guard stops it from nulling
                 // the new child's handle (which would kill the event bridge and orphan the
                 // fabric) (re-review: fabric respawn stale-child race).
-                if drain_state
-                    .fabric_process
-                    .lock()
-                    .map(|mut slot| slot.clear_if_current(generation))
-                    .unwrap_or(false)
-                {
+                let cleared = match drain_state.fabric_process.lock() {
+                    Ok(mut slot) => slot.clear_if_current(generation),
+                    Err(_) => {
+                        log::error!("[FABRIC] process slot lock poisoned while recording termination for generation {generation}");
+                        break;
+                    }
+                };
+                if cleared {
                     log::warn!(
                         "[FABRIC] termflow-fabric terminated (code={:?}, signal={:?}); clearing process handle",
                         payload.code,
@@ -330,11 +336,13 @@ async fn subscribe_fabric_events(
 }
 
 fn fabric_generation_is_current<R: tauri::Runtime>(state: &AppState<R>, generation: u64) -> bool {
-    state
-        .fabric_process
-        .lock()
-        .map(|slot| slot.is_current(generation))
-        .unwrap_or(false)
+    match state.fabric_process.lock() {
+        Ok(slot) => slot.is_current(generation),
+        Err(_) => {
+            log::error!("[FABRIC] process slot lock poisoned while checking generation {generation}; stopping subscription without classifying it stale");
+            false
+        }
+    }
 }
 
 fn subscription_cancelled(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
@@ -502,18 +510,18 @@ pub async fn respawn_fabric(app: AppHandle, state: AppState) {
 }
 
 pub fn shutdown_fabric(state: &AppState) {
-    let child = state.fabric_process.lock().ok().and_then(|mut slot| slot.take());
-    shutdown_fabric_child(child);
+    match state.fabric_process.lock() {
+        Ok(mut slot) => shutdown_fabric_child(slot.take()),
+        Err(_) => log::error!("[FABRIC] process slot lock poisoned during shutdown; unable to inspect ownership"),
+    }
 }
 
 /// Stop only the current slot if it still belongs to this lifecycle operation.
 fn shutdown_fabric_generation(state: &AppState, generation: u64) {
-    let child = state
-        .fabric_process
-        .lock()
-        .ok()
-        .and_then(|mut slot| slot.take_if_current(generation));
-    shutdown_fabric_child(child);
+    match state.fabric_process.lock() {
+        Ok(mut slot) => shutdown_fabric_child(slot.take_if_current(generation)),
+        Err(_) => log::error!("[FABRIC] process slot lock poisoned during generation shutdown; unable to inspect ownership"),
+    }
 }
 
 fn shutdown_fabric_child(child: Option<tauri_plugin_shell::process::CommandChild>) {
