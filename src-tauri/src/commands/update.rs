@@ -9,7 +9,11 @@ use tauri::State;
 /// This deliberately reads the connected client, never discovery: a discovery
 /// record can be stale or replaced after the pipe connection is established.
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "camelCase")]
+// `rename_all` renames the VARIANTS; the fields INSIDE a struct variant need
+// `rename_all_fields`. Without it this sent `active_secs` while the renderer
+// read `activeSecs`, so the panel and the confirm dialog both told the user
+// their shells were retained for "undefined seconds".
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ConnectedHostRetention {
     Unknown,
     Indefinite,
@@ -269,6 +273,27 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
 /// was in which preflight each caller ran.
 #[cfg(test)]
 mod preflight_wiring_tests {
+    /// The renderer reads `activeSecs` (see `ConnectedHostRetention` in
+    /// tauri-bridge.ts). Nothing else pinned this hop: the TypeScript test
+    /// hand-builds its object and the command test only checks which source the
+    /// command reads, so a field-name mismatch reached the user as "undefined
+    /// seconds" with every suite green. Assert the wire, not just both ends.
+    #[test]
+    fn bounded_retention_serializes_the_field_name_the_renderer_reads() {
+        let json =
+            serde_json::to_value(super::ConnectedHostRetention::Bounded { active_secs: 900 })
+                .expect("serialize");
+        assert_eq!(json["state"], "bounded");
+        assert_eq!(
+            json["activeSecs"], 900,
+            "renderer reads activeSecs; got: {json}"
+        );
+        assert!(
+            json.get("active_secs").is_none(),
+            "snake_case field would leave the renderer with undefined: {json}"
+        );
+    }
+
     /// The body of `fn <name>`, found by counting braces from its opening `{`.
     ///
     /// Brace counting rather than "the next N lines": a body that grows would
