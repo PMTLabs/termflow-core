@@ -571,7 +571,7 @@ pub async fn connect_or_spawn(
     token: &str,
     record_pid: Option<u32>,
     deps: PtyHostDeps,
-) -> std::io::Result<PtyHostClient> {
+) -> std::io::Result<(PtyHostClient, HostConnectionOrigin)> {
     use std::time::Duration;
     use tokio::net::windows::named_pipe::ClientOptions;
 
@@ -584,12 +584,12 @@ pub async fn connect_or_spawn(
         OPEN_GRACE_STEP,
     )
     .await;
-    let conn = match outcome {
+    let (conn, origin) = match outcome {
         OpenOutcome::Connected(c) => {
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
-            c
+            (c, HostConnectionOrigin::Adopted)
         }
         OpenOutcome::HostAliveUnreachable => {
             log::warn!(
@@ -614,12 +614,12 @@ pub async fn connect_or_spawn(
                     break;
                 }
             }
-            conn.ok_or_else(|| {
+            (conn.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "pty-host sidecar did not open its pipe",
                 )
-            })?
+            })?, HostConnectionOrigin::SpawnedHere)
         }
     };
     let (rd, wr) = tokio::io::split(conn);
@@ -627,7 +627,7 @@ pub async fn connect_or_spawn(
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
-    Ok(client)
+    Ok((client, origin))
 }
 
 /// Spawn the sidecar detached from the GUI's lifetime. Returns whether it broke
@@ -730,7 +730,7 @@ pub async fn connect_or_spawn(
     token: &str,
     record_pid: Option<u32>,
     deps: PtyHostDeps,
-) -> std::io::Result<PtyHostClient> {
+) -> std::io::Result<(PtyHostClient, HostConnectionOrigin)> {
     use std::time::Duration;
     use tokio::net::UnixStream;
 
@@ -743,12 +743,12 @@ pub async fn connect_or_spawn(
         OPEN_GRACE_STEP,
     )
     .await;
-    let conn = match outcome {
+    let (conn, origin) = match outcome {
         OpenOutcome::Connected(c) => {
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
-            c
+            (c, HostConnectionOrigin::Adopted)
         }
         OpenOutcome::HostAliveUnreachable => {
             log::warn!(
@@ -773,12 +773,12 @@ pub async fn connect_or_spawn(
                     break;
                 }
             }
-            conn.ok_or_else(|| {
+            (conn.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "pty-host sidecar did not open its socket",
                 )
-            })?
+            })?, HostConnectionOrigin::SpawnedHere)
         }
     };
     let (rd, wr) = tokio::io::split(conn);
@@ -786,7 +786,7 @@ pub async fn connect_or_spawn(
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
-    Ok(client)
+    Ok((client, origin))
 }
 
 /// Spawn the sidecar detached into its own session so a GUI exit (or a `SIGHUP`
@@ -850,7 +850,7 @@ pub async fn connect_or_spawn(
     _token: &str,
     _record_pid: Option<u32>,
     _deps: PtyHostDeps,
-) -> std::io::Result<PtyHostClient> {
+) -> std::io::Result<(PtyHostClient, HostConnectionOrigin)> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "pty-host sidecar is unsupported on this target",
@@ -1185,6 +1185,24 @@ pub enum ConnectPlan {
     /// A new host is running but shares NO protocol version with us. Do NOT
     /// force-kill its sessions — coexist read-only / banner (design §10.3/§10.4).
     Incompatible { instance_id: u128 },
+}
+
+/// Provenance established by the connect-or-spawn operation, not by discovery.
+/// A record names a possible endpoint but cannot attest which process accepted
+/// the pipe connection; only this process's successful spawn is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostConnectionOrigin { SpawnedHere, Adopted }
+
+impl ConnectPlan {
+    pub fn retention_for(&self, origin: HostConnectionOrigin) -> HostRetention {
+        match origin {
+            HostConnectionOrigin::Adopted => HostRetention::Unknown,
+            HostConnectionOrigin::SpawnedHere => match self {
+                ConnectPlan::Bootstrap { lifecycle, .. } => lifecycle.clone(),
+                ConnectPlan::LegacyOrNone | ConnectPlan::Incompatible { .. } => HostRetention::Unknown,
+            },
+        }
+    }
 }
 
 /// Three-state lifecycle exposure for app consumers. This is not a capability

@@ -516,24 +516,25 @@ impl<R: Runtime> AppState<R> {
                 "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow"
             ),
         }
-        let (pipe, attach_acks, lifecycle) = match crate::pty_host_client::plan_connection(record) {
+        let connect_plan = crate::pty_host_client::plan_connection(record);
+        let (pipe, attach_acks) = match &connect_plan {
             crate::pty_host_client::ConnectPlan::LegacyOrNone => {
                 log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
-                (pipe, false, crate::pty_host_client::HostRetention::Unknown)
+                (pipe, false)
             }
             crate::pty_host_client::ConnectPlan::Bootstrap {
                 endpoint,
                 version,
                 instance_id,
                 host_caps,
-                lifecycle,
+                lifecycle: _,
             } => {
                 let acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
                 log::info!(
                     "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
                      caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks})"
                 );
-                (endpoint, acks, lifecycle)
+                (endpoint.clone(), acks)
             }
             crate::pty_host_client::ConnectPlan::Incompatible { instance_id } => {
                 // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
@@ -623,12 +624,12 @@ impl<R: Runtime> AppState<R> {
             stream_offsets: self.host_stream_offsets.clone(),
         };
 
-        let mut client =
+        let (mut client, origin) =
             crate::pty_host_client::connect_or_spawn(&sidecar, &launch.build_id, &pipe, &token, record_pid, deps)
                 .await
                 .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);
-        client.set_lifecycle(lifecycle);
+        client.set_lifecycle(connect_plan.retention_for(origin));
         // Record sessions that survived a hot-swap (tab_id -> pid) so
         // create_host_terminal reattaches instead of respawning. `None` means
         // the host did not answer — treat as unknown, never as empty.

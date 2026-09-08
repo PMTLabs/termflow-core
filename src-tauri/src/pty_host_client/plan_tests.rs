@@ -1,4 +1,4 @@
-use super::{host_build_disposition, plan_connection, ConnectPlan, HostBuildDisposition, HostRetention};
+use super::{host_build_disposition, plan_connection, ConnectPlan, HostBuildDisposition, HostConnectionOrigin, HostRetention};
 use termflow_pty_protocol::{HostRecord, LifecycleContract, RetentionPolicy};
 
 fn record(proto_min: u16, proto_max: u16) -> HostRecord {
@@ -96,6 +96,27 @@ fn disjoint_versions_are_incompatible_not_a_kill() {
     assert_eq!(
         plan_connection(Some(record(2, 3))),
         ConnectPlan::Incompatible { instance_id: 99 }
+    );
+}
+
+#[test]
+fn bounded_record_is_retained_only_when_this_process_spawned_the_connected_host() {
+    let mut rec = record(1, 1);
+    rec.capabilities |= termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT;
+    rec.lifecycle = Some(LifecycleContract {
+        version: 1,
+        retention: RetentionPolicy::Bounded { active_secs: 900 },
+    });
+    let plan = plan_connection(Some(rec));
+    assert_eq!(
+        plan.retention_for(HostConnectionOrigin::SpawnedHere),
+        HostRetention::Bounded { active_secs: 900 },
+        "a host spawned in this app session is confirmed by construction"
+    );
+    assert_eq!(
+        plan.retention_for(HostConnectionOrigin::Adopted),
+        HostRetention::Unknown,
+        "the identical discovery record cannot attest which host accepted an adopted pipe"
     );
 }
 
