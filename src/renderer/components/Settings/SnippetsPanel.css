@@ -88,7 +88,18 @@
   font-size: 0.85rem;
 }
 
-.snippets-list {
+/* ⚠ SCOPED ON PURPOSE — read this before adding a `.snippets-*` rule that redeclares a
+   property its `.agent-schema-*` base also sets.
+
+   These rows carry both classes (`agent-schema-list snippets-list`), and both selectors are
+   a single class, so they have EQUAL specificity and the cascade falls through to source
+   order. `SettingsPage.tsx` imports `SnippetsPanel` (and therefore this file) BEFORE its own
+   `SettingsPage.css`, so the base sheet is injected LAST and wins every tie. A one-class
+   override here is not a weaker rule, it is a silently dead one — `margin: 0` below, and the
+   colour and size in `.snippets-name`, were all being discarded exactly this way.
+
+   Qualifying with the parent class takes it to (0,2,0), which wins regardless of order. */
+.snippets-group .snippets-list {
   margin: 0;
 }
 
@@ -96,15 +107,17 @@
   padding: 0.3rem 0;
 }
 
-.snippets-name {
+/* Parent-qualified for the cascade reason documented above: `.agent-schema-name` sets both
+   `color` and `font-size`, and its sheet is injected after this one. */
+.snippets-row .snippets-name {
   flex: 1;
   min-width: 0;
   color: #eee;
   font-weight: 600;
-  /* Overrides `.agent-schema-name`'s 0.85rem. The snippet's text IS the content of this
-     panel — everything else on the row (folder, date, use count) is metadata about it —
-     so it should not be set at the same size as the metadata beside it. */
-  font-size: 0.95rem;
+  /* The snippet's text IS the content of this panel — everything else on the row (folder,
+     date, use count) is metadata about it — so it is set well above the 0.85rem the base
+     row uses for all of them, rather than sharing a size with its own annotations. */
+  font-size: 1.05rem;
 }
 
 .snippets-tags {
