@@ -259,7 +259,8 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     // came up, so the bridge NEVER started that session and no `peer:event` (incl. incoming
     // pairing requests) reached the renderer until an app restart.
     let verify_state = state.clone();
-    tauri::async_runtime::spawn(subscribe_fabric_events(app, state, generation, stop_rx));
+    let stream_build_id = build_id.clone();
+    tauri::async_runtime::spawn(subscribe_fabric_events(app, state, generation, stream_build_id, stop_rx));
 
     // A new child handle is not proof that the shared control port is its
     // listener.  Verify asynchronously so slow first-run key generation cannot
@@ -309,6 +310,7 @@ async fn subscribe_fabric_events(
     app: AppHandle,
     state: AppState,
     generation: u64,
+    expected_build: String,
     mut stop: tokio::sync::watch::Receiver<bool>,
 ) {
     let url = format!("http://127.0.0.1:{}/events", state.fabric_control_port);
@@ -320,7 +322,7 @@ async fn subscribe_fabric_events(
         .unwrap_or_else(|_| reqwest::Client::new());
 
     while fabric_generation_is_current(&state, generation) && !subscription_cancelled(&stop) {
-        match stream_fabric_events(&app, &client, &url, &mut stop).await {
+        match stream_fabric_events(&app, &client, &url, &state.instance_id, &expected_build, &mut stop).await {
             Ok(()) => log::debug!("[FABRIC] event stream closed; will reconnect"),
             Err(e) => log::debug!("[FABRIC] event stream error: {}; will reconnect", e),
         }
@@ -358,6 +360,8 @@ async fn stream_fabric_events(
     app: &AppHandle,
     client: &reqwest::Client,
     url: &str,
+    own_id: &str,
+    expected_build: &str,
     stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), reqwest::Error> {
     if subscription_cancelled(stop) {
@@ -372,6 +376,14 @@ async fn stream_fabric_events(
         response = request => response?,
     }
     .error_for_status()?;
+
+    // Starting the bridge is deliberately independent from the slow startup
+    // verifier, but a successful /events response is not identity evidence.
+    // Verify this listener before it can emit a connection marker or payload.
+    if !stream_identity_allows_events(client, url, own_id, expected_build, stop).await? {
+        log::warn!("[FABRIC] refusing events from an unverified control listener");
+        return Ok(());
+    }
 
     // Signal the renderer that the event stream (re)connected, so it can re-hydrate the
     // pending-approvals consent queue — a pairing staged while the stream was down would
@@ -514,6 +526,34 @@ pub fn shutdown_fabric(state: &AppState) {
         Ok(mut slot) => shutdown_fabric_child(slot.take()),
         Err(_) => log::error!("[FABRIC] process slot lock poisoned during shutdown; unable to inspect ownership"),
     }
+}
+
+async fn stream_identity_allows_events(
+    client: &reqwest::Client,
+    events_url: &str,
+    own_id: &str,
+    expected_build: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<bool, reqwest::Error> {
+    let health_url = events_url.strip_suffix("/events").unwrap_or(events_url).to_string() + "/health";
+    let request = client.get(health_url).send();
+    let response = tokio::select! {
+        _ = stop.changed() => return Ok(false),
+        response = request => response?,
+    }.error_for_status()?;
+    let body: serde_json::Value = response.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    let reported_owner = body.get("ownerId").or_else(|| body.get("instanceId")).and_then(|value| value.as_str());
+    let observed_build = body.get("buildId").and_then(|value| value.as_str()).filter(|value| !value.is_empty());
+    Ok(stream_identity_is_acceptable(reported_owner, own_id, observed_build, expected_build))
+}
+
+fn stream_identity_is_acceptable(
+    reported_owner: Option<&str>, own_id: &str, observed_build: Option<&str>, expected_build: &str,
+) -> bool {
+    matches!(
+        crate::mcp_sidecar::classify_sidecar_report(reported_owner, own_id, observed_build, expected_build),
+        Some(crate::mcp_sidecar::SidecarAcceptance::Verified | crate::mcp_sidecar::SidecarAcceptance::Unverified)
+    )
 }
 
 /// Stop only the current slot if it still belongs to this lifecycle operation.
@@ -693,6 +733,15 @@ mod tests {
     use super::*;
     use crate::app_config::NetworkConfig;
     use std::path::Path;
+
+    #[test]
+    fn stream_acceptance_requires_the_spawned_owner_and_build_identity() {
+        assert!(stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", Some("build-g7"), "build-g7"));
+        assert!(stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", None, "build-g7"));
+        assert!(!stream_identity_is_acceptable(Some("foreign-owner"), "spawn-owner-g7", Some("build-g7"), "build-g7"));
+        assert!(!stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", Some("wrong-build"), "build-g7"));
+        assert!(!stream_identity_is_acceptable(None, "spawn-owner-g7", Some("build-g7"), "build-g7"));
+    }
 
     #[test]
     fn fabric_env_carries_core_token_and_ports() {
