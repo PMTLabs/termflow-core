@@ -316,7 +316,7 @@ pub(crate) struct SpawnRequest {
     /// build, whose host session is still keyed by the old `tb-` id and would be
     /// orphaned by a rename — the protocol has no rename verb (design 014 §A2).
     pub session_key: Option<String>,
-    /// Present only for a recovery create delivered by the backend claim path.
+    /// The pane-tree tab that owns this terminal, when known to the caller.
     pub owning_tab_id: Option<String>,
     pub cols: u16,
     pub rows: u16,

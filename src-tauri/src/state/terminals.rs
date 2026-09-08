@@ -179,8 +179,8 @@ impl<R: Runtime> AppState<R> {
         });
     }
 
-    /// Claim a session for backend registration. A non-token renderer restore
-    /// may consume only a Reserved entry; a recovery pane must carry its token.
+    /// Claim a session for backend registration. A recovery create consumes the
+    /// Reserved entry established from the host's authoritative listing.
     pub fn claim_host_registration(&self, session_key: &str) -> Result<Option<u32>, String> {
         use dashmap::mapref::entry::Entry;
         match self.host_session_claims.entry(session_key.to_string()) {
@@ -972,9 +972,6 @@ impl<R: Runtime> AppState<R> {
                 .map(|t| (t.cols, t.rows))
                 .unwrap_or((80, 24));
             client.nudge_repaint(&a.tab_id, cols, rows);
-            // ensure_pty_host re-listed this session into host_reattach_pending;
-            // it is attached in place now, so a later createTerminal for the same
-            // id must not re-adopt it.
             // The registered terminal remains the exclusive owner across an
             // in-place reconnect; deleting this claim would let a late create
             // register a second identity for the same live host session.
@@ -1033,15 +1030,15 @@ impl<R: Runtime> AppState<R> {
         // Validate BEFORE claiming the flag. `swap` marks the sweep released
         // unconditionally, so claiming first and validating second lets a caller
         // that arrives while windows are still pending poison the flag: the real
-        // release AND the backstop would then both return early here and the
-        // sweep would never run — silently. Today's callers pre-check, but that
-        // guard belongs at this choke point, not in each caller.
+        // release would return early until the periodic worker resets the flag
+        // and forces another pass. The guard belongs at this choke point, not
+        // in each caller.
         if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
         if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
         if !sweep_claim_survives(self.run_host_restore_sweep().await) {
             // Hand the one-shot back so the backstop — or a later report — can
-            // retry. Consuming it on a transient failure is indistinguishable
-            // from a completed sweep and permanently strands the sessions.
+            // retry. The periodic worker also resets this flag before forcing
+            // another pass after a transient failure.
             self.host_restore_released.store(false, Ordering::Release);
             log::warn!("[HOTSWAP] restore sweep could not complete; leaving it retryable");
         }

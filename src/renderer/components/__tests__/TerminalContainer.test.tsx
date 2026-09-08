@@ -176,7 +176,7 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     );
 
     // Registering the placeholder process id would bypass TerminalPane's normal
-    // createTerminal call, leaving host_reattach_pending unconsumed forever.
+    // createTerminal call, which performs the actual host-session claim.
     expect(registerExistingTerminal).not.toHaveBeenCalled();
     expect(result.paneTree.sessionKey).toBe('tm-host-session01');
   });
