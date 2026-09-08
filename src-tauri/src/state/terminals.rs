@@ -836,8 +836,14 @@ impl<R: Runtime> AppState<R> {
     }
 
     async fn release_host_restore_sweep(&self, forced: bool) {
-        let released = self.host_restore_released.swap(true, Ordering::AcqRel);
-        if released || (!forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false)) { return; }
+        // Validate BEFORE claiming the flag. `swap` marks the sweep released
+        // unconditionally, so claiming first and validating second lets a caller
+        // that arrives while windows are still pending poison the flag: the real
+        // release AND the backstop would then both return early here and the
+        // sweep would never run — silently. Today's callers pre-check, but that
+        // guard belongs at this choke point, not in each caller.
+        if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
+        if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
         if self.ensure_pty_host().await.is_err() {
             return;
         }
