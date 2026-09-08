@@ -69,7 +69,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-owner-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined,
+      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined, undefined,
     );
   });
 
@@ -78,7 +78,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
   it('omits the owner when the caller does not know one', async () => {
     await terminalService.createTerminal('tb-solo-1');
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined,
+      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined, undefined,
     );
   });
 
@@ -92,7 +92,25 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-migrated-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab', 'tb-legacy01',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01',
+      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01', undefined,
+    );
+  });
+
+  // The recovery claim token must reach the backend AT SPAWN, for the same reason
+  // the two arguments above must. The pane acknowledges its claim only after the
+  // create resolves, so a dropped token means the backend never hears the claim was
+  // adopted — and the retry loop then surfaces a SECOND pane for a session that is
+  // already on screen. Every other assertion in this file passes `undefined` here,
+  // so without this case an implementation that drops the argument outright is
+  // indistinguishable from one that forwards it.
+  it('forwards the recovery claim token to the bridge', async () => {
+    await terminalService.createTerminal(
+      'tm-recovered-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
+      'tm-recovered-leaf', 'claim-abc123',
+    );
+    expect(createTerminal).toHaveBeenCalledWith(
+      'default', 'Terminal', undefined, 'tm-recovered-leaf', 120, 40, 'tb-owner-tab',
+      'tm-recovered-leaf', 'claim-abc123',
     );
   });
 
