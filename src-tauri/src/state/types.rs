@@ -31,17 +31,14 @@ pub const SCROLLBACK_LINES: usize = 5000;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HostSessionClaimState {
     Reserved,
-    DeliveredAwaitingAck,
     RegistrationInProgress,
     Registered,
-    Abandoned,
 }
 
 #[derive(Clone, Debug)]
 pub struct HostSessionClaim {
     pub state: HostSessionClaimState,
     pub pid: u32,
-    pub token: Option<String>,
     /// Process identity currently registered under this session, if any. This
     /// stops a stale exit callback from retiring a replacement's claim.
     pub process_id: Option<String>,
@@ -583,7 +580,6 @@ pub struct AppState<R: Runtime = Wry> {
     // present here, restoring the real pid.
     pub host_session_claims: Arc<DashMap<String, HostSessionClaim>>,
     pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
-    pub host_restore_claims: Arc<DashMap<String, ()>>,
     pub host_restore_released: Arc<AtomicBool>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
     // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
@@ -683,7 +679,6 @@ impl<R: Runtime> Clone for AppState<R> {
             identity: self.identity.clone(),
             host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
-            host_restore_claims: self.host_restore_claims.clone(),
             host_restore_released: self.host_restore_released.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),

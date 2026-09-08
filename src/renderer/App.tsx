@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { invoke } from '@tauri-apps/api/core';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
 import { TerminalContainer } from './components/TerminalContainer';
@@ -1083,20 +1082,12 @@ const App: React.FC = () => {
         // A live pty-host session which has no app tab. Mode 0 creates a pane
         // for it, whose normal createTerminal call consumes this pending key.
         sessionKey?: string;
-        claimToken?: string;
         // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
         // the edge itself was already written by the backend before this event was emitted.
         parentTerminalId?: string;
       };
       console.log('API: Creating terminal tab', options);
 
-      // This must precede the pane-tree dispatch: after this point the backend
-      // treats the delivery as in flight and will not issue a duplicate retry.
-      if (options.sessionKey && options.claimToken) {
-        await invoke('begin_host_recovery_registration', {
-          sessionKey: options.sessionKey, claimToken: options.claimToken,
-        });
-      }
 
       const { name, profile, paneId, direction } = options;
       const { processId, leafId, owningTabId } = resolveApiCreateIds(options);

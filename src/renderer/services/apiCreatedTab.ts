@@ -151,7 +151,6 @@ export interface ApiCreateMode0Result {
     name?: string;
     shellType?: string;
     sessionKey?: string;
-    claimToken?: string;
   };
 }
 
@@ -179,7 +178,6 @@ export function runApiCreateMode0(
     tabId?: string;
     /** A pending pty-host session to adopt rather than a process already registered here. */
     sessionKey?: string;
-    claimToken?: string;
   },
   deps: ApiCreateMode0Deps,
 ): ApiCreateMode0Result {
@@ -206,7 +204,6 @@ export function runApiCreateMode0(
     name: name || 'Terminal',
     shellType: profile || deps.defaultProfile || 'default',
     sessionKey: detail.sessionKey,
-    claimToken: detail.claimToken,
   };
 
   // Seed the window map (API/persistence) BEFORE the tab enters the `tabs`

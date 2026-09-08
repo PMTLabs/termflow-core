@@ -42,7 +42,6 @@ export const TERMINAL_BOUND_FIELDS = [
   // before that ack would otherwise leave the token behind, the backend would never
   // hear the claim was adopted, and the retry loop would surface a SECOND pane for a
   // session that is already visible.
-  'claimToken',
   'seededForTabId',
 ] as const;
 
@@ -276,18 +275,6 @@ export function findSessionKeyByTerminalId(
   return undefined;
 }
 
-export function findClaimTokenByTerminalId(
-  treesByTabId: Record<string, PaneNode | null>, terminalId: string,
-): string | undefined {
-  const search = (node: PaneNode | null): string | undefined => {
-    if (!node) return undefined;
-    if (node.type === 'terminal' && node.terminalId === terminalId) return node.claimToken;
-    for (const child of node.children ?? []) { const found = search(child); if (found !== undefined) return found; }
-    return undefined;
-  };
-  for (const tree of Object.values(treesByTabId)) { const found = search(tree); if (found !== undefined) return found; }
-  return undefined;
-}
 
 export function findTabIdByTerminalId(
   treesByTabId: Record<string, PaneNode | null>,

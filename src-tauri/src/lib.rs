@@ -793,8 +793,6 @@ pub fn run() {
         commands::merge_config,
         commands::load_config,
         commands::close_terminal,
-        commands::begin_host_recovery_registration,
-        commands::acknowledge_host_recovery,
         commands::prune_terminal_history,
         commands::add_command_history,
         commands::rename_terminal_history,
