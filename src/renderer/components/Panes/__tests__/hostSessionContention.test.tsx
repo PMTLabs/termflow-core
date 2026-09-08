@@ -63,6 +63,8 @@ const settle = async () => { await act(async () => { await Promise.resolve(); aw
 describe('recovery create contention', () => {
   it('removes the losing recovery tab and never closes a host session', async () => {
     addRecoveryTab('tb-loser', 'tm-loser');
+    addRecoveryTab('tb-winner', 'tm-winner');
+    addRecoveryTab('tb-user', 'tm-user', false, 'Unrelated user tab');
     markProvisionalRecovery('tm-loser');
     createTerminal.mockRejectedValueOnce(new Error('host-session-contended: host session S is already registered'));
     act(() => mount('tm-loser'));
@@ -70,6 +72,14 @@ describe('recovery create contention', () => {
 
     expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-loser')).toBeUndefined();
     expect(store.getState().panes.treesByTabId['tb-loser']).toBeUndefined();
+    expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-winner')).toBeDefined();
+    expect(store.getState().panes.treesByTabId['tb-winner']).toMatchObject({
+      type: 'terminal', terminalId: 'tm-winner',
+    });
+    expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-user')).toMatchObject({ title: 'Unrelated user tab' });
+    expect(store.getState().panes.treesByTabId['tb-user']).toMatchObject({
+      type: 'terminal', terminalId: 'tm-user',
+    });
     expect(closeTerminal).not.toHaveBeenCalled();
   });
 
@@ -95,7 +105,9 @@ describe('recovery create contention', () => {
     await settle();
 
     expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-spawn-error')).toBeDefined();
-    expect(store.getState().panes.treesByTabId['tb-spawn-error']).toBeDefined();
+    expect(store.getState().panes.treesByTabId['tb-spawn-error']).toMatchObject({
+      type: 'terminal', terminalId: 'tm-spawn-error',
+    });
     expect(container.textContent).toContain('Failed to start shell');
   });
 
@@ -115,11 +127,17 @@ describe('recovery create contention', () => {
 
   it('does not remove a multi-pane tab after a contention loss', async () => {
     addRecoveryTab('tb-split', 'tm-split', true);
+    markProvisionalRecovery('tm-split');
     createTerminal.mockRejectedValueOnce(new Error('host-session-contended: host session S is claimed by another recovery'));
     act(() => mount('tm-split'));
     await settle();
 
     expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-split')).toBeDefined();
-    expect(store.getState().panes.treesByTabId['tb-split']).toBeDefined();
+    expect(store.getState().panes.treesByTabId['tb-split']).toMatchObject({
+      type: 'split', children: expect.arrayContaining([
+        expect.objectContaining({ type: 'terminal', terminalId: 'tm-split' }),
+        expect.objectContaining({ type: 'terminal', terminalId: 'tm-other' }),
+      ]),
+    });
   });
 });

@@ -125,6 +125,10 @@ mod restore_sweep_gate_tests {
             .and_then(|rest| rest.split("    /// Resolve either a PTY process id").next())
             .expect("claim retirement body");
         assert!(retirement.contains("remove_if"), "claim retirement must use DashMap::remove_if atomically");
+        assert!(
+            retirement.contains("claim_is_owned_by(claim, process_id)"),
+            "claim retirement must check that the stored claim belongs to process_id"
+        );
         let teardown = source
             .rfind("\n    pub fn teardown_host_terminal")
             .map(|start| &source[start..])
