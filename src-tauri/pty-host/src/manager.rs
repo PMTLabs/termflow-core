@@ -175,7 +175,7 @@ impl SessionManager {
             Control::Close { tab_id } => {
                 self.sessions.remove(&tab_id);
             }
-            Control::ListSessions { req } => {
+            Control::ListSessions { req, .. } => {
                 let _ = self.responses.try_send(Response::SessionList {
                     req,
                     sessions: self.session_metas(),
@@ -306,6 +306,22 @@ impl SessionManager {
         self.armed_at = None;
         self.absence_started_at = None;
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Whether a control is an authenticated reconnect lifecycle frame.  Keep
+    /// this deliberately narrow: resize, close, attach and spawn must never
+    /// consume a detach hold merely because they were the first decoded frame.
+    pub fn authenticates_lifecycle(&self, ctrl: &Control) -> bool {
+        match ctrl {
+            Control::ListSessions {
+                token: Some(token),
+                ..
+            }
+            | Control::ArmDetach { token, .. } => {
+                self.expected_token.as_deref() == Some(token.as_str())
+            }
+            _ => false,
+        }
     }
 
     /// Starts a fresh deadline only after the GUI's absence is confirmed.  An

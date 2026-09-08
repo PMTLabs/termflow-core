@@ -492,6 +492,7 @@ impl<R: Runtime> AppState<R> {
         let st_gap = self.clone();
         let st_disc = self.clone();
         let deps = crate::pty_host_client::PtyHostDeps {
+            lifecycle_token: token.clone(),
             output_tx: self.output_tx.clone(),
             output_produced: self.output_produced.clone(),
             on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {

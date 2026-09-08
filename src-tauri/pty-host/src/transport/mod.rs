@@ -382,9 +382,12 @@ where
             Err(ConnectionResult::Disconnected) => break ConnectionResult::Disconnected,
             Err(ConnectionResult::Expired(hold)) => break ConnectionResult::Expired(hold),
         };
-        // Only a control/lifecycle frame adopts a held host. Data::Stdin is
-        // intentionally not reinterpreted as GUI identity.
-        if !adopted && matches!(frame, Frame::Ctrl(_)) {
+        // Only an authenticated lifecycle frame adopts a held host. In
+        // particular, Resize and Data::Stdin are not GUI identity, and a bad
+        // ArmDetach token must be rejected without spending the existing arm.
+        if !adopted
+            && matches!(&frame, Frame::Ctrl(control) if mgr.authenticates_lifecycle(control))
+        {
             if let Some(d) = deadline {
                 // Expiry wins the tie unless the qualifying frame was already
                 // processed before this active-time sample.
@@ -515,7 +518,10 @@ mod tests {
         let (mut mgr, hold) = local_hold_manager();
         let clock = FakeClock(Arc::new(Mutex::new(Some(Duration::ZERO))));
         let (server, mut client) = tokio::io::duplex(1024);
-        let bytes = termflow_pty_protocol::encode(&Frame::Ctrl(Control::ListSessions { req: 9 }));
+        let bytes = termflow_pty_protocol::encode(&Frame::Ctrl(Control::ListSessions {
+            req: 9,
+            token: Some("tok".into()),
+        }));
         let advancing = clock.clone();
         let peer = tokio::spawn(async move {
             tokio::io::AsyncWriteExt::write_all(&mut client, &bytes)
@@ -548,6 +554,38 @@ mod tests {
         assert!(
             !mgr.local_hold_is_current(hold),
             "adoption must retire the hold that was watching for it"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_token_arm_detach_cannot_adopt_a_local_hold() {
+        let (mut mgr, hold) = local_hold_manager();
+        let (server, mut client) = tokio::io::duplex(1024);
+        let bytes = termflow_pty_protocol::encode(&Frame::Ctrl(Control::ArmDetach {
+            req: 9,
+            timeout_secs: 1,
+            token: "wrong".into(),
+            purpose: Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        }));
+        let peer = tokio::spawn(async move {
+            tokio::io::AsyncWriteExt::write_all(&mut client, &bytes).await.unwrap();
+            tokio::io::AsyncWriteExt::shutdown(&mut client).await.unwrap();
+        });
+        let (events, responses, result) = run_connection(
+            &mut mgr,
+            server,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            None,
+            &FakeClock(Arc::new(Mutex::new(Some(Duration::ZERO)))),
+        )
+        .await;
+        peer.await.unwrap();
+        drop((events, responses));
+        assert!(matches!(result, ConnectionResult::Disconnected));
+        assert!(
+            mgr.local_hold_is_current(hold),
+            "a rejected ArmDetach must not cancel the hold before its token is checked"
         );
     }
 
@@ -693,11 +731,11 @@ mod tests {
         });
 
         let mut client = connect_with_retry(&ep).await;
-        let ping = Frame::Ctrl(Control::ListSessions { req: 42 });
+        let ping = Frame::Ctrl(Control::ListSessions { req: 42, token: None });
         write_frame(&mut client, &ping).await.unwrap();
         let echoed = read_frame(&mut client).await.unwrap().unwrap();
         assert!(
-            matches!(echoed, Frame::Ctrl(Control::ListSessions { req: 42 })),
+            matches!(echoed, Frame::Ctrl(Control::ListSessions { req: 42, .. })),
             "frame round-tripped over the transport"
         );
         server.await.unwrap();
@@ -786,7 +824,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
 
         let mut c2 = connect_with_retry(&ep).await;
-        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3, token: Some("tok".into()) }))
             .await
             .unwrap();
         let mut has_t1 = false;
@@ -898,7 +936,7 @@ mod tests {
         let mut c3 = tokio::time::timeout(Duration::from_secs(5), connect_with_retry(&ep))
             .await
             .expect("host must still be listening; a silent connection tore it down");
-        write_frame(&mut c3, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+        write_frame(&mut c3, &Frame::Ctrl(Control::ListSessions { req: 3, token: Some("tok".into()) }))
             .await
             .unwrap();
         let mut has_t1 = false;
@@ -980,7 +1018,7 @@ mod tests {
             // A new GUI adopts the held session. This connection is what spends
             // the arm — nothing here re-arms.
             let mut c2 = connect_with_retry(&ep).await;
-            write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+            write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3, token: Some("tok".into()) }))
                 .await
                 .unwrap();
             let _ = tokio::time::timeout(Duration::from_secs(5), async {
@@ -1057,7 +1095,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1800)).await;
 
         let mut c2 = connect_with_retry(&ep).await;
-        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3, token: None }))
             .await
             .unwrap();
         let mut has_t1 = false;
@@ -1169,7 +1207,7 @@ mod tests {
 
         // And a reconnect still works normally afterwards.
         let mut c2 = connect_with_retry(&ep).await;
-        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
+        write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3, token: None }))
             .await
             .unwrap();
         let _ =

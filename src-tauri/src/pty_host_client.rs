@@ -26,6 +26,9 @@ use tokio::sync::oneshot;
 /// Injected dependencies so the client stays decoupled from `AppState`.
 #[derive(Clone)]
 pub struct PtyHostDeps {
+    /// Per-profile credential used to authenticate the first reconnect
+    /// lifecycle probe to a held host.
+    pub lifecycle_token: String,
     pub output_tx: broadcast::Sender<ChannelPayload>,
     pub output_produced: Arc<AtomicU64>,
     /// Called on child exit: `(process_id, session_key, exit_cwd)`.
@@ -135,6 +138,7 @@ pub struct PtyHostClient {
     /// whose disconnect already ran — otherwise a drop during connection setup
     /// leaves a permanently-dead client installed that nothing will ever null.
     alive: Arc<std::sync::atomic::AtomicBool>,
+    lifecycle_token: Arc<String>,
 }
 
 impl PtyHostClient {
@@ -296,7 +300,14 @@ impl PtyHostClient {
     /// must never treat that like an authoritative empty list, or a stale
     /// recovery pass would tear down live panes on a transport failure.
     pub async fn list_sessions(&self) -> Option<Vec<SessionMeta>> {
-        match self.request(|req| Control::ListSessions { req }).await {
+        let token = self.lifecycle_token.to_string();
+        match self
+            .request(move |req| Control::ListSessions {
+                req,
+                token: Some(token),
+            })
+            .await
+        {
             Some(Response::SessionList { sessions, .. }) => Some(sessions),
             _ => None,
         }
@@ -373,6 +384,7 @@ where
     let req_ctr = Arc::new(AtomicU64::new(1));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let alive_r = alive.clone();
+    let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
 
     // Writer task.
     tokio::spawn(async move {
@@ -444,6 +456,7 @@ where
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
+        lifecycle_token,
     }
 }
 
@@ -1336,6 +1349,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(256);
         let produced = Arc::new(AtomicU64::new(0));
         let deps = PtyHostDeps {
+            lifecycle_token: "tok".into(),
             output_tx: tx,
             output_produced: produced.clone(),
             on_exit: Arc::new(|_, _, _| {}),

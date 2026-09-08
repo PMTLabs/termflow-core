@@ -33,7 +33,13 @@ pub enum Control {
     Spawn { req: u64, tab_id: String, spec: SpawnSpec },
     Resize { tab_id: String, cols: u16, rows: u16 },
     Close { tab_id: String },
-    ListSessions { req: u64 },
+    ListSessions {
+        req: u64,
+        /// Credentials for a reconnect lifecycle probe.  Older clients omit
+        /// this and retain their legacy, non-adopting behavior.
+        #[serde(default)]
+        token: Option<String>,
+    },
     /// Reattach `tab_id`, replaying buffered output from `from_offset`.
     Attach { req: u64, tab_id: String, from_offset: u64 },
     /// Arm hot-swap hold. `token` must match the sidecar's launch token.
@@ -176,7 +182,7 @@ impl From<LegacyFrame> for Frame {
                 LegacyControl::Spawn { req, tab_id, spec } => Control::Spawn { req, tab_id, spec },
                 LegacyControl::Resize { tab_id, cols, rows } => Control::Resize { tab_id, cols, rows },
                 LegacyControl::Close { tab_id } => Control::Close { tab_id },
-                LegacyControl::ListSessions { req } => Control::ListSessions { req },
+                LegacyControl::ListSessions { req } => Control::ListSessions { req, token: None },
                 LegacyControl::Attach { req, tab_id, from_offset } => Control::Attach { req, tab_id, from_offset },
                 LegacyControl::ArmDetach { req, timeout_secs, token } => Control::ArmDetach {
                     req, timeout_secs, token, purpose: None,
