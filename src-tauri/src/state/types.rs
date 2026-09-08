@@ -247,7 +247,11 @@ pub struct ChannelPayload {
 #[derive(Debug)]
 pub enum McpProcessHandle {
     Legacy(std::process::Child),
-    Sidecar(tauri_plugin_shell::process::CommandChild),
+    Sidecar {
+        child: tauri_plugin_shell::process::CommandChild,
+        /// The shell event drain sends once on `CommandEvent::Terminated`.
+        terminated: std::sync::mpsc::Receiver<()>,
+    },
 }
 
 use std::sync::Mutex;
@@ -337,6 +341,9 @@ pub struct AppState<R: Runtime = Wry> {
     pub tmux_sessions: Arc<DashMap<String, Mutex<TmuxSession>>>,
     // MCP Server process handle for graceful shutdown
     pub mcp_process: Arc<Mutex<Option<McpProcessHandle>>>,
+    // Monotonic spawn generation for MCP. A stale child must never clear the
+    // handle installed by a later config-change respawn.
+    pub mcp_generation: Arc<AtomicU64>,
     // termflow-fabric peering sidecar handle for graceful shutdown. `None` when
     // the fabric binary is absent (open-core builds run fine without it).
     pub fabric_process: Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>,
@@ -536,6 +543,7 @@ impl<R: Runtime> Clone for AppState<R> {
             tmux_config: self.tmux_config.clone(),
             tmux_sessions: self.tmux_sessions.clone(),
             mcp_process: self.mcp_process.clone(),
+            mcp_generation: self.mcp_generation.clone(),
             fabric_process: self.fabric_process.clone(),
             fabric_generation: self.fabric_generation.clone(),
             fabric_control_port: self.fabric_control_port,

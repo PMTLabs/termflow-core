@@ -110,12 +110,45 @@ async fn start_mcp_sidecar(
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[MCP] MCP sidecar spawned");
 
+    let generation = state
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        .wrapping_add(1);
+    let (terminated_tx, terminated_rx) = std::sync::mpsc::channel();
+
     if let Ok(mut guard) = state.mcp_process.lock() {
-        *guard = Some(McpProcessHandle::Sidecar(child));
+        *guard = Some(McpProcessHandle::Sidecar {
+            child,
+            terminated: terminated_rx,
+        });
     }
 
+    let drain_state = state.clone();
     tauri::async_runtime::spawn(async move {
-        while rx.recv().await.is_some() {}
+        use tauri_plugin_shell::process::CommandEvent;
+        while let Some(event) = rx.recv().await {
+            if let CommandEvent::Terminated(payload) = event {
+                let _ = terminated_tx.send(());
+                let current = drain_state
+                    .mcp_generation
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if current == generation {
+                    log::info!(
+                        "[MCP] sidecar terminated (code={:?}, signal={:?}); clearing process handle",
+                        payload.code,
+                        payload.signal
+                    );
+                    if let Ok(mut guard) = drain_state.mcp_process.lock() {
+                        *guard = None;
+                    }
+                } else {
+                    log::debug!(
+                        "[MCP] stale sidecar child (gen {generation}) terminated after respawn (current gen {current}); keeping new handle"
+                    );
+                }
+                break;
+            }
+        }
     });
 
     let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
@@ -146,6 +179,9 @@ async fn start_mcp_legacy(
         .envs(mcp_env(cfg))
         // P0b: identity for owner-aware MCP health (see start_mcp_sidecar).
         .env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id)
+        // Private parent-to-child control protocol: exactly `TERMFLOW_SHUTDOWN\n`
+        // asks the sidecar to drain. This is deliberately stdin-only, never HTTP/MCP.
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // CREATE_NO_WINDOW so the node fallback doesn't flash a console window.
@@ -160,6 +196,9 @@ async fn start_mcp_legacy(
     let pid = child.id();
     log::info!("[MCP] MCP Server spawned with PID: {}", pid);
 
+    state
+        .mcp_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut guard) = state.mcp_process.lock() {
         *guard = Some(McpProcessHandle::Legacy(child));
     }

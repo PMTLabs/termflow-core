@@ -54,6 +54,8 @@ use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
 use tokio::sync::broadcast;
 use crate::state::{AppState, McpProcessHandle};
+use std::io::Write;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -77,29 +79,74 @@ pub(crate) fn mcp_alive(state: &AppState) -> bool {
     state.mcp_process.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
+/// Private stdin line protocol understood only by our spawned MCP child. It is
+/// intentionally not an HTTP/MCP method, so an MCP client cannot kill its host.
+const MCP_SHUTDOWN_COMMAND: &[u8] = b"TERMFLOW_SHUTDOWN\n";
+/// The Node/Bun sidecar allocates 750 ms to close transports and 750 ms to close
+/// HTTP. Two seconds includes scheduler/pipe slack yet keeps UI exit bounded.
+const MCP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
+    !completed
+}
+
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
     if let Ok(mut guard) = state.mcp_process.lock() {
         if let Some(child) = guard.take() {
             match child {
                 McpProcessHandle::Legacy(mut handle) => {
-                    log::info!("[MCP] Shutting down MCP Server (PID: {})...", handle.id());
-                    if let Err(e) = handle.kill() {
-                        log::warn!("[MCP] Failed to kill legacy MCP Server: {}", e);
+                    log::info!("[MCP] Gracefully shutting down MCP Server (PID: {})...", handle.id());
+                    let wrote = handle.stdin.as_mut().map(|stdin| stdin.write_all(MCP_SHUTDOWN_COMMAND)).transpose();
+                    if let Err(e) = wrote {
+                        log::warn!("[MCP] Failed to send legacy shutdown command: {}", e);
                     }
-                    if let Err(e) = handle.wait() {
-                        log::warn!("[MCP] Failed to wait for legacy MCP Server: {}", e);
+                    let deadline = std::time::Instant::now() + MCP_SHUTDOWN_TIMEOUT;
+                    let mut completed = false;
+                    while std::time::Instant::now() < deadline {
+                        match handle.try_wait() {
+                            Ok(Some(_)) => { completed = true; break; }
+                            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                            Err(e) => { log::warn!("[MCP] Failed to poll legacy MCP Server: {}", e); break; }
+                        }
+                    }
+                    if should_force_kill_after_graceful_wait(completed) {
+                        log::warn!("[MCP] Legacy shutdown exceeded {:?}; force-killing", MCP_SHUTDOWN_TIMEOUT);
+                        if let Err(e) = handle.kill() {
+                            log::warn!("[MCP] Failed to kill legacy MCP Server: {}", e);
+                        }
+                        if let Err(e) = handle.wait() {
+                            log::warn!("[MCP] Failed to wait for legacy MCP Server: {}", e);
+                        }
                     }
                 }
-                McpProcessHandle::Sidecar(handle) => {
-                    log::info!("[MCP] Shutting down MCP Server sidecar...");
-                    if let Err(e) = handle.kill() {
-                        log::warn!("[MCP] Failed to kill sidecar MCP Server: {}", e);
+                McpProcessHandle::Sidecar { mut child, terminated } => {
+                    log::info!("[MCP] Gracefully shutting down MCP Server sidecar (PID: {})...", child.pid());
+                    if let Err(e) = child.write(MCP_SHUTDOWN_COMMAND) {
+                        log::warn!("[MCP] Failed to send sidecar shutdown command: {}", e);
+                    }
+                    let completed = terminated.recv_timeout(MCP_SHUTDOWN_TIMEOUT).is_ok();
+                    if should_force_kill_after_graceful_wait(completed) {
+                        log::warn!("[MCP] Sidecar shutdown exceeded {:?}; force-killing", MCP_SHUTDOWN_TIMEOUT);
+                        if let Err(e) = child.kill() {
+                            log::warn!("[MCP] Failed to kill sidecar MCP Server: {}", e);
+                        }
                     }
                 }
             }
 
             log::info!("[MCP] MCP Server terminated");
         }
+    }
+}
+
+#[cfg(test)]
+mod mcp_shutdown_tests {
+    use super::should_force_kill_after_graceful_wait;
+
+    #[test]
+    fn only_an_incomplete_graceful_wait_requires_force_kill() {
+        assert!(!should_force_kill_after_graceful_wait(true));
+        assert!(should_force_kill_after_graceful_wait(false));
     }
 }
 

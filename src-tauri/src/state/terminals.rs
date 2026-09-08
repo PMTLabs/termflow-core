@@ -87,6 +87,7 @@ impl<R: Runtime> AppState<R> {
             tmux_config: Arc::new(RwLock::new(tmux_config)),
             tmux_sessions: Arc::new(DashMap::new()),
             mcp_process: Arc::new(Mutex::new(None)),
+            mcp_generation: Arc::new(AtomicU64::new(0)),
             fabric_process: Arc::new(Mutex::new(None)),
             fabric_generation: Arc::new(AtomicU64::new(0)),
             fabric_control_port: crate::app_config::resolve_fabric_control_port(),
