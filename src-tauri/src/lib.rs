@@ -83,8 +83,24 @@ pub(crate) fn mcp_alive(state: &AppState) -> bool {
 /// intentionally not an HTTP/MCP method, so an MCP client cannot kill its host.
 const MCP_SHUTDOWN_COMMAND: &[u8] = b"TERMFLOW_SHUTDOWN\n";
 /// The Node/Bun sidecar allocates 750 ms to close transports and 750 ms to close
-/// HTTP. Two seconds includes scheduler/pipe slack yet keeps UI exit bounded.
+/// HTTP. Two seconds includes scheduler/pipe slack; every shutdown path also
+/// uses a bounded termination confirmation before it reports completion.
 const MCP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn wait_for_legacy_exit(handle: &mut std::process::Child, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match handle.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => {
+                log::warn!("[MCP] Failed to poll legacy MCP Server: {e}");
+                return false;
+            }
+        }
+    }
+    false
+}
 
 fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
     !completed
@@ -121,22 +137,18 @@ fn shutdown_mcp_handle(child: McpProcessHandle) {
                     if let Err(e) = wrote {
                         log::warn!("[MCP] Failed to send legacy shutdown command: {}", e);
                     }
-                    let deadline = std::time::Instant::now() + MCP_SHUTDOWN_TIMEOUT;
-                    let mut completed = false;
-                    while std::time::Instant::now() < deadline {
-                        match handle.try_wait() {
-                            Ok(Some(_)) => { completed = true; break; }
-                            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-                            Err(e) => { log::warn!("[MCP] Failed to poll legacy MCP Server: {}", e); break; }
-                        }
-                    }
+                    let completed = wait_for_legacy_exit(&mut handle, MCP_SHUTDOWN_TIMEOUT);
                     if should_force_kill_after_graceful_wait(completed) {
                         log::warn!("[MCP] Legacy shutdown exceeded {:?}; force-killing", MCP_SHUTDOWN_TIMEOUT);
-                        if let Err(e) = handle.kill() {
+                        let killed = match handle.kill() {
+                            Ok(()) => true,
+                            Err(e) => {
                             log::warn!("[MCP] Failed to kill legacy MCP Server: {}", e);
-                        }
-                        if let Err(e) = handle.wait() {
-                            log::warn!("[MCP] Failed to wait for legacy MCP Server: {}", e);
+                                false
+                            }
+                        };
+                        if !wait_for_legacy_exit(&mut handle, MCP_SHUTDOWN_TIMEOUT) {
+                            log::warn!("[MCP] Legacy MCP Server termination unconfirmed after force-kill (kill_succeeded={killed})");
                         }
                     }
                 }
@@ -148,24 +160,45 @@ fn shutdown_mcp_handle(child: McpProcessHandle) {
                     let completed = terminated.recv_timeout(MCP_SHUTDOWN_TIMEOUT).is_ok();
                     if should_force_kill_after_graceful_wait(completed) {
                         log::warn!("[MCP] Sidecar shutdown exceeded {:?}; force-killing", MCP_SHUTDOWN_TIMEOUT);
-                        if let Err(e) = child.kill() {
+                        let killed = match child.kill() {
+                            Ok(()) => true,
+                            Err(e) => {
                             log::warn!("[MCP] Failed to kill sidecar MCP Server: {}", e);
+                                false
+                            }
+                        };
+                        if terminated.recv_timeout(MCP_SHUTDOWN_TIMEOUT).is_err() {
+                            log::warn!("[MCP] Sidecar MCP Server termination unconfirmed after force-kill (kill_succeeded={killed})");
                         }
                     }
                 }
             }
 
-            log::info!("[MCP] MCP Server terminated");
+            log::info!("[MCP] MCP Server shutdown sequence finished");
 }
 
 #[cfg(test)]
 mod mcp_shutdown_tests {
-    use super::should_force_kill_after_graceful_wait;
+    use super::{should_force_kill_after_graceful_wait, wait_for_legacy_exit};
+    use std::time::Duration;
 
     #[test]
     fn only_an_incomplete_graceful_wait_requires_force_kill() {
         assert!(!should_force_kill_after_graceful_wait(true));
         assert!(should_force_kill_after_graceful_wait(false));
+    }
+
+    #[test]
+    fn force_kill_confirmation_deadline_does_not_wait_forever_for_a_live_legacy_child() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 10 127.0.0.1 >NUL"])
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(!wait_for_legacy_exit(&mut child, Duration::from_millis(75)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        child.kill().unwrap();
+        let _ = child.wait();
     }
 }
 
