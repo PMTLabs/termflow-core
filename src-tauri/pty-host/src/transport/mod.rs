@@ -206,11 +206,9 @@ pub async fn serve(
                 // must not retain a pre-disconnect queue.
                 while events_rx.try_recv().is_ok() {}
                 while resp_rx.try_recv().is_ok() {}
-                // C3 (design §10.4): hold WHILE any child is live — never abandon
-                // a live session because the arm timer expired. Tear down only
-                // once nothing live remains to preserve. The arm deadline is still
-                // computed + reported in ArmAck for the GUI's UI, but it no longer
-                // destroys sessions here.
+                // Sibling/hotswap arms are unbounded while any child is live.
+                // A Local-purpose arm is deliberately bounded: after 900 seconds
+                // of active time its expiry tears down even live sessions.
                 let deadline = mgr.begin_local_absence().and_then(|hold| {
                     clock.now().map(|now| HoldDeadline {
                         hold,
@@ -238,12 +236,11 @@ pub async fn serve(
 }
 
 /// Wait for a GUI to reconnect while the host still owns at least one LIVE
-/// child. Unlike a destructive arm timeout, this never abandons live sessions on
-/// a timer (design §10.4): it returns `Some(stream)` on reconnect, or `None`
-/// ONLY once every hosted child has exited (nothing left to preserve → safe
-/// teardown). Liveness is re-checked on a short interval so a child that exits
-/// while detached eventually releases the host. Transient accept errors retry so
-/// a flaky reconnect does not drop held sessions.
+/// child. Sibling/hotswap holds are unbounded and return `Empty` only after all
+/// hosted children exit. A Local-purpose deadline is deliberately destructive:
+/// it returns `Expired` after its active-time bound even if children remain live.
+/// Liveness is re-checked on a short interval, and transient accept errors retry
+/// so a flaky reconnect does not drop held sessions.
 async fn wait_for_reconnect(
     listener: &mut Listener,
     mgr: &SessionManager,
