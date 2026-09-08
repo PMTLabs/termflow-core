@@ -865,17 +865,30 @@ mod tests {
         /// which is exactly how the table came to grow for the life of the profile.
         #[test]
         fn closing_a_terminal_deletes_its_edges() {
-            let commands = include_str!("commands.rs").replace("
-", "
-");
+            let terminal = include_str!("commands/terminal.rs").replace("\r\n", "\n");
             assert!(
-                commands.contains("canvas_store.delete_edges_for(&tab_id)"),
+                terminal.contains("canvas_store.delete_edges_for(&tab_id)"),
                 "close_terminal must delete the closed terminal's edges"
             );
-            // ...and it must stay the TARGETED delete. `prune_edges` takes a liveness set,
-            // so reaching for it here would reap a restored-but-unspawned peer's wires —
-            // the same trap `nothing_prunes_edges_on_startup` guards one door of.
-            assert!(!commands.contains("canvas_store.prune_edges("));
+            // ...and it must stay the TARGETED delete, crate-wide -- not just in the file
+            // close_terminal happens to live in after the commands.rs split. `prune_edges`
+            // takes a liveness set, so reaching for it ANYWHERE would reap a
+            // restored-but-unspawned peer's wires -- the same trap
+            // `nothing_prunes_edges_on_startup` guards one door of. Walked via the shared,
+            // split-proof `crate_sources()` census rather than a second `include_str!`, so a
+            // future split of THIS caller stays covered without this guard needing to
+            // remember a new path. Exempt this file: its own source names the needle in the
+            // prose/assertions above.
+            let sources = crate::automation_engine::test_host::crate_sources();
+            let hits = crate::automation_engine::test_host::files_containing(
+                &sources,
+                "canvas_store.prune_edges(",
+                &["canvas_endpoints.rs"],
+            );
+            assert!(
+                hits.is_empty(),
+                "canvas_store.prune_edges( must not be called anywhere: {hits:?}"
+            );
         }
 
         /// Startup pruning would delete exactly the edges the fix preserves: `prune_edges` takes
