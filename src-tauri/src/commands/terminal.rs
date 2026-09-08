@@ -1019,6 +1019,27 @@ mod scrollback_restore_tests {
         assert_eq!(state.claim_host_registration("S"), Ok(Some(4242)));
     }
 
+    #[test]
+    fn claim_retirement_preserves_a_replacement_until_its_owner_exits() {
+        use crate::state::{HostSessionClaim, HostSessionClaimState};
+
+        let (_app, state) = mock_state();
+        state.host_session_claims.insert("S".into(), HostSessionClaim {
+            state: HostSessionClaimState::Registered,
+            pid: 4242,
+            process_id: Some("pc-replacement".into()),
+        });
+
+        state.forget_host_session_claim_if_owner("S", "pc-stale-exit");
+        let replacement = state.host_session_claims.get("S").expect("replacement claim survives stale retirement");
+        assert_eq!(replacement.state, HostSessionClaimState::Registered);
+        assert_eq!(replacement.process_id.as_deref(), Some("pc-replacement"));
+        drop(replacement);
+
+        state.forget_host_session_claim_if_owner("S", "pc-replacement");
+        assert!(state.host_session_claims.get("S").is_none());
+    }
+
     /// The ratchet itself: stage_scrollback must seed the freshly-initialized
     /// parser with the persisted blob, so the next persist writes old + new
     /// content instead of clobbering the stored history with only new content.

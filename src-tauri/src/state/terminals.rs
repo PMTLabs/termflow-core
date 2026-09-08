@@ -131,13 +131,6 @@ mod restore_sweep_gate_tests {
 
 
     #[test]
-    fn cleanup_retires_only_its_own_registered_claim() {
-        let replacement = super::HostSessionClaim { state: super::HostSessionClaimState::Registered, pid: 9, process_id: Some("pc-replacement".into()) };
-        assert!(!super::claim_is_owned_by(&replacement, "pc-stale-exit"), "rejects unconditional cleanup: a stale exit must not erase replacement ownership");
-        assert!(super::claim_is_owned_by(&replacement, "pc-replacement"), "rejects the exit-leak implementation: cleanup of the actual owner must retire its Registered claim so Restart can claim the session");
-    }
-
-    #[test]
     fn each_sweep_restates_unowned_sessions_but_never_registered_ones() {
         assert!(super::session_needs_surface(false), "rejects already-surfaced suppression: a dropped create event must be stated again on the next sweep");
         assert!(!super::session_needs_surface(true), "rejects a sweep that spams duplicate creates after registration wins");
@@ -154,6 +147,23 @@ mod restore_sweep_gate_tests {
         let reserve = body.find("self.reserve_host_session(&orphan.tab_id, orphan.pid);").expect("orphan must reserve its listed PID");
         let emit = body.find("self.app_handle.emit").expect("orphan must emit recovery event");
         assert!(reserve < emit, "reservation must precede recovery emission");
+    }
+
+    #[test]
+    fn host_claim_retirement_uses_atomic_owner_guard_at_every_site() {
+        let source = include_str!("terminals.rs").replace("\r\n", "\n");
+        let retirement = source
+            .rfind("\n    pub fn forget_host_session_claim_if_owner")
+            .map(|start| &source[start..])
+            .and_then(|rest| rest.split("    /// Resolve either a PTY process id").next())
+            .expect("claim retirement body");
+        assert!(retirement.contains("remove_if"), "claim retirement must use DashMap::remove_if atomically");
+        let teardown = source
+            .rfind("\n    pub fn teardown_host_terminal")
+            .map(|start| &source[start..])
+            .and_then(|rest| rest.split("    /// Reconnect to an already-running").next())
+            .expect("teardown_host_terminal body");
+        assert!(!teardown.contains("forget_host_session_claim("), "teardown must not bypass the owner guard");
     }
 }
 
@@ -195,14 +205,10 @@ impl<R: Runtime> AppState<R> {
         }
     }
 
-    pub fn forget_host_session_claim(&self, session_key: &str) { self.host_session_claims.remove(session_key); }
-
     /// Retire only the registration owned by this exact process. A late Exit for
     /// an old process must not erase a replacement which reused the session key.
     pub fn forget_host_session_claim_if_owner(&self, session_key: &str, process_id: &str) {
-        if self.host_session_claims.get(session_key).is_some_and(|claim| claim_is_owned_by(&claim, process_id)) {
-            self.host_session_claims.remove(session_key);
-        }
+        self.host_session_claims.remove_if(session_key, |_, claim| claim_is_owned_by(claim, process_id));
     }
 
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
@@ -806,7 +812,7 @@ impl<R: Runtime> AppState<R> {
         self.host_terminals.remove(id);
         if let Some(key) = session_key {
             self.host_stream_offsets.remove(&key);
-            self.forget_host_session_claim(&key);
+            self.forget_host_session_claim_if_owner(&key, id);
         }
         self.cleanup_terminal_state(id);
         let _ = self.app_handle.emit(
