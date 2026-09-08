@@ -14,7 +14,8 @@
 //! - The `SessionManager` is built ONCE and outlives every connection.
 //! - The loop always holds an already-connected stream (first connected before
 //!   the loop; a reconnect connected inside the Hold branch and carried in).
-//! - The armed hold uses ONE absolute deadline; a reconnect never restarts it.
+//! - An absence generation uses ONE absolute deadline; a reconnect never restarts
+//!   it, while a newly confirmed absence deliberately starts a fresh generation.
 //! - A transient accept error during Hold does NOT tear down the sidecar — it
 //!   retries until the deadline, so held sessions survive a flaky reconnect.
 //! - On disconnect the outbound backlog is PURGED: reattach replays from the

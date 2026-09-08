@@ -268,7 +268,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     tauri::async_runtime::spawn(async move {
         match wait_for_fabric_health(control_port, &verify_state.instance_id, &build_id).await {
             crate::mcp_sidecar::SidecarAcceptance::Verified => log::info!("[FABRIC] build-verified descriptor={}", launch_path.display()),
-            crate::mcp_sidecar::SidecarAcceptance::Unverified => log::warn!("[FABRIC] owner matched but build identity unavailable; continuing unverified"),
+            crate::mcp_sidecar::SidecarAcceptance::Unverified => log::warn!("[FABRIC] health did not establish a matching build identity; continuing unverified"),
             crate::mcp_sidecar::SidecarAcceptance::Rejected => {
                 log::error!("[FABRIC] foreign or mismatched listener; stopping only our spawned generation");
                 let _ = stop_tx.send(true);

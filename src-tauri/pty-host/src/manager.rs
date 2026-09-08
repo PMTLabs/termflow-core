@@ -63,8 +63,8 @@ pub struct SessionManager {
     armed_deadline: Option<Instant>,
     /// Epoch-ms mirror of `armed_deadline` for honest `ArmAck` reporting.
     armed_deadline_ms: Option<u64>,
-    /// Protocol groundwork for the future bounded lifecycle. Recording this
-    /// must not alter today's indefinite hold behavior.
+    /// The local-purpose lifecycle uses this state to establish a bounded
+    /// destructive absence deadline; other purposes remain non-destructive.
     armed_purpose: Option<ArmDetachPurpose>,
     armed_at: Option<Instant>,
     /// Recorded when the GUI absence is confirmed (pipe disconnect), never at
