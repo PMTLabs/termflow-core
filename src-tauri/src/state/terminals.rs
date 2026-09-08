@@ -142,6 +142,19 @@ mod restore_sweep_gate_tests {
         assert!(super::session_needs_surface(false), "rejects already-surfaced suppression: a dropped create event must be stated again on the next sweep");
         assert!(!super::session_needs_surface(true), "rejects a sweep that spams duplicate creates after registration wins");
     }
+
+    #[test]
+    fn surfaced_orphans_are_reserved_before_the_recovery_event_is_emitted() {
+        let source = include_str!("terminals.rs").replace("\r\n", "\n");
+        let body = source
+            .rfind("\n    pub(crate) fn surface_host_orphans")
+            .map(|start| &source[start..])
+            .and_then(|rest| rest.split("    /// Clone out the connected client").next())
+            .expect("surface_host_orphans body");
+        let reserve = body.find("self.reserve_host_session(&orphan.tab_id, orphan.pid);").expect("orphan must reserve its listed PID");
+        let emit = body.find("self.app_handle.emit").expect("orphan must emit recovery event");
+        assert!(reserve < emit, "reservation must precede recovery emission");
+    }
 }
 
 impl<R: Runtime> AppState<R> {
@@ -1041,13 +1054,17 @@ impl<R: Runtime> AppState<R> {
     }
 
     /// The sole UI emission path for live host sessions that no known tab claims.
-    fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
+    pub(crate) fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
         use tauri::Emitter;
         for orphan in orphans {
             // A terminal can be created between a listing and this UI pass.
             // The current ownership map, rather than a restore snapshot, is
             // authoritative at the point recovery would become visible.
             if !session_needs_surface(self.host_sessions_by_key().contains_key(&orphan.tab_id)) { continue; }
+            // This emission carries the authoritative PID from the host listing.
+            // Reserve it so a recovery create can never degrade into a fresh spawn
+            // merely because the reservation was absent.
+            self.reserve_host_session(&orphan.tab_id, orphan.pid);
             let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
             if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": "Recovered terminal", "profile": "default", "processId": leaf_id,

@@ -1009,6 +1009,16 @@ mod scrollback_restore_tests {
         );
     }
 
+    #[test]
+    fn surfacing_an_orphan_reserves_the_listed_pid_for_reattach() {
+        let (_app, state) = mock_state();
+        state.surface_host_orphans(vec![termflow_pty_protocol::SessionMeta {
+            tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
+        }]);
+
+        assert_eq!(state.claim_host_registration("S"), Ok(Some(4242)));
+    }
+
     /// The ratchet itself: stage_scrollback must seed the freshly-initialized
     /// parser with the persisted blob, so the next persist writes old + new
     /// content instead of clobbering the stored history with only new content.
