@@ -170,7 +170,7 @@ describe('SnippetsPanel', () => {
         expect(container.textContent).toContain('0 uses');
         expect(rows()[1].querySelector('.snippets-uses')!.getAttribute('title')).toBe('Never used');
         expect(rows()[0].querySelector('.snippets-created')).not.toBeNull();
-        await click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Copy') ?? null);
+        await click(container.querySelector('[aria-label="Copy One"]'));
         await flush();
         expect(writeClipboardText).toHaveBeenCalledWith('copy this');
         expect(store.getState().settings.snippets[0].usageCount).toBe(1);
@@ -180,7 +180,7 @@ describe('SnippetsPanel', () => {
         const target = snip({ id: 'a', text: 'echo target', label: 'My Label', folder: 'git', tags: ['x', 'y'] });
         await mount(makeStore([target]));
 
-        const editBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Edit');
+        const editBtn = container.querySelector('[aria-label="Edit My Label"]');
         await click(editBtn ?? null);
 
         const textarea = document.querySelector('.snippet-dialog-textarea') as HTMLTextAreaElement;
@@ -222,7 +222,7 @@ describe('SnippetsPanel', () => {
         const store = makeStore([target]);
         await mount(store);
 
-        const editBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Edit');
+        const editBtn = container.querySelector('[aria-label="Edit old text"]');
         await click(editBtn ?? null);
 
         const textarea = document.querySelector('.snippet-dialog-textarea') as HTMLTextAreaElement;
@@ -246,7 +246,7 @@ describe('SnippetsPanel', () => {
         const store = makeStore([target]);
         await mount(store);
 
-        const deleteBtn = container.querySelector('.agent-schema-remove');
+        const deleteBtn = container.querySelector('[aria-label="Delete delete me"]');
         await click(deleteBtn);
 
         expect(document.querySelector('.confirm-dialog')).not.toBeNull();
@@ -259,7 +259,7 @@ describe('SnippetsPanel', () => {
         expect(document.querySelector('.confirm-dialog')).toBeNull();
 
         // Reopen and actually confirm.
-        const deleteBtn2 = container.querySelector('.agent-schema-remove');
+        const deleteBtn2 = container.querySelector('[aria-label="Delete delete me"]');
         await click(deleteBtn2);
         const confirmBtn = document.querySelector('[data-dialog-confirm]');
         await click(confirmBtn);
@@ -323,7 +323,7 @@ describe('SnippetsPanel', () => {
         ]);
         await mount(store);
 
-        const renameBtn = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Rename');
+        const renameBtn = container.querySelector('[aria-label="Rename folder git"]');
         await click(renameBtn ?? null);
 
         const renameInput = container.querySelector('.snippets-folder-rename-input') as HTMLInputElement;
@@ -366,5 +366,53 @@ describe('SnippetsPanel', () => {
             });
         });
         expect(container.textContent).toContain('added-after-mount');
+    });
+
+    it('uses accessible icon names and does not repeat a folder chip on every row', async () => {
+        await mount(makeStore([snip({ id: 'named', label: 'Named', folder: 'Git' })]));
+        expect(container.querySelector('.snippets-folder-chip')).toBeNull();
+        for (const name of ['Copy Named', 'Edit Named', 'Delete Named', 'Rename folder Git']) {
+            expect(container.querySelector(`[aria-label="${name}"]`)).not.toBeNull();
+        }
+    });
+
+    it('hides the pager through 500 rows, pages thereafter, and repeats split folder headers', async () => {
+        await mount(makeStore(Array.from({ length: 500 }, (_, i) => snip({ id: `small-${i}`, text: `small-${i}`, createdAt: i }))));
+        expect(container.querySelector('.snippets-pager')).toBeNull();
+        await act(async () => root.unmount());
+        container.remove();
+        container = document.createElement('div'); document.body.appendChild(container);
+
+        const many = Array.from({ length: 501 }, (_, i) => snip({ id: `many-${i}`, text: `many-${i}`, folder: 'Git', createdAt: i }));
+        await mount(makeStore(many));
+        expect(rows()).toHaveLength(500);
+        expect(groupLabels()).toEqual(['Git']);
+        const prev = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Prev')!;
+        const next = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Next')!;
+        expect(prev.disabled).toBe(true);
+        await click(next);
+        expect(rows()).toHaveLength(1);
+        expect(groupLabels()).toEqual(['Git']);
+        expect(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Next')!.disabled).toBe(true);
+    });
+
+    it('resets pagination when search or sort changes', async () => {
+        const many = Array.from({ length: 501 }, (_, i) => snip({ id: `page-${i}`, text: `page-${i}`, createdAt: i }));
+        await mount(makeStore(many));
+        await click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Next')!);
+        expect(container.textContent).toContain('Page 2 of 2');
+        const search = container.querySelector('[aria-label="Search snippets"]') as HTMLInputElement;
+        await act(async () => {
+            const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+            set.call(search, 'page'); search.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        expect(container.textContent).toContain('Page 1 of 2');
+        await click(Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Next')!);
+        const sort = container.querySelector('[aria-label="Sort snippets by"]') as HTMLSelectElement;
+        await act(async () => {
+            const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+            set.call(sort, 'name'); sort.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        expect(container.textContent).toContain('Page 1 of 2');
     });
 });

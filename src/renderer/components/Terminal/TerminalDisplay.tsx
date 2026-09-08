@@ -128,6 +128,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
   const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
   const [snippetSeedText, setSnippetSeedText] = useState<string | undefined>(undefined);
+  // Dialog exits need to know whether a flyout remains mounted, but including either menu state
+  // in their stable callback would churn the close handler passed into the portalled dialog.
+  const contextMenuOpenRef = useRef(false);
+  const snippetsMenuOpenRef = useRef(false);
   /**
    * The Snippets flyout opened by the KEYBOARD (plan/029 §6), as opposed to by a
    * right-click. Its own slot rather than a flag on `contextMenu`: it is a different
@@ -238,6 +242,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * the ref is what lets that one path opt out of the refocus.
    */
   const snippetDialogOpenRef = useRef(false);
+  useEffect(() => {
+    contextMenuOpenRef.current = contextMenu !== null;
+    snippetsMenuOpenRef.current = snippetsMenu !== null;
+  }, [contextMenu, snippetsMenu]);
   /**
    * Put the keyboard back in the terminal.
    *
@@ -285,7 +293,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     snippetDialogOpenRef.current = false;
     setSnippetDialogOpen(false);
     setSnippetSeedText(undefined);
-    refocusTerminal();
+    // An open flyout's search input is the next keyboard destination. Refocusing the terminal
+    // here would leave that visible menu unable to receive typing after its dialog closes.
+    if (!contextMenuOpenRef.current && !snippetsMenuOpenRef.current) refocusTerminal();
   }, [refocusTerminal]);
   /**
    * Open the terminal's context menu at a point in VIEWPORT coordinates.
@@ -811,7 +821,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     sortMode: snippetsSortMode,
     insert: (text) => insertTextIntoTerminal(terminalId, text),
     onUse: (id) => dispatch(recordSnippetUse(id)),
-    onAddNew: (seedText) => { openSnippetDialog(seedText); closeMenu(); },
+    onAddNew: (seedText) => openSnippetDialog(seedText),
     onToggleViewMode: () => dispatch(
       setSnippetsViewMode(snippetsViewMode === 'flat' ? 'folders' : 'flat'),
     ),
@@ -1075,6 +1085,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           y={contextMenu.y}
           items={getContextMenuItems()}
           onClose={closeContextMenu}
+          suppressDismiss={snippetDialogOpen}
         />
       )}
       {/* plan/029 §6 — the same flyout the right-click menu carries, opened straight from
@@ -1086,6 +1097,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           items={[snippetsMenuItem(closeSnippetsMenu, snippetsMenu.selectionText)]}
           standaloneSubmenu={0}
           onClose={closeSnippetsMenu}
+          suppressDismiss={snippetDialogOpen}
         />
       )}
       {pathPicker && (

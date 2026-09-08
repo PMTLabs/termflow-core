@@ -174,8 +174,29 @@
   display: flex;
   align-items: stretch;
   gap: 4px;
+  position: relative;
   margin: 2px 8px 6px;
   flex-wrap: nowrap;
+}
+
+.context-menu-flyout-flash {
+  position: absolute;
+  /* Anchored to the header's LEFT, under the search box, while the actions that raise it
+     sit at the right. A native tooltip renders under the POINTER, which is over one of
+     those buttons — so keeping the flash at the opposite end means even a tooltip left
+     over from before the click cannot land on top of it. */
+  left: 0;
+  top: calc(100% + 4px);
+  z-index: 1;
+  pointer-events: none;
+  white-space: nowrap;
+  border: 1px solid var(--menu-border, #454545);
+  border-radius: 3px;
+  background: var(--menu-background, #252526);
+  color: var(--menu-accelerator-color, #969696);
+  font-size: 0.72rem;
+  line-height: 1;
+  padding: 3px 5px;
 }
 
 .context-menu-flyout-search {

@@ -51,9 +51,9 @@ afterEach(async () => {
     jest.restoreAllMocks();
 });
 
-async function render(items: ContextMenuItem[]) {
+async function render(items: ContextMenuItem[], suppressDismiss = false) {
     await act(async () => {
-        root.render(<ContextMenu x={10} y={10} items={items} onClose={onClose} />);
+        root.render(<ContextMenu x={10} y={10} items={items} onClose={onClose} suppressDismiss={suppressDismiss} />);
     });
 }
 
@@ -80,6 +80,88 @@ const rows = (depth = 0) =>
 const labels = (depth = 0) =>
     rows(depth).map((r) => r.querySelector('.context-menu-flyout-label')!.textContent);
 const activeIndex = (depth = 0) => rows(depth).findIndex((r) => r.classList.contains('is-active'));
+
+describe('dismissal suppression and action flashes', () => {
+    const flyout = (actions: NonNullable<ContextMenuItem['submenu']>['headerActions'] = []) => ({
+        rows: [row('one', 'One')],
+        headerActions: actions,
+    });
+
+    it('suppresses outside mousedown and Escape only while asked', async () => {
+        await render(menuWith(flyout()), true);
+        await click(menuItem('Snippets'));
+        await mousedown(document.body);
+        await key(document, 'Escape');
+        expect(onClose).not.toHaveBeenCalled();
+
+        await render(menuWith(flyout()));
+        await click(menuItem('Snippets'));
+        await mousedown(document.body);
+        expect(onClose).toHaveBeenCalledTimes(1);
+        onClose.mockClear();
+        await key(document, 'Escape');
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns focus to the flyout search when dismissal suppression ends', async () => {
+        await render(menuWith(flyout()), true);
+        await click(menuItem('Snippets'));
+        const input = search();
+        document.body.focus();
+        await render(menuWith(flyout()));
+        expect(document.activeElement).toBe(input);
+    });
+
+    it('shows flashes transiently and reads their current-render text', async () => {
+        jest.useFakeTimers();
+        const first = { id: 'sort', icon: '⇅', title: 'Sort', flash: 'Sorted by: Old', onSelect: jest.fn() };
+        await render(menuWith(flyout([first])));
+        await click(menuItem('Snippets'));
+        await click(panel()!.querySelector('[data-action-id="sort"]')!);
+        expect(document.body.textContent).toContain('Sorted by: Old');
+
+        // A store-backed action is rebuilt after dispatch. This proves the pill resolves the
+        // current action object instead of preserving the pre-dispatch string from the click.
+        const changed = { ...first, flash: 'Sorted by: New' };
+        await render(menuWith(flyout([changed])));
+        expect(document.body.textContent).toContain('Sorted by: New');
+        act(() => jest.advanceTimersByTime(1600));
+        expect(document.body.textContent).not.toContain('Sorted by: New');
+        jest.useRealTimers();
+    });
+
+    it('withholds the flashing button’s native title, so the tooltip cannot cover the flash', async () => {
+        // Both render just below the button, so a tooltip earned by hovering long enough to read
+        // it then sits ON the confirmation the click produced. `title` is the redundant one while
+        // a flash is up: it says what the button WILL do, the flash says what it just DID.
+        // `aria-label` is not negotiable and must survive, or the button loses its accessible
+        // name in the middle of an interaction.
+        jest.useFakeTimers();
+        const action = { id: 'sort', icon: '⇅', title: 'Sorted by: Old. Click to sort by New.', flash: 'Sorted by: New', onSelect: jest.fn() };
+        await render(menuWith(flyout([action])));
+        await click(menuItem('Snippets'));
+        const btn = panel()!.querySelector('[data-action-id="sort"]') as HTMLElement;
+        expect(btn.getAttribute('title')).toBe(action.title);
+        expect(btn.getAttribute('aria-label')).toBe(action.title);
+
+        await click(btn);
+        expect(document.body.textContent).toContain('Sorted by: New');
+        expect(btn.hasAttribute('title')).toBe(false);
+        // The name a screen reader reads is unaffected by the visual suppression.
+        expect(btn.getAttribute('aria-label')).toBe(action.title);
+
+        act(() => jest.advanceTimersByTime(1600));
+        expect(btn.getAttribute('title')).toBe(action.title);
+        jest.useRealTimers();
+    });
+
+    it('does not show a flash for an action without one', async () => {
+        await render(menuWith(flyout([{ id: 'plain', icon: 'x', title: 'Plain', onSelect: jest.fn() }])));
+        await click(menuItem('Snippets'));
+        await click(panel()!.querySelector('[data-action-id="plain"]')!);
+        expect(document.querySelector('.context-menu-flyout-flash')).toBeNull();
+    });
+});
 
 /* ── Event helpers ────────────────────────────────────────────────────────── */
 

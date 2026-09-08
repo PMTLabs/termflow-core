@@ -140,7 +140,7 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
     expect(footer.disabled).toBeFalsy();
     footer.onSelect!();
     expect(onAddNew).toHaveBeenCalled();
-    expect(footer.closeMenuOnSelect).toBe(true);
+    expect(footer.closeMenuOnSelect).toBe(false);
   });
 });
 
@@ -165,6 +165,7 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     expect(actions.map(action => action.id)).toEqual(['view-mode', 'sort-mode', 'add-snippet', 'open-settings']);
     expect(actions[1].title).toContain('Created date');
     expect(actions[1].title).toContain('Updated date');
+    expect(actions[1].flash).toBe('Sorted by: Created date');
     expect(actions[2].title).toContain('selected text');
     actions[2].onSelect();
     item.submenu!.footerRows![0].onSelect!();
@@ -638,11 +639,35 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(DISPLAY).toMatch(/setSnippetsViewMode\(snippetsViewMode === 'flat' \? 'folders' : 'flat'\)/);
   });
 
-  it('opens the dialog before host menu dismissal so the refocus guard is armed', () => {
+  it('keeps the host menu open when the dialog opens, while Settings still dismisses it', () => {
     const start = DISPLAY.indexOf('onAddNew: (seedText) =>');
     expect(start).toBeGreaterThan(-1);
     const body = DISPLAY.slice(start, DISPLAY.indexOf('onToggleViewMode:', start));
-    expect(body.indexOf('openSnippetDialog(seedText)')).toBeLessThan(body.indexOf('closeMenu()'));
+    expect(body).toMatch(/onAddNew: \(seedText\) => openSnippetDialog\(seedText\)/);
+    expect(body).not.toContain('closeMenu()');
+    expect(DISPLAY).toMatch(/onOpenSettings: \(\) => \{ closeMenu\(\); openSettingsTab\('snippets'\); \}/);
+    expect((DISPLAY.match(/suppressDismiss=\{snippetDialogOpen\}/g) ?? [])).toHaveLength(2);
+  });
+
+  /**
+   * The other half of "the menu survives the dialog", and the half a mutation probe found
+   * unpinned: leaving the menu up is worthless if the keyboard is taken off it on the way out.
+   *
+   * `closeSnippetDialog` ends by putting focus back in the terminal, which is right when the
+   * dialog was the only thing on screen and wrong when a flyout is still standing — the user
+   * would be looking at a search box that silently receives nothing. Removing the guard leaves
+   * every other assertion in this file green, which is why it needs one of its own.
+   */
+  it('does not pull focus back to the terminal while a flyout is still mounted', () => {
+    const start = DISPLAY.indexOf('const closeSnippetDialog = useCallback(');
+    expect(start).toBeGreaterThan(-1);
+    const body = DISPLAY.slice(start, DISPLAY.indexOf('}, [refocusTerminal]);', start));
+    // The call must be REACHED THROUGH a test of both menus, not merely sit near one.
+    expect(body).toMatch(
+      /if \(!contextMenuOpenRef\.current && !snippetsMenuOpenRef\.current\)\s*refocusTerminal\(\);/,
+    );
+    // ...and it must be the only route to it, or the guard is decorative.
+    expect((body.match(/refocusTerminal\(\)/g) ?? [])).toHaveLength(1);
   });
 
   /**

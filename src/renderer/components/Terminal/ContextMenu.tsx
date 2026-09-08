@@ -62,17 +62,11 @@ export interface ContextMenuFlyoutRow {
    *
    * *The argument that failed.* Several rows here open a surface of their own: a modal
    * editor (`AutomationMenuSection`'s rule and "New automation" rows) or a dialog
-   * (`snippetsHistoryMenu`'s "Add New Snippet"). This menu does not close itself when
-   * something is portalled on top of it, and while it is up it holds a document-level
-   * `mousedown` trap and a document-level Escape handler. It is tempting to conclude that
-   * the dismissal must therefore be asked for FIRST, so the modal never mounts under a live
-   * menu. It does not follow: `onCloseMenu()` is a queued `setState`, and React does not
-   * flush it until the end of the discrete event. Probing the real component — counting
-   * live document listeners from inside a row's `onSelect` — shows the menu still mounted
-   * with BOTH handlers installed at the moment the row opens its surface, **whichever order
-   * the two calls are in**. Reordering bought nothing here, and the paragraph that used to
-   * stand in this space claimed otherwise while conceding two lines later that React batches
-   * the two commits into one.
+   * (`snippetsHistoryMenu`'s "Add New Snippet"). Most menus do keep their normal outside-click
+   * and Escape dismissal while a portalled surface is mounting. The deliberate exception is a
+   * host that leaves its menu alive under that surface: it passes `suppressDismiss`, which
+   * removes those document listeners for the modal's lifetime. That is a caller's explicit
+   * policy choice, not an invariant every modal-opening row can assume.
    *
    * *What order genuinely decides* is a close callback that does synchronous non-React
    * work, and there the action-first order is the correct one rather than the arbitrary
@@ -110,6 +104,9 @@ export interface ContextMenuFlyoutAction {
   id: string;
   /** Present means toggle semantics; absent keeps this a plain action button. */
   pressed?: boolean;
+  /** Transient text shown beside the header after this action fires (e.g. "Sorted by: Usage count").
+   *  Read from the CURRENT render, so an action that changes state shows the state it changed TO. */
+  flash?: string;
   onSelect: () => void;
 }
 
@@ -199,6 +196,16 @@ interface ContextMenuProps {
    * would leave nothing on screen and a live outside-click handler behind it.
    */
   standaloneSubmenu?: number;
+  /**
+   * Suspend this menu's own dismissal while something modal is open ON TOP of it.
+   *
+   * The two document-level listeners below close the menu on any outside mousedown or on Escape.
+   * A dialog opened FROM a menu item is portalled, so it is "outside" by that test — every click
+   * into it, and its own Escape, would tear down the menu the dialog was opened from. Callers that
+   * deliberately keep the menu alive under a dialog (Snippets → Add New Snippet) pass this while
+   * that dialog is open, and the listeners are simply not installed for its duration.
+   */
+  suppressDismiss?: boolean;
 }
 
 /** Keep-on-screen margin, matching the menu's own 5px in the effect below. */
@@ -263,6 +270,8 @@ interface FlyoutPanelProps {
   /** Dismiss the entire context menu — called for a `closeMenuOnSelect` row, before that
    *  row's own `onSelect` runs. */
   onCloseMenu: () => void;
+  /** Mirrors the host's dismissal suspension so focus returns when its modal closes. */
+  suppressDismiss?: boolean;
 }
 
 /**
@@ -314,6 +323,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   parentFlippedLeft = false,
   onCloseSelf,
   onCloseMenu,
+  suppressDismiss = false,
 }) => {
   const uid = useId();
   // One per PANEL, not one shared down the cascade: each panel owns the rows it draws, and a
@@ -325,6 +335,9 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
+  const [flashedActionId, setFlashedActionId] = useState<string | null>(null);
+  const flashTimer = useRef<number | null>(null);
+  const wasDismissSuppressed = useRef(suppressDismiss);
   /**
    * Was the active row reached by the KEYBOARD?
    *
@@ -342,6 +355,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   });
 
   const { rows, emptyRow, footerRows, searchPlaceholder, headerActions, narrow } = flyout;
+  const flash = flashedActionId ? headerActions?.find((action) => action.id === flashedActionId)?.flash : undefined;
 
   // The visible list: matches (or the empty-state row) followed by the never-filtered footer.
   const visible = useMemo(() => {
@@ -367,6 +381,17 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
 
   useEffect(() => {
     inputRef.current?.focus();
+  }, []);
+
+  // The modal owns focus while dismissal is suppressed. Once it closes, the still-visible
+  // flyout needs its search box back or it remains on screen but cannot receive typing.
+  useEffect(() => {
+    if (wasDismissSuppressed.current && !suppressDismiss) inputRef.current?.focus();
+    wasDismissSuppressed.current = suppressDismiss;
+  }, [suppressDismiss]);
+
+  useEffect(() => () => {
+    if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
   }, []);
 
   // A new query means a new result set; the selection restarts at the top match.
@@ -594,15 +619,36 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
         />
+        {flash && <span className="context-menu-flyout-flash" aria-live="polite">{flash}</span>}
         {headerActions?.map((action) => (
           <button key={action.id} type="button"
             className={`context-menu-flyout-toggle${action.pressed === true ? ' is-on' : ''}`}
-            title={action.title} aria-label={action.title}
+            // The flash and this native tooltip both render just below the button, so a
+            // tooltip earned by hovering long enough to read it then sits ON the confirmation
+            // the click produced. Withholding `title` for the flash's lifetime is the same
+            // move `useTooltipDwell` already makes for rows — the attribute is the only way to
+            // suppress a native tooltip, and while a flash is up it is the redundant one of the
+            // two: `title` says what the button WILL do, the flash says what it just DID.
+            // `aria-label` is unconditional — the accessible name must never blink out.
+            title={flashedActionId === action.id ? undefined : action.title}
+            aria-label={action.title}
             aria-pressed={typeof action.pressed === 'boolean' ? action.pressed : undefined}
             data-action-id={action.id} tabIndex={-1}
             // Keep focus in search while header actions operate on the list around it.
             onMouseDown={(e) => e.preventDefault()}
-            onClick={(e) => { e.stopPropagation(); action.onSelect(); inputRef.current?.focus(); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              action.onSelect();
+              if (action.flash) {
+                if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
+                setFlashedActionId(action.id);
+                flashTimer.current = window.setTimeout(() => {
+                  flashTimer.current = null;
+                  setFlashedActionId(null);
+                }, 1600);
+              }
+              inputRef.current?.focus();
+            }}
           >{action.icon}</button>
         ))}
       </div>
@@ -634,6 +680,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           parentFlippedLeft={flip.left}
           onCloseSelf={closeFolder}
           onCloseMenu={onCloseMenu}
+          suppressDismiss={suppressDismiss}
         />
       )}
     </div>
@@ -647,6 +694,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   onClose,
   instantTitles = false,
   standaloneSubmenu,
+  suppressDismiss = false,
 }) => {
   /** No menu chrome, no items — one flyout, at the requested point. */
   const bare = standaloneSubmenu != null;
@@ -717,6 +765,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   }, []);
 
   useEffect(() => {
+    if (suppressDismiss) return;
     const handleClick = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
@@ -736,7 +785,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       document.removeEventListener('mousedown', handleClick);
       document.removeEventListener('keydown', handleEscape);
     };
-  }, [onClose]);
+  }, [onClose, suppressDismiss]);
 
   // Adjust position to keep menu on screen
   useEffect(() => {
@@ -862,6 +911,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                 // therefore mean "dismiss", which is what they already meant to the user.
                 onCloseSelf={bare ? onClose : () => setOpenSubmenu(null)}
                 onCloseMenu={onClose}
+                suppressDismiss={suppressDismiss}
               />
             )}
           </div>

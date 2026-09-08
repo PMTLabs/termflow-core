@@ -10,8 +10,25 @@
   margin: 0.5rem 0 0.75rem;
 }
 
-.snippets-toolbar .link-btn:disabled {
+.snippets-toolbar-btn {
+  flex-shrink: 0;
+  background-color: #333;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #ddd;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.snippets-toolbar-btn:hover:not(:disabled) {
+  background-color: #454545;
+  border-color: #666;
+}
+
+.snippets-toolbar-btn:disabled {
   color: #666;
+  border-color: #3b3b3b;
+  background-color: #292929;
   cursor: default;
 }
 
@@ -28,16 +45,33 @@
 .snippets-group-header {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.4rem;
   margin-bottom: 0.35rem;
 }
 
+/* The heading's own rename affordance. Dimmed until the header is hovered so the
+   heading reads as a label first and a control second. */
+.snippets-group-header .snippets-icon-btn {
+  font-size: 0.95rem;
+  color: #8a8a8a;
+  opacity: 0.7;
+}
+
+.snippets-group-header:hover .snippets-icon-btn {
+  opacity: 1;
+  color: #ddd;
+}
+
 .snippets-group-label {
-  font-size: 0.8rem;
+  font-size: 0.95rem;
   font-weight: 600;
+  /* Upper-case is what makes this read as a SECTION heading rather than as another
+     snippet label: the rows below it are mixed-case, so case alone separates the two
+     without needing a second colour or a rule. The wider tracking is what keeps
+     upper-case legible at this size. */
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: #9a9a9a;
+  letter-spacing: 0.05em;
+  color: #ddd;
 }
 
 .snippets-folder-rename-input {
@@ -64,15 +98,6 @@
   font-weight: 600;
 }
 
-.snippets-folder-chip {
-  font-size: 0.75rem;
-  color: #8a8a8a;
-  background-color: #2a2a2a;
-  border-radius: 3px;
-  padding: 1px 6px;
-  flex-shrink: 0;
-}
-
 .snippets-tags {
   font-size: 0.75rem;
   color: #6cb6ff;
@@ -90,7 +115,7 @@
   border: 1px solid #444;
   border-radius: 4px;
   color: #ddd;
-  padding: 3px 6px;
+  padding: 5px 6px;
 }
 
 .snippets-sort {
@@ -108,4 +133,36 @@
   color: #8a8a8a;
   font-size: 0.75rem;
   white-space: nowrap;
+}
+
+/* Pulls the icon cluster together: the row's own 0.6rem gap is meant to separate
+   unrelated columns (label, tags, date, uses), and applying it between three buttons
+   that act on the SAME snippet made them read as three separate columns too. */
+.snippets-row .snippets-icon-btn + .snippets-icon-btn {
+  margin-left: -0.35rem;
+}
+
+.snippets-icon-btn {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 2px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #ddd;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.snippets-icon-btn:hover {
+  background-color: #454545;
+}
+
+.snippets-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  color: #aaa;
+  font-size: 0.85rem;
 }

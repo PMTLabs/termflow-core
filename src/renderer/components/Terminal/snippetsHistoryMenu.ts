@@ -131,7 +131,7 @@ export function buildSnippetsMenuItem(opts: {
       headerActions: [
         { id: 'view-mode', icon: flat ? '☰' : '📁', pressed: flat,
           title: flat ? 'Flat list. Click to group snippets by folder.' : 'Grouped by folder. Click to show every snippet in one flat list.', onSelect: onToggleViewMode },
-        { id: 'sort-mode', icon: '⇅', title: `Sorted by: ${SNIPPET_SORT_LABELS[sortMode]}. Click to sort by ${SNIPPET_SORT_LABELS[nextSnippetSortMode(sortMode)]}.`, onSelect: onCycleSortMode },
+        { id: 'sort-mode', icon: '⇅', title: `Sorted by: ${SNIPPET_SORT_LABELS[sortMode]}. Click to sort by ${SNIPPET_SORT_LABELS[nextSnippetSortMode(sortMode)]}.`, flash: `Sorted by: ${SNIPPET_SORT_LABELS[sortMode]}`, onSelect: onCycleSortMode },
         { id: 'add-snippet', icon: '➕', title: selectionText ? 'Add a new snippet from the selected text.' : 'Add a new snippet.', onSelect: () => onAddNew(selectionText) },
         { id: 'open-settings', icon: '⚙️', title: 'Manage snippets in Settings.', onSelect: onOpenSettings },
       ],
@@ -158,7 +158,9 @@ export function buildSnippetsMenuItem(opts: {
           label: 'Add New Snippet',
           icon: '➕',
           onSelect: () => onAddNew(selectionText),
-          closeMenuOnSelect: true,
+          // This dialog adds the snippet the user will immediately pick from this same menu;
+          // closing it here would discard the surface whose newly-created row they need.
+          closeMenuOnSelect: false,
         },
       ],
     },
