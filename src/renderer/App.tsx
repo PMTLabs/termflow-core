@@ -38,8 +38,10 @@ import {
   setAgentColorSchemes,
   setSnippets,
   setSnippetsViewMode,
+  setSnippetsSortMode,
   isValidSnippet,
   isSnippetsViewMode,
+  isSnippetSortMode,
   setCustomKeybindings,
   setKeepRunningInBackground,
   setNotifySoundEnabled,
@@ -616,6 +618,9 @@ const App: React.FC = () => {
         }
         if (isSnippetsViewMode(config.snippetsViewMode)) {
           dispatch(setSnippetsViewMode(config.snippetsViewMode));
+        }
+        if (isSnippetSortMode(config.snippetsSortMode)) {
+          dispatch(setSnippetsSortMode(config.snippetsSortMode));
         }
         if (config.customKeybindings && typeof config.customKeybindings === 'object') {
           // Drop any actionId not in the current registry (stale config from a

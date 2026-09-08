@@ -1,7 +1,19 @@
 // Plan 029 §4.6 — pure search/ranking module for the Snippets flyout submenu.
 // No DOM, no Redux: everything here is exhaustively unit-testable data-in/data-out.
 
-import type { Snippet } from '../store/slices/settingsSlice';
+import type { Snippet, SnippetSortMode } from '../store/slices/settingsSlice';
+
+export const SNIPPET_SORT_MODES: readonly SnippetSortMode[] =
+  ['lastUsed', 'usageCount', 'created', 'updated', 'name'];
+
+export const SNIPPET_SORT_LABELS: Record<SnippetSortMode, string> = {
+  lastUsed: 'Last used', usageCount: 'Usage count', created: 'Created date', updated: 'Updated date', name: 'Name (A–Z)',
+};
+
+export function nextSnippetSortMode(mode: SnippetSortMode): SnippetSortMode {
+  const index = SNIPPET_SORT_MODES.indexOf(mode);
+  return SNIPPET_SORT_MODES[(index + 1) % SNIPPET_SORT_MODES.length];
+}
 
 const DISPLAY_LABEL_MAX = 60;
 
@@ -268,6 +280,25 @@ export function snippetDisplayLabel(s: Snippet): string {
   if (!firstLine) return '(empty snippet)';
   if (firstLine.length <= DISPLAY_LABEL_MAX) return firstLine;
   return firstLine.slice(0, DISPLAY_LABEL_MAX - 1).trimEnd() + '…';
+}
+
+/** Return a total, immutable browse ordering. Search ranking is intentionally separate. */
+export function sortSnippets(snippets: Snippet[], mode: SnippetSortMode): Snippet[] {
+  return [...snippets].sort((a, b) => {
+    let result = 0;
+    if (mode === 'lastUsed') {
+      const aUsed = a.lastUsedAt !== undefined;
+      const bUsed = b.lastUsedAt !== undefined;
+      result = aUsed !== bUsed ? (aUsed ? -1 : 1) : (b.lastUsedAt ?? b.createdAt) - (a.lastUsedAt ?? a.createdAt);
+    } else if (mode === 'usageCount') {
+      result = (b.usageCount ?? 0) - (a.usageCount ?? 0)
+        || (b.lastUsedAt ?? -Infinity) - (a.lastUsedAt ?? -Infinity)
+        || b.createdAt - a.createdAt;
+    } else if (mode === 'created') result = b.createdAt - a.createdAt;
+    else if (mode === 'updated') result = (b.updatedAt ?? b.createdAt) - (a.updatedAt ?? a.createdAt);
+    else result = snippetDisplayLabel(a).localeCompare(snippetDisplayLabel(b), undefined, { sensitivity: 'base' });
+    return result || a.id.localeCompare(b.id);
+  });
 }
 
 /** Derived, de-duplicated, sorted folder vocabulary. Absent/'' folder is "unfiled" and

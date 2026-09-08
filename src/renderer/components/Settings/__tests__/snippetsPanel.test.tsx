@@ -25,6 +25,8 @@ jest.mock('../../UI/ConfirmDialog.css', () => ({}));
 // snippetPorting's own test file).
 const exportSnippets = jest.fn();
 const importSnippets = jest.fn();
+const writeClipboardText = jest.fn(() => Promise.resolve());
+jest.mock('../../../utils/clipboard', () => ({ writeClipboardText: (...args: unknown[]) => writeClipboardText(...args) }));
 jest.mock('../../../services/snippetPorting', () => ({
     exportSnippets: (...args: unknown[]) => exportSnippets(...args),
     importSnippets: (...args: unknown[]) => importSnippets(...args),
@@ -63,6 +65,7 @@ describe('SnippetsPanel', () => {
         document.body.appendChild(container);
         exportSnippets.mockReset();
         importSnippets.mockReset();
+        writeClipboardText.mockClear();
     });
 
     afterEach(async () => {
@@ -115,6 +118,62 @@ describe('SnippetsPanel', () => {
 
         expect(groupLabels()).toEqual(['docker', 'git', 'Unfiled']);
         expect(rows()).toHaveLength(3);
+    });
+
+    it('filters rows and omits folder headers with no surviving snippets', async () => {
+        await mount(makeStore([
+            snip({ id: 'git', label: 'git status', text: 'git status', folder: 'Git' }),
+            snip({ id: 'docker', label: 'docker up', text: 'docker up', folder: 'Docker' }),
+        ]));
+        const search = container.querySelector('[aria-label="Search snippets"]') as HTMLInputElement;
+        await act(async () => {
+            const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+            set.call(search, 'git'); search.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        expect(rows()).toHaveLength(1);
+        expect(groupLabels()).toEqual(['Git']);
+    });
+
+    it('distinguishes a no-match result from an empty library', async () => {
+        await mount(makeStore([snip({ label: 'git', text: 'git status' })]));
+        const search = container.querySelector('[aria-label="Search snippets"]') as HTMLInputElement;
+        await act(async () => {
+            const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
+            set.call(search, 'nothing'); search.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        expect(container.textContent).toContain('No snippets match “nothing”');
+        expect(container.textContent).not.toContain('A snippet is a saved piece');
+    });
+
+    it('sorts rows within folders through the shared sort select', async () => {
+        const store = makeStore([
+            snip({ id: 'z', label: 'Zulu', text: 'z', folder: 'Git', createdAt: 1 }),
+            snip({ id: 'a', label: 'Alpha', text: 'a', folder: 'Git', createdAt: 2 }),
+        ]);
+        await mount(store);
+        const select = container.querySelector('[aria-label="Sort snippets by"]') as HTMLSelectElement;
+        await act(async () => {
+            const set = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!;
+            set.call(select, 'name'); select.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        expect(store.getState().settings.snippetsSortMode).toBe('name');
+        expect(rows().map(row => row.querySelector('.snippets-name')!.textContent)).toEqual(['Alpha', 'Zulu']);
+    });
+
+    it('copies text without recording a terminal use, and renders date/use metadata', async () => {
+        const store = makeStore([
+            snip({ id: 'one', label: 'One', text: 'copy this', createdAt: 0, usageCount: 1, lastUsedAt: 1 }),
+            snip({ id: 'zero', label: 'Zero', text: 'not used', createdAt: 1000 }),
+        ]);
+        await mount(store);
+        expect(container.textContent).toContain('1 use');
+        expect(container.textContent).toContain('0 uses');
+        expect(rows()[1].querySelector('.snippets-uses')!.getAttribute('title')).toBe('Never used');
+        expect(rows()[0].querySelector('.snippets-created')).not.toBeNull();
+        await click(Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Copy') ?? null);
+        await flush();
+        expect(writeClipboardText).toHaveBeenCalledWith('copy this');
+        expect(store.getState().settings.snippets[0].usageCount).toBe(1);
     });
 
     it('Edit opens the dialog pre-filled with that snippet', async () => {

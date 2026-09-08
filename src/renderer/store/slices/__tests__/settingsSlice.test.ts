@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, isValidSnippet, Snippet } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -358,9 +358,11 @@ describe('settingsSlice snippets (plan/029)', () => {
   });
 
   it('updateSnippet merges a patch into the matching record', () => {
+    jest.spyOn(Date, 'now').mockReturnValue(4444);
     let state = settingsReducer(undefined, setSnippets([mk()]));
     state = settingsReducer(state, updateSnippet({ id: 's1', patch: { label: 'Pods', folder: 'k8s' } }));
-    expect(state.snippets[0]).toEqual(expect.objectContaining({ label: 'Pods', folder: 'k8s', text: 'kubectl get pods' }));
+    expect(state.snippets[0]).toEqual(expect.objectContaining({ label: 'Pods', folder: 'k8s', text: 'kubectl get pods', updatedAt: 4444 }));
+    jest.restoreAllMocks();
   });
 
   it('updateSnippet on an unknown id is a no-op', () => {
@@ -383,6 +385,16 @@ describe('settingsSlice snippets (plan/029)', () => {
     ]));
     state = settingsReducer(state, renameSnippetFolder({ from: 'Git', to: 'Version Control' }));
     expect(state.snippets.map((s) => s.folder)).toEqual(['Version Control', 'Version Control', 'Docker']);
+    expect(state.snippets.every((s) => s.updatedAt === undefined)).toBe(true);
+  });
+
+  it('records a terminal insertion from absent usage and does nothing for an unknown id', () => {
+    jest.spyOn(Date, 'now').mockReturnValue(5555);
+    const before = settingsReducer(undefined, setSnippets([mk()]));
+    const used = settingsReducer(before, recordSnippetUse('s1'));
+    expect(used.snippets[0]).toEqual(expect.objectContaining({ usageCount: 1, lastUsedAt: 5555 }));
+    expect(settingsReducer(used, recordSnippetUse('missing'))).toEqual(used);
+    jest.restoreAllMocks();
   });
 
   it("renameSnippetFolder with to: '' unfiles the matching snippets", () => {
@@ -451,6 +463,21 @@ describe('settingsSlice snippets (plan/029)', () => {
       settingsReducer(state, removeSnippet('s2'));
       // Kills: persisting the unmodified list — the commonest way a "plain array" assertion lies.
       expect(persistedSnippetsArgs().at(-1)).toEqual([tagged()]);
+    });
+
+    it('persists a recorded use, but does not persist an unknown id', () => {
+      const state = settingsReducer(undefined, setSnippets([tagged()]));
+      setConfigValue.mockClear();
+      settingsReducer(state, recordSnippetUse('s1'));
+      expect(persistedSnippetsArgs()).toHaveLength(1);
+      setConfigValue.mockClear();
+      settingsReducer(state, recordSnippetUse('missing'));
+      expect(setConfigValue).not.toHaveBeenCalled();
+    });
+
+    it('persists snippetsSortMode under its own config key', () => {
+      settingsReducer(undefined, setSnippetsSortMode('name'));
+      expect(setConfigValue).toHaveBeenCalledWith('snippetsSortMode', 'name');
     });
 
     it('one tagged snippet must not take the untagged ones down with it', () => {

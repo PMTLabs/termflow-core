@@ -60,6 +60,8 @@
 .snippets-name {
   flex: 1;
   min-width: 0;
+  color: #eee;
+  font-weight: 600;
 }
 
 .snippets-folder-chip {
@@ -78,5 +80,32 @@
   max-width: 30%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snippets-search {
+  flex: 1;
+  min-width: 10rem;
+  background-color: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #ddd;
+  padding: 3px 6px;
+}
+
+.snippets-sort {
+  flex-shrink: 0;
+  background-color: #2d2d2d;
+  border: 1px solid #444;
+  border-radius: 4px;
+  color: #ddd;
+  padding: 3px 6px;
+}
+
+.snippets-created,
+.snippets-uses {
+  flex-shrink: 0;
+  color: #8a8a8a;
+  font-size: 0.75rem;
   white-space: nowrap;
 }

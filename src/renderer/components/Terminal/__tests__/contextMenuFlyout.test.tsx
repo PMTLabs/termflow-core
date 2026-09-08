@@ -811,16 +811,36 @@ describe('tooltip dwell', () => {
         expect(titleOf(menuItem('file.cs'))).toBe('D:/a/b/file.cs');
     });
 
-    it('the flyout header toggle keeps its title unconditionally', () => {
+    it('a flyout header action keeps its title unconditionally', () => {
         // A glyph-only button, aimed at on purpose rather than swept past, whose `title` is the
         // only text anywhere saying what pressing it does. There is no annoyance here to delay.
         renderSync(menuWith({
             rows: [row('a', 'x')],
-            headerToggle: { icon: '📁', title: 'Group by folder', pressed: false, onToggle: () => {} },
+            headerActions: [{ id: 'view-mode', icon: '📁', title: 'Group by folder', pressed: false, onSelect: () => {} }],
         }));
         hoverSync(menuItem('Snippets'));
         const toggle = panel()!.querySelector('.context-menu-flyout-toggle')!;
         expect(titleOf(toggle)).toBe('Group by folder');
+    });
+
+    it('renders pressed state only for toggle actions and header clicks leave the menu open', async () => {
+        const onSelect = jest.fn();
+        renderSync(menuWith({
+            rows: [row('a', 'x')],
+            headerActions: [
+                { id: 'toggle', icon: 'T', title: 'Toggle', pressed: true, onSelect },
+                { id: 'plain', icon: 'P', title: 'Plain', onSelect },
+            ],
+        }));
+        hoverSync(menuItem('Snippets'));
+        const toggle = panel()!.querySelector('[data-action-id="toggle"]')!;
+        const plain = panel()!.querySelector('[data-action-id="plain"]')!;
+        expect(toggle.getAttribute('aria-pressed')).toBe('true');
+        expect(plain.hasAttribute('aria-pressed')).toBe(false);
+        await click(toggle);
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(menuItem('Snippets')).not.toBeNull();
+        expect(panel()).not.toBeNull();
     });
 
     it('a dwell armed before the menu unmounts is torn down with it', () => {

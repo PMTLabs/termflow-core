@@ -27,16 +27,19 @@ export async function readClipboardText(): Promise<string> {
   }
 }
 
-export function writeClipboardText(text: string): void {
-  void writeText(text).catch(async (err) => {
+export async function writeClipboardText(text: string): Promise<void> {
+  try {
+    await writeText(text);
+  } catch (nativeError) {
     try {
       if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(text);
         return;
       }
     } catch {
-      /* ignore */
+      /* fall through to the original failure */
     }
-    console.error('clipboard: native write failed', err);
-  });
+    console.error('clipboard: native write failed', nativeError);
+    throw nativeError;
+  }
 }

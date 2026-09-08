@@ -16,6 +16,8 @@ import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
+import { nextSnippetSortMode } from '../../services/snippetSearch';
+import { openSettingsTab } from '../../services/openSettings';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
@@ -34,7 +36,7 @@ import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { blendEndedTint, endedRailColor } from '../../store/endedTint';
-import { setAgentColorScheme, removeAgentColorScheme, addSnippet, setSnippetsViewMode } from '../../store/slices/settingsSlice';
+import { setAgentColorScheme, removeAgentColorScheme, addSnippet, recordSnippetUse, setSnippetsSortMode, setSnippetsViewMode } from '../../store/slices/settingsSlice';
 import { addToast } from '../../store/slices/uiSlice';
 import { listen } from '@tauri-apps/api/event';
 import { isAbsolutePath, joinCwd } from '../../utils/pathResolve';
@@ -123,14 +125,16 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // Same rule as `snippets` above: a live store read, so the flyout redraws in the
   // arrangement the toggle just persisted rather than the one it opened with.
   const snippetsViewMode = useSelector((s: RootState) => s.settings.snippetsViewMode);
+  const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
   const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
+  const [snippetSeedText, setSnippetSeedText] = useState<string | undefined>(undefined);
   /**
    * The Snippets flyout opened by the KEYBOARD (plan/029 §6), as opposed to by a
    * right-click. Its own slot rather than a flag on `contextMenu`: it is a different
    * menu — one item, its flyout already open — and folding the two together would
    * mean every read of `contextMenu.link` had to ask which kind it was looking at.
    */
-  const [snippetsMenu, setSnippetsMenu] = useState<{ x: number; y: number } | null>(null);
+  const [snippetsMenu, setSnippetsMenu] = useState<{ x: number; y: number; selectionText?: string } | null>(null);
   // Smart Ctrl+C targets Windows/Linux; macOS keeps Cmd+C / Ctrl+C=SIGINT (design §5).
   const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -269,8 +273,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     setSchemaPicker(null);
     refocusTerminal();
   }, [refocusTerminal]);
-  const openSnippetDialog = useCallback(() => {
+  const openSnippetDialog = useCallback((seedText?: string) => {
     snippetDialogOpenRef.current = true;
+    setSnippetSeedText(seedText);
     setSnippetDialogOpen(true);
   }, []);
   /** Both dialog exits (Save and Cancel) land here. `useDialogA11y` restores focus to the
@@ -279,6 +284,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const closeSnippetDialog = useCallback(() => {
     snippetDialogOpenRef.current = false;
     setSnippetDialogOpen(false);
+    setSnippetSeedText(undefined);
     refocusTerminal();
   }, [refocusTerminal]);
   /**
@@ -335,6 +341,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     setSnippetsMenu({
       x: rect.left + (cursor?.left ?? 0),
       y: rect.top + (cursor ? cursor.top + cursor.cellHeight : 0),
+      selectionText: engineRef.current?.getCopyableSelection().trim() || undefined,
     });
   }, []);
 
@@ -544,7 +551,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // Native clipboard for context-menu copy/paste + Ctrl+Shift+C/V, so they
       // don't trigger the WebView clipboard permission popup.
       readClipboard: () => readClipboardText(),
-      writeClipboard: (text) => writeClipboardText(text),
+      writeClipboard: (text) => { void writeClipboardText(text).catch(() => {}); },
       // Backlog 005: read live each keypress so the setting toggles without remount.
       smartCopy: () => !isMac && store.getState().settings.smartCtrlC,
       // Live each keypress so the Settings toggle applies without remount.
@@ -798,14 +805,19 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * prop to be forgotten — and the toggle, the insert target and the dialog hook all
    * have to behave identically whichever way the flyout was opened.
    */
-  const snippetsMenuItem = () => buildSnippetsMenuItem({
+  const snippetsMenuItem = (closeMenu: () => void, selectionText?: string) => buildSnippetsMenuItem({
     snippets,
     viewMode: snippetsViewMode,
+    sortMode: snippetsSortMode,
     insert: (text) => insertTextIntoTerminal(terminalId, text),
-    onAddNew: openSnippetDialog,
+    onUse: (id) => dispatch(recordSnippetUse(id)),
+    onAddNew: (seedText) => { openSnippetDialog(seedText); closeMenu(); },
     onToggleViewMode: () => dispatch(
       setSnippetsViewMode(snippetsViewMode === 'flat' ? 'folders' : 'flat'),
     ),
+    onCycleSortMode: () => dispatch(setSnippetsSortMode(nextSnippetSortMode(snippetsSortMode))),
+    onOpenSettings: () => { closeMenu(); openSettingsTab('snippets'); },
+    selectionText,
   });
 
   const getContextMenuItems = () => {
@@ -977,7 +989,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         cwd: getCwdSnapshot(terminalId),
         insert: (command) => insertTextIntoTerminal(terminalId, command),
       }),
-      snippetsMenuItem(),
+      snippetsMenuItem(closeContextMenu, engine?.getCopyableSelection().trim() || undefined),
       { type: 'separator' as const },
       {
         label: 'Clear',
@@ -1071,7 +1083,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         <ContextMenu
           x={snippetsMenu.x}
           y={snippetsMenu.y}
-          items={[snippetsMenuItem()]}
+          items={[snippetsMenuItem(closeSnippetsMenu, snippetsMenu.selectionText)]}
           standaloneSubmenu={0}
           onClose={closeSnippetsMenu}
         />
@@ -1123,6 +1135,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       <SnippetDialog
         isOpen={snippetDialogOpen}
         snippet={null}
+        initialText={snippetSeedText}
         snippets={snippets}
         onSave={(snippet) => {
           dispatch(addSnippet(snippet));

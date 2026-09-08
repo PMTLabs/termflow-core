@@ -8,8 +8,10 @@ import {
     removeSnippet,
     renameSnippetFolder,
     setSnippets,
+    setSnippetsSortMode,
 } from '../../store/slices/settingsSlice';
-import { snippetDisplayLabel } from '../../services/snippetSearch';
+import { filterSnippets, SNIPPET_SORT_LABELS, SNIPPET_SORT_MODES, snippetDisplayLabel, sortSnippets } from '../../services/snippetSearch';
+import { writeClipboardText } from '../../utils/clipboard';
 import { exportSnippets, importSnippets, describeImport } from '../../services/snippetPorting';
 import { SnippetDialog } from '../UI/SnippetDialog';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
@@ -51,6 +53,7 @@ function groupByFolder(snippets: Snippet[]): FolderGroup[] {
 export const SnippetsPanel: React.FC = () => {
     const dispatch = useDispatch<AppDispatch>();
     const snippets = useSelector((s: RootState) => s.settings.snippets);
+    const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
 
     const [dialogOpen, setDialogOpen] = useState(false);
     const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
@@ -59,8 +62,13 @@ export const SnippetsPanel: React.FC = () => {
     const [renameValue, setRenameValue] = useState('');
     const [portBusy, setPortBusy] = useState(false);
     const [resultLine, setResultLine] = useState<string | null>(null);
+    const [search, setSearch] = useState('');
 
-    const groups = useMemo(() => groupByFolder(snippets), [snippets]);
+    const filteredSnippets = useMemo(() => search.trim() ? filterSnippets(snippets, search) : snippets, [snippets, search]);
+    const groups = useMemo(
+        () => groupByFolder(filteredSnippets).map((group) => ({ ...group, snippets: sortSnippets(group.snippets, snippetsSortMode) })),
+        [filteredSnippets, snippetsSortMode],
+    );
 
     const openCreate = () => {
         setEditingSnippet(null);
@@ -102,6 +110,15 @@ export const SnippetsPanel: React.FC = () => {
         setRenamingFolder(null);
     };
     const cancelRename = () => setRenamingFolder(null);
+
+    const copySnippet = async (s: Snippet) => {
+        try {
+            await writeClipboardText(s.text);
+            setResultLine(`Copied “${snippetDisplayLabel(s)}” to the clipboard.`);
+        } catch {
+            setResultLine('Could not copy snippet to the clipboard.');
+        }
+    };
 
     const runExport = async () => {
         setResultLine(null);
@@ -162,6 +179,12 @@ export const SnippetsPanel: React.FC = () => {
                 <button type="button" className="link-btn" onClick={() => { void runExport(); }} disabled={portBusy}>
                     Export…
                 </button>
+                <input className="snippets-search" value={search} onChange={(e) => setSearch(e.target.value)}
+                    placeholder="Search name, text, tag, or initials…" aria-label="Search snippets" />
+                <select className="snippets-sort" aria-label="Sort snippets by" value={snippetsSortMode}
+                    onChange={(e) => dispatch(setSnippetsSortMode(e.target.value as typeof snippetsSortMode))}>
+                    {SNIPPET_SORT_MODES.map((mode) => <option key={mode} value={mode}>{SNIPPET_SORT_LABELS[mode]}</option>)}
+                </select>
             </div>
 
             {resultLine && <p className="snippets-result-line">{resultLine}</p>}
@@ -172,6 +195,8 @@ export const SnippetsPanel: React.FC = () => {
                     terminal's right-click Snippets menu. Click "New Snippet" above to add your first
                     one.
                 </p>
+            ) : groups.length === 0 ? (
+                <p className="help-text">No snippets match “{search.trim()}”</p>
             ) : (
                 groups.map((g) => (
                     <div className="snippets-group" key={g.folder || UNFILED}>
@@ -223,6 +248,13 @@ export const SnippetsPanel: React.FC = () => {
                                     {s.tags && s.tags.length > 0 && (
                                         <span className="snippets-tags">{s.tags.join(', ')}</span>
                                     )}
+                                    {Number.isFinite(s.createdAt) && (
+                                        <span className="snippets-created" title={new Date(s.createdAt).toLocaleString()}>{new Date(s.createdAt).toLocaleDateString()}</span>
+                                    )}
+                                    <span className="snippets-uses" title={s.lastUsedAt ? `Last used: ${new Date(s.lastUsedAt).toLocaleString()}` : 'Never used'}>
+                                        {(s.usageCount ?? 0) === 1 ? '1 use' : `${s.usageCount ?? 0} uses`}
+                                    </span>
+                                    <button type="button" className="link-btn" aria-label={`Copy ${snippetDisplayLabel(s)}`} onClick={() => { void copySnippet(s); }}>Copy</button>
                                     <button type="button" className="link-btn" onClick={() => openEdit(s)}>
                                         Edit
                                     </button>

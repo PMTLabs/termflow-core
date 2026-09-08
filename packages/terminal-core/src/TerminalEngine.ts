@@ -4491,6 +4491,14 @@ export class TerminalEngine {
     return this.effectiveSelection().length > 0;
   }
 
+  // The text counterpart to hasCopyableSelection(). Context-menu callers must use this
+  // instead of getSelection(): under mouse-tracking apps xterm clears the live selection
+  // on right-click, while effectiveSelection preserves the Shift-drag text for Copy and
+  // for actions, such as snippet creation, that need the selected content itself.
+  getCopyableSelection(): string {
+    return this.effectiveSelection();
+  }
+
   // True while an app holds mouse tracking — the menu uses this to offer selection mode.
   isMouseTrackingActive(): boolean {
     return this.mouseTrackingActive();

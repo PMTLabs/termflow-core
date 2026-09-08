@@ -71,9 +71,13 @@ const snippetsItem = (over: Partial<Parameters<typeof buildSnippetsMenuItem>[0]>
   buildSnippetsMenuItem({
     snippets: ALL_SNIPPETS,
     viewMode: 'folders',
+    sortMode: 'lastUsed',
     insert: jest.fn(),
+    onUse: jest.fn(),
     onAddNew: jest.fn(),
     onToggleViewMode: jest.fn(),
+    onCycleSortMode: jest.fn(),
+    onOpenSettings: jest.fn(),
     ...over,
   });
 
@@ -88,7 +92,7 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
     const folderLabels = rows.filter((r: any) => r.children).map((r: any) => r.label);
     expect(folderLabels).toEqual(['Docker', 'Git']);
     const gitFolder = rows.find((r: any) => r.label === 'Git') as any;
-    expect(gitFolder.children.map((c: any) => c.id)).toEqual(['snippet-s1', 'snippet-s2']);
+    expect(gitFolder.children.map((c: any) => c.id)).toEqual(['snippet-s2', 'snippet-s1']);
     const unfiled = rows.filter((r: any) => !r.children);
     expect(unfiled.map((r: any) => r.id)).toEqual(['snippet-s4']);
   });
@@ -141,10 +145,50 @@ describe('buildSnippetsMenuItem — pure row shape', () => {
 });
 
 describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => {
-  it('lists EVERY snippet as one row, in registry order, with no folder rows at all', () => {
+  it('honours two distinct browse sort modes, while preserving relevance order once searching', () => {
+    const ranked = [
+      makeSnippet({ id: 'older-prefix', label: 'git deploy', text: 'x', createdAt: 1 }),
+      makeSnippet({ id: 'newer-body', label: 'other', text: 'git deploy', createdAt: 99 }),
+    ];
+    const byCreated = (snippetsItem({ snippets: ranked, viewMode: 'flat', sortMode: 'created' }).submenu!.rows as (q: string) => any[])('');
+    const byName = (snippetsItem({ snippets: ranked, viewMode: 'flat', sortMode: 'name' }).submenu!.rows as (q: string) => any[])('');
+    expect(byCreated.map(row => row.id)).toEqual(['snippet-newer-body', 'snippet-older-prefix']);
+    expect(byName.map(row => row.id)).toEqual(['snippet-older-prefix', 'snippet-newer-body']);
+    expect((snippetsItem({ snippets: ranked, sortMode: 'created' }).submenu!.rows as (q: string) => any[])('git').map(row => row.id))
+      .toEqual(['snippet-older-prefix', 'snippet-newer-body']);
+  });
+
+  it('exposes ordered header actions, explains sort cycling, and seeds both add routes', () => {
+    const onAddNew = jest.fn();
+    const item = snippetsItem({ sortMode: 'created', selectionText: ' selected ', onAddNew });
+    const actions = item.submenu!.headerActions!;
+    expect(actions.map(action => action.id)).toEqual(['view-mode', 'sort-mode', 'add-snippet', 'open-settings']);
+    expect(actions[1].title).toContain('Created date');
+    expect(actions[1].title).toContain('Updated date');
+    expect(actions[2].title).toContain('selected text');
+    actions[2].onSelect();
+    item.submenu!.footerRows![0].onSelect!();
+    expect(onAddNew).toHaveBeenNthCalledWith(1, ' selected ');
+    expect(onAddNew).toHaveBeenNthCalledWith(2, ' selected ');
+    expect(snippetsItem().submenu!.headerActions![2].title).toBe('Add a new snippet.');
+    const noSelection = jest.fn();
+    snippetsItem({ onAddNew: noSelection }).submenu!.footerRows![0].onSelect!();
+    expect(noSelection).toHaveBeenCalledWith(undefined);
+  });
+
+  it('records a use before inserting its text', () => {
+    const onUse = jest.fn();
+    const insert = jest.fn();
+    const row = (snippetsItem({ onUse, insert }).submenu!.rows as (q: string) => any[])('echo')[0];
+    row.onSelect();
+    expect(onUse).toHaveBeenCalledWith('s4');
+    expect(insert).toHaveBeenCalledWith(multiline.text);
+    expect(onUse.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
+  });
+  it('lists EVERY snippet as one row in shared browse-sort order, with no folder rows at all', () => {
     const rows = (snippetsItem({ viewMode: 'flat' }).submenu!.rows as (q: string) => any[])('');
     expect(rows.map((r) => r.id)).toEqual([
-      'snippet-s1', 'snippet-s2', 'snippet-s3', 'snippet-s4',
+      'snippet-s4', 'snippet-s3', 'snippet-s2', 'snippet-s1',
     ]);
     expect(rows.some((r) => r.children)).toBe(false);
   });
@@ -168,10 +212,10 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     expect(ids('flat')).toEqual(['snippet-s1', 'snippet-s2']);
   });
 
-  it('the header toggle reports the mode it is IN and hands the switch back to the caller', () => {
+  it('the header view action reports the mode it is in and hands the switch back to the caller', () => {
     const onToggleViewMode = jest.fn();
-    const flat = snippetsItem({ viewMode: 'flat', onToggleViewMode }).submenu!.headerToggle!;
-    const folders = snippetsItem({ viewMode: 'folders', onToggleViewMode }).submenu!.headerToggle!;
+    const flat = snippetsItem({ viewMode: 'flat', onToggleViewMode }).submenu!.headerActions![0];
+    const folders = snippetsItem({ viewMode: 'folders', onToggleViewMode }).submenu!.headerActions![0];
 
     expect(flat.pressed).toBe(true);
     expect(folders.pressed).toBe(false);
@@ -181,7 +225,7 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     expect(folders.title).toMatch(/flat list/i);
 
     // The builder never owns the setting — it cannot, it has no store.
-    flat.onToggle();
+    flat.onSelect();
     expect(onToggleViewMode).toHaveBeenCalledTimes(1);
   });
 
@@ -406,7 +450,7 @@ describe('mounted through ContextMenu', () => {
     expect(nested).toBeTruthy();
     // Pressing it there would switch to flat, which deletes the panel it was pressed in.
     expect(nested.querySelector('.context-menu-flyout-toggle')).toBeNull();
-    expect(document.querySelectorAll('.context-menu-flyout-toggle')).toHaveLength(1);
+    expect(document.querySelectorAll('.context-menu-flyout-toggle')).toHaveLength(4);
   });
 
   it('puts the folder/tag tooltip on the CHIP itself, so a row really does offer two', async () => {
@@ -523,7 +567,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     // its own helper (shared with the keyboard-opened menu) and sits ABOVE this array, so
     // anchoring on `buildSnippetsMenuItem(` would compare a definition to a use and read
     // the order backwards.
-    const snippetsAt = DISPLAY.indexOf('snippetsMenuItem(),');
+    const snippetsAt = DISPLAY.indexOf('snippetsMenuItem(closeContextMenu,');
     const clearAt = DISPLAY.indexOf("label: 'Clear',");
     expect(muteAt).toBeGreaterThan(-1);
     expect(automationAt).toBeGreaterThan(-1);
@@ -594,6 +638,13 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(DISPLAY).toMatch(/setSnippetsViewMode\(snippetsViewMode === 'flat' \? 'folders' : 'flat'\)/);
   });
 
+  it('opens the dialog before host menu dismissal so the refocus guard is armed', () => {
+    const start = DISPLAY.indexOf('onAddNew: (seedText) =>');
+    expect(start).toBeGreaterThan(-1);
+    const body = DISPLAY.slice(start, DISPLAY.indexOf('onToggleViewMode:', start));
+    expect(body.indexOf('openSnippetDialog(seedText)')).toBeLessThan(body.indexOf('closeMenu()'));
+  });
+
   /**
    * Closing any of these menus leaves DOM focus on `document.body` — the menu button or
    * the flyout's search box held it, and both unmount — so the terminal goes deaf until
@@ -636,7 +687,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(DISPLAY).toMatch(/const openSnippetsMenu = useCallback\(/);
     expect(DISPLAY).toMatch(/standaloneSubmenu=\{0\}/);
     // Same item as the right-click menu's, not a second copy that can drift from it.
-    expect(DISPLAY).toMatch(/items=\{\[snippetsMenuItem\(\)\]\}/);
+    expect(DISPLAY).toMatch(/items=\{\[snippetsMenuItem\(closeSnippetsMenu, snippetsMenu\.selectionText\)\]\}/);
   });
 
   it('renders SnippetDialog wired to addSnippet, never dispatching from inside the dialog itself', () => {

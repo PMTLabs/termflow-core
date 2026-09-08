@@ -175,6 +175,7 @@
   align-items: stretch;
   gap: 4px;
   margin: 2px 8px 6px;
+  flex-wrap: nowrap;
 }
 
 .context-menu-flyout-search {

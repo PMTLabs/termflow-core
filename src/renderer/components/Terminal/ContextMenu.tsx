@@ -99,36 +99,26 @@ export interface ContextMenuFlyoutRow {
   disabled?: boolean;
 }
 
-/**
- * A single toggle button sitting beside the flyout's search box.
- *
- * Deliberately ONE optional button rather than a list of header actions: the only caller
- * is the Snippets flyout's flat/folders switch, and an action bar would be a shape
- * invented for a second caller that does not exist. It is also why `pressed` is a plain
- * boolean — this models a two-state toggle, not a menu.
- */
-export interface ContextMenuFlyoutToggle {
-  /** Glyph on the button. Reflects the CURRENT state, so it changes when toggled. */
+/** A depth-zero header action. Four Snippets controls now share this surface, so a list
+ * models the actual callers without making nested folder panels inherit whole-list controls. */
+export interface ContextMenuFlyoutAction {
+  /** Glyph on the button. Reflects the CURRENT state for a toggle-ish action, so it may change. */
   icon: string;
-  /** Native tooltip and accessible name — say what pressing it will DO. */
+  /** Native tooltip AND accessible name — say what pressing it will DO. */
   title: string;
-  /** `aria-pressed`, and the `.is-on` styling hook. */
-  pressed: boolean;
-  onToggle: () => void;
+  /** Stable identity: React key and the test-facing data-action-id. */
+  id: string;
+  /** Present means toggle semantics; absent keeps this a plain action button. */
+  pressed?: boolean;
+  onSelect: () => void;
 }
 
 /** The flyout attached to one `ContextMenuItem`. */
 export interface ContextMenuFlyout {
   /** Placeholder for the search box at the top of the flyout. */
   searchPlaceholder?: string;
-  /**
-   * Optional toggle rendered to the right of the search box, at DEPTH 0 ONLY.
-   *
-   * A nested (folder) panel is handed a derived flyout, and this field is stripped on the
-   * way down: the toggle switches how the WHOLE list is grouped, so a copy of it inside a
-   * folder would be a control whose own panel disappears the moment it is pressed.
-   */
-  headerToggle?: ContextMenuFlyoutToggle;
+  /** Buttons rendered to the right of the search box, at DEPTH 0 ONLY, in array order. */
+  headerActions?: ContextMenuFlyoutAction[];
   /**
    * Render the DEPTH-0 panel narrow, at DEPTH 0 ONLY.
    *
@@ -351,7 +341,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     shiftY: 0,
   });
 
-  const { rows, emptyRow, footerRows, searchPlaceholder, headerToggle, narrow } = flyout;
+  const { rows, emptyRow, footerRows, searchPlaceholder, headerActions, narrow } = flyout;
 
   // The visible list: matches (or the empty-state row) followed by the never-filtered footer.
   const visible = useMemo(() => {
@@ -604,25 +594,17 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}
         />
-        {headerToggle && (
-          <button
-            type="button"
-            className={`context-menu-flyout-toggle${headerToggle.pressed ? ' is-on' : ''}`}
-            title={headerToggle.title}
-            aria-label={headerToggle.title}
-            aria-pressed={headerToggle.pressed}
-            tabIndex={-1}
-            // Same reason the rows do it: pressing this must not blur the search box, or
-            // one use of the mouse leaves the keyboard dead for the rest of the session.
+        {headerActions?.map((action) => (
+          <button key={action.id} type="button"
+            className={`context-menu-flyout-toggle${action.pressed === true ? ' is-on' : ''}`}
+            title={action.title} aria-label={action.title}
+            aria-pressed={typeof action.pressed === 'boolean' ? action.pressed : undefined}
+            data-action-id={action.id} tabIndex={-1}
+            // Keep focus in search while header actions operate on the list around it.
             onMouseDown={(e) => e.preventDefault()}
-            onClick={() => {
-              headerToggle.onToggle();
-              inputRef.current?.focus();
-            }}
-          >
-            {headerToggle.icon}
-          </button>
-        )}
+            onClick={(e) => { e.stopPropagation(); action.onSelect(); inputRef.current?.focus(); }}
+          >{action.icon}</button>
+        ))}
       </div>
       <div className="context-menu-flyout-list" id={`${uid}-list`} role="listbox">
         {visible.head.map(renderRow)}
@@ -645,7 +627,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             // otherwise carry a grouping control into a panel that exists only BECAUSE of
             // the grouping it switches off, and squeeze that panel's snippets into a width
             // chosen for folder names.
-            headerToggle: undefined,
+            headerActions: undefined,
             narrow: undefined,
           }}
           depth={depth + 1}

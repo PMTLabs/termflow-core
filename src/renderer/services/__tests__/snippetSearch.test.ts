@@ -5,6 +5,8 @@ import {
   snippetDisplayLabel,
   snippetFolders,
   allSnippetTags,
+  sortSnippets,
+  nextSnippetSortMode,
 } from '../snippetSearch';
 import type { Snippet } from '../../store/slices/settingsSlice';
 
@@ -442,5 +444,30 @@ describe('allSnippetTags', () => {
 
   it('empty input returns empty list', () => {
     expect(allSnippetTags([])).toEqual([]);
+  });
+});
+
+describe('sortSnippets', () => {
+  const items = [
+    s({ id: 'a', label: 'Zebra', text: 'a', createdAt: 10, updatedAt: 50, usageCount: 1, lastUsedAt: 100 }),
+    s({ id: 'b', label: 'Alpha', text: 'b', createdAt: 20, updatedAt: 10, usageCount: 3, lastUsedAt: 90 }),
+    s({ id: 'c', label: 'Mike', text: 'c', createdAt: 30, updatedAt: 40, usageCount: 2 }),
+    s({ id: 'd', label: 'Delta', text: 'd', createdAt: 40, usageCount: 0, lastUsedAt: 80 }),
+    s({ id: 'e', label: 'Echo', text: 'e', createdAt: 50 }),
+  ];
+
+  it('gives every mode its own ordering without mutating input, including absent-field fallbacks', () => {
+    expect(sortSnippets(items, 'lastUsed').map(x => x.id)).toEqual(['a', 'b', 'd', 'e', 'c']);
+    expect(sortSnippets(items, 'usageCount').map(x => x.id)).toEqual(['b', 'c', 'a', 'd', 'e']);
+    expect(sortSnippets(items, 'created').map(x => x.id)).toEqual(['e', 'd', 'c', 'b', 'a']);
+    expect(sortSnippets(items, 'updated').map(x => x.id)).toEqual(['a', 'e', 'c', 'd', 'b']);
+    expect(sortSnippets(items, 'name').map(x => x.id)).toEqual(['b', 'd', 'e', 'c', 'a']);
+    expect(items.map(x => x.id)).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('uses id as its final tie-break and cycles safely from unknown values', () => {
+    expect(sortSnippets([s({ id: 'z', text: 'same', createdAt: 1 }), s({ id: 'a', text: 'same', createdAt: 1 })], 'created').map(x => x.id)).toEqual(['a', 'z']);
+    expect(nextSnippetSortMode('name')).toBe('lastUsed');
+    expect(nextSnippetSortMode('stale' as any)).toBe('lastUsed');
   });
 });
