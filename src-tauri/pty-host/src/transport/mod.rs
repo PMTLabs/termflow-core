@@ -78,10 +78,10 @@ impl ActiveClock for SystemActiveClock {
 fn unbiased_interrupt_ticks() -> Option<u64> {
     let mut ticks = 0u64;
     // SAFETY: the API writes one u64 to the valid pointer supplied here.
-    unsafe {
+    let ok = unsafe {
         windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut ticks)
     };
-    Some(ticks)
+    (ok != 0).then_some(ticks)
 }
 
 #[derive(Clone, Copy)]
@@ -362,9 +362,25 @@ where
         if let Some(hold) = deadline_expired(mgr, deadline, clock) {
             break ConnectionResult::Expired(hold);
         }
-        let frame = tokio::select! {
-            r = read_frame(&mut rd) => match r { Ok(Some(f)) => f, _ => break ConnectionResult::Disconnected },
-            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+        // `read_frame` performs several sequential `read_exact` calls, so it
+        // is not cancellation-safe. Keep THIS read future pinned across every
+        // watchdog tick; it is dropped only when expiry wins and we tear down.
+        let read = read_frame(&mut rd);
+        tokio::pin!(read);
+        let frame = loop {
+            tokio::select! {
+                r = &mut read => match r { Ok(Some(frame)) => break Ok(frame), _ => break Err(ConnectionResult::Disconnected) },
+                _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                    if let Some(hold) = deadline_expired(mgr, deadline, clock) {
+                        break Err(ConnectionResult::Expired(hold));
+                    }
+                }
+            }
+        };
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(ConnectionResult::Disconnected) => break ConnectionResult::Disconnected,
+            Err(ConnectionResult::Expired(hold)) => break ConnectionResult::Expired(hold),
         };
         // Only a control/lifecycle frame adopts a held host. Data::Stdin is
         // intentionally not reinterpreted as GUI identity.
@@ -419,7 +435,8 @@ mod tests {
     use std::sync::Mutex;
     use termflow_pty_protocol::{Control, SpawnSpec};
 
-    struct FakeClock(Mutex<Option<Duration>>);
+    #[derive(Clone)]
+    struct FakeClock(Arc<Mutex<Option<Duration>>>);
     impl FakeClock {
         fn set(&self, now: Option<Duration>) {
             *self.0.lock().unwrap() = now;
@@ -429,6 +446,63 @@ mod tests {
         fn now(&self) -> Option<Duration> {
             *self.0.lock().unwrap()
         }
+    }
+
+    /// Regression for a non-cancel-safe `read_frame`: the header is delivered
+    /// before a watchdog tick and the payload afterwards.  The frame must be
+    /// dispatched once intact, not restarted with payload bytes as a header.
+    #[tokio::test]
+    async fn split_frame_across_watchdog_tick_is_not_misframed() {
+        let (events, _) = tokio::sync::mpsc::channel(CHAN_CAP);
+        let (responses, _) = tokio::sync::mpsc::channel(CHAN_CAP);
+        let mut mgr = SessionManager::new(events, responses, Some("tok".into()), true);
+        let (server, mut client) = tokio::io::duplex(1024);
+        let bytes = termflow_pty_protocol::encode(&Frame::Ctrl(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 1,
+            token: "tok".into(),
+            purpose: Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        }));
+        let split = 3; // inside the version/length header
+        let writer = tokio::spawn(async move {
+            tokio::io::AsyncWriteExt::write_all(&mut client, &bytes[..split]).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::io::AsyncWriteExt::write_all(&mut client, &bytes[split..]).await.unwrap();
+            tokio::io::AsyncWriteExt::shutdown(&mut client).await.unwrap();
+        });
+        let (events, responses, result) = run_connection(
+            &mut mgr,
+            server,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            None,
+            &FakeClock(Arc::new(Mutex::new(Some(Duration::ZERO)))),
+        ).await;
+        drop((events, responses));
+        writer.await.unwrap();
+        assert!(matches!(result, ConnectionResult::Disconnected));
+        assert!(mgr.is_armed(), "split ArmDetach frame was received and authenticated intact");
+    }
+
+    #[tokio::test]
+    async fn silent_connected_peer_still_reaches_the_local_deadline() {
+        let (mut mgr, hold) = local_hold_manager();
+        let clock = FakeClock(Arc::new(Mutex::new(Some(Duration::ZERO))));
+        let (server, client) = tokio::io::duplex(64);
+        let advancing_clock = clock.clone();
+        let advance = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            advancing_clock.set(Some(Duration::from_secs(2)));
+        });
+        let (events, responses, result) = run_connection(
+            &mut mgr, server,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            tokio::sync::mpsc::channel(CHAN_CAP).1,
+            Some(HoldDeadline { hold, at: Duration::from_secs(1) }), &clock,
+        ).await;
+        advance.await.unwrap();
+        drop((events, responses, client));
+        assert!(matches!(result, ConnectionResult::Expired(found) if found == hold));
     }
 
     fn local_hold_manager() -> (SessionManager, LocalHold) {
@@ -450,7 +524,7 @@ mod tests {
     #[test]
     fn local_hold_expires_only_after_active_deadline_and_is_cancelled_by_lifecycle_adoption() {
         let (mut mgr, hold) = local_hold_manager();
-        let clock = FakeClock(Mutex::new(Some(Duration::from_secs(899))));
+        let clock = FakeClock(Arc::new(Mutex::new(Some(Duration::from_secs(899)))));
         let deadline = HoldDeadline {
             hold,
             at: Duration::from_secs(900),
@@ -489,7 +563,7 @@ mod tests {
         );
 
         let (mgr, hold) = local_hold_manager();
-        let clock = FakeClock(Mutex::new(None)); // simulated resume/read failure
+        let clock = FakeClock(Arc::new(Mutex::new(None))); // simulated resume/read failure
         assert!(
             deadline_expired(
                 &mgr,
