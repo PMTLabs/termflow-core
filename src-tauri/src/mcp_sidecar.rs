@@ -34,10 +34,21 @@ pub(crate) fn classify_sidecar_report(
 }
 
 async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: &str) -> SidecarAcceptance {
+    wait_for_mcp_health_within(port, own_id, expected_build, 10).await
+}
+
+/// Split out only so a test can exhaust the budget without waiting the real
+/// 10 × 500 ms; production always passes the full budget.
+async fn wait_for_mcp_health_within(
+    port: u16,
+    own_id: &str,
+    expected_build: &str,
+    attempts: u32,
+) -> SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
-    for attempt in 1..=10 {
+    for attempt in 1..=attempts {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let result = match &client {
@@ -79,8 +90,14 @@ async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: &str) -> S
         }
     }
 
-    log::error!("[MCP] MCP Server health check failed after 10 attempts — MCP is NOT available");
-    SidecarAcceptance::Rejected
+    // Silence is the ABSENCE of evidence, not evidence the listener is foreign
+    // or the wrong build. Rejected kills the child we just spawned, and before
+    // this gate existed the health result was discarded entirely — so treating a
+    // slow start as a rejection would newly kill a server that was merely late.
+    // The self-derived build id now hashes a multi-megabyte executable at
+    // startup, which pushes against this same budget.
+    log::error!("[MCP] MCP Server health check did not answer in {attempts} attempts — continuing unverified");
+    SidecarAcceptance::Unverified
 }
 
 /// Mirrors Tauri shell's sidecar resolver exactly: `current_exe().parent()` plus
@@ -318,8 +335,28 @@ pub async fn respawn_mcp(
 
 #[cfg(test)]
 mod respawn_tests {
-    use super::{classify_sidecar_report, mcp_respawn_needed, SidecarAcceptance};
+    use super::{
+        classify_sidecar_report, mcp_respawn_needed, wait_for_mcp_health_within, SidecarAcceptance,
+    };
     use crate::app_config::NetworkConfig;
+
+    /// A port nothing is listening on, so every attempt is refused.
+    fn closed_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        l.local_addr().expect("read the bound port").port()
+    }
+
+    /// Silence is the ABSENCE of evidence, never evidence of a foreign or wrong
+    /// build. Only `Rejected` calls `shutdown_mcp_server`, and before this gate
+    /// existed the health result was discarded entirely — so returning Rejected
+    /// here would newly kill a server that was merely slow to answer.
+    #[tokio::test]
+    async fn a_health_check_that_never_answers_is_unverified_not_rejected() {
+        assert_eq!(
+            wait_for_mcp_health_within(closed_port(), "ours", "expected", 1).await,
+            SidecarAcceptance::Unverified
+        );
+    }
 
     fn base() -> NetworkConfig {
         NetworkConfig {

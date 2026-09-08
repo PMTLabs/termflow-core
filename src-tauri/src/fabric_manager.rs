@@ -94,9 +94,20 @@ async fn wait_for_fabric_health(control_port: u16, owner: &str, expected_build: 
     // access, which on Windows can block on a Credential Manager prompt) so the "healthy"
     // log line still fires on a slow cold start rather than a spurious failure warning.
     const HEALTH_ATTEMPTS: u32 = 40; // 40 × 500ms ≈ 20s
+    wait_for_fabric_health_within(control_port, owner, expected_build, HEALTH_ATTEMPTS).await
+}
+
+/// Split out only so a test can exhaust the budget without waiting the real
+/// ~20 s; production always passes the full budget.
+async fn wait_for_fabric_health_within(
+    control_port: u16,
+    owner: &str,
+    expected_build: &str,
+    attempts: u32,
+) -> crate::mcp_sidecar::SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the OS default.
     let client = crate::network_commands::localhost_client(1500);
-    for attempt in 1..=HEALTH_ATTEMPTS {
+    for attempt in 1..=attempts {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let url = format!("http://127.0.0.1:{}/health", control_port);
         let result = match &client {
@@ -121,11 +132,15 @@ async fn wait_for_fabric_health(control_port: u16, owner: &str, expected_build: 
             Err(e) => log::debug!("[FABRIC] Health check attempt {} failed: {}", attempt, e),
         }
     }
+    // Exhausting the budget means we heard NOTHING — which is exactly what the
+    // cadence comment above predicts on a first run that blocks on a Credential
+    // Manager prompt. Rejected stops our own fabric child, so returning it here
+    // would kill peering in the one scenario that budget was written for.
     log::warn!(
-        "[FABRIC] Fabric health check failed after {} attempts",
-        HEALTH_ATTEMPTS
+        "[FABRIC] Fabric health did not answer in {} attempts — continuing unverified",
+        attempts
     );
-    crate::mcp_sidecar::SidecarAcceptance::Rejected
+    crate::mcp_sidecar::SidecarAcceptance::Unverified
 }
 
 /// Spawn the `termflow-fabric` sidecar. On spawn failure (binary absent / not
@@ -687,6 +702,23 @@ mod tests {
 #[cfg(test)]
 mod client_tests {
     use super::*;
+
+    /// The cadence comment above this poll says its budget exists to cover a
+    /// first run that blocks on a Windows Credential Manager prompt. `Rejected`
+    /// stops our own fabric child, so returning it on an exhausted budget would
+    /// kill peering in exactly the scenario the budget was written for — and
+    /// this poll previously could not disable anything at all.
+    #[tokio::test]
+    async fn an_unanswered_fabric_health_budget_is_unverified_not_rejected() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+            l.local_addr().expect("read the bound port").port()
+        };
+        assert_eq!(
+            wait_for_fabric_health_within(port, "ours", "expected", 1).await,
+            crate::mcp_sidecar::SidecarAcceptance::Unverified
+        );
+    }
 
     /// The `FabricClient` GETs `/health` from a real (stub) control server and
     /// parses the JSON body. Also proves the "not installed" signal: a request to a
