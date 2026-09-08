@@ -542,9 +542,18 @@ async fn stream_identity_allows_events(
         response = request => response?,
     }.error_for_status()?;
     let body: serde_json::Value = response.json().await.unwrap_or_else(|_| serde_json::json!({}));
-    let reported_owner = body.get("ownerId").or_else(|| body.get("instanceId")).and_then(|value| value.as_str());
-    let observed_build = body.get("buildId").and_then(|value| value.as_str()).filter(|value| !value.is_empty());
+    let (reported_owner, observed_build) = stream_identity_from_health(&body);
     Ok(stream_identity_is_acceptable(reported_owner, own_id, observed_build, expected_build))
+}
+
+/// Fabric's control API serializes its raw health value with serde's native
+/// snake_case field names. Keep extraction in one production helper so tests
+/// exercise the wire hop rather than pre-extracted predicate inputs.
+fn stream_identity_from_health(body: &serde_json::Value) -> (Option<&str>, Option<&str>) {
+    (
+        body.get("owner_id").and_then(|value| value.as_str()),
+        body.get("build_id").and_then(|value| value.as_str()).filter(|value| !value.is_empty()),
+    )
 }
 
 fn stream_identity_is_acceptable(
@@ -741,6 +750,16 @@ mod tests {
         assert!(!stream_identity_is_acceptable(Some("foreign-owner"), "spawn-owner-g7", Some("build-g7"), "build-g7"));
         assert!(!stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", Some("wrong-build"), "build-g7"));
         assert!(!stream_identity_is_acceptable(None, "spawn-owner-g7", Some("build-g7"), "build-g7"));
+    }
+
+    #[test]
+    fn stream_acceptance_reads_the_companion_snake_case_health_wire_fields() {
+        let health = serde_json::json!({ "owner_id": "spawn-owner-g7", "build_id": "build-g7" });
+        let (owner, build) = stream_identity_from_health(&health);
+        assert!(stream_identity_is_acceptable(owner, "spawn-owner-g7", build, "build-g7"), "rejects the camelCase-only extraction: the companion's real health body must open the event bridge");
+        let mismatch = serde_json::json!({ "owner_id": "spawn-owner-g7", "build_id": "wrong-build" });
+        let (owner, build) = stream_identity_from_health(&mismatch);
+        assert!(!stream_identity_is_acceptable(owner, "spawn-owner-g7", build, "build-g7"), "rejects an owner-only fix which silently accepts a real snake_case build mismatch");
     }
 
     #[test]
