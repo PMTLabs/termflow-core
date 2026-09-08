@@ -186,18 +186,23 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
         sidecar_command = sidecar_command.env(k, v);
     }
 
+    let generation = state
+        .fabric_process
+        .lock()
+        .map_err(|_| "fabric process slot lock poisoned".to_string())?
+        .claim_generation();
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[FABRIC] termflow-fabric sidecar spawned");
-
-    // Claim a spawn generation for THIS child. A later respawn bumps it, so this child's
-    // drain task can tell whether it still owns the stored handle before clearing it.
-    let generation = state
-        .fabric_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        .wrapping_add(1);
-
-    if let Ok(mut guard) = state.fabric_process.lock() {
-        *guard = Some(child);
+    let installed = state
+        .fabric_process
+        .lock()
+        .map_err(|_| "fabric process slot lock poisoned".to_string())?
+        .install_if_current(generation, child);
+    if let Err(stale_child) = installed {
+        // A newer spawn claimed the slot while this one was being created.
+        // This is our child but never the current generation.
+        let _ = stale_child.kill();
+        return Ok(());
     }
 
     // Drain the sidecar's stdout/stderr/event stream so its pipe never fills and
@@ -216,21 +221,20 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
                 // old child's Terminated arrives after that, this guard stops it from nulling
                 // the new child's handle (which would kill the event bridge and orphan the
                 // fabric) (re-review: fabric respawn stale-child race).
-                let current = drain_state
-                    .fabric_generation
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                if current == generation {
+                if drain_state
+                    .fabric_process
+                    .lock()
+                    .map(|mut slot| slot.clear_if_current(generation))
+                    .unwrap_or(false)
+                {
                     log::warn!(
                         "[FABRIC] termflow-fabric terminated (code={:?}, signal={:?}); clearing process handle",
                         payload.code,
                         payload.signal
                     );
-                    if let Ok(mut guard) = drain_state.fabric_process.lock() {
-                        *guard = None;
-                    }
                 } else {
                     log::debug!(
-                        "[FABRIC] stale fabric child (gen {generation}) terminated after respawn (current gen {current}); keeping new handle"
+                        "[FABRIC] stale fabric child (gen {generation}) terminated after respawn; keeping current handle"
                     );
                 }
             }
@@ -257,9 +261,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
             crate::mcp_sidecar::SidecarAcceptance::Unverified => log::warn!("[FABRIC] owner matched but build identity unavailable; continuing unverified"),
             crate::mcp_sidecar::SidecarAcceptance::Rejected => {
                 log::error!("[FABRIC] foreign or mismatched listener; stopping only our spawned generation");
-                if verify_state.fabric_generation.load(std::sync::atomic::Ordering::Acquire) == generation {
-                    shutdown_fabric(&verify_state);
-                }
+                shutdown_fabric_generation(&verify_state, generation);
             }
         }
     });
@@ -282,16 +284,12 @@ pub(crate) fn fabric_installed<R: tauri::Runtime>(state: &AppState<R>) -> bool {
     state
         .fabric_process
         .lock()
-        .map(|g| option_handle_present(&g))
+        .map(|g| g.is_present())
         .unwrap_or(false)
 }
 
 /// Pure predicate: is an `Option` handle present? Extracted so the gate's logic is
 /// unit-testable without constructing an `AppState` (which needs `mock_app`).
-fn option_handle_present<T>(guard: &Option<T>) -> bool {
-    guard.is_some()
-}
-
 /// Subscribe to the fabric's SSE event stream (`GET /events` on the loopback
 /// control port) and re-emit each event to the renderer as a `peer:event` Tauri
 /// event (bridged to a DOM `CustomEvent` in `tauri-bridge.ts`). The stream is
@@ -454,7 +452,7 @@ pub async fn respawn_fabric(app: AppHandle, state: AppState) {
     let was_running = state
         .fabric_process
         .lock()
-        .map(|g| g.is_some())
+        .map(|g| g.is_present())
         .unwrap_or(false);
     if !was_running {
         return;
@@ -468,14 +466,27 @@ pub async fn respawn_fabric(app: AppHandle, state: AppState) {
 }
 
 pub fn shutdown_fabric(state: &AppState) {
-    if let Ok(mut guard) = state.fabric_process.lock() {
-        if let Some(child) = guard.take() {
-            log::info!("[FABRIC] Shutting down termflow-fabric sidecar...");
-            if let Err(e) = child.kill() {
-                log::warn!("[FABRIC] Failed to kill fabric sidecar: {}", e);
-            }
-            log::info!("[FABRIC] Fabric sidecar terminated");
+    let child = state.fabric_process.lock().ok().and_then(|mut slot| slot.take());
+    shutdown_fabric_child(child);
+}
+
+/// Stop only the current slot if it still belongs to this lifecycle operation.
+fn shutdown_fabric_generation(state: &AppState, generation: u64) {
+    let child = state
+        .fabric_process
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take_if_current(generation));
+    shutdown_fabric_child(child);
+}
+
+fn shutdown_fabric_child(child: Option<tauri_plugin_shell::process::CommandChild>) {
+    if let Some(child) = child {
+        log::info!("[FABRIC] Shutting down termflow-fabric sidecar...");
+        if let Err(e) = child.kill() {
+            log::warn!("[FABRIC] Failed to kill fabric sidecar: {}", e);
         }
+        log::info!("[FABRIC] Fabric sidecar terminated");
     }
 }
 
@@ -683,11 +694,14 @@ mod tests {
     }
 
     #[test]
-    fn option_handle_present_reflects_some_and_none() {
+    fn generation_slot_presence_reflects_installed_child() {
         // fabric_installed() reduces to "is the child handle present?" — pin that
         // predicate so the gate can't silently invert (installed when absent).
-        assert!(!super::option_handle_present::<()>(&None));
-        assert!(super::option_handle_present(&Some(())));
+        let mut slot = crate::state::GenerationSlot::new();
+        assert!(!slot.is_present());
+        let generation = slot.claim_generation();
+        slot.install_if_current(generation, ()).unwrap();
+        assert!(slot.is_present());
     }
 
     #[test]

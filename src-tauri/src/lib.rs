@@ -76,7 +76,7 @@ pub(crate) use window_restore::{restore_windows, show_or_focus_main_window};
 /// not resurrect a sidecar the user deliberately stopped — "the API moved" is a reason to
 /// re-point a running forwarder, never a reason to start one.
 pub(crate) fn mcp_alive(state: &AppState) -> bool {
-    state.mcp_process.lock().map(|g| g.is_some()).unwrap_or(false)
+    state.mcp_process.lock().map(|g| g.is_present()).unwrap_or(false)
 }
 
 /// Private stdin line protocol understood only by our spawned MCP child. It is
@@ -91,8 +91,25 @@ fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
 }
 
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
-    if let Ok(mut guard) = state.mcp_process.lock() {
-        if let Some(child) = guard.take() {
+    let child = state.mcp_process.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(child) = child {
+        shutdown_mcp_handle(child);
+    }
+}
+
+/// Stop only the child that belongs to a lifecycle operation's generation.
+pub(crate) fn shutdown_mcp_generation(state: &AppState, generation: u64) {
+    let child = state
+        .mcp_process
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take_if_current(generation));
+    if let Some(child) = child {
+        shutdown_mcp_handle(child);
+    }
+}
+
+fn shutdown_mcp_handle(child: McpProcessHandle) {
             match child {
                 McpProcessHandle::Legacy(mut handle) => {
                     log::info!("[MCP] Gracefully shutting down MCP Server (PID: {})...", handle.id());
@@ -135,8 +152,6 @@ pub(crate) fn shutdown_mcp_server(state: &AppState) {
             }
 
             log::info!("[MCP] MCP Server terminated");
-        }
-    }
 }
 
 #[cfg(test)]
@@ -598,7 +613,15 @@ pub fn run() {
                         Some(p) => {
                             mcp_net.mcp_port = p;
                             tauri::async_runtime::spawn(async move {
-                                respawn_mcp(mcp_app_handle, mcp_state, &mcp_net).await;
+                                let _op = mcp_state.network_op_lock.lock().await;
+                                let started = respawn_mcp(mcp_app_handle, mcp_state.clone(), &mcp_net).await;
+                                if !started {
+                                    let mut effective = mcp_state.effective_endpoints.write();
+                                    if effective.mcp_port == Some(p) {
+                                        effective.mcp_port = None;
+                                    }
+                                    log::error!("[MCP] boot startup was rejected or failed; endpoint unpublished");
+                                }
                             });
                         }
                         None => log::error!(

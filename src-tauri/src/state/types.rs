@@ -257,6 +257,87 @@ pub enum McpProcessHandle {
 use std::sync::Mutex;
 use std::collections::VecDeque;
 
+/// A process handle coupled to the generation that owns it. The counter and
+/// current handle are protected by one mutex so stale lifecycle work cannot
+/// select a replacement child between checking and removing it.
+pub struct GenerationSlot<T> {
+    next_generation: u64,
+    current: Option<(u64, T)>,
+}
+
+#[cfg(test)]
+mod generation_slot_tests {
+    use super::GenerationSlot;
+
+    #[test]
+    fn a_stale_spawn_cannot_replace_a_newer_slot_or_clear_it() {
+        let mut slot = GenerationSlot::new();
+        let old = slot.claim_generation();
+        let new = slot.claim_generation();
+        assert_eq!(slot.install_if_current(old, "old"), Err("old"));
+        assert_eq!(slot.install_if_current(new, "new"), Ok(()));
+        assert!(!slot.clear_if_current(old));
+        assert!(slot.is_present());
+        assert_eq!(slot.take_if_current(new), Some("new"));
+    }
+}
+
+impl<T> GenerationSlot<T> {
+    pub fn new() -> Self {
+        Self {
+            next_generation: 0,
+            current: None,
+        }
+    }
+
+    pub fn claim_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.next_generation
+    }
+
+    /// Installs a spawned child only if no later spawn has claimed the slot.
+    /// The caller must terminate the returned stale child itself.
+    pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<(), T> {
+        if self.next_generation == generation {
+            self.current = Some((generation, handle));
+            Ok(())
+        } else {
+            Err(handle)
+        }
+    }
+
+    pub fn clear_if_current(&mut self, generation: u64) -> bool {
+        if self.current.as_ref().is_some_and(|(current, _)| *current == generation) {
+            self.current = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_current(&self, generation: u64) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|(current, _)| *current == generation)
+    }
+
+    pub fn take_if_current(&mut self, generation: u64) -> Option<T> {
+        if self.current.as_ref().is_some_and(|(current, _)| *current == generation) {
+            self.current.take().map(|(_, handle)| handle)
+        } else {
+            None
+        }
+    }
+
+    pub fn take(&mut self) -> Option<T> {
+        self.current.take().map(|(_, handle)| handle)
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.current.is_some()
+    }
+}
+
 /// An in-flight cross-window pane drag. The source window registers it; the
 /// window the user releases over claims it (and the source removes its pane).
 #[derive(Clone)]
@@ -339,19 +420,12 @@ pub struct AppState<R: Runtime = Wry> {
     pub tmux_config: Arc<RwLock<TmuxConfig>>,
     // Active tmux sessions (terminal ID -> session)
     pub tmux_sessions: Arc<DashMap<String, Mutex<TmuxSession>>>,
-    // MCP Server process handle for graceful shutdown
-    pub mcp_process: Arc<Mutex<Option<McpProcessHandle>>>,
-    // Monotonic spawn generation for MCP. A stale child must never clear the
-    // handle installed by a later config-change respawn.
-    pub mcp_generation: Arc<AtomicU64>,
+    // MCP process handle and generation are one atomic ownership slot. A stale
+    // lifecycle operation may only take the generation it installed.
+    pub mcp_process: Arc<Mutex<GenerationSlot<McpProcessHandle>>>,
     // termflow-fabric peering sidecar handle for graceful shutdown. `None` when
     // the fabric binary is absent (open-core builds run fine without it).
-    pub fabric_process: Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>,
-    // Monotonic spawn generation for the fabric child. Each spawn bumps it; a child's drain
-    // task captures its generation and only clears `fabric_process` on Terminated if it is
-    // STILL the current one — so a respawn's old child dying can't null the new child's
-    // handle (re-review: fabric respawn stale-child race).
-    pub fabric_generation: Arc<AtomicU64>,
+    pub fabric_process: Arc<Mutex<GenerationSlot<tauri_plugin_shell::process::CommandChild>>>,
     // Loopback control port the fabric exposes its command/SSE API on. Dev/prod
     // isolated (see app_config::default_fabric_control_port), same as api/mcp ports.
     pub fabric_control_port: u16,
@@ -543,9 +617,7 @@ impl<R: Runtime> Clone for AppState<R> {
             tmux_config: self.tmux_config.clone(),
             tmux_sessions: self.tmux_sessions.clone(),
             mcp_process: self.mcp_process.clone(),
-            mcp_generation: self.mcp_generation.clone(),
             fabric_process: self.fabric_process.clone(),
-            fabric_generation: self.fabric_generation.clone(),
             fabric_control_port: self.fabric_control_port,
             keep_running_in_background: self.keep_running_in_background.clone(),
             network: self.network.clone(),
