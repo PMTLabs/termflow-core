@@ -23,9 +23,7 @@ const REPO_URL: &str = "https://github.com/PMTLabs/termflow-core";
 /// Velopack startup hook — MUST be the first thing `main()` runs. Startup
 /// auto-apply is disabled so only our transactional path applies an update.
 pub fn run_startup_hook() {
-    VelopackApp::build()
-        .set_auto_apply_on_startup(false)
-        .run();
+    VelopackApp::build().set_auto_apply_on_startup(false).run();
 }
 
 /// Build an `UpdateManager` for the GitHub source. `new` returns an error when
@@ -57,7 +55,8 @@ fn check_and_download() -> Result<Option<UpdateInfo>, String> {
     let um = manager()?;
     match um.check_for_updates().map_err(|e| e.to_string())? {
         UpdateCheck::UpdateAvailable(info) => {
-            um.download_updates(&info, None).map_err(|e| e.to_string())?;
+            um.download_updates(&info, None)
+                .map_err(|e| e.to_string())?;
             Ok(Some(*info))
         }
         _ => Ok(None),
@@ -128,7 +127,10 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     let armed_siblings =
         crate::sibling_coord::arm_siblings(&siblings, crate::sibling_coord::http_call).await?;
     if !armed_siblings.is_empty() {
-        log::info!("[UPDATE] armed {} sibling(s): {armed_siblings:?}", armed_siblings.len());
+        log::info!(
+            "[UPDATE] armed {} sibling(s): {armed_siblings:?}",
+            armed_siblings.len()
+        );
     }
 
     // Arm our own host so shells survive, and wait for the ack BEFORE applying.
@@ -138,23 +140,29 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
             // We armed strangers for an update that cannot now proceed. Put them
             // back before returning, or each holds a 600s window it never asked for.
             let _ = crate::sibling_coord::disarm_siblings(
-                &siblings, &armed_siblings, &crate::sibling_coord::http_call,
-            ).await;
+                &siblings,
+                &armed_siblings,
+                &crate::sibling_coord::http_call,
+            )
+            .await;
             return Err("pty-host not connected — nothing to keep alive".to_string());
         }
     };
     let token = crate::pty_host_client::resolve_token();
     if let Err(e) = client
         .arm_detach(
-            600,
+            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
             &token,
             Some(termflow_pty_protocol::ArmDetachPurpose::Local),
         )
         .await
     {
         let _ = crate::sibling_coord::disarm_siblings(
-            &siblings, &armed_siblings, &crate::sibling_coord::http_call,
-        ).await;
+            &siblings,
+            &armed_siblings,
+            &crate::sibling_coord::http_call,
+        )
+        .await;
         return Err(e);
     }
 
@@ -179,8 +187,11 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         // leaving them armed would be the asymmetry this rollback exists to
         // avoid — they armed for OUR update, and it is not happening.
         let _ = crate::sibling_coord::disarm_siblings(
-            &siblings, &armed_siblings, &crate::sibling_coord::http_call,
-        ).await;
+            &siblings,
+            &armed_siblings,
+            &crate::sibling_coord::http_call,
+        )
+        .await;
         return Err(e);
     }
     // Apply succeeded, so Velopack's kill-and-swap (if it reached a sibling at
@@ -190,8 +201,11 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // paths above) but self-disarms on its own next reconnect (state.rs
     // `ensure_pty_host_inner`) — the two paths cover each other.
     let _ = crate::sibling_coord::disarm_siblings(
-        &siblings, &armed_siblings, &crate::sibling_coord::http_call,
-    ).await;
+        &siblings,
+        &armed_siblings,
+        &crate::sibling_coord::http_call,
+    )
+    .await;
     // Let every window persist its state (cwd snapshot included) before we drop
     // it. `app_handle.exit(0)` is a hard process termination — the comment above
     // used to assume Tauri would still "flush tab/session state" on the way out,
@@ -213,9 +227,9 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
 mod arm_lifecycle_wiring_tests {
     /// The body of `fn <name>`, found by counting braces from its opening `{`.
     fn fn_body(src: &str, signature: &str) -> String {
-        let start = src
-            .find(signature)
-            .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
+        let start = src.find(signature).unwrap_or_else(|| {
+            panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously")
+        });
         let rest = &src[start..];
         let open = rest.find('{').expect("no body");
         let mut depth = 0usize;
@@ -235,7 +249,9 @@ mod arm_lifecycle_wiring_tests {
     }
 
     fn source() -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("updater.rs");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("updater.rs");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
             .replace("\r\n", "\n")
@@ -254,8 +270,14 @@ mod arm_lifecycle_wiring_tests {
         // failure branches' own `disarm_siblings` calls — so a disarm found
         // only in those earlier branches does not satisfy this.
         let occurrences = body.matches("return Err(e);").count();
-        assert_eq!(occurrences, 2, "expected exactly the arm_detach and apply failure returns: {body}");
-        let success_tail = body.rsplit("return Err(e);").next().expect("split is never empty");
+        assert_eq!(
+            occurrences, 2,
+            "expected exactly the arm_detach and apply failure returns: {body}"
+        );
+        let success_tail = body
+            .rsplit("return Err(e);")
+            .next()
+            .expect("split is never empty");
         assert!(
             success_tail.contains("disarm_siblings"),
             "a successful update must disarm the siblings it armed, on the \
@@ -279,7 +301,9 @@ mod arm_lifecycle_wiring_tests {
              included) before exiting. Body:\n{body}"
         );
         let flush_at = body.find("flush_all_windows").expect("checked above");
-        let exit_at = body.find(".exit(").expect("update_and_restart must still exit");
+        let exit_at = body
+            .find(".exit(")
+            .expect("update_and_restart must still exit");
         assert!(
             flush_at < exit_at,
             "flush_all_windows must be awaited BEFORE exit(0) — after would persist \

@@ -84,11 +84,13 @@ async fn main() {
             // Drain/takeover is NOT implemented yet — do not advertise CAP_DRAIN.
             capabilities: termflow_pty_protocol::CAP_ATTACH_ACK
                 | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT,
-            // This release only lays lifecycle protocol groundwork. Its hold
-            // behavior remains the existing indefinite retention policy.
+            // The bound applies only to an authenticated, purpose-labelled
+            // LOCAL hold. Legacy/unlabelled sibling holds remain indefinite.
             lifecycle: Some(termflow_pty_protocol::LifecycleContract {
                 version: 1,
-                retention: termflow_pty_protocol::RetentionPolicy::Indefinite,
+                retention: termflow_pty_protocol::RetentionPolicy::Bounded {
+                    active_secs: termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+                },
             }),
         };
         if let Err(e) = termflow_pty_protocol::write_record(&path, &rec) {

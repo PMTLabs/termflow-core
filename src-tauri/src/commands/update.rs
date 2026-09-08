@@ -1,9 +1,9 @@
 //! Update / hot-swap / offload preflight checks, and the reattach prompt-gate
 //! seed. Split out of the former `commands.rs`.
 
-use tauri::State;
-use crate::state::AppState;
 use super::window::flush_all_windows;
+use crate::state::AppState;
+use tauri::State;
 
 /// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
 /// rebuild. The sidecar keeps every PTY (and its CLI) alive; the next launch
@@ -112,7 +112,10 @@ pub async fn take_reattach_prompt_hook(
     };
     let pid = state.terminals.get(&id).map(|t| t.pid).unwrap_or(0);
     let at_prompt = sample_at_prompt(hook, pid).await;
-    Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
+    Ok(Some(ReattachPromptGateSeed {
+        prompt_hook: hook,
+        at_prompt,
+    }))
 }
 
 /// Design 006 pre-mount probe: NON-consuming "would the gate arm right now?"
@@ -131,7 +134,10 @@ pub async fn probe_reattach_prompt_gate(
         return Ok(None);
     };
     let at_prompt = sample_at_prompt(hook, pid).await;
-    Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
+    Ok(Some(ReattachPromptGateSeed {
+        prompt_hook: hook,
+        at_prompt,
+    }))
 }
 
 /// Strict at-prompt sample shared by the drain and the pre-mount probe
@@ -208,7 +214,7 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // exit and drop the pipe (10-minute safety window).
     client
         .arm_detach(
-            600,
+            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
             &token,
             Some(termflow_pty_protocol::ArmDetachPurpose::Local),
         )
@@ -236,9 +242,9 @@ mod preflight_wiring_tests {
     /// silently fall out of a line-window and the assertion would pass by
     /// measuring nothing.
     fn fn_body(src: &str, signature: &str) -> String {
-        let start = src
-            .find(signature)
-            .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
+        let start = src.find(signature).unwrap_or_else(|| {
+            panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously")
+        });
         let rest = &src[start..];
         let open = rest.find('{').expect("no body");
         let mut depth = 0usize;
@@ -278,7 +284,12 @@ mod preflight_wiring_tests {
         // Named against the LIVE sibling APIs, not the removed
         // `sibling_instance_preflight`: a guard that watches for a function
         // nobody can call any more is trivially true and guards nothing.
-        for api in ["live_siblings_now", "describe_unarmable", "arm_siblings", "update_preflight"] {
+        for api in [
+            "live_siblings_now",
+            "describe_unarmable",
+            "arm_siblings",
+            "update_preflight",
+        ] {
             assert!(
                 !body.contains(api),
                 "Offload & Close must not consult siblings (`{api}` found) — it performs no \
@@ -296,7 +307,10 @@ mod preflight_wiring_tests {
     /// `contains` matched the assertion literals BELOW, in this very file, so
     /// the offload site passed even when it was mutated to send `None`.
     fn arm_detach_args(src: &str) -> Vec<String> {
-        let production = src.split("mod preflight_wiring_tests").next().unwrap_or(src);
+        let production = src
+            .split("mod preflight_wiring_tests")
+            .next()
+            .unwrap_or(src);
         let mut out = Vec::new();
         for (open, _) in production.match_indices(".arm_detach(") {
             let start = open + ".arm_detach(".len();
@@ -357,8 +371,14 @@ mod preflight_wiring_tests {
         let src = source();
         let shown = fn_body(&src, "pub fn hotswap_available");
         let enforced = fn_body(&src, "pub async fn restart_for_update");
-        assert!(shown.contains("offload_preflight"), "panel must use the shared check: {shown}");
-        assert!(enforced.contains("offload_preflight"), "button must use the shared check");
+        assert!(
+            shown.contains("offload_preflight"),
+            "panel must use the shared check: {shown}"
+        );
+        assert!(
+            enforced.contains("offload_preflight"),
+            "button must use the shared check"
+        );
     }
 
     /// Update's reach IS real — Velopack kills every process under the install
@@ -366,8 +386,14 @@ mod preflight_wiring_tests {
     #[test]
     fn update_still_considers_siblings() {
         let body = fn_body(&source(), "pub fn update_preflight");
-        assert!(body.contains("live_siblings_now"), "update must enumerate siblings: {body}");
-        assert!(body.contains("hotswap_preflight"), "update must also guard our own terminals");
+        assert!(
+            body.contains("live_siblings_now"),
+            "update must enumerate siblings: {body}"
+        );
+        assert!(
+            body.contains("hotswap_preflight"),
+            "update must also guard our own terminals"
+        );
     }
 
     /// The two preflights must stay DIFFERENT functions. Collapsing them back
@@ -382,4 +408,3 @@ mod preflight_wiring_tests {
         );
     }
 }
-

@@ -20,26 +20,111 @@
 //! - On disconnect the outbound backlog is PURGED: reattach replays from the
 //!   bounded ring, so Hold retains only the rings (no unbounded queue).
 
-use crate::manager::{Disposition, SessionManager};
+use crate::manager::{Disposition, LocalHold, SessionManager};
+use std::sync::Arc;
 use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
 use termflow_pty_protocol::{read_frame, write_frame, Data, Frame, Response};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 
+/// Monotonic active-time clock.  Windows uses the kernel's unbiased interrupt
+/// counter, which excludes suspend.  On non-Windows `Instant` is the best
+/// portable monotonic source; tests inject a clock.  A Windows read failure is
+/// `None`, and is conservative: it can delay expiry but never authorizes it.
+trait ActiveClock: Send + Sync {
+    fn now(&self) -> Option<Duration>;
+}
+
+struct SystemActiveClock {
+    #[cfg(not(windows))]
+    origin: Instant,
+    #[cfg(windows)]
+    origin_ticks: Option<u64>,
+}
+
+impl SystemActiveClock {
+    fn new() -> Self {
+        #[cfg(windows)]
+        let origin_ticks = unbiased_interrupt_ticks();
+        Self {
+            #[cfg(not(windows))]
+            origin: Instant::now(),
+            #[cfg(windows)]
+            origin_ticks,
+        }
+    }
+}
+
+impl ActiveClock for SystemActiveClock {
+    fn now(&self) -> Option<Duration> {
+        #[cfg(windows)]
+        {
+            let ticks = unbiased_interrupt_ticks()?;
+            return Some(Duration::from_nanos(
+                ticks.saturating_sub(self.origin_ticks?).saturating_mul(100),
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            Some(self.origin.elapsed())
+        }
+    }
+}
+
+#[cfg(windows)]
+fn unbiased_interrupt_ticks() -> Option<u64> {
+    let mut ticks = 0u64;
+    // SAFETY: the API writes one u64 to the valid pointer supplied here.
+    unsafe {
+        windows_sys::Win32::System::WindowsProgramming::QueryUnbiasedInterruptTime(&mut ticks)
+    };
+    Some(ticks)
+}
+
+#[derive(Clone, Copy)]
+struct HoldDeadline {
+    hold: LocalHold,
+    at: Duration,
+}
+
+enum WaitResult {
+    Accepted(Stream, Option<HoldDeadline>),
+    Empty,
+    Expired(LocalHold),
+}
+enum ConnectionResult {
+    Disconnected,
+    Expired(LocalHold),
+}
+
+fn deadline_expired(
+    mgr: &SessionManager,
+    deadline: Option<HoldDeadline>,
+    clock: &dyn ActiveClock,
+) -> Option<LocalHold> {
+    let d = deadline?;
+    // A prior authenticated lifecycle frame, re-arm, or disarm revokes this
+    // generation before its old timer can do any damage.
+    (mgr.local_hold_is_current(d.hold) && clock.now().is_some_and(|now| now >= d.at))
+        .then_some(d.hold)
+}
+
 #[cfg(windows)]
 mod pipe_windows;
-#[cfg(windows)]
-pub use pipe_windows::{Listener, Stream};
 #[cfg(all(windows, test))]
 pub use pipe_windows::{connect, ClientStream};
+#[cfg(windows)]
+pub use pipe_windows::{Listener, Stream};
 
 #[cfg(unix)]
 mod socket_unix;
-#[cfg(unix)]
-pub use socket_unix::{default_endpoint, Listener, Stream};
 #[cfg(all(unix, test))]
 pub use socket_unix::{connect, ClientStream};
+#[cfg(unix)]
+pub use socket_unix::{default_endpoint, Listener, Stream};
 
 /// Bounded outbound channel depth (frames). On overflow the reader drops the
 /// frame (bytes remain in the ring) and emits a Gap so the GUI resyncs.
@@ -60,6 +145,7 @@ pub async fn serve(
     survivable: bool,
     record: Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
 ) -> std::io::Result<()> {
+    let clock: Arc<dyn ActiveClock> = Arc::new(SystemActiveClock::new());
     let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
     let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
     let mut mgr = SessionManager::new(events_tx, resp_tx, token, survivable);
@@ -69,12 +155,26 @@ pub async fn serve(
     // spawn must see us during the whole window in which we are acceptable.
     heal_record(&record);
     let mut stream = listener.accept().await?;
+    let mut pending_deadline = None;
 
     loop {
         heal_record(&record);
-        let (erx, rrx) = run_connection(&mut mgr, stream, events_rx, resp_rx).await;
+        let (erx, rrx, connection) = run_connection(
+            &mut mgr,
+            stream,
+            events_rx,
+            resp_rx,
+            pending_deadline,
+            &*clock,
+        )
+        .await;
         events_rx = erx;
         resp_rx = rrx;
+
+        if let ConnectionResult::Expired(hold) = connection {
+            mgr.expire_local_hold(hold);
+            return Ok(());
+        }
 
         match mgr.on_gui_disconnect() {
             Disposition::TearDown => return Ok(()),
@@ -88,9 +188,26 @@ pub async fn serve(
                 // once nothing live remains to preserve. The arm deadline is still
                 // computed + reported in ArmAck for the GUI's UI, but it no longer
                 // destroys sessions here.
-                match wait_for_reconnect(&mut listener, &mgr, &record).await {
-                    Some(s) => stream = s, // already connected → loop top
-                    None => return Ok(()), // all children exited → safe teardown
+                let deadline = mgr.begin_local_absence().and_then(|hold| {
+                    clock.now().map(|now| HoldDeadline {
+                        hold,
+                        at: now
+                            + Duration::from_secs(termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS),
+                    })
+                });
+                match wait_for_reconnect(&mut listener, &mgr, &record, deadline, &*clock).await {
+                    WaitResult::Accepted(s, deadline) => {
+                        // Keep the generation-owned timer through the first
+                        // read; accept alone never proves lifecycle adoption.
+                        stream = s;
+                        pending_deadline = deadline;
+                        continue;
+                    }
+                    WaitResult::Empty => return Ok(()),
+                    WaitResult::Expired(hold) => {
+                        mgr.expire_local_hold(hold);
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -108,11 +225,18 @@ async fn wait_for_reconnect(
     listener: &mut Listener,
     mgr: &SessionManager,
     record: &Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
-) -> Option<Stream> {
+    deadline: Option<HoldDeadline>,
+    clock: &dyn ActiveClock,
+) -> WaitResult {
     const RECHECK: Duration = Duration::from_millis(500);
     loop {
         if mgr.live_session_count() == 0 {
-            return None;
+            return WaitResult::Empty;
+        }
+        // Re-read active time after every short wakeup. A suspend/resume wakeup
+        // is never proof that 900 active seconds passed.
+        if let Some(hold) = deadline_expired(mgr, deadline, clock) {
+            return WaitResult::Expired(hold);
         }
         // Keep the advertisement alive THROUGHOUT the re-accept window: a
         // client that cannot see this host's pid gets only the short grace
@@ -120,7 +244,7 @@ async fn wait_for_reconnect(
         heal_record(record);
         tokio::select! {
             r = listener.accept() => match r {
-                Ok(s) => return Some(s),
+                Ok(s) => return WaitResult::Accepted(s, deadline),
                 Err(_) => {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     continue;
@@ -182,7 +306,9 @@ async fn run_connection<S>(
     stream: S,
     events_rx: Receiver<Data>,
     resp_rx: Receiver<Response>,
-) -> (Receiver<Data>, Receiver<Response>)
+    deadline: Option<HoldDeadline>,
+    clock: &dyn ActiveClock,
+) -> (Receiver<Data>, Receiver<Response>, ConnectionResult)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -231,11 +357,27 @@ where
     // nothing, and spending the arm for it would destroy the very sessions the arm
     // was set to preserve. Cleared BEFORE the frame is dispatched, so a client
     // whose first frame is `ArmDetach` still ends up armed.
-    let mut heard_from_peer = false;
-    while let Ok(Some(frame)) = read_frame(&mut rd).await {
-        if !heard_from_peer {
-            heard_from_peer = true;
+    let mut adopted = false;
+    let result = loop {
+        if let Some(hold) = deadline_expired(mgr, deadline, clock) {
+            break ConnectionResult::Expired(hold);
+        }
+        let frame = tokio::select! {
+            r = read_frame(&mut rd) => match r { Ok(Some(f)) => f, _ => break ConnectionResult::Disconnected },
+            _ = tokio::time::sleep(Duration::from_millis(250)) => continue,
+        };
+        // Only a control/lifecycle frame adopts a held host. Data::Stdin is
+        // intentionally not reinterpreted as GUI identity.
+        if !adopted && matches!(frame, Frame::Ctrl(_)) {
+            if let Some(d) = deadline {
+                // Expiry wins the tie unless the qualifying frame was already
+                // processed before this active-time sample.
+                if deadline_expired(mgr, Some(d), clock).is_some() {
+                    break ConnectionResult::Expired(d.hold);
+                }
+            }
             mgr.on_gui_connect();
+            adopted = true;
         }
         // This loop is strictly sequential: the next frame is not even READ
         // until the current handler returns, so any handler that blocks delays
@@ -260,26 +402,116 @@ where
                 took.as_millis()
             );
         }
-    }
+    };
 
     let _ = stop_tx.send(());
-    writer.await.unwrap_or_else(|_| {
+    let (events_rx, resp_rx) = writer.await.unwrap_or_else(|_| {
         let (_e_tx, e_rx) = tokio::sync::mpsc::channel(CHAN_CAP);
         let (_r_tx, r_rx) = tokio::sync::mpsc::channel(CHAN_CAP);
         (e_rx, r_rx)
-    })
+    });
+    (events_rx, resp_rx, result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use termflow_pty_protocol::{Control, SpawnSpec};
+
+    struct FakeClock(Mutex<Option<Duration>>);
+    impl FakeClock {
+        fn set(&self, now: Option<Duration>) {
+            *self.0.lock().unwrap() = now;
+        }
+    }
+    impl ActiveClock for FakeClock {
+        fn now(&self) -> Option<Duration> {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    fn local_hold_manager() -> (SessionManager, LocalHold) {
+        let (events, _) = tokio::sync::mpsc::channel(CHAN_CAP);
+        let (responses, _) = tokio::sync::mpsc::channel(CHAN_CAP);
+        let mut mgr = SessionManager::new(events, responses, Some("tok".into()), true);
+        mgr.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 1,
+            token: "tok".into(),
+            purpose: Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        });
+        let hold = mgr
+            .begin_local_absence()
+            .expect("Local arms start an absence deadline");
+        (mgr, hold)
+    }
+
+    #[test]
+    fn local_hold_expires_only_after_active_deadline_and_is_cancelled_by_lifecycle_adoption() {
+        let (mut mgr, hold) = local_hold_manager();
+        let clock = FakeClock(Mutex::new(Some(Duration::from_secs(899))));
+        let deadline = HoldDeadline {
+            hold,
+            at: Duration::from_secs(900),
+        };
+        assert!(
+            deadline_expired(&mgr, Some(deadline), &clock).is_none(),
+            "live child hold cannot expire early"
+        );
+        clock.set(Some(Duration::from_secs(900)));
+        assert_eq!(
+            deadline_expired(&mgr, Some(deadline), &clock),
+            Some(hold),
+            "active 900 seconds expires the local hold"
+        );
+        mgr.on_gui_connect();
+        assert!(
+            deadline_expired(&mgr, Some(deadline), &clock).is_none(),
+            "a reconnecting lifecycle frame cancels the old generation"
+        );
+    }
+
+    #[test]
+    fn unlabelled_hold_and_unreadable_unbiased_clock_never_authorize_expiry() {
+        let (events, _) = tokio::sync::mpsc::channel(CHAN_CAP);
+        let (responses, _) = tokio::sync::mpsc::channel(CHAN_CAP);
+        let mut sibling = SessionManager::new(events, responses, Some("tok".into()), true);
+        sibling.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 1,
+            token: "tok".into(),
+            purpose: None,
+        });
+        assert!(
+            sibling.begin_local_absence().is_none(),
+            "legacy/sibling arm has no deadline"
+        );
+
+        let (mgr, hold) = local_hold_manager();
+        let clock = FakeClock(Mutex::new(None)); // simulated resume/read failure
+        assert!(
+            deadline_expired(
+                &mgr,
+                Some(HoldDeadline {
+                    hold,
+                    at: Duration::ZERO
+                }),
+                &clock
+            )
+            .is_none(),
+            "a wakeup without a fresh unbiased-time sample cannot destroy sessions"
+        );
+    }
 
     /// A per-OS endpoint under a directory we own, unique to this test process.
     fn test_endpoint(tag: &str) -> Endpoint {
         #[cfg(windows)]
         {
-            Endpoint(format!(r"\\.\pipe\termflow-test-{}-{tag}", std::process::id()))
+            Endpoint(format!(
+                r"\\.\pipe\termflow-test-{}-{tag}",
+                std::process::id()
+            ))
         }
         #[cfg(unix)]
         {
@@ -718,7 +950,10 @@ mod tests {
             }
         })
         .await;
-        assert!(has_t1, "live session survived past the expired arm deadline");
+        assert!(
+            has_t1,
+            "live session survived past the expired arm deadline"
+        );
         srv.abort();
     }
 
@@ -816,10 +1051,8 @@ mod tests {
         write_frame(&mut c2, &Frame::Ctrl(Control::ListSessions { req: 3 }))
             .await
             .unwrap();
-        let _ = tokio::time::timeout(Duration::from_secs(5), async {
-            read_frame(&mut c2).await
-        })
-        .await;
+        let _ =
+            tokio::time::timeout(Duration::from_secs(5), async { read_frame(&mut c2).await }).await;
         assert!(path.exists(), "record still present after reconnect");
         srv.abort();
         let _ = std::fs::remove_dir_all(&dir);
