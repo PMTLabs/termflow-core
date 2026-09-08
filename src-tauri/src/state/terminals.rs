@@ -15,6 +15,26 @@ use super::render::{FocusReportingTracker, render_full_scrollback, render_tail_l
 use super::reattach::plan_reattach;
 use super::types::*;
 
+fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> bool {
+    pending_windows == 0 && !already_released
+}
+
+#[cfg(test)]
+mod restore_sweep_gate_tests {
+    use super::restore_sweep_may_release;
+
+    #[test]
+    fn waits_for_every_window_then_releases_when_last_is_destroyed() {
+        assert!(!restore_sweep_may_release(1, false));
+        assert!(restore_sweep_may_release(0, false));
+    }
+
+    #[test]
+    fn a_released_sweep_never_releases_twice() {
+        assert!(!restore_sweep_may_release(0, true));
+    }
+}
+
 impl<R: Runtime> AppState<R> {
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
     /// to the renderer leaf used by persisted canvas edges. Owning tab ids are not
@@ -106,6 +126,7 @@ impl<R: Runtime> AppState<R> {
             host_reattach_pending: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
             host_restore_claims: Arc::new(DashMap::new()),
+            host_restore_released: Arc::new(AtomicBool::new(false)),
             host_recovery_surfaced: Arc::new(DashMap::new()),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
@@ -783,9 +804,19 @@ impl<R: Runtime> AppState<R> {
     pub fn begin_host_restore_sweep(&self, windows: impl IntoIterator<Item = String>) {
         self.host_restore_pending_windows.clear();
         self.host_restore_claims.clear();
+        self.host_restore_released.store(false, Ordering::Release);
         for label in windows {
             self.host_restore_pending_windows.insert(label, ());
         }
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let pending: Vec<String> = state.host_restore_pending_windows.iter().map(|e| e.key().clone()).collect();
+            if !pending.is_empty() {
+                log::warn!("[HOTSWAP] host restore sweep proceeding after 60s without acknowledgements from: {}", pending.join(", "));
+                state.release_host_restore_sweep(true).await;
+            }
+        });
     }
 
     pub async fn report_host_restore_settled(&self, window_label: String, claims: Vec<String>) {
@@ -793,9 +824,20 @@ impl<R: Runtime> AppState<R> {
             self.host_restore_claims.insert(claim, ());
         }
         self.host_restore_pending_windows.remove(&window_label);
-        if !self.host_restore_pending_windows.is_empty() {
-            return;
+        if !restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) { return; }
+        self.release_host_restore_sweep(false).await;
+    }
+
+    pub async fn host_restore_window_destroyed(&self, window_label: &str) {
+        self.host_restore_pending_windows.remove(window_label);
+        if restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) {
+            self.release_host_restore_sweep(false).await;
         }
+    }
+
+    async fn release_host_restore_sweep(&self, forced: bool) {
+        let released = self.host_restore_released.swap(true, Ordering::AcqRel);
+        if released || (!forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false)) { return; }
         if self.ensure_pty_host().await.is_err() {
             return;
         }

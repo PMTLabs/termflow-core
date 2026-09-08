@@ -469,6 +469,7 @@ pub struct AppState<R: Runtime = Wry> {
     pub host_reattach_pending: Arc<DashMap<String, u32>>,
     pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
     pub host_restore_claims: Arc<DashMap<String, ()>>,
+    pub host_restore_released: Arc<AtomicBool>,
     pub host_recovery_surfaced: Arc<DashMap<String, ()>>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
     // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
@@ -570,6 +571,7 @@ impl<R: Runtime> Clone for AppState<R> {
             host_reattach_pending: self.host_reattach_pending.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_claims: self.host_restore_claims.clone(),
+            host_restore_released: self.host_restore_released.clone(),
             host_recovery_surfaced: self.host_recovery_surfaced.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
