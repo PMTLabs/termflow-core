@@ -1,7 +1,8 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import cors from "cors";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 /** Constant-time string equality (guards the terminal-I/O auth surface). */
 function safeEqual(a: string, b: string): boolean {
@@ -27,6 +28,11 @@ const API_BASE = (process.env.AUTO_TERMINAL_API_URL || "http://localhost:42031")
 // AUTO_TERMINAL_TOKEN is preferred; AUTO_TERMINAL_API_TOKEN kept for back-compat.
 const ACCESS_TOKEN = process.env.AUTO_TERMINAL_TOKEN || process.env.AUTO_TERMINAL_API_TOKEN || "";
 const API_TOKEN = ACCESS_TOKEN || undefined;
+// Bun's packaged sidecar is a single executable, so it can identify itself.
+// Node's legacy loader imports a graph; intentionally report no build id there.
+const SELF_BUILD_ID = (process.versions as Record<string, string>).bun
+    ? createHash("sha256").update(readFileSync(process.execPath)).digest("hex")
+    : "";
 
 // Axios instance with default auth if token is provided. A finite timeout
 // prevents a stalled backend from hanging the MCP request indefinitely.
@@ -90,7 +96,7 @@ app.get("/health", (_req: Request, res: Response) => {
         // Echo the launching app's identity (P0b) so its Settings health check can
         // distinguish OUR sidecar from another instance's that owns this MCP port.
         instanceId: process.env.AUTO_TERMINAL_INSTANCE_ID || "",
-        buildId: process.env.TERMFLOW_BUILD_ID || "",
+        buildId: SELF_BUILD_ID,
     });
 });
 

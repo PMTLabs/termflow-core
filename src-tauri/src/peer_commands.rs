@@ -178,8 +178,11 @@ fn health_owner_matches(health: &serde_json::Value, my_instance_id: &str) -> boo
 
 fn health_build_matches(health: &serde_json::Value, expected: Option<&str>) -> bool {
     match expected {
-        Some(expected) => health.get("build_id").and_then(|v| v.as_str()) == Some(expected),
-        None => false,
+        Some(expected) => match health.get("build_id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+            Some(actual) => actual == expected,
+            None => true, // Older fabric: owner is known, artifact identity is unavailable.
+        },
+        None => true,
     }
 }
 
@@ -440,6 +443,12 @@ mod tests {
         ));
         // Older fabric without an owner id → accepted (backward compatible).
         assert!(health_owner_matches(&json!({ "status": "ok" }), "inst-A"));
+    }
+
+    #[test]
+    fn missing_fabric_build_id_is_unverified_not_not_installed() {
+        assert!(health_build_matches(&json!({ "owner_id": "inst-A" }), Some("expected")));
+        assert!(!health_build_matches(&json!({ "build_id": "other" }), Some("expected")));
     }
 
     #[test]

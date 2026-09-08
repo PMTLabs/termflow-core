@@ -10,7 +10,30 @@ use tauri_plugin_shell::ShellExt;
 /// a running server we do not own — and quietly route this instance's tool calls
 /// into the other app. The sidecar echoes `AUTO_TERMINAL_INSTANCE_ID`, so
 /// compare it (`classify_health_owner`, the same rule the Settings check uses).
-async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: Option<&str>) -> bool {
+/// A health response can prove this exact build, prove only ownership, or prove
+/// that the listener is not ours.  `Unverified` is intentionally usable: old
+/// fabric and the legacy Node graph cannot self-identify a launch artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarAcceptance { Verified, Unverified, Rejected }
+
+pub(crate) fn classify_sidecar_report(
+    reported_owner: Option<&str>,
+    own_id: &str,
+    observed_build: Option<&str>,
+    expected_build: &str,
+) -> Option<SidecarAcceptance> {
+    let (owned, foreign) = crate::network_commands::classify_health_owner(reported_owner, own_id);
+    if owned {
+        return Some(match observed_build {
+            Some(actual) if actual == expected_build => SidecarAcceptance::Verified,
+            Some(_) => SidecarAcceptance::Rejected,
+            None => SidecarAcceptance::Unverified,
+        });
+    }
+    foreign.then_some(SidecarAcceptance::Rejected)
+}
+
+async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: &str) -> SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
@@ -26,26 +49,26 @@ async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: Option<&st
                 let body: serde_json::Value =
                     response.json().await.unwrap_or_else(|_| serde_json::json!({}));
                 let reported = body.get("instanceId").and_then(|v| v.as_str());
-                let (healthy, conflict) =
-                    crate::network_commands::classify_health_owner(reported, own_id);
-                if healthy {
-                    let observed_build = body.get("buildId").and_then(|v| v.as_str());
-                    if expected_build.is_some() && observed_build != expected_build {
-                        log::error!("[MCP] health owner matched but build identity did not: observed={observed_build:?} expected={expected_build:?}");
-                        return false;
+                let observed_build = body.get("buildId").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                match classify_sidecar_report(reported, own_id, observed_build, expected_build) {
+                    Some(SidecarAcceptance::Verified) => {
+                        log::info!("[MCP] MCP Server build-verified after {} attempt(s)", attempt);
+                        return SidecarAcceptance::Verified;
                     }
-                    log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
-                    return true;
-                }
-                if conflict {
+                    Some(SidecarAcceptance::Unverified) => {
+                        log::warn!("[MCP] MCP Server owner matched but build identity is unavailable; continuing unverified");
+                        return SidecarAcceptance::Unverified;
+                    }
+                    Some(SidecarAcceptance::Rejected) => {
                     log::error!(
                         "[MCP] port {port} is served by ANOTHER instance ({}) — this instance's \
                          MCP server is not running. Change the MCP port in Settings.",
                         reported.unwrap_or("unknown")
                     );
-                    return false;
+                        return SidecarAcceptance::Rejected;
+                    }
+                    None => log::debug!("[MCP] Health check attempt {attempt}: no instanceId yet"),
                 }
-                log::debug!("[MCP] Health check attempt {attempt}: no instanceId yet");
             }
             Ok(response) => {
                 log::debug!("[MCP] Health check attempt {} returned status: {}", attempt, response.status());
@@ -57,7 +80,7 @@ async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: Option<&st
     }
 
     log::error!("[MCP] MCP Server health check failed after 10 attempts — MCP is NOT available");
-    false
+    SidecarAcceptance::Rejected
 }
 
 /// Mirrors Tauri shell's sidecar resolver exactly: `current_exe().parent()` plus
@@ -124,7 +147,7 @@ async fn start_mcp_sidecar(
     }
     // P0b: let the sidecar echo our identity on /health so the Settings health check
     // can tell OUR sidecar from another instance's that happens to own the MCP port.
-    sidecar_command = sidecar_command.env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id).env("TERMFLOW_BUILD_ID", &build_id);
+    sidecar_command = sidecar_command.env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id);
 
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[MCP] MCP sidecar spawned");
@@ -170,14 +193,14 @@ async fn start_mcp_sidecar(
         }
     });
 
-    let healthy = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, Some(&build_id)).await;
+    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, &build_id).await;
     log::debug!("[MCP] bundled descriptor={} digest={build_id}", launch_path.display());
-    if !healthy {
+    if acceptance == SidecarAcceptance::Rejected {
         // This is the child handle we just spawned, not the listener discovered
         // on the shared port.  Never act on that foreign listener.
         shutdown_mcp_server(&state);
     }
-    Ok(healthy)
+    Ok(acceptance != SidecarAcceptance::Rejected)
 }
 
 async fn start_mcp_legacy(
@@ -231,10 +254,9 @@ async fn start_mcp_legacy(
     // Node imports a graph of built modules.  There is no single launch artifact
     // descriptor here, so build identity is explicitly unavailable and cannot
     // make this path a successful acceptance/fallback/retry signal.
-    let owner_healthy = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, None).await;
-    if owner_healthy { log::warn!("[MCP] legacy Node build identity unavailable; not accepting it as current"); }
-    shutdown_mcp_server(&state);
-    Ok(false)
+    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, "legacy-node-has-no-artifact-descriptor").await;
+    if acceptance == SidecarAcceptance::Rejected { shutdown_mcp_server(&state); }
+    Ok(acceptance != SidecarAcceptance::Rejected)
 }
 
 /// Kill any running MCP server, then (re)start it from the given config. Tries
@@ -296,7 +318,7 @@ pub async fn respawn_mcp(
 
 #[cfg(test)]
 mod respawn_tests {
-    use super::mcp_respawn_needed;
+    use super::{classify_sidecar_report, mcp_respawn_needed, SidecarAcceptance};
     use crate::app_config::NetworkConfig;
 
     fn base() -> NetworkConfig {
@@ -356,6 +378,34 @@ mod respawn_tests {
         let mut new = base();
         new.expose_on_network = true;
         assert!(mcp_respawn_needed(&old, &new));
+    }
+
+    #[test]
+    fn echoed_expected_env_value_is_not_a_special_acceptance_path() {
+        // A report has no channel for a parent-supplied label: it is accepted
+        // only because its *observed* self-derived digest matches.  Swapping the
+        // executable while it echoes an arbitrary expected string must therefore
+        // be represented as a mismatch and rejected by this classifier.
+        assert_eq!(
+            classify_sidecar_report(Some("ours"), "ours", Some("old-self-hash"), "new-expected-hash"),
+            Some(SidecarAcceptance::Rejected)
+        );
+    }
+
+    #[test]
+    fn owner_matched_missing_build_is_usable_but_unverified() {
+        assert_eq!(
+            classify_sidecar_report(Some("ours"), "ours", None, "expected"),
+            Some(SidecarAcceptance::Unverified)
+        );
+    }
+
+    #[test]
+    fn foreign_owner_is_rejected_even_without_a_build_id() {
+        assert_eq!(
+            classify_sidecar_report(Some("foreign"), "ours", None, "expected"),
+            Some(SidecarAcceptance::Rejected)
+        );
     }
 
     /// The geometry handler must decide a window is TRACKED before it asks whether it is
