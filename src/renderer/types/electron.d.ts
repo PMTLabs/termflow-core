@@ -330,6 +330,7 @@ export interface ElectronAPI {
   flushSessionAck?: () => Promise<void>;
   /** Plan 018: every window id the backend registry currently holds. */
   listWindowSessionIds?: () => Promise<string[]>;
+  reportHostRestoreSettled?: (windowLabel: string, claimedSessionKeys: string[]) => Promise<void>;
 
   // Detach / cross-window pane handoff (Tauri only)
   stashDetachPayload?: (token: string, payload: any) => Promise<void>;

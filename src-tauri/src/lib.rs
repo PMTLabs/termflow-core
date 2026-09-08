@@ -451,6 +451,7 @@ pub fn run() {
         // `main` is titled, so a restored window is configured identically to
         // one opened during the session.
         restore_windows(app.handle());
+        state.begin_host_restore_sweep(app.webview_windows().keys().cloned());
 
         // Get app handle for emitting events
         let app_handle = app.handle().clone();
@@ -628,6 +629,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
+        commands::report_host_restore_settled,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,

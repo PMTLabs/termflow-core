@@ -104,6 +104,9 @@ impl<R: Runtime> AppState<R> {
             host_terminals: Arc::new(DashMap::new()),
             identity: crate::identity_index::IdentityIndex::new(),
             host_reattach_pending: Arc::new(DashMap::new()),
+            host_restore_pending_windows: Arc::new(DashMap::new()),
+            host_restore_claims: Arc::new(DashMap::new()),
+            host_recovery_surfaced: Arc::new(DashMap::new()),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
@@ -703,31 +706,7 @@ impl<R: Runtime> AppState<R> {
             plan.teardown.len(),
             plan.orphans.len()
         );
-        for orphan in plan.orphans {
-            if !still_current() {
-                log::warn!("[HOTSWAP] recovery superseded before orphan adoption; aborting pass");
-                return;
-            }
-            // `ensure_pty_host` also records this answered listing in the pending
-            // queue. Insert here as well so this exhaustive plan remains the
-            // authority for the recovered terminal we now ask the renderer to make.
-            self.host_reattach_pending.insert(orphan.tab_id.clone(), orphan.pid);
-            let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
-            use tauri::Emitter;
-            if let Err(e) = self.app_handle.emit(
-                "api:createTerminalTab",
-                serde_json::json!({
-                    "name": "Recovered terminal",
-                    "profile": "default",
-                    "processId": leaf_id,
-                    "rendererTerminalId": leaf_id,
-                    "sessionKey": orphan.tab_id,
-                    "targetWindow": self.resolve_active_window_label(),
-                }),
-            ) {
-                log::warn!("[HOTSWAP] failed to surface recovered session {}: {e}", orphan.tab_id);
-            }
-        }
+        self.surface_host_orphans(plan.orphans);
         for a in plan.reattach {
             if !still_current() {
                 log::warn!("[HOTSWAP] recovery superseded mid-reattach; aborting pass");
@@ -798,6 +777,53 @@ impl<R: Runtime> AppState<R> {
                 "[HOTSWAP] session {t} not held by the reconnected host; closing its pane"
             );
             self.teardown_host_terminal(&process_id);
+        }
+    }
+
+    pub fn begin_host_restore_sweep(&self, windows: impl IntoIterator<Item = String>) {
+        self.host_restore_pending_windows.clear();
+        self.host_restore_claims.clear();
+        for label in windows {
+            self.host_restore_pending_windows.insert(label, ());
+        }
+    }
+
+    pub async fn report_host_restore_settled(&self, window_label: String, claims: Vec<String>) {
+        for claim in claims {
+            self.host_restore_claims.insert(claim, ());
+        }
+        self.host_restore_pending_windows.remove(&window_label);
+        if !self.host_restore_pending_windows.is_empty() {
+            return;
+        }
+        if self.ensure_pty_host().await.is_err() {
+            return;
+        }
+        let Some(client) = self.pty_host_clone() else { return };
+        // An unanswered listing is unknown, never empty: do not surface or tear down.
+        let Some(sessions) = client.list_sessions().await else { return };
+        let claims: Vec<String> = self.host_restore_claims.iter().map(|e| e.key().clone()).collect();
+        let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
+        self.surface_host_orphans(plan.orphans);
+    }
+
+    /// The sole UI emission path for live host sessions that no known tab claims.
+    fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
+        use tauri::Emitter;
+        for orphan in orphans {
+            if self.host_recovery_surfaced.insert(orphan.tab_id.clone(), ()).is_some() {
+                continue;
+            }
+            self.host_reattach_pending.insert(orphan.tab_id.clone(), orphan.pid);
+            let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
+            if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
+                "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
+                "rendererTerminalId": leaf_id, "sessionKey": orphan.tab_id,
+                "targetWindow": self.resolve_active_window_label(),
+            })) {
+                self.host_recovery_surfaced.remove(&orphan.tab_id);
+                log::warn!("[HOTSWAP] failed to surface recovered session {}: {e}", orphan.tab_id);
+            }
         }
     }
 

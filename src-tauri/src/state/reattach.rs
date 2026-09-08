@@ -167,4 +167,19 @@ mod reattach_plan_tests {
             );
         }
     }
+
+    #[test]
+    fn cold_restore_claim_prevents_a_recovered_duplicate() {
+        let session = meta("tm-restored", 0, 10);
+        let plan = plan_reattach(&["tm-restored".into()], &[session], &HashMap::new());
+        assert!(plan.orphans.is_empty());
+    }
+
+    #[test]
+    fn repeating_the_same_cold_sweep_has_one_orphan_identity() {
+        let sessions = vec![meta("tm-unclaimed", 0, 10)];
+        let first = plan_reattach(&[], &sessions, &HashMap::new());
+        let second = plan_reattach(&[], &sessions, &HashMap::new());
+        assert_eq!(first.orphans[0].tab_id, second.orphans[0].tab_id);
+    }
 }

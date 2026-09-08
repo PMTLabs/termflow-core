@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
 import { TerminalContainer } from './components/TerminalContainer';
@@ -533,6 +534,24 @@ const App: React.FC = () => {
       createDefaultTabIfNeeded(pendingOpenPath);
     } else if (postRestoreAction === 'openFolderTab') {
       openFolderTab(pendingOpenPath!);
+    }
+
+    // StateManager has finished restoring this window's complete persisted pane
+    // tree. Tell Rust which host session keys this window will claim before it
+    // considers any other live host session a recovered orphan.
+    const claims: string[] = [];
+    const collect = (node: any) => {
+      if (!node) return;
+      if (node.type === 'terminal' && node.terminalId) {
+        claims.push(node.sessionKey ?? node.terminalId);
+      }
+      node.children?.forEach(collect);
+    };
+    Object.values(store.getState().panes.treesByTabId).forEach(collect);
+    try {
+      await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label, claims);
+    } catch (error) {
+      console.warn('Failed to report host restore completion:', error);
     }
   };
 

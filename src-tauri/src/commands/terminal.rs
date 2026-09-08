@@ -199,6 +199,16 @@ pub async fn create_terminal(
     Ok(id)
 }
 
+#[tauri::command]
+pub async fn report_host_restore_settled(
+    state: State<'_, AppState>,
+    window_label: String,
+    claimed_session_keys: Vec<String>,
+) -> Result<(), String> {
+    state.report_host_restore_settled(window_label, claimed_session_keys).await;
+    Ok(())
+}
+
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane
 /// currently lives in. Without it, dialogs a console program parents to
 /// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open
