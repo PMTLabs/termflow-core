@@ -3313,25 +3313,33 @@ mod api_spawn_routing_tests {
     /// remembered to add to it. Reading the directory means the audit's coverage is
     /// derived from reality rather than asserted.
     fn crate_sources() -> Vec<(String, String)> {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| {
-            panic!(
-                "cannot read {} to audit spawn sites ({e}) — this guard must FAIL loudly \
-                 rather than pass vacuously",
-                dir.display()
-            )
-        });
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut sources = Vec::new();
-        for entry in entries {
-            let path = entry.expect("unreadable source dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-                continue;
+        // Top-level `src/*.rs`, plus one level into `src/state/` — `state.rs` used to be a
+        // single top-level file and its content (the pty-host session-key calls this audit
+        // exists for) must stay visible now that it is `state/*.rs`. Other multi-file modules
+        // (`pty_manager/`, `automation/`, …) were already outside this non-recursive scan
+        // before that split and are left as-is rather than widening this guard's scope.
+        for dir in [src.clone(), src.join("state")] {
+            let entries = std::fs::read_dir(&dir).unwrap_or_else(|e| {
+                panic!(
+                    "cannot read {} to audit spawn sites ({e}) — this guard must FAIL loudly \
+                     rather than pass vacuously",
+                    dir.display()
+                )
+            });
+            for entry in entries {
+                let path = entry.expect("unreadable source dir entry").path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = if dir == src { name } else { format!("state/{name}") };
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {name} to audit spawn sites: {e}"))
+                    .replace("\r\n", "\n");
+                sources.push((name, text));
             }
-            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-            let text = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("cannot read {name} to audit spawn sites: {e}"))
-                .replace("\r\n", "\n");
-            sources.push((name, text));
         }
         assert!(
             sources.len() > 20,
