@@ -31,6 +31,12 @@ export type UpdateStatus =
   | { state: 'available'; version: string }
   | { state: 'unavailable' };
 
+/** Retention policy of the PTY host the app is connected to, not a discovery record. */
+export type ConnectedHostRetention =
+  | { state: 'unknown' }
+  | { state: 'indefinite' }
+  | { state: 'bounded'; activeSecs: number };
+
 export interface NetworkInterfaceInfo {
   name: string;
   label: string;
@@ -147,6 +153,7 @@ interface ElectronAPI {
   /// be rebuilt (hot-swap "offload"). Resolves never on success (the process
   /// exits); rejects with the refusal reason if hot-swap isn't possible.
   restartForUpdate: () => Promise<void>;
+  connectedHostRetention: () => Promise<ConnectedHostRetention>;
   /// Preflight for the offload/hot-swap: resolves if it would keep all terminals
   /// alive, rejects with the reason if it would currently be refused.
   ///
@@ -733,6 +740,7 @@ const tauriBridge: ElectronAPI = {
     invalidateApiBase();
   },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
+  connectedHostRetention: async () => invoke<ConnectedHostRetention>('connected_host_retention'),
   updateAvailable: async () => {
     await invoke('update_available');
   },

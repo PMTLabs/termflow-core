@@ -308,6 +308,8 @@ export interface ElectronAPI {
    *  be rebuilt (hot-swap "offload"). Never resolves on success (the process
    *  exits); rejects with the refusal reason if hot-swap isn't possible. */
   restartForUpdate?: () => Promise<void>;
+  /** Retention of the PTY host currently connected to this app instance. */
+  connectedHostRetention?: () => Promise<import('../api/tauri-bridge').ConnectedHostRetention>;
   /** Preflight: resolves if an offload would keep all terminals alive, rejects
    *  with the reason if it would currently be refused. */
   hotswapAvailable?: () => Promise<void>;

@@ -697,6 +697,7 @@ pub fn run() {
         automation_commands::rearm_automation,
         commands::restart_for_update,
         commands::hotswap_available,
+        commands::connected_host_retention,
         commands::update_available,
         commands::take_reattach_prompt_hook,
         commands::probe_reattach_prompt_gate,

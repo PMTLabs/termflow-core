@@ -5,6 +5,39 @@ use super::window::flush_all_windows;
 use crate::state::AppState;
 use tauri::State;
 
+/// Lifecycle retention reported by the host this app is currently connected to.
+/// This deliberately reads the connected client, never discovery: a discovery
+/// record can be stale or replaced after the pipe connection is established.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum ConnectedHostRetention {
+    Unknown,
+    Indefinite,
+    Bounded { active_secs: u64 },
+}
+
+impl From<crate::pty_host_client::HostRetention> for ConnectedHostRetention {
+    fn from(retention: crate::pty_host_client::HostRetention) -> Self {
+        match retention {
+            crate::pty_host_client::HostRetention::Unknown => Self::Unknown,
+            crate::pty_host_client::HostRetention::Indefinite => Self::Indefinite,
+            crate::pty_host_client::HostRetention::Bounded { active_secs } => {
+                Self::Bounded { active_secs }
+            }
+        }
+    }
+}
+
+/// Return the retention contract of the connected host. No connected client is
+/// also unknown: absence does not establish an indefinite retention promise.
+#[tauri::command]
+pub fn connected_host_retention(state: State<'_, AppState>) -> ConnectedHostRetention {
+    state
+        .pty_host_clone()
+        .map(|client| client.host_retention().into())
+        .unwrap_or(ConnectedHostRetention::Unknown)
+}
+
 /// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
 /// rebuild. The sidecar keeps every PTY (and its CLI) alive; the next launch
 /// reattaches. Refuses if the sidecar isn't connected or couldn't break away
