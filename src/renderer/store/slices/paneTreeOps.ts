@@ -37,11 +37,6 @@ export const TERMINAL_BOUND_FIELDS = [
   'shellType',
   'notifyMuted',
   'sessionKey',
-  // The recovery acknowledgement token is `sessionKey`'s companion: the pane that
-  // finally mounts is the one that must acknowledge the claim. A split or move
-  // before that ack would otherwise leave the token behind, the backend would never
-  // hear the claim was adopted, and the retry loop would surface a SECOND pane for a
-  // session that is already visible.
   'seededForTabId',
 ] as const;
 
