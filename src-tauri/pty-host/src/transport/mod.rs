@@ -67,14 +67,19 @@ impl SystemActiveClock {
         let ticks = ticks?;
         let observed = self.origin_ticks.load(Ordering::Acquire);
         let origin = if observed == Self::NO_ORIGIN {
-            self.origin_ticks
-                .compare_exchange(
-                    Self::NO_ORIGIN,
-                    ticks,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .unwrap_or_else(|existing| existing)
+            // On success the CAS reports the PREVIOUS value (the sentinel), not
+            // the one it installed, so name `ticks` explicitly: relying on
+            // `saturating_sub` to floor `ticks - u64::MAX` to zero would make
+            // this correct only by accident.
+            match self.origin_ticks.compare_exchange(
+                Self::NO_ORIGIN,
+                ticks,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => ticks,
+                Err(existing) => existing,
+            }
         } else {
             observed
         };
