@@ -5,14 +5,25 @@ pub struct ReattachAction {
     pub from_offset: u64,
 }
 
+/// Complete result of reconciling the app's tabs with an answered host listing.
+#[derive(Debug, PartialEq)]
+pub struct ReattachPlan {
+    pub reattach: Vec<ReattachAction>,
+    pub teardown: Vec<String>,
+    /// Live host sessions which have no corresponding app tab and must be
+    /// adopted into a visible terminal.
+    pub orphans: Vec<termflow_pty_protocol::SessionMeta>,
+}
+
 /// Decide, per previously host-owned tab, whether to reattach in place (session
 /// still held by the reconnected host) and from which ring offset, or tear down
-/// (session gone). Pure so the sleep/wake recovery policy is unit-testable.
+/// (session gone), and surface every live host session the app does not own.
+/// Pure so the sleep/wake recovery policy is unit-testable.
 pub fn plan_reattach(
     tabs: &[String],
     sessions: &[termflow_pty_protocol::SessionMeta],
     saved_offsets: &std::collections::HashMap<String, u64>,
-) -> (Vec<ReattachAction>, Vec<String>) {
+) -> ReattachPlan {
     let mut reattach = Vec::new();
     let mut teardown = Vec::new();
     for tab in tabs {
@@ -34,7 +45,12 @@ pub fn plan_reattach(
             None => teardown.push(tab.clone()),
         }
     }
-    (reattach, teardown)
+    let orphans = sessions
+        .iter()
+        .filter(|meta| meta.alive && !tabs.contains(&meta.tab_id))
+        .cloned()
+        .collect();
+    ReattachPlan { reattach, teardown, orphans }
 }
 
 #[cfg(test)]
@@ -58,29 +74,31 @@ mod reattach_plan_tests {
         let tabs = vec!["t1".to_string()];
         let sessions = vec![meta("t1", 0, 500)];
         let saved = HashMap::from([("t1".to_string(), 320u64)]);
-        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &saved);
+        let plan = plan_reattach(&tabs, &sessions, &saved);
         assert_eq!(
-            reattach,
+            plan.reattach,
             vec![ReattachAction { tab_id: "t1".into(), from_offset: 320 }]
         );
-        assert!(teardown.is_empty());
+        assert!(plan.teardown.is_empty());
+        assert!(plan.orphans.is_empty());
     }
 
     #[test]
     fn missing_session_is_torn_down() {
         let tabs = vec!["t1".to_string(), "t2".to_string()];
         let sessions = vec![meta("t2", 0, 10)];
-        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
-        assert_eq!(reattach.len(), 1, "t2 survives");
-        assert_eq!(teardown, vec!["t1".to_string()], "t1 is gone from the host");
+        let plan = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(plan.reattach.len(), 1, "t2 survives");
+        assert_eq!(plan.teardown, vec!["t1".to_string()], "t1 is gone from the host");
+        assert!(plan.orphans.is_empty());
     }
 
     #[test]
     fn no_saved_offset_replays_whole_ring() {
         let tabs = vec!["t1".to_string()];
         let sessions = vec![meta("t1", 100, 900)];
-        let (reattach, _) = plan_reattach(&tabs, &sessions, &HashMap::new());
-        assert_eq!(reattach[0].from_offset, 0, "full replay (host gaps if evicted)");
+        let plan = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(plan.reattach[0].from_offset, 0, "full replay (host gaps if evicted)");
     }
 
     /// A saved offset beyond the ring tail is a stale-identity signal (reused
@@ -91,8 +109,8 @@ mod reattach_plan_tests {
         let tabs = vec!["t1".to_string()];
         let sessions = vec![meta("t1", 0, 50)];
         let saved = HashMap::from([("t1".to_string(), 5000u64)]);
-        let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
-        assert_eq!(reattach[0].from_offset, 0);
+        let plan = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(plan.reattach[0].from_offset, 0);
     }
 
     #[test]
@@ -100,18 +118,53 @@ mod reattach_plan_tests {
         let tabs = vec!["t1".to_string()];
         let sessions = vec![meta("t1", 0, 50)];
         let saved = HashMap::from([("t1".to_string(), 50u64)]);
-        let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
-        assert_eq!(reattach[0].from_offset, 50, "exactly-at-tail resumes with no replay");
+        let plan = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(plan.reattach[0].from_offset, 50, "exactly-at-tail resumes with no replay");
     }
 
     #[test]
-    fn zombie_sessions_unknown_to_the_gui_are_left_untouched() {
-        // Sessions the host holds but no tab owns must appear in NEITHER list —
-        // adoption/pending handles them, not the pipe-drop recovery.
+    fn live_host_session_without_an_app_tab_is_an_orphan() {
         let tabs = vec!["t1".to_string()];
         let sessions = vec![meta("t1", 0, 10), meta("zombie", 0, 10)];
-        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
-        assert_eq!(reattach.len(), 1);
-        assert!(teardown.is_empty());
+        let plan = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(plan.reattach.len(), 1);
+        assert!(plan.teardown.is_empty());
+        assert_eq!(plan.orphans, vec![meta("zombie", 0, 10)]);
+    }
+
+    #[test]
+    fn empty_app_and_host_have_no_actions() {
+        let plan = plan_reattach(&[], &[], &HashMap::new());
+        assert!(plan.reattach.is_empty());
+        assert!(plan.teardown.is_empty());
+        assert!(plan.orphans.is_empty());
+    }
+
+    #[test]
+    fn dead_host_session_without_an_app_tab_is_not_an_orphan() {
+        let mut dead = meta("finished", 0, 10);
+        dead.alive = false;
+        let plan = plan_reattach(&[], &[dead], &HashMap::new());
+        assert!(plan.reattach.is_empty());
+        assert!(plan.teardown.is_empty());
+        assert!(plan.orphans.is_empty());
+    }
+
+    #[test]
+    fn reconciliation_table_covers_all_tab_and_session_presence_pairs() {
+        let cases = [
+            (vec!["t1".to_string()], vec![meta("t1", 0, 10)], (1, 0, 0)),
+            (vec!["t1".to_string()], vec![], (0, 1, 0)),
+            (vec![], vec![meta("host-only", 0, 10)], (0, 0, 1)),
+            (vec![], vec![], (0, 0, 0)),
+        ];
+        for (tabs, sessions, expected) in cases {
+            let plan = plan_reattach(&tabs, &sessions, &HashMap::new());
+            assert_eq!(
+                (plan.reattach.len(), plan.teardown.len(), plan.orphans.len()),
+                expected,
+                "tabs={tabs:?}, sessions={sessions:?}"
+            );
+        }
     }
 }

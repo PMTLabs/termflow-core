@@ -549,7 +549,7 @@ impl<R: Runtime> AppState<R> {
                     // live tabs are still registered; queueing them would let a
                     // concurrent create re-adopt one at offset 0 straight into
                     // its live parser (review 007 F-1).
-                    if !owned_sessions.contains_key(&meta.tab_id) {
+                    if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
                         self.host_reattach_pending.insert(meta.tab_id.clone(), meta.pid);
                     }
                 }
@@ -629,9 +629,8 @@ impl<R: Runtime> AppState<R> {
         // (sleep/wake) would destroy every shell. Translate once, here.
         let by_session = self.host_sessions_by_key();
         let tabs: Vec<String> = by_session.keys().cloned().collect();
-        if tabs.is_empty() {
-            return;
-        }
+        // Do not return when the app currently owns no tabs: the host can still
+        // hold live sessions which must be recovered into visible terminals.
         const BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000, 8000, 8000];
         let mut connected = false;
         for (i, ms) in BACKOFF_MS.iter().enumerate() {
@@ -697,13 +696,39 @@ impl<R: Runtime> AppState<R> {
             .iter()
             .map(|e| (e.key().clone(), *e.value()))
             .collect();
-        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &saved);
+        let plan = plan_reattach(&tabs, &sessions, &saved);
         log::info!(
-            "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost",
-            reattach.len(),
-            teardown.len()
+            "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost, {} orphan(s) to recover",
+            plan.reattach.len(),
+            plan.teardown.len(),
+            plan.orphans.len()
         );
-        for a in reattach {
+        for orphan in plan.orphans {
+            if !still_current() {
+                log::warn!("[HOTSWAP] recovery superseded before orphan adoption; aborting pass");
+                return;
+            }
+            // `ensure_pty_host` also records this answered listing in the pending
+            // queue. Insert here as well so this exhaustive plan remains the
+            // authority for the recovered terminal we now ask the renderer to make.
+            self.host_reattach_pending.insert(orphan.tab_id.clone(), orphan.pid);
+            let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
+            use tauri::Emitter;
+            if let Err(e) = self.app_handle.emit(
+                "api:createTerminalTab",
+                serde_json::json!({
+                    "name": "Recovered terminal",
+                    "profile": "default",
+                    "processId": leaf_id,
+                    "rendererTerminalId": leaf_id,
+                    "sessionKey": orphan.tab_id,
+                    "targetWindow": self.resolve_active_window_label(),
+                }),
+            ) {
+                log::warn!("[HOTSWAP] failed to surface recovered session {}: {e}", orphan.tab_id);
+            }
+        }
+        for a in plan.reattach {
             if !still_current() {
                 log::warn!("[HOTSWAP] recovery superseded mid-reattach; aborting pass");
                 return;
@@ -757,7 +782,7 @@ impl<R: Runtime> AppState<R> {
             // id must not re-adopt it.
             self.host_reattach_pending.remove(&a.tab_id);
         }
-        for t in teardown {
+        for t in plan.teardown {
             if !still_current() {
                 log::warn!("[HOTSWAP] recovery superseded mid-teardown; aborting pass");
                 return;

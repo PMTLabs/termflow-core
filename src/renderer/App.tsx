@@ -1061,6 +1061,9 @@ const App: React.FC = () => {
         // P0-A (Task 5's emit): the unambiguous ids. `terminalId`/`tabId` above
         // are the legacy pair this event has always carried.
         processId?: string; rendererTerminalId?: string; owningTabId?: string;
+        // A live pty-host session which has no app tab. Mode 0 creates a pane
+        // for it, whose normal createTerminal call consumes this pending key.
+        sessionKey?: string;
         // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
         // the edge itself was already written by the backend before this event was emitted.
         parentTerminalId?: string;
