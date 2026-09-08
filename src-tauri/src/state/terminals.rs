@@ -19,6 +19,16 @@ fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> 
     pending_windows == 0 && !already_released
 }
 
+/// May a claimed sweep KEEP the one-shot flag? Only a sweep that actually ran
+/// to completion. Claiming the flag and then failing — no host, no client, an
+/// unanswered listing — used to consume the only sweep there will ever be: the
+/// 60s backstop tests this same flag, so it could not rescue it either, and a
+/// live session no restored tab claims stayed invisible for the whole GUI
+/// lifetime. That is precisely the leak the sweep exists to close.
+fn sweep_claim_survives(completed: bool) -> bool {
+    completed
+}
+
 #[cfg(test)]
 mod restore_sweep_gate_tests {
     use super::restore_sweep_may_release;
@@ -32,6 +42,16 @@ mod restore_sweep_gate_tests {
     #[test]
     fn a_released_sweep_never_releases_twice() {
         assert!(!restore_sweep_may_release(0, true));
+    }
+
+    #[test]
+    fn only_a_completed_sweep_consumes_the_one_shot() {
+        assert!(super::sweep_claim_survives(true));
+        assert!(
+            !super::sweep_claim_survives(false),
+            "an incomplete sweep must hand the flag back: the backstop reads it too, \
+             so consuming it here strands an unclaimed live session for good"
+        );
     }
 }
 
@@ -857,15 +877,27 @@ impl<R: Runtime> AppState<R> {
         // guard belongs at this choke point, not in each caller.
         if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
         if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
-        if self.ensure_pty_host().await.is_err() {
-            return;
+        if !sweep_claim_survives(self.run_host_restore_sweep().await) {
+            // Hand the one-shot back so the backstop — or a later report — can
+            // retry. Consuming it on a transient failure is indistinguishable
+            // from a completed sweep and permanently strands the sessions.
+            self.host_restore_released.store(false, Ordering::Release);
+            log::warn!("[HOTSWAP] restore sweep could not complete; leaving it retryable");
         }
-        let Some(client) = self.pty_host_clone() else { return };
+    }
+
+    /// Runs the sweep. `false` means it did NOT complete and must stay retryable.
+    async fn run_host_restore_sweep(&self) -> bool {
+        if self.ensure_pty_host().await.is_err() {
+            return false;
+        }
+        let Some(client) = self.pty_host_clone() else { return false };
         // An unanswered listing is unknown, never empty: do not surface or tear down.
-        let Some(sessions) = client.list_sessions().await else { return };
+        let Some(sessions) = client.list_sessions().await else { return false };
         let claims: Vec<String> = self.host_restore_claims.iter().map(|e| e.key().clone()).collect();
         let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
         self.surface_host_orphans(plan.orphans);
+        true
     }
 
     /// The sole UI emission path for live host sessions that no known tab claims.
