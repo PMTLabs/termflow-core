@@ -204,6 +204,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
         let _ = stale_child.kill();
         return Ok(());
     }
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
     // Drain the sidecar's stdout/stderr/event stream so its pipe never fills and
     // blocks the child (same pattern as the MCP sidecar). Crucially, watch for
@@ -212,10 +213,12 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     // handle lingers forever, `fabric_alive()` stays true, and `subscribe_fabric_events`
     // hammers `GET /events` against a dead port every 1s indefinitely.
     let drain_state = state.clone();
+    let drain_stop = stop_tx.clone();
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Terminated(payload) = event {
+                let _ = drain_stop.send(true);
                 // Only clear the handle if we still own the current generation. During a
                 // respawn the OLD child is killed and a NEW one stored ~immediately; if the
                 // old child's Terminated arrives after that, this guard stops it from nulling
@@ -250,7 +253,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     // came up, so the bridge NEVER started that session and no `peer:event` (incl. incoming
     // pairing requests) reached the renderer until an app restart.
     let verify_state = state.clone();
-    tauri::async_runtime::spawn(subscribe_fabric_events(app, state));
+    tauri::async_runtime::spawn(subscribe_fabric_events(app, state, generation, stop_rx));
 
     // A new child handle is not proof that the shared control port is its
     // listener.  Verify asynchronously so slow first-run key generation cannot
@@ -261,6 +264,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
             crate::mcp_sidecar::SidecarAcceptance::Unverified => log::warn!("[FABRIC] owner matched but build identity unavailable; continuing unverified"),
             crate::mcp_sidecar::SidecarAcceptance::Rejected => {
                 log::error!("[FABRIC] foreign or mismatched listener; stopping only our spawned generation");
+                let _ = stop_tx.send(true);
                 shutdown_fabric_generation(&verify_state, generation);
             }
         }
@@ -295,7 +299,12 @@ pub(crate) fn fabric_installed<R: tauri::Runtime>(state: &AppState<R>) -> bool {
 /// event (bridged to a DOM `CustomEvent` in `tauri-bridge.ts`). The stream is
 /// long-lived; on drop or error it reconnects after a short delay, but only while
 /// the fabric is still alive (its child handle is present).
-async fn subscribe_fabric_events(app: AppHandle, state: AppState) {
+async fn subscribe_fabric_events(
+    app: AppHandle,
+    state: AppState,
+    generation: u64,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     let url = format!("http://127.0.0.1:{}/events", state.fabric_control_port);
     // A dedicated client with NO total request timeout: SSE is a long-lived stream,
     // so the bounded-timeout localhost client used for one-shot control calls would
@@ -304,17 +313,32 @@ async fn subscribe_fabric_events(app: AppHandle, state: AppState) {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    while fabric_alive(&state) {
-        match stream_fabric_events(&app, &client, &url).await {
+    while fabric_generation_is_current(&state, generation) && !subscription_cancelled(&stop) {
+        match stream_fabric_events(&app, &client, &url, &mut stop).await {
             Ok(()) => log::debug!("[FABRIC] event stream closed; will reconnect"),
             Err(e) => log::debug!("[FABRIC] event stream error: {}; will reconnect", e),
         }
-        if !fabric_alive(&state) {
+        if !fabric_generation_is_current(&state, generation) || subscription_cancelled(&stop) {
             break;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(1000)) => {}
+            _ = stop.changed() => break,
+        }
     }
-    log::info!("[FABRIC] event subscriber stopped (fabric no longer alive)");
+    log::info!("[FABRIC] event subscriber stopped for generation {generation}");
+}
+
+fn fabric_generation_is_current<R: tauri::Runtime>(state: &AppState<R>, generation: u64) -> bool {
+    state
+        .fabric_process
+        .lock()
+        .map(|slot| slot.is_current(generation))
+        .unwrap_or(false)
+}
+
+fn subscription_cancelled(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *stop.borrow()
 }
 
 /// Open the SSE stream once and pump events until it ends or errors. Reads the
@@ -326,13 +350,20 @@ async fn stream_fabric_events(
     app: &AppHandle,
     client: &reqwest::Client,
     url: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), reqwest::Error> {
-    let mut resp = client
+    if subscription_cancelled(stop) {
+        return Ok(());
+    }
+    let request = client
         .get(url)
         .header("Accept", "text/event-stream")
-        .send()
-        .await?
-        .error_for_status()?;
+        .send();
+    let mut resp = tokio::select! {
+        _ = stop.changed() => return Ok(()),
+        response = request => response?,
+    }
+    .error_for_status()?;
 
     // Signal the renderer that the event stream (re)connected, so it can re-hydrate the
     // pending-approvals consent queue — a pairing staged while the stream was down would
@@ -346,7 +377,12 @@ async fn stream_fabric_events(
     let mut buf: Vec<u8> = Vec::new();
     let mut data = String::new();
 
-    while let Some(chunk) = resp.chunk().await? {
+    loop {
+        let chunk = tokio::select! {
+            _ = stop.changed() => return Ok(()),
+            chunk = resp.chunk() => chunk?,
+        };
+        let Some(chunk) = chunk else { break };
         buf.extend_from_slice(&chunk);
         // A newline (0x0A) never appears inside a UTF-8 multibyte sequence, so
         // splitting the raw byte buffer on it is always codepoint-safe.
@@ -702,6 +738,15 @@ mod tests {
         let generation = slot.claim_generation();
         slot.install_if_current(generation, ()).unwrap();
         assert!(slot.is_present());
+    }
+
+    #[tokio::test]
+    async fn rejection_signal_cancels_a_generation_bound_subscription() {
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        assert!(!super::subscription_cancelled(&stop_rx));
+        stop_tx.send(true).unwrap();
+        stop_rx.changed().await.unwrap();
+        assert!(super::subscription_cancelled(&stop_rx));
     }
 
     #[test]
