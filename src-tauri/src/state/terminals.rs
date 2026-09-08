@@ -29,6 +29,21 @@ fn sweep_claim_survives(completed: bool) -> bool {
     completed
 }
 
+/// A restore report is historical: a terminal can be created after its window
+/// snapshot but before another window releases the sweep.  Reconcile that
+/// snapshot with ownership observed immediately before planning recovery.
+fn restore_claims_with_current_ownership(
+    claims: impl IntoIterator<Item = String>,
+    owned_session_keys: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    claims
+        .into_iter()
+        .chain(owned_session_keys)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod restore_sweep_gate_tests {
     use super::restore_sweep_may_release;
@@ -51,6 +66,26 @@ mod restore_sweep_gate_tests {
             !super::sweep_claim_survives(false),
             "an incomplete sweep must hand the flag back: the backstop reads it too, \
              so consuming it here strands an unclaimed live session for good"
+        );
+    }
+
+    #[test]
+    fn current_ownership_augments_stale_restore_claims() {
+        let claims = super::restore_claims_with_current_ownership(
+            ["restored-before-snapshot".into()],
+            ["created-after-snapshot".into()],
+        );
+        let sessions = [termflow_pty_protocol::SessionMeta {
+            tab_id: "created-after-snapshot".into(),
+            pid: 73,
+            head_offset: 0,
+            tail_offset: 0,
+            alive: true,
+        }];
+        let plan = super::plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
+        assert!(
+            plan.orphans.is_empty(),
+            "a session currently owned by another restored window must never become a recovered duplicate"
         );
     }
 }
@@ -685,8 +720,8 @@ impl<R: Runtime> AppState<R> {
         // design 014, so comparing the two directly matches NOTHING and sends
         // every live terminal to teardown — i.e. a transient pipe drop
         // (sleep/wake) would destroy every shell. Translate once, here.
-        let by_session = self.host_sessions_by_key();
-        let tabs: Vec<String> = by_session.keys().cloned().collect();
+        let initial_by_session = self.host_sessions_by_key();
+        let tabs: Vec<String> = initial_by_session.keys().cloned().collect();
         // Do not return when the app currently owns no tabs: the host can still
         // hold live sessions which must be recovered into visible terminals.
         const BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000, 8000, 8000];
@@ -749,6 +784,11 @@ impl<R: Runtime> AppState<R> {
             log::warn!("[HOTSWAP] recovery superseded (gen {my_gen} stale); aborting pass");
             return;
         }
+        // Ownership may have changed while reconnect/list_sessions awaited.
+        // Re-snapshot it now so a newly created live terminal is never
+        // mistaken for an orphan and surfaced a second time.
+        let by_session = self.host_sessions_by_key();
+        let tabs: Vec<String> = by_session.keys().cloned().collect();
         let saved: std::collections::HashMap<String, u64> = self
             .host_stream_offsets
             .iter()
@@ -895,7 +935,10 @@ impl<R: Runtime> AppState<R> {
         let Some(client) = self.pty_host_clone() else { return false };
         // An unanswered listing is unknown, never empty: do not surface or tear down.
         let Some(sessions) = client.list_sessions().await else { return false };
-        let claims: Vec<String> = self.host_restore_claims.iter().map(|e| e.key().clone()).collect();
+        let claims = restore_claims_with_current_ownership(
+            self.host_restore_claims.iter().map(|e| e.key().clone()),
+            self.host_sessions_by_key().into_keys(),
+        );
         let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
         self.surface_host_orphans(plan.orphans);
         true
@@ -905,6 +948,12 @@ impl<R: Runtime> AppState<R> {
     fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
         use tauri::Emitter;
         for orphan in orphans {
+            // A terminal can be created between a listing and this UI pass.
+            // The current ownership map, rather than a restore snapshot, is
+            // authoritative at the point recovery would become visible.
+            if self.host_sessions_by_key().contains_key(&orphan.tab_id) {
+                continue;
+            }
             if self.host_recovery_surfaced.insert(orphan.tab_id.clone(), ()).is_some() {
                 continue;
             }
