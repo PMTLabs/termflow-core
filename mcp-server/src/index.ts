@@ -31,7 +31,15 @@ const API_TOKEN = ACCESS_TOKEN || undefined;
 // Bun's packaged sidecar is a single executable, so it can identify itself.
 // Node's legacy loader imports a graph; intentionally report no build id there.
 const SELF_BUILD_ID = (process.versions as Record<string, string>).bun
-    ? createHash("sha256").update(readFileSync(process.execPath)).digest("hex")
+    ? (() => {
+        try {
+            return createHash("sha256").update(readFileSync(process.execPath)).digest("hex");
+        } catch {
+            // Identity is additive: an unreadable executable must not prevent
+            // this sidecar from starting and serving requests.
+            return "";
+        }
+    })()
     : "";
 
 // Axios instance with default auth if token is provided. A finite timeout
