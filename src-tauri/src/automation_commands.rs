@@ -1246,7 +1246,7 @@ mod source_tests {
             crate::automation_engine::test_host::strip_comments(include_str!("automation_commands.rs"));
         let commands =
             &module[..module.find("#[cfg(test)]").expect("the tests must follow the code")];
-        let state = crate::automation_engine::test_host::strip_comments(include_str!("state.rs"));
+        let state = crate::automation_engine::test_host::strip_comments(include_str!("state/engine_host.rs"));
         assert!(
             commands.contains("engine.runtime_payload()"),
             "get_automation_runtime must return the same object the event carries"

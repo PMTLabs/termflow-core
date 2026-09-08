@@ -1,0 +1,117 @@
+/// One in-place reattach decision produced by [`plan_reattach`].
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReattachAction {
+    pub tab_id: String,
+    pub from_offset: u64,
+}
+
+/// Decide, per previously host-owned tab, whether to reattach in place (session
+/// still held by the reconnected host) and from which ring offset, or tear down
+/// (session gone). Pure so the sleep/wake recovery policy is unit-testable.
+pub fn plan_reattach(
+    tabs: &[String],
+    sessions: &[termflow_pty_protocol::SessionMeta],
+    saved_offsets: &std::collections::HashMap<String, u64>,
+) -> (Vec<ReattachAction>, Vec<String>) {
+    let mut reattach = Vec::new();
+    let mut teardown = Vec::new();
+    for tab in tabs {
+        match sessions.iter().find(|m| &m.tab_id == tab) {
+            Some(meta) => {
+                // No saved offset (never saw a byte this app-lifetime) ⇒ replay
+                // the whole ring. A saved offset PAST the ring tail can only
+                // mean the saved value belongs to a different session identity
+                // (stale entry for a reused id) — resuming from the tail would
+                // silently skip everything the real session produced, so treat
+                // it as a discontinuity and replay from zero instead.
+                let saved = saved_offsets.get(tab).copied().unwrap_or(0);
+                let from = if saved > meta.tail_offset { 0 } else { saved };
+                reattach.push(ReattachAction {
+                    tab_id: tab.clone(),
+                    from_offset: from,
+                });
+            }
+            None => teardown.push(tab.clone()),
+        }
+    }
+    (reattach, teardown)
+}
+
+#[cfg(test)]
+mod reattach_plan_tests {
+    use super::{plan_reattach, ReattachAction};
+    use std::collections::HashMap;
+    use termflow_pty_protocol::SessionMeta;
+
+    fn meta(tab: &str, head: u64, tail: u64) -> SessionMeta {
+        SessionMeta {
+            tab_id: tab.into(),
+            pid: 1234,
+            head_offset: head,
+            tail_offset: tail,
+            alive: true,
+        }
+    }
+
+    #[test]
+    fn held_session_reattaches_from_saved_offset() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 500)];
+        let saved = HashMap::from([("t1".to_string(), 320u64)]);
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(
+            reattach,
+            vec![ReattachAction { tab_id: "t1".into(), from_offset: 320 }]
+        );
+        assert!(teardown.is_empty());
+    }
+
+    #[test]
+    fn missing_session_is_torn_down() {
+        let tabs = vec!["t1".to_string(), "t2".to_string()];
+        let sessions = vec![meta("t2", 0, 10)];
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(reattach.len(), 1, "t2 survives");
+        assert_eq!(teardown, vec!["t1".to_string()], "t1 is gone from the host");
+    }
+
+    #[test]
+    fn no_saved_offset_replays_whole_ring() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 100, 900)];
+        let (reattach, _) = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(reattach[0].from_offset, 0, "full replay (host gaps if evicted)");
+    }
+
+    /// A saved offset beyond the ring tail is a stale-identity signal (reused
+    /// id), NOT a resume point — clamping to tail would silently drop all of
+    /// the real session's output, so it must replay from zero.
+    #[test]
+    fn future_offset_is_a_discontinuity_and_replays_from_zero() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 50)];
+        let saved = HashMap::from([("t1".to_string(), 5000u64)]);
+        let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(reattach[0].from_offset, 0);
+    }
+
+    #[test]
+    fn saved_offset_at_or_below_tail_is_used_as_is() {
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 50)];
+        let saved = HashMap::from([("t1".to_string(), 50u64)]);
+        let (reattach, _) = plan_reattach(&tabs, &sessions, &saved);
+        assert_eq!(reattach[0].from_offset, 50, "exactly-at-tail resumes with no replay");
+    }
+
+    #[test]
+    fn zombie_sessions_unknown_to_the_gui_are_left_untouched() {
+        // Sessions the host holds but no tab owns must appear in NEITHER list —
+        // adoption/pending handles them, not the pipe-drop recovery.
+        let tabs = vec!["t1".to_string()];
+        let sessions = vec![meta("t1", 0, 10), meta("zombie", 0, 10)];
+        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &HashMap::new());
+        assert_eq!(reattach.len(), 1);
+        assert!(teardown.is_empty());
+    }
+}
