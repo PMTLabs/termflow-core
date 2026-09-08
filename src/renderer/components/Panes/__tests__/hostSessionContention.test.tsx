@@ -99,6 +99,20 @@ describe('recovery create contention', () => {
     expect(container.textContent).toContain('Failed to start shell');
   });
 
+  it('keeps a provisional tab when a spawn error merely embeds the contention marker', async () => {
+    addRecoveryTab('tb-embedded-marker', 'tm-embedded-marker');
+    markProvisionalRecovery('tm-embedded-marker');
+    createTerminal.mockRejectedValueOnce(new Error('spawn failed for C:\\host-session-contended: \\shell.exe'));
+    act(() => mount('tm-embedded-marker'));
+    await settle();
+
+    expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-embedded-marker')).toBeDefined();
+    expect(store.getState().panes.treesByTabId['tb-embedded-marker']).toMatchObject({
+      type: 'terminal', terminalId: 'tm-embedded-marker',
+    });
+    expect(container.textContent).toContain('Failed to start shell');
+  });
+
   it('does not remove a multi-pane tab after a contention loss', async () => {
     addRecoveryTab('tb-split', 'tm-split', true);
     createTerminal.mockRejectedValueOnce(new Error('host-session-contended: host session S is claimed by another recovery'));
