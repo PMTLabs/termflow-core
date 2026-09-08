@@ -44,6 +44,21 @@ fn restore_claims_with_current_ownership(
         .collect()
 }
 
+/// Reconcile a host answer with the ownership that existed before asking for it.
+/// Ownership observed after the answer was built can suppress recovery of an
+/// orphan, but cannot prove that the older answer killed that new terminal.
+fn plan_reconnect(
+    teardown_tabs: &[String],
+    sessions: &[termflow_pty_protocol::SessionMeta],
+    saved_offsets: &std::collections::HashMap<String, u64>,
+    current_owned_sessions: impl IntoIterator<Item = String>,
+) -> super::reattach::ReattachPlan {
+    let current_owned_sessions = current_owned_sessions.into_iter().collect::<std::collections::HashSet<_>>();
+    let mut plan = plan_reattach(teardown_tabs, sessions, saved_offsets);
+    plan.orphans.retain(|orphan| !current_owned_sessions.contains(&orphan.tab_id));
+    plan
+}
+
 #[cfg(test)]
 mod restore_sweep_gate_tests {
     use super::restore_sweep_may_release;
@@ -87,6 +102,25 @@ mod restore_sweep_gate_tests {
             plan.orphans.is_empty(),
             "a session currently owned by another restored window must never become a recovered duplicate"
         );
+    }
+
+    #[test]
+    fn terminal_registered_after_list_snapshot_is_neither_torn_down_nor_an_orphan() {
+        let old_tab = "present-when-list-was-issued".to_string();
+        let new_tab = "registered-after-host-captured-list".to_string();
+        let listed_orphan = termflow_pty_protocol::SessionMeta {
+            tab_id: "unowned-host-session".into(), pid: 17, head_offset: 0, tail_offset: 4, alive: true,
+        };
+        let plan = super::plan_reconnect(
+            &[old_tab.clone()],
+            &[listed_orphan.clone()],
+            &std::collections::HashMap::new(),
+            [old_tab, new_tab.clone()],
+        );
+        assert_eq!(plan.teardown, vec!["present-when-list-was-issued"], "only pre-request ownership can be destructively reconciled");
+        assert_eq!(plan.orphans, vec![listed_orphan], "the fresh snapshot only suppresses already-owned host sessions");
+        assert!(!plan.teardown.contains(&new_tab), "a terminal absent from the older host answer was created too late to be declared dead");
+        assert!(!plan.orphans.iter().any(|session| session.tab_id == new_tab), "the newly registered terminal is not surfaced as an orphan");
     }
 }
 
@@ -782,17 +816,17 @@ impl<R: Runtime> AppState<R> {
             log::warn!("[HOTSWAP] recovery superseded (gen {my_gen} stale); aborting pass");
             return;
         }
-        // Ownership may have changed while reconnect/list_sessions awaited.
-        // Re-snapshot it now so a newly created live terminal is never
-        // mistaken for an orphan and surfaced a second time.
+        // `tabs` is the pre-request snapshot and is the sole destructive
+        // authority. A terminal registered after the host built this answer is
+        // absent from `sessions`, but that is not evidence it has died.
+        // Fresh ownership is useful only to suppress orphan recovery.
         let by_session = self.host_sessions_by_key();
-        let tabs: Vec<String> = by_session.keys().cloned().collect();
         let saved: std::collections::HashMap<String, u64> = self
             .host_stream_offsets
             .iter()
             .map(|e| (e.key().clone(), *e.value()))
             .collect();
-        let plan = plan_reattach(&tabs, &sessions, &saved);
+        let plan = plan_reconnect(&tabs, &sessions, &saved, by_session.keys().cloned());
         log::info!(
             "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost, {} orphan(s) to recover",
             plan.reattach.len(),
