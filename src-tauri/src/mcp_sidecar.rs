@@ -387,8 +387,16 @@ pub async fn respawn_mcp(
 #[cfg(test)]
 mod respawn_tests {
     use super::{
-        classify_sidecar_report, mcp_respawn_needed, wait_for_mcp_health_within, SidecarAcceptance,
+        cached_tauri_sidecar_digest, classify_sidecar_report, mcp_respawn_needed, wait_for_mcp_health_within, SidecarAcceptance, SIDECAR_DIGEST_CACHE,
     };
+
+    #[test]
+    fn successful_sidecar_digest_is_reused_without_a_second_file_read() {
+        let name = "__test_cached_sidecar_digest__";
+        SIDECAR_DIGEST_CACHE.lock().unwrap().insert(name.into(), "cached-digest".into());
+        assert_eq!(cached_tauri_sidecar_digest(name).as_deref(), Some("cached-digest"));
+        SIDECAR_DIGEST_CACHE.lock().unwrap().remove(name);
+    }
     use crate::app_config::NetworkConfig;
 
     /// A port nothing is listening on, so every attempt is refused.
