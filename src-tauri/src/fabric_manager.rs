@@ -87,10 +87,8 @@ fn fabric_data_dir(app: &AppHandle) -> std::path::PathBuf {
     dir
 }
 
-/// Poll the fabric's loopback `/health` until it answers or the attempts run out.
-/// Best-effort and status/logging ONLY: it no longer gates the SSE event bridge (that
-/// starts unconditionally in [`start_fabric`]), so a slow answer never disables peering.
-async fn wait_for_fabric_health(control_port: u16) -> bool {
+/// Poll the fabric's loopback `/health` until the expected owner and build answer.
+async fn wait_for_fabric_health(control_port: u16, owner: &str, expected_build: &str) -> bool {
     // 500ms cadence; the budget covers first-run latency (Ed25519 keygen + OS keychain
     // access, which on Windows can block on a Credential Manager prompt) so the "healthy"
     // log line still fires on a slow cold start rather than a spurious failure warning.
@@ -106,6 +104,13 @@ async fn wait_for_fabric_health(control_port: u16) -> bool {
         };
         match result {
             Ok(resp) if resp.status().is_success() => {
+                let health: serde_json::Value = resp.json().await.unwrap_or_default();
+                let observed_owner = health.get("owner_id").and_then(|v| v.as_str());
+                let observed_build = health.get("build_id").and_then(|v| v.as_str());
+                if observed_owner != Some(owner) || observed_build != Some(expected_build) {
+                    log::error!("[FABRIC] refusing foreign or mismatched health report owner={observed_owner:?} build={observed_build:?}");
+                    return false;
+                }
                 log::info!("[FABRIC] Fabric healthy after {} attempt(s)", attempt);
                 return true;
             }
@@ -157,6 +162,8 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     };
     cfg.api_port = api_port;
 
+    let (launch_path, build_id) = crate::mcp_sidecar::resolved_tauri_sidecar("termflow-fabric")
+        .map_err(|e| format!("fabric build identity unavailable: {e}"))?;
     let mut sidecar_command = app
         .shell()
         .sidecar("termflow-fabric")
@@ -164,6 +171,7 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     for (k, v) in fabric_env(&cfg, control_port, FABRIC_PEER_PORT, &data_dir, &state.instance_id) {
         sidecar_command = sidecar_command.env(k, v);
     }
+    sidecar_command = sidecar_command.env("TERMFLOW_FABRIC_BUILD_ID", &build_id);
 
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[FABRIC] termflow-fabric sidecar spawned");
@@ -216,8 +224,17 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
         }
     });
 
-    // Start the SSE event bridge UNCONDITIONALLY, right after storing the child — do NOT
-    // gate it on the health poll. `subscribe_fabric_events` self-guards on `fabric_alive()`
+    // Only an owner+build-matching status may authorize the event bridge.  A new
+    // child handle is not proof that the shared control port belongs to it.
+    if !wait_for_fabric_health(control_port, &state.instance_id, &build_id).await {
+        log::warn!("[FABRIC] status did not prove the spawned build; event bridge not started (descriptor={})", launch_path.display());
+        // Kill only our freshly-created child handle; the listener that produced
+        // a foreign report is not ours and must remain untouched.
+        shutdown_fabric(&state);
+        return Err("fabric health identity rejected".into());
+    }
+    // Start the SSE event bridge after ownership and build identity are proven.
+    // `subscribe_fabric_events` self-guards on `fabric_alive()`
     // and reconnects every 1s while the child handle is present, so an early start simply
     // retries `GET /events` until the fabric answers. Previously this was gated on a 5s
     // health poll (10×500ms); on a slow first run (Ed25519 keygen + OS keychain access —
@@ -226,11 +243,6 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     // pairing requests) reached the renderer until an app restart.
     tauri::async_runtime::spawn(subscribe_fabric_events(app, state));
 
-    // Health poll retained for status/logging only (it no longer gates eventing). Raised
-    // attempt budget tolerates first-run keychain latency.
-    tauri::async_runtime::spawn(async move {
-        let _ = wait_for_fabric_health(control_port).await;
-    });
     Ok(())
 }
 

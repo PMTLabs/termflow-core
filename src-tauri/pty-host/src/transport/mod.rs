@@ -1095,6 +1095,7 @@ mod tests {
             proto_max: PROTOCOL_MAX,
             endpoint: ep.0.clone(),
             capabilities: termflow_pty_protocol::CAP_ATTACH_ACK,
+            build_id: None,
             lifecycle: None,
         };
         termflow_pty_protocol::write_record(&path, &rec).unwrap();

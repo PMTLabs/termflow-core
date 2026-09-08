@@ -10,7 +10,7 @@ use tauri_plugin_shell::ShellExt;
 /// a running server we do not own — and quietly route this instance's tool calls
 /// into the other app. The sidecar echoes `AUTO_TERMINAL_INSTANCE_ID`, so
 /// compare it (`classify_health_owner`, the same rule the Settings check uses).
-async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
+async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: Option<&str>) -> bool {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
@@ -29,6 +29,11 @@ async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
                 let (healthy, conflict) =
                     crate::network_commands::classify_health_owner(reported, own_id);
                 if healthy {
+                    let observed_build = body.get("buildId").and_then(|v| v.as_str());
+                    if expected_build.is_some() && observed_build != expected_build {
+                        log::error!("[MCP] health owner matched but build identity did not: observed={observed_build:?} expected={expected_build:?}");
+                        return false;
+                    }
                     log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
                     return true;
                 }
@@ -53,6 +58,19 @@ async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
 
     log::error!("[MCP] MCP Server health check failed after 10 attempts — MCP is NOT available");
     false
+}
+
+/// Mirrors Tauri shell's sidecar resolver exactly: `current_exe().parent()` plus
+/// the platform executable suffix.  The resolved path is what we hash and what
+/// `ShellExt::sidecar` launches.  This remains a pre-exec label, not attestation:
+/// a symlink retarget or rewrite between hash and exec can still mislabel a child.
+pub(crate) fn resolved_tauri_sidecar(name: &str) -> std::io::Result<(std::path::PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    let mut path = std::env::current_exe()?.parent().ok_or_else(|| std::io::Error::other("current exe has no parent"))?.join(name);
+    #[cfg(windows)] if path.extension().is_none_or(|e| e != "exe") { path.as_mut_os_string().push(".exe"); }
+    #[cfg(not(windows))] if path.extension().is_some_and(|e| e == "exe") { path.set_extension(""); }
+    let bytes = std::fs::read(&path)?;
+    Ok((path, format!("{:x}", Sha256::digest(bytes))))
 }
 
 /// The environment the MCP server is launched with, derived from the current
@@ -93,9 +111,10 @@ async fn start_mcp_sidecar(
     app_handle: tauri::AppHandle,
     state: AppState,
     cfg: &app_config::NetworkConfig,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     log::info!("[MCP] Starting MCP Server sidecar...");
 
+    let (launch_path, build_id) = resolved_tauri_sidecar("termflow-mcp-server").map_err(|e| format!("MCP build identity unavailable: {e}"))?;
     let mut sidecar_command = app_handle
         .shell()
         .sidecar("termflow-mcp-server")
@@ -105,7 +124,7 @@ async fn start_mcp_sidecar(
     }
     // P0b: let the sidecar echo our identity on /health so the Settings health check
     // can tell OUR sidecar from another instance's that happens to own the MCP port.
-    sidecar_command = sidecar_command.env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id);
+    sidecar_command = sidecar_command.env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id).env("TERMFLOW_BUILD_ID", &build_id);
 
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[MCP] MCP sidecar spawned");
@@ -151,14 +170,20 @@ async fn start_mcp_sidecar(
         }
     });
 
-    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
-    Ok(())
+    let healthy = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, Some(&build_id)).await;
+    log::debug!("[MCP] bundled descriptor={} digest={build_id}", launch_path.display());
+    if !healthy {
+        // This is the child handle we just spawned, not the listener discovered
+        // on the shared port.  Never act on that foreign listener.
+        shutdown_mcp_server(&state);
+    }
+    Ok(healthy)
 }
 
 async fn start_mcp_legacy(
     state: AppState,
     cfg: &app_config::NetworkConfig,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     log::info!("[MCP] Starting MCP Server via legacy node fallback...");
 
     let possible_paths = [
@@ -203,8 +228,13 @@ async fn start_mcp_legacy(
         *guard = Some(McpProcessHandle::Legacy(child));
     }
 
-    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
-    Ok(())
+    // Node imports a graph of built modules.  There is no single launch artifact
+    // descriptor here, so build identity is explicitly unavailable and cannot
+    // make this path a successful acceptance/fallback/retry signal.
+    let owner_healthy = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, None).await;
+    if owner_healthy { log::warn!("[MCP] legacy Node build identity unavailable; not accepting it as current"); }
+    shutdown_mcp_server(&state);
+    Ok(false)
 }
 
 /// Kill any running MCP server, then (re)start it from the given config. Tries
@@ -251,11 +281,12 @@ pub async fn respawn_mcp(
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
 
     match start_mcp_sidecar(app_handle.clone(), state.clone(), cfg).await {
-        Ok(_) => return true,
+        Ok(true) => return true,
+        Ok(false) => return false,
         Err(e) => log::warn!("[MCP] Sidecar startup failed, falling back to legacy node path: {}", e),
     }
     match start_mcp_legacy(state, cfg).await {
-        Ok(_) => true,
+        Ok(accepted) => accepted,
         Err(e) => {
             log::error!("[MCP] Failed to start MCP server: {}", e);
             false

@@ -90,6 +90,7 @@ app.get("/health", (_req: Request, res: Response) => {
         // Echo the launching app's identity (P0b) so its Settings health check can
         // distinguish OUR sidecar from another instance's that owns this MCP port.
         instanceId: process.env.AUTO_TERMINAL_INSTANCE_ID || "",
+        buildId: process.env.TERMFLOW_BUILD_ID || "",
     });
 });
 

@@ -398,9 +398,10 @@ impl<R: Runtime> AppState<R> {
         }
         // RP-1: install the host into the update-stable runtime dir and run it
         // from there (outside the swapped app payload) so it survives an update.
-        let sidecar = crate::pty_host_client::resolve_host_path().ok_or_else(|| {
+        let launch = crate::pty_host_client::resolve_host_launch().ok_or_else(|| {
             "pty-host sidecar binary not found (set TERMFLOW_PTY_HOST_BIN)".to_string()
         })?;
+        let sidecar = launch.path;
         let pipe = crate::pty_host_client::resolve_pipe();
         let token = crate::pty_host_client::resolve_token();
 
@@ -419,6 +420,15 @@ impl<R: Runtime> AppState<R> {
         // Advertised host pid (if any): connect_or_spawn refuses to spawn a
         // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
         let record_pid = record.as_ref().map(|r| r.pid);
+        match crate::pty_host_client::host_build_disposition(record.as_ref(), &launch.build_id) {
+            crate::pty_host_client::HostBuildDisposition::Current => {}
+            crate::pty_host_client::HostBuildDisposition::Stale { observed, expected } => log::warn!(
+                "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
+            ),
+            crate::pty_host_client::HostBuildDisposition::Unknown => log::warn!(
+                "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow"
+            ),
+        }
         let (pipe, attach_acks, lifecycle) = match crate::pty_host_client::plan_connection(record) {
             crate::pty_host_client::ConnectPlan::LegacyOrNone => {
                 log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
@@ -526,7 +536,7 @@ impl<R: Runtime> AppState<R> {
         };
 
         let mut client =
-            crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, record_pid, deps)
+            crate::pty_host_client::connect_or_spawn(&sidecar, &launch.build_id, &pipe, &token, record_pid, deps)
                 .await
                 .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);

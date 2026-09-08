@@ -553,6 +553,7 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
 #[cfg(windows)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
+    build_id: &str,
     pipe: &str,
     token: &str,
     record_pid: Option<u32>,
@@ -591,7 +592,7 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, pipe, token)?;
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -623,6 +624,7 @@ pub async fn connect_or_spawn(
 #[cfg(windows)]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
+    build_id: &str,
     pipe: &str,
     token: &str,
 ) -> std::io::Result<bool> {
@@ -658,6 +660,7 @@ fn spawn_sidecar_detached(
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
             .env("TERMFLOW_PTY_TOKEN", token)
+            .env("TERMFLOW_PTY_BUILD_ID", build_id)
             .stdin(Stdio::null());
         match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
             Some(f) => {
@@ -709,6 +712,7 @@ fn spawn_sidecar_detached(
 #[cfg(unix)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
+    build_id: &str,
     pipe: &str, // socket path on Unix
     token: &str,
     record_pid: Option<u32>,
@@ -747,7 +751,7 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, pipe, token)?;
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -781,6 +785,7 @@ pub async fn connect_or_spawn(
 #[cfg(unix)]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
+    build_id: &str,
     pipe: &str,
     token: &str,
 ) -> std::io::Result<bool> {
@@ -794,6 +799,7 @@ fn spawn_sidecar_detached(
     let mut c = Command::new(sidecar);
     c.env("TERMFLOW_PTY_PIPE", pipe)
         .env("TERMFLOW_PTY_TOKEN", token)
+        .env("TERMFLOW_PTY_BUILD_ID", build_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -826,6 +832,7 @@ fn spawn_sidecar_detached(
 #[cfg(not(any(windows, unix)))]
 pub async fn connect_or_spawn(
     _sidecar: &std::path::Path,
+    _build_id: &str,
     _pipe: &str,
     _token: &str,
     _record_pid: Option<u32>,
@@ -1103,23 +1110,46 @@ fn install_host_into(
 /// failure, fall back to the bundled path so terminals still work (they just
 /// won't survive an update that swaps the payload).
 pub fn resolve_host_path() -> Option<std::path::PathBuf> {
+    resolve_host_launch().map(|launch| launch.path)
+}
+
+/// The exact descriptor used for both the host hash and `Command::new`.  The
+/// full digest is retained: the runtime directory uses only its first 8 bytes.
+/// A hash failure or missing source has no descriptor and callers must not
+/// claim that a host is current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostLaunch {
+    pub path: std::path::PathBuf,
+    pub build_id: String,
+}
+
+pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
-    match runtime_host_dir() {
+    let path = match runtime_host_dir() {
         Some(base) => match install_host_into(&src, &base) {
-            Ok(dest) => Some(dest),
+            Ok(dest) => dest,
             Err(e) => {
                 log::warn!(
                     "pty-host: could not install host into runtime dir ({e}); \
                      running from bundled path (won't survive a payload swap)"
                 );
-                Some(src)
+                src
             }
         },
         None => {
             log::warn!("pty-host: no per-user runtime dir; running from bundled path");
-            Some(src)
+            src
         }
-    }
+    };
+    let digest = sha256_file(&path).ok()?;
+    Some(HostLaunch { path, build_id: hex_full(&digest) })
+}
+
+fn hex_full(digest: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in digest { let _ = write!(s, "{b:02x}"); }
+    s
 }
 
 /// What to do with a (possibly running) host, decided from its discovery record
@@ -1151,6 +1181,20 @@ pub enum HostRetention {
     Unknown,
     Indefinite,
     Bounded { active_secs: u64 },
+}
+
+/// Hash handling for a discovered host.  A mismatched or legacy-unknown host is
+/// deliberately adopted when its protocol/capabilities allow it; terminating
+/// live terminals to enforce freshness would be the worse failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostBuildDisposition { Current, Stale { observed: String, expected: String }, Unknown }
+
+pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: &str) -> HostBuildDisposition {
+    match record.and_then(|r| r.build_id.as_deref()) {
+        Some(observed) if observed == expected => HostBuildDisposition::Current,
+        Some(observed) => HostBuildDisposition::Stale { observed: observed.into(), expected: expected.into() },
+        None => HostBuildDisposition::Unknown,
+    }
 }
 
 fn advertised_retention(rec: &termflow_pty_protocol::HostRecord) -> HostRetention {

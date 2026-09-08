@@ -92,6 +92,9 @@ async fn main() {
                     active_secs: termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
                 },
             }),
+            // This is a launch-time label, not executable attestation: a symlink
+            // can be retargeted or a file rewritten after the GUI hashes it.
+            build_id: std::env::var("TERMFLOW_PTY_BUILD_ID").ok(),
         };
         if let Err(e) = termflow_pty_protocol::write_record(&path, &rec) {
             eprintln!("termflow-pty-host: could not write discovery record: {e}");

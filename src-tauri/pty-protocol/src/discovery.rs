@@ -55,6 +55,10 @@ pub struct HostRecord {
     /// no policy. Missing must be interpreted as unknown, never indefinite.
     #[serde(default)]
     pub lifecycle: Option<LifecycleContract>,
+    /// SHA-256 of the resolved executable the host was launched from.  Optional
+    /// for records written before build identity existed.
+    #[serde(default)]
+    pub build_id: Option<String>,
 }
 
 impl HostRecord {
@@ -118,6 +122,7 @@ mod tests {
                 version: 1,
                 retention: RetentionPolicy::Indefinite,
             }),
+            build_id: Some("a".repeat(64)),
         }
     }
 
@@ -175,6 +180,7 @@ mod tests {
         assert_eq!(r.capabilities, 0, "missing capabilities defaults to 0");
         assert_eq!(r.format, 0, "missing format defaults to 0");
         assert_eq!(r.lifecycle, None, "missing lifecycle is unknown, not indefinite");
+        assert_eq!(r.build_id, None, "missing build id is unknown, not current");
     }
 
     #[test]

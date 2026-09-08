@@ -1,4 +1,4 @@
-use super::{plan_connection, ConnectPlan, HostRetention};
+use super::{host_build_disposition, plan_connection, ConnectPlan, HostBuildDisposition, HostRetention};
 use termflow_pty_protocol::{HostRecord, LifecycleContract, RetentionPolicy};
 
 fn record(proto_min: u16, proto_max: u16) -> HostRecord {
@@ -11,6 +11,7 @@ fn record(proto_min: u16, proto_max: u16) -> HostRecord {
         endpoint: "ep-99".into(),
         capabilities: termflow_pty_protocol::CAP_DRAIN,
         lifecycle: None,
+        build_id: None,
     }
 }
 
@@ -96,4 +97,22 @@ fn disjoint_versions_are_incompatible_not_a_kill() {
         plan_connection(Some(record(2, 3))),
         ConnectPlan::Incompatible { instance_id: 99 }
     );
+}
+
+#[test]
+fn stale_host_is_adopted_but_reports_its_observed_digest() {
+    let mut old = record(1, 1);
+    old.build_id = Some("old-digest".into());
+    assert_eq!(
+        host_build_disposition(Some(&old), "new-digest"),
+        HostBuildDisposition::Stale { observed: "old-digest".into(), expected: "new-digest".into() }
+    );
+    // Its usable capability remains the adoption gate; hash mismatch never asks
+    // the app to kill this instance or its sessions.
+    assert!(matches!(plan_connection(Some(old)), ConnectPlan::Bootstrap { .. }));
+}
+
+#[test]
+fn old_record_without_build_id_is_explicitly_unknown() {
+    assert_eq!(host_build_disposition(Some(&record(1, 1)), "new"), HostBuildDisposition::Unknown);
 }
