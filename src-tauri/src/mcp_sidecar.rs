@@ -3,6 +3,22 @@ use crate::state::{AppState, McpProcessHandle};
 use crate::{shutdown_mcp_generation, shutdown_mcp_server};
 use tauri_plugin_shell::ShellExt;
 
+static SIDECAR_DIGEST_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Return a successful sidecar digest from cache. Failures are deliberately not
+/// retained: a later status poll must retry an unavailable artifact read.
+pub(crate) fn cached_tauri_sidecar_digest(name: &str) -> Option<String> {
+    if let Some(digest) = SIDECAR_DIGEST_CACHE.lock().ok()?.get(name).cloned() {
+        return Some(digest);
+    }
+    let digest = resolved_tauri_sidecar(name).ok().map(|(_, digest)| digest)?;
+    if let Ok(mut cache) = SIDECAR_DIGEST_CACHE.lock() {
+        cache.insert(name.to_string(), digest.clone());
+    }
+    Some(digest)
+}
+
 /// Poll the MCP server's `/health` until OUR sidecar answers.
 ///
 /// A 200 is not enough: with per-profile instances another TermFlow's MCP server

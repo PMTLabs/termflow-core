@@ -302,9 +302,8 @@ pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<C
 
     // Check MCP Server — ownership and a present build ID must both match. An
     // absent build ID remains an explicitly unverified legacy/Node outcome.
-    let expected_mcp_build = crate::mcp_sidecar::resolved_tauri_sidecar("termflow-mcp-server")
-        .ok()
-        .map(|(_, build_id)| build_id);
+    let expected_mcp_build = effective_mcp
+        .and_then(|_| crate::mcp_sidecar::cached_tauri_sidecar_digest("termflow-mcp-server"));
     let (mcp_reported, mcp_build, mcp_clients): (Option<String>, Option<String>, Option<u32>) = match effective_mcp {
         None => (None, None, None),
         Some(port) => match client.get(format!("http://localhost:{}/health", port)).send().await {

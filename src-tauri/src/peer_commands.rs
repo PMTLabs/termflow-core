@@ -205,7 +205,7 @@ pub async fn fabric_status(state: State<'_, AppState>) -> Result<serde_json::Val
             // reports an owner id it must be ours. A mismatch means we reached a different
             // instance's fabric (a stale/shared control port), so report "not installed"
             // rather than exposing its peers/pairing to this renderer.
-            let expected = crate::mcp_sidecar::resolved_tauri_sidecar("termflow-fabric").ok().map(|(_, digest)| digest);
+            let expected = crate::mcp_sidecar::cached_tauri_sidecar_digest("termflow-fabric");
             if !health_owner_matches(&health, &state.instance_id) || !health_build_matches(&health, expected.as_deref()) {
                 return Ok(serde_json::json!({ "installed": false }));
             }
