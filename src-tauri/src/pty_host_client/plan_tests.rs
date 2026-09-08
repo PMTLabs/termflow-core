@@ -125,7 +125,7 @@ fn stale_host_is_adopted_but_reports_its_observed_digest() {
     let mut old = record(1, 1);
     old.build_id = Some("old-digest".into());
     assert_eq!(
-        host_build_disposition(Some(&old), "new-digest"),
+        host_build_disposition(Some(&old), Some("new-digest")),
         HostBuildDisposition::Stale { observed: "old-digest".into(), expected: "new-digest".into() }
     );
     // Its usable capability remains the adoption gate; hash mismatch never asks
@@ -135,5 +135,16 @@ fn stale_host_is_adopted_but_reports_its_observed_digest() {
 
 #[test]
 fn old_record_without_build_id_is_explicitly_unknown() {
-    assert_eq!(host_build_disposition(Some(&record(1, 1)), "new"), HostBuildDisposition::Unknown);
+    assert_eq!(host_build_disposition(Some(&record(1, 1)), Some("new")), HostBuildDisposition::Unknown);
+}
+
+#[test]
+fn launchable_host_with_unreadable_local_digest_does_not_reject_a_discovered_host() {
+    let mut discovered_host = record(42, 7);
+    discovered_host.build_id = Some("running-host-digest".into());
+    assert_eq!(
+        host_build_disposition(Some(&discovered_host), None),
+        HostBuildDisposition::Unknown,
+        "a missing parent-side digest is unverified, not evidence that the readable launch path mismatches the host"
+    );
 }

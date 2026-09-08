@@ -566,7 +566,7 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
 #[cfg(windows)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
-    build_id: &str,
+    build_id: Option<&str>,
     pipe: &str,
     token: &str,
     record_pid: Option<u32>,
@@ -637,7 +637,7 @@ pub async fn connect_or_spawn(
 #[cfg(windows)]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
-    build_id: &str,
+    build_id: Option<&str>,
     pipe: &str,
     token: &str,
 ) -> std::io::Result<bool> {
@@ -673,8 +673,10 @@ fn spawn_sidecar_detached(
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
             .env("TERMFLOW_PTY_TOKEN", token)
-            .env("TERMFLOW_PTY_BUILD_ID", build_id)
             .stdin(Stdio::null());
+        if let Some(build_id) = build_id {
+            c.env("TERMFLOW_PTY_BUILD_ID", build_id);
+        }
         match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
             Some(f) => {
                 c.stdout(f.try_clone().expect("clone log file handle"));
@@ -725,7 +727,7 @@ fn spawn_sidecar_detached(
 #[cfg(unix)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
-    build_id: &str,
+    build_id: Option<&str>,
     pipe: &str, // socket path on Unix
     token: &str,
     record_pid: Option<u32>,
@@ -798,7 +800,7 @@ pub async fn connect_or_spawn(
 #[cfg(unix)]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
-    build_id: &str,
+    build_id: Option<&str>,
     pipe: &str,
     token: &str,
 ) -> std::io::Result<bool> {
@@ -812,10 +814,12 @@ fn spawn_sidecar_detached(
     let mut c = Command::new(sidecar);
     c.env("TERMFLOW_PTY_PIPE", pipe)
         .env("TERMFLOW_PTY_TOKEN", token)
-        .env("TERMFLOW_PTY_BUILD_ID", build_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(build_id) = build_id {
+        c.env("TERMFLOW_PTY_BUILD_ID", build_id);
+    }
     // RP-2: tell the host where to advertise itself (discovery record).
     if let Some(rp) = record_path() {
         c.env("TERMFLOW_PTY_RECORD", rp);
@@ -845,7 +849,7 @@ fn spawn_sidecar_detached(
 #[cfg(not(any(windows, unix)))]
 pub async fn connect_or_spawn(
     _sidecar: &std::path::Path,
-    _build_id: &str,
+    _build_id: Option<&str>,
     _pipe: &str,
     _token: &str,
     _record_pid: Option<u32>,
@@ -1133,7 +1137,7 @@ pub fn resolve_host_path() -> Option<std::path::PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostLaunch {
     pub path: std::path::PathBuf,
-    pub build_id: String,
+    pub build_id: Option<String>,
 }
 
 pub fn resolve_host_launch() -> Option<HostLaunch> {
@@ -1154,8 +1158,14 @@ pub fn resolve_host_launch() -> Option<HostLaunch> {
             src
         }
     };
-    let digest = sha256_file(&path).ok()?;
-    Some(HostLaunch { path, build_id: hex_full(&digest) })
+    let build_id = sha256_file(&path).map(|digest| hex_full(&digest)).map_err(|e| {
+        log::warn!(
+            "pty-host: could not read build identity for {} ({e}); adopting or launching unverified",
+            path.display()
+        );
+        e
+    }).ok();
+    Some(HostLaunch { path, build_id })
 }
 
 fn hex_full(digest: &[u8; 32]) -> String {
@@ -1220,11 +1230,12 @@ pub enum HostRetention {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostBuildDisposition { Current, Stale { observed: String, expected: String }, Unknown }
 
-pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: &str) -> HostBuildDisposition {
-    match record.and_then(|r| r.build_id.as_deref()) {
-        Some(observed) if observed == expected => HostBuildDisposition::Current,
-        Some(observed) => HostBuildDisposition::Stale { observed: observed.into(), expected: expected.into() },
-        None => HostBuildDisposition::Unknown,
+pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: Option<&str>) -> HostBuildDisposition {
+    match (record.and_then(|r| r.build_id.as_deref()), expected) {
+        (_, None) => HostBuildDisposition::Unknown,
+        (Some(observed), Some(expected)) if observed == expected => HostBuildDisposition::Current,
+        (Some(observed), Some(expected)) => HostBuildDisposition::Stale { observed: observed.into(), expected: expected.into() },
+        (None, Some(_)) => HostBuildDisposition::Unknown,
     }
 }
 
