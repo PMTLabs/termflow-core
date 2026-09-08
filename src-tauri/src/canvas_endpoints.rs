@@ -893,11 +893,28 @@ mod tests {
 
         /// Startup pruning would delete exactly the edges the fix preserves: `prune_edges` takes
         /// the same `live` set, so at boot every restored-but-unspawned endpoint looks dead.
+        ///
+        /// The negative half used to scan only `lib.rs`. The boot path that calls `canvas_store.init(`
+        /// was split (feature/lib-split) into five sibling files (mcp_sidecar/output_pipeline/
+        /// history_flush/tray/window_restore), so a `lib.rs`-only scan would stay green even if boot
+        /// code in any of them started calling `prune_edges`. Walked crate-wide instead, same as
+        /// `closing_a_terminal_deletes_its_edges` above. Exempt this file: its own source names the
+        /// needle in the prose/assertions here.
         #[test]
         fn nothing_prunes_edges_on_startup() {
             let lib = include_str!("lib.rs").replace("\r\n", "\n");
             assert!(lib.contains("canvas_store.init("), "found the startup wiring");
-            assert!(!lib.contains("canvas_store.prune_edges("));
+
+            let sources = crate::automation_engine::test_host::crate_sources();
+            let hits = crate::automation_engine::test_host::files_containing(
+                &sources,
+                "canvas_store.prune_edges(",
+                &["canvas_endpoints.rs"],
+            );
+            assert!(
+                hits.is_empty(),
+                "canvas_store.prune_edges( must not be called anywhere: {hits:?}"
+            );
         }
     }
 }
