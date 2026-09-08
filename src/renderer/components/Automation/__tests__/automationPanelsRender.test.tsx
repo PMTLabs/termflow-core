@@ -437,7 +437,7 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
             draft,
             preview: () => container.querySelector('[data-testid="action-preview"]'),
             messageInput: () =>
-                container.querySelector<HTMLInputElement>('input[aria-label="Message to send"]')!,
+                container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message to send"]')!,
         };
     }
 
@@ -538,6 +538,14 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
         expect(chips.map((chip) => chip.textContent)).toContain('${10}');
         expect(chips.filter((chip) => chip.classList.contains('dead')).map((chip) => chip.textContent))
             .toEqual(['${11}']);
+
+        // Caret at the end of "send " — real browsers park it there when a value is set
+        // programmatically, but jsdom's `<textarea>` (unlike its `<input>`) does not, so this pins
+        // it explicitly rather than leaning on a default that only held for the element this field
+        // used to be.
+        const box = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message to send"]')!;
+        box.focus();
+        box.setSelectionRange(box.value.length, box.value.length);
 
         await act(async () => (chips.find((chip) => chip.textContent === '${10}') as HTMLButtonElement).click());
         const action = dispatch.mock.calls[0][0] as { patch: { message: string } };

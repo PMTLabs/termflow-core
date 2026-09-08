@@ -106,8 +106,8 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
      * not of the panel, and one that would make the assertion below about the wrong thing.
      */
     function caretToEnd() {
-        // The action's message box is an `<input>` and the webhook's body is a `<textarea>`.
-        const box = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        // Both the action's message box and the webhook's body are `<textarea>`s.
+        const box = container.querySelector<HTMLTextAreaElement>(
             'textarea, input[aria-label="Message to send"]',
         )!;
         box.setSelectionRange(box.value.length, box.value.length);

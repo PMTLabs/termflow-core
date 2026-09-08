@@ -79,7 +79,7 @@ export function sampleFromPattern(find: string, keep: AutomationKeep): Record<st
 
 export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch, sample }) => {
     const { parse, action } = draft.rule.graph;
-    const messageRef = React.useRef<HTMLInputElement | null>(null);
+    const messageRef = React.useRef<HTMLTextAreaElement | null>(null);
     if (!action) return null;
 
     // **This panel survives an absent parse step, and must**: `action` is the one step every rule
@@ -174,11 +174,12 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     return (
         <>
             <AuField label="Message">
-                <input
+                <textarea
                     ref={messageRef}
-                    className={`au-finput${model.values.message.missing ? ' err' : ''}`}
+                    className={`au-finput au-finput-message${model.values.message.missing ? ' err' : ''}`}
                     aria-label="Message to send"
                     placeholder="e.g. prepare to do context-hand-off"
+                    rows={3}
                     value={action.message}
                     onChange={(e) => dispatch({ type: 'action', patch: { message: e.target.value } })}
                 />
