@@ -16,6 +16,23 @@ use serde::{Deserialize, Serialize};
 /// `#[serde(default)]` so older records still parse.
 pub const HOST_RECORD_FORMAT: u32 = 1;
 
+/// Versioned retention contract advertised by a host that supports lifecycle
+/// negotiation. It is optional in [`HostRecord`] because old records cannot
+/// advertise it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LifecycleContract {
+    pub version: u32,
+    pub retention: RetentionPolicy,
+}
+
+/// A host's retention policy. This deliberately carries duration data outside
+/// the capability bitset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RetentionPolicy {
+    Indefinite,
+    Bounded { active_secs: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRecord {
     #[serde(default)]
@@ -34,6 +51,10 @@ pub struct HostRecord {
     /// Host capability bitflags (see [`crate::bootstrap`] `CAP_*`).
     #[serde(default)]
     pub capabilities: u32,
+    /// Optional because records from hosts predating lifecycle negotiation have
+    /// no policy. Missing must be interpreted as unknown, never indefinite.
+    #[serde(default)]
+    pub lifecycle: Option<LifecycleContract>,
 }
 
 impl HostRecord {
@@ -93,6 +114,10 @@ mod tests {
             proto_max: 1,
             endpoint: r"\\.\pipe\termflow-pty-host.user.rel.abc123".into(),
             capabilities: crate::bootstrap::CAP_DRAIN,
+            lifecycle: Some(LifecycleContract {
+                version: 1,
+                retention: RetentionPolicy::Indefinite,
+            }),
         }
     }
 
@@ -149,6 +174,7 @@ mod tests {
         assert_eq!(r.instance_id, 7);
         assert_eq!(r.capabilities, 0, "missing capabilities defaults to 0");
         assert_eq!(r.format, 0, "missing format defaults to 0");
+        assert_eq!(r.lifecycle, None, "missing lifecycle is unknown, not indefinite");
     }
 
     #[test]

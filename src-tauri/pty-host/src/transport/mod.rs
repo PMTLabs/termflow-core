@@ -415,6 +415,7 @@ mod tests {
                     req: 2,
                     timeout_secs: 300,
                     token: "tok".into(),
+                    purpose: None,
                 }),
             )
             .await
@@ -515,6 +516,7 @@ mod tests {
                     req: 2,
                     timeout_secs: 600,
                     token: "tok".into(),
+                    purpose: None,
                 }),
             )
             .await
@@ -604,6 +606,7 @@ mod tests {
                     req: 2,
                     timeout_secs: 600,
                     token: "tok".into(),
+                    purpose: None,
                 }),
             )
             .await
@@ -682,6 +685,7 @@ mod tests {
                     req: 2,
                     timeout_secs: 1,
                     token: "tok".into(),
+                    purpose: None,
                 }),
             )
             .await
@@ -736,6 +740,7 @@ mod tests {
             proto_max: PROTOCOL_MAX,
             endpoint: ep.0.clone(),
             capabilities: termflow_pty_protocol::CAP_ATTACH_ACK,
+            lifecycle: None,
         };
         termflow_pty_protocol::write_record(&path, &rec).unwrap();
         let srv = tokio::spawn(serve(
@@ -772,6 +777,7 @@ mod tests {
                     req: 2,
                     timeout_secs: 300,
                     token: "tok".into(),
+                    purpose: None,
                 }),
             )
             .await

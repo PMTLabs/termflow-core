@@ -9,6 +9,7 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             req_ctr: Arc::new(AtomicU64::new(0)),
             survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            lifecycle: Arc::new(HostRetention::Unknown),
             alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         },
         out_rx,

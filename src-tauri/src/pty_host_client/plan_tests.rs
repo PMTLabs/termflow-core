@@ -1,5 +1,5 @@
-use super::{plan_connection, ConnectPlan};
-use termflow_pty_protocol::HostRecord;
+use super::{plan_connection, ConnectPlan, HostRetention};
+use termflow_pty_protocol::{HostRecord, LifecycleContract, RetentionPolicy};
 
 fn record(proto_min: u16, proto_max: u16) -> HostRecord {
     HostRecord {
@@ -10,12 +10,29 @@ fn record(proto_min: u16, proto_max: u16) -> HostRecord {
         proto_max,
         endpoint: "ep-99".into(),
         capabilities: termflow_pty_protocol::CAP_DRAIN,
+        lifecycle: None,
     }
 }
 
 #[test]
 fn no_record_is_legacy_or_none() {
     assert_eq!(plan_connection(None), ConnectPlan::LegacyOrNone);
+}
+
+#[test]
+fn old_record_json_without_lifecycle_yields_unknown() {
+    let old = r#"{
+        "instance_id": 99,
+        "pid": 1,
+        "proto_min": 1,
+        "proto_max": 1,
+        "endpoint": "ep-99"
+    }"#;
+    let record = HostRecord::from_json(old).unwrap();
+    assert!(matches!(
+        plan_connection(Some(record)),
+        ConnectPlan::Bootstrap { lifecycle: HostRetention::Unknown, .. }
+    ));
 }
 
 #[test]
@@ -27,14 +44,49 @@ fn compatible_record_plans_bootstrap_at_negotiated_version() {
             version,
             instance_id,
             host_caps,
+            lifecycle,
         } => {
             assert_eq!(version, 1);
             assert_eq!(endpoint, "ep-99");
             assert_eq!(instance_id, 99);
             assert_eq!(host_caps & termflow_pty_protocol::CAP_DRAIN, termflow_pty_protocol::CAP_DRAIN);
+            assert_eq!(lifecycle, HostRetention::Unknown);
         }
         other => panic!("expected Bootstrap, got {other:?}"),
     }
+}
+
+#[test]
+fn lifecycle_requires_both_capability_and_contract() {
+    let mut rec = record(1, 1);
+    rec.lifecycle = Some(LifecycleContract {
+        version: 1,
+        retention: RetentionPolicy::Indefinite,
+    });
+    assert!(matches!(
+        plan_connection(Some(rec.clone())),
+        ConnectPlan::Bootstrap { lifecycle: HostRetention::Unknown, .. }
+    ));
+
+    rec.capabilities |= termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT;
+    assert!(matches!(
+        plan_connection(Some(rec)),
+        ConnectPlan::Bootstrap { lifecycle: HostRetention::Indefinite, .. }
+    ));
+}
+
+#[test]
+fn bounded_lifecycle_carries_active_duration() {
+    let mut rec = record(1, 1);
+    rec.capabilities |= termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT;
+    rec.lifecycle = Some(LifecycleContract {
+        version: 1,
+        retention: RetentionPolicy::Bounded { active_secs: 900 },
+    });
+    assert!(matches!(
+        plan_connection(Some(rec)),
+        ConnectPlan::Bootstrap { lifecycle: HostRetention::Bounded { active_secs: 900 }, .. }
+    ));
 }
 
 #[test]

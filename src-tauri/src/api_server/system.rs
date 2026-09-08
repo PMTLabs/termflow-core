@@ -29,7 +29,7 @@ pub(crate) async fn hotswap_arm(State(state): State<AppState>) -> impl IntoRespo
         return (StatusCode::SERVICE_UNAVAILABLE, "pty-host not connected").into_response();
     };
     let token = crate::pty_host_client::resolve_token();
-    match client.arm_detach(SIBLING_ARM_SECS, &token).await {
+    match client.arm_detach(SIBLING_ARM_SECS, &token, None).await {
         Ok(_) => {
             log::info!("[HOTSWAP] armed at a sibling's request ({SIBLING_ARM_SECS}s)");
             (StatusCode::OK, "armed").into_response()

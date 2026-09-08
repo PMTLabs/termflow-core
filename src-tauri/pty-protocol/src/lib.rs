@@ -10,14 +10,16 @@ pub mod frame;
 pub mod spec;
 
 pub use bootstrap::{
-    negotiate, read_hello, write_hello, Hello, HelloKind, CAP_ATTACH_ACK, CAP_DRAIN, PROTOCOL_MAX,
+    negotiate, read_hello, write_hello, Hello, HelloKind, CAP_ATTACH_ACK, CAP_DRAIN,
+    CAP_LIFECYCLE_CONTRACT, PROTOCOL_MAX,
     PROTOCOL_MIN,
 };
 pub use discovery::{
-    read_record, remove_record_if_owned, write_record, HostRecord, HOST_RECORD_FORMAT,
+    read_record, remove_record_if_owned, write_record, HostRecord, LifecycleContract,
+    RetentionPolicy, HOST_RECORD_FORMAT,
 };
 pub use frame::{
-    decode, encode, read_frame, write_frame, Control, Data, DecodeError, Frame, Response,
+    decode, encode, read_frame, write_frame, ArmDetachPurpose, Control, Data, DecodeError, Frame, Response,
     SessionMeta, MAX_FRAME_LEN, PROTOCOL_VERSION,
 };
 pub use spec::SpawnSpec;

@@ -144,7 +144,14 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         }
     };
     let token = crate::pty_host_client::resolve_token();
-    if let Err(e) = client.arm_detach(600, &token).await {
+    if let Err(e) = client
+        .arm_detach(
+            600,
+            &token,
+            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        )
+        .await
+    {
         let _ = crate::sibling_coord::disarm_siblings(
             &siblings, &armed_siblings, &crate::sibling_coord::http_call,
         ).await;

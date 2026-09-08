@@ -82,7 +82,14 @@ async fn main() {
             proto_max: termflow_pty_protocol::PROTOCOL_MAX,
             endpoint: endpoint.0.clone(),
             // Drain/takeover is NOT implemented yet — do not advertise CAP_DRAIN.
-            capabilities: termflow_pty_protocol::CAP_ATTACH_ACK,
+            capabilities: termflow_pty_protocol::CAP_ATTACH_ACK
+                | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT,
+            // This release only lays lifecycle protocol groundwork. Its hold
+            // behavior remains the existing indefinite retention policy.
+            lifecycle: Some(termflow_pty_protocol::LifecycleContract {
+                version: 1,
+                retention: termflow_pty_protocol::RetentionPolicy::Indefinite,
+            }),
         };
         if let Err(e) = termflow_pty_protocol::write_record(&path, &rec) {
             eprintln!("termflow-pty-host: could not write discovery record: {e}");

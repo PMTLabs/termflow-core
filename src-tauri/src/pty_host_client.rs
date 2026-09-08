@@ -126,6 +126,10 @@ pub struct PtyHostClient {
     /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
     /// (no record) must only ever receive the fire-and-forget `Attach`.
     attach_acks: Arc<std::sync::atomic::AtomicBool>,
+    /// Lifecycle policy copied from the selected connection plan. This is
+    /// deliberately connection-owned so UI consumers never re-read a mutable
+    /// discovery record after connecting.
+    lifecycle: Arc<HostRetention>,
     /// Cleared by the reader task the moment the pipe closes (just before
     /// on_disconnect fires). Lets `ensure_pty_host` refuse to PUBLISH a client
     /// whose disconnect already ran — otherwise a drop during connection setup
@@ -134,6 +138,16 @@ pub struct PtyHostClient {
 }
 
 impl PtyHostClient {
+    /// Retention advertised for this connected host. `Unknown` covers legacy,
+    /// absent, incomplete, and non-contract records; it never implies
+    /// indefinite retention.
+    pub fn host_retention(&self) -> HostRetention {
+        (*self.lifecycle).clone()
+    }
+
+    pub fn set_lifecycle(&mut self, lifecycle: HostRetention) {
+        self.lifecycle = Arc::new(lifecycle);
+    }
     fn next_req(&self) -> u64 {
         self.req_ctr.fetch_add(1, Ordering::Relaxed)
     }
@@ -289,13 +303,19 @@ impl PtyHostClient {
     }
 
     /// Arm the hot-swap hold; returns the epoch-ms deadline on ack.
-    pub async fn arm_detach(&self, timeout_secs: u64, token: &str) -> Result<u64, String> {
+    pub async fn arm_detach(
+        &self,
+        timeout_secs: u64,
+        token: &str,
+        purpose: Option<termflow_pty_protocol::ArmDetachPurpose>,
+    ) -> Result<u64, String> {
         let token = token.to_string();
         match self
             .request(move |req| Control::ArmDetach {
                 req,
                 timeout_secs,
                 token,
+                purpose,
             })
             .await
         {
@@ -422,6 +442,7 @@ where
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        lifecycle: Arc::new(HostRetention::Unknown),
         alive,
     }
 }
@@ -1116,10 +1137,39 @@ pub enum ConnectPlan {
         version: u16,
         instance_id: u128,
         host_caps: u32,
+        lifecycle: HostRetention,
     },
     /// A new host is running but shares NO protocol version with us. Do NOT
     /// force-kill its sessions — coexist read-only / banner (design §10.3/§10.4).
     Incompatible { instance_id: u128 },
+}
+
+/// Three-state lifecycle exposure for app consumers. This is not a capability
+/// bit: a bounded policy carries its active retention duration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRetention {
+    Unknown,
+    Indefinite,
+    Bounded { active_secs: u64 },
+}
+
+fn advertised_retention(rec: &termflow_pty_protocol::HostRecord) -> HostRetention {
+    if rec.capabilities & termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT == 0 {
+        return HostRetention::Unknown;
+    }
+    match rec.lifecycle.as_ref() {
+        Some(termflow_pty_protocol::LifecycleContract {
+            version: 1,
+            retention: termflow_pty_protocol::RetentionPolicy::Indefinite,
+        }) => HostRetention::Indefinite,
+        Some(termflow_pty_protocol::LifecycleContract {
+            version: 1,
+            retention: termflow_pty_protocol::RetentionPolicy::Bounded { active_secs },
+        }) => HostRetention::Bounded {
+            active_secs: *active_secs,
+        },
+        _ => HostRetention::Unknown,
+    }
 }
 
 /// Decide how to connect from an already-read discovery record.
@@ -1133,12 +1183,16 @@ pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> Con
             ),
             (rec.proto_min, rec.proto_max),
         ) {
-            Some(version) => ConnectPlan::Bootstrap {
-                endpoint: rec.endpoint,
-                version,
-                instance_id: rec.instance_id,
-                host_caps: rec.capabilities,
-            },
+            Some(version) => {
+                let lifecycle = advertised_retention(&rec);
+                ConnectPlan::Bootstrap {
+                    endpoint: rec.endpoint,
+                    version,
+                    instance_id: rec.instance_id,
+                    host_caps: rec.capabilities,
+                    lifecycle,
+                }
+            }
             None => ConnectPlan::Incompatible {
                 instance_id: rec.instance_id,
             },

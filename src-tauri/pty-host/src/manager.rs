@@ -16,7 +16,7 @@
 use crate::session::Session;
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use termflow_pty_protocol::{Control, Data, Response, SessionMeta};
+use termflow_pty_protocol::{ArmDetachPurpose, Control, Data, Response, SessionMeta};
 use tokio::sync::mpsc::Sender;
 
 /// Upper bound on an armed hold (24h). Prevents overflow and unbounded holds.
@@ -55,6 +55,10 @@ pub struct SessionManager {
     armed_deadline: Option<Instant>,
     /// Epoch-ms mirror of `armed_deadline` for honest `ArmAck` reporting.
     armed_deadline_ms: Option<u64>,
+    /// Protocol groundwork for the future bounded lifecycle. Recording this
+    /// must not alter today's indefinite hold behavior.
+    armed_purpose: Option<ArmDetachPurpose>,
+    armed_at: Option<Instant>,
     expected_token: Option<String>,
     /// Whether this host can actually outlive the GUI (Windows: broke away from
     /// a kill-on-close job; Unix: is a session leader). If false, arming is a
@@ -80,6 +84,8 @@ impl SessionManager {
             sessions: HashMap::new(),
             armed_deadline: None,
             armed_deadline_ms: None,
+            armed_purpose: None,
+            armed_at: None,
             expected_token,
             survivable,
             events,
@@ -98,6 +104,11 @@ impl SessionManager {
     #[cfg(test)]
     pub fn is_armed(&self) -> bool {
         self.armed_deadline.is_some()
+    }
+
+    #[cfg(test)]
+    fn armed_purpose(&self) -> Option<ArmDetachPurpose> {
+        self.armed_purpose
     }
 
     /// Number of hosted sessions whose child is still running. Drives the
@@ -192,6 +203,7 @@ impl SessionManager {
                 req,
                 timeout_secs,
                 token,
+                purpose,
             } => {
                 if self.expected_token.as_deref() != Some(token.as_str()) {
                     log::warn!("ArmDetach rejected: token mismatch");
@@ -208,6 +220,8 @@ impl SessionManager {
                     return;
                 }
                 let capped = timeout_secs.min(MAX_ARM_SECS);
+                self.armed_purpose = purpose;
+                self.armed_at = Some(Instant::now());
                 // Capture the deadline ONCE (checked add against overflow).
                 if self.armed_deadline.is_none() {
                     let deadline = Instant::now()
@@ -223,6 +237,8 @@ impl SessionManager {
             Control::Disarm { req } => {
                 self.armed_deadline = None;
                 self.armed_deadline_ms = None;
+                self.armed_purpose = None;
+                self.armed_at = None;
                 let _ = self.responses.try_send(Response::DisarmAck { req });
             }
         }
@@ -263,6 +279,8 @@ impl SessionManager {
         }
         self.armed_deadline = None;
         self.armed_deadline_ms = None;
+        self.armed_purpose = None;
+        self.armed_at = None;
     }
 
     /// Kill every session and WAIT for the kills to actually run.
@@ -536,6 +554,7 @@ mod tests {
             req: 1,
             timeout_secs: 600,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(m.is_armed(), "precondition: armed");
 
@@ -553,6 +572,7 @@ mod tests {
             req: 1,
             timeout_secs: 600,
             token: "tok".into(),
+            purpose: None,
         });
         m.on_gui_connect();
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
@@ -570,6 +590,7 @@ mod tests {
             req: 1,
             timeout_secs: 600,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
     }
@@ -613,8 +634,22 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(m.is_armed());
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+    }
+
+    #[test]
+    fn arm_records_optional_purpose_without_changing_hold_behavior() {
+        let (mut m, _e, _r) = mgr();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 300,
+            token: "tok".into(),
+            purpose: Some(ArmDetachPurpose::Local),
+        });
+        assert_eq!(m.armed_purpose(), Some(ArmDetachPurpose::Local));
         assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
     }
 
@@ -625,6 +660,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "WRONG".into(),
+            purpose: None,
         });
         assert!(!m.is_armed());
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
@@ -637,6 +673,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         m.handle_control(Control::Disarm { req: 2 });
         assert!(!m.is_armed());
@@ -650,12 +687,14 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         let first = m.armed_deadline.unwrap();
         m.handle_control(Control::ArmDetach {
             req: 2,
             timeout_secs: 9999,
             token: "tok".into(),
+            purpose: None,
         });
         assert_eq!(m.armed_deadline.unwrap(), first, "deadline not restarted");
     }
@@ -667,6 +706,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         let first_ack = match r.try_recv().unwrap() {
             Response::ArmAck { deadline_ms, .. } => deadline_ms,
@@ -677,6 +717,7 @@ mod tests {
             req: 2,
             timeout_secs: 99999,
             token: "tok".into(),
+            purpose: None,
         });
         let second_ack = match r.try_recv().unwrap() {
             Response::ArmAck { deadline_ms, .. } => deadline_ms,
@@ -692,6 +733,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(!m.is_armed(), "must not arm when not survivable");
         assert!(
@@ -710,6 +752,7 @@ mod tests {
             req: 1,
             timeout_secs: u64::MAX,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(m.is_armed());
     }

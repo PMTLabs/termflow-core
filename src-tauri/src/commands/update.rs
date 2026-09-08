@@ -206,7 +206,13 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     let token = crate::pty_host_client::resolve_token();
     // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
     // exit and drop the pipe (10-minute safety window).
-    client.arm_detach(600, &token).await?;
+    client
+        .arm_detach(
+            600,
+            &token,
+            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        )
+        .await?;
     // Let every window persist its state (cwd snapshot included) before we drop
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
@@ -283,6 +289,17 @@ mod preflight_wiring_tests {
             body.contains("offload_preflight"),
             "Offload must still guard THIS instance's terminals. Body:\n{body}"
         );
+    }
+
+    #[test]
+    fn all_arm_call_sites_send_the_intended_purpose() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let offload = std::fs::read_to_string(root.join("commands/update.rs")).unwrap();
+        let own_update = std::fs::read_to_string(root.join("updater.rs")).unwrap();
+        let sibling = std::fs::read_to_string(root.join("api_server/system.rs")).unwrap();
+        assert!(offload.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"));
+        assert!(own_update.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"));
+        assert!(sibling.contains("arm_detach(SIBLING_ARM_SECS, &token, None)"));
     }
 
     /// The asymmetry that produced the report: the panel showed offload as
