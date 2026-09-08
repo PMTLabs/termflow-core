@@ -1987,6 +1987,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             <div className="setting-item">
                 <label className="setting-label">Offload &amp; rebuild (keep terminals running)</label>
                 <p className="help-text">
+                    Detaches your running shells and their CLIs (Claude, codex, …) into the
+                    background PTY host and closes TermFlow so the app can be rebuilt.
+                </p>
+                <p className="help-text">
                     {offloadRetentionCopy(hostRetention)}
                 </p>
                 <ol className="help-text" style={{ margin: '8px 0 12px 18px', padding: 0 }}>
