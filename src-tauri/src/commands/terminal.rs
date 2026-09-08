@@ -423,7 +423,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
         let process_id = ident.process_id.clone();
         register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
-        state.host_session_registered(&session_key, claim_token.as_deref());
+        state.host_session_registered(&session_key, claim_token.as_deref(), &process_id);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
@@ -452,7 +452,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
     let process_id = ident.process_id.clone();
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
-    state.host_session_registered(&session_key, claim_token.as_deref());
+    state.host_session_registered(&session_key, claim_token.as_deref(), &process_id);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -924,8 +924,8 @@ pub async fn close_terminal(
     let close_started = std::time::Instant::now();
 
     // Get the terminal info to retrieve the PID + renderer id.
-    let (pid, tab_id, session_key) = if let Some(terminal) = state.terminals.get(&id) {
-        (terminal.pid, terminal.renderer_terminal_id.clone(), terminal.session_key.clone())
+    let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
+        (terminal.pid, terminal.renderer_terminal_id.clone())
     } else {
         return Err("Terminal not found".to_string());
     };
@@ -936,7 +936,6 @@ pub async fn close_terminal(
         // Kill the process tree (parent and all children)
         crate::pty_manager::kill_process_tree(pid);
     }
-    state.forget_host_session_claim(&session_key);
 
     // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
     // the old inline cleanup leaked). Dropping the pty also EOFs the reader.

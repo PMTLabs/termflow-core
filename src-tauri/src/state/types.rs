@@ -42,6 +42,9 @@ pub struct HostSessionClaim {
     pub state: HostSessionClaimState,
     pub pid: u32,
     pub token: Option<String>,
+    /// Process identity currently registered under this session, if any. This
+    /// stops a stale exit callback from retiring a replacement's claim.
+    pub process_id: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

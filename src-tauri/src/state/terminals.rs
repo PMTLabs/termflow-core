@@ -61,9 +61,13 @@ fn plan_reconnect(
 
 fn recovery_delivery_transition(claim: &mut HostSessionClaim, pid: u32, token: String) -> bool {
     if matches!(claim.state, HostSessionClaimState::Reserved | HostSessionClaimState::Abandoned) {
-        *claim = HostSessionClaim { state: HostSessionClaimState::DeliveredAwaitingAck, pid, token: Some(token) };
+        *claim = HostSessionClaim { state: HostSessionClaimState::DeliveredAwaitingAck, pid, token: Some(token), process_id: None };
         true
     } else { false }
+}
+
+fn claim_is_owned_by(claim: &HostSessionClaim, process_id: &str) -> bool {
+    claim.process_id.as_deref() == Some(process_id)
 }
 
 #[cfg(test)]
@@ -132,21 +136,28 @@ mod restore_sweep_gate_tests {
 
     #[test]
     fn unacknowledged_delivery_becomes_retryable_but_inflight_delivery_does_not() {
-        let mut lost = super::HostSessionClaim { state: super::HostSessionClaimState::DeliveredAwaitingAck, pid: 7, token: Some("old".into()) };
+        let mut lost = super::HostSessionClaim { state: super::HostSessionClaimState::DeliveredAwaitingAck, pid: 7, token: Some("old".into()), process_id: None };
         lost.state = super::HostSessionClaimState::Abandoned;
         lost.token = None;
         assert!(super::recovery_delivery_transition(&mut lost, 7, "retry".into()), "rejects the old permanent-surfaced implementation: a lost event must be deliverable again");
-        let mut inflight = super::HostSessionClaim { state: super::HostSessionClaimState::RegistrationInProgress, pid: 7, token: Some("live".into()) };
+        let mut inflight = super::HostSessionClaim { state: super::HostSessionClaimState::RegistrationInProgress, pid: 7, token: Some("live".into()), process_id: None };
         assert!(!super::recovery_delivery_transition(&mut inflight, 7, "duplicate".into()), "rejects retrying every unacknowledged event: an in-flight renderer create must not receive a second pane");
     }
 
     #[test]
     fn recovery_and_restore_registration_have_one_winner() {
-        let mut reserved = super::HostSessionClaim { state: super::HostSessionClaimState::Reserved, pid: 9, token: None };
+        let mut reserved = super::HostSessionClaim { state: super::HostSessionClaimState::Reserved, pid: 9, token: None, process_id: None };
         // Simulate the restore worker consuming the entry before recovery tries
         // its entry transition. The old separate maps allowed both operations.
         reserved.state = super::HostSessionClaimState::RegistrationInProgress;
         assert!(!super::recovery_delivery_transition(&mut reserved, 9, "second".into()), "rejects check-then-insert recovery: a concurrent registration must keep its exclusive claim");
+    }
+
+    #[test]
+    fn cleanup_retires_only_its_own_registered_claim() {
+        let replacement = super::HostSessionClaim { state: super::HostSessionClaimState::Registered, pid: 9, token: None, process_id: Some("pc-replacement".into()) };
+        assert!(!super::claim_is_owned_by(&replacement, "pc-stale-exit"), "rejects unconditional cleanup: a stale exit must not erase replacement ownership");
+        assert!(super::claim_is_owned_by(&replacement, "pc-replacement"), "rejects the exit-leak implementation: cleanup of the actual owner must retire its Registered claim so Restart can claim the session");
     }
 }
 
@@ -156,7 +167,7 @@ impl<R: Runtime> AppState<R> {
     /// the observation and reservation.
     pub fn reserve_host_session(&self, session_key: &str, pid: u32) {
         self.host_session_claims.entry(session_key.to_string()).or_insert(HostSessionClaim {
-            state: HostSessionClaimState::Reserved, pid, token: None,
+            state: HostSessionClaimState::Reserved, pid, token: None, process_id: None,
         });
     }
 
@@ -167,7 +178,7 @@ impl<R: Runtime> AppState<R> {
         let token = uuid::Uuid::new_v4().to_string();
         match self.host_session_claims.entry(session_key.to_string()) {
             Entry::Vacant(v) => {
-                v.insert(HostSessionClaim { state: HostSessionClaimState::DeliveredAwaitingAck, pid, token: Some(token.clone()) });
+                v.insert(HostSessionClaim { state: HostSessionClaimState::DeliveredAwaitingAck, pid, token: Some(token.clone()), process_id: None });
                 Some(token)
             }
             Entry::Occupied(mut o) => recovery_delivery_transition(o.get_mut(), pid, token.clone()).then_some(token),
@@ -192,7 +203,7 @@ impl<R: Runtime> AppState<R> {
         use dashmap::mapref::entry::Entry;
         match self.host_session_claims.entry(session_key.to_string()) {
             Entry::Vacant(v) => {
-                v.insert(HostSessionClaim { state: HostSessionClaimState::RegistrationInProgress, pid: 0, token: None });
+                v.insert(HostSessionClaim { state: HostSessionClaimState::RegistrationInProgress, pid: 0, token: None, process_id: None });
                 Ok(None)
             }
             Entry::Occupied(mut o) => match o.get().state {
@@ -208,10 +219,11 @@ impl<R: Runtime> AppState<R> {
         }
     }
 
-    pub fn host_session_registered(&self, session_key: &str, token: Option<&str>) {
+    pub fn host_session_registered(&self, session_key: &str, token: Option<&str>, process_id: &str) {
         if let Some(mut claim) = self.host_session_claims.get_mut(session_key) {
             // Recovery remains awaiting the renderer acknowledgement. Ordinary
             // creates have no delivery token and complete at backend registration.
+            claim.process_id = Some(process_id.to_string());
             if claim.token.is_none() || token.is_none() { claim.state = HostSessionClaimState::Registered; }
         }
     }
@@ -231,6 +243,14 @@ impl<R: Runtime> AppState<R> {
     }
 
     pub fn forget_host_session_claim(&self, session_key: &str) { self.host_session_claims.remove(session_key); }
+
+    /// Retire only the registration owned by this exact process. A late Exit for
+    /// an old process must not erase a replacement which reused the session key.
+    pub fn forget_host_session_claim_if_owner(&self, session_key: &str, process_id: &str) {
+        if self.host_session_claims.get(session_key).is_some_and(|claim| claim_is_owned_by(&claim, process_id)) {
+            self.host_session_claims.remove(session_key);
+        }
+    }
 
     fn expire_unacknowledged_host_deliveries(&self) {
         for mut entry in self.host_session_claims.iter_mut() {
@@ -692,6 +712,7 @@ impl<R: Runtime> AppState<R> {
                 // Ring bookkeeping is keyed by the SESSION, not the process: it is
                 // the host's own offset and lives in the host's id space.
                 st_exit.host_stream_offsets.remove(&session_key);
+                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
                 // Drop the identity lookups LAST among the removals but before the
                 // emit — a leaked entry would route a later terminal's output at a
                 // process id that no longer exists.
@@ -1246,6 +1267,7 @@ impl<R: Runtime> AppState<R> {
         }
         self.host_terminals.remove(id);
         self.host_stream_offsets.remove(&session_key);
+        self.forget_host_session_claim_if_owner(&session_key, id);
 
         // Announce the end HERE, because nothing downstream will.
         //
@@ -1399,10 +1421,11 @@ impl<R: Runtime> AppState<R> {
         // to fall back on. Reading the leaf after `terminals.remove` yields `None` and the purge
         // silently does nothing, which is invisible: the symptom is a restarted terminal that is
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
-        let leaf = self
+        let (leaf, session_key) = self
             .terminals
             .get(id)
-            .and_then(|t| t.renderer_terminal_id.clone());
+            .map(|t| (t.renderer_terminal_id.clone(), t.session_key.clone()))
+            .unwrap_or((None, id.to_string()));
         if let Some(leaf) = leaf {
             self.automations.runtime.forget_terminal(&leaf);
         }
@@ -1436,6 +1459,7 @@ impl<R: Runtime> AppState<R> {
         // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
         // in the routing set after its state is torn down.
         self.host_terminals.remove(id);
+        self.forget_host_session_claim_if_owner(&session_key, id);
     }
 }
 
