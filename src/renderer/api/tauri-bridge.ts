@@ -184,7 +184,7 @@ interface ElectronAPI {
   flushSessionAck: () => Promise<void>;
   /** Plan 018: every window id the backend registry currently holds. */
   listWindowSessionIds: () => Promise<string[]>;
-  reportHostRestoreSettled: (windowLabel: string, claimedSessionKeys: string[]) => Promise<void>;
+  reportHostRestoreSettled: (windowLabel: string) => Promise<void>;
   // Detach / cross-window pane handoff
   stashDetachPayload: (token: string, payload: any) => Promise<void>;
   takeDetachPayload: (token: string) => Promise<any | null>;
@@ -785,8 +785,8 @@ const tauriBridge: ElectronAPI = {
   listWindowSessionIds: async () => {
     return invoke('list_window_session_ids');
   },
-  reportHostRestoreSettled: async (windowLabel, claimedSessionKeys) => {
-    await invoke('report_host_restore_settled', { windowLabel, claimedSessionKeys });
+  reportHostRestoreSettled: async (windowLabel) => {
+    await invoke('report_host_restore_settled', { windowLabel });
   },
 
   // Detach / cross-window pane handoff

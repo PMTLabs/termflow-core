@@ -29,21 +29,6 @@ fn sweep_claim_survives(completed: bool) -> bool {
     completed
 }
 
-/// A restore report is historical: a terminal can be created after its window
-/// snapshot but before another window releases the sweep.  Reconcile that
-/// snapshot with ownership observed immediately before planning recovery.
-fn restore_claims_with_current_ownership(
-    claims: impl IntoIterator<Item = String>,
-    owned_session_keys: impl IntoIterator<Item = String>,
-) -> Vec<String> {
-    claims
-        .into_iter()
-        .chain(owned_session_keys)
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 /// Reconcile a host answer with the ownership that existed before asking for it.
 /// Ownership observed after the answer was built can suppress recovery of an
 /// orphan, but cannot prove that the older answer killed that new terminal.
@@ -89,26 +74,6 @@ mod restore_sweep_gate_tests {
             !super::sweep_claim_survives(false),
             "an incomplete sweep must hand the flag back: the backstop reads it too, \
              so consuming it here strands an unclaimed live session for good"
-        );
-    }
-
-    #[test]
-    fn current_ownership_augments_stale_restore_claims() {
-        let claims = super::restore_claims_with_current_ownership(
-            ["restored-before-snapshot".into()],
-            ["created-after-snapshot".into()],
-        );
-        let sessions = [termflow_pty_protocol::SessionMeta {
-            tab_id: "created-after-snapshot".into(),
-            pid: 73,
-            head_offset: 0,
-            tail_offset: 0,
-            alive: true,
-        }];
-        let plan = super::plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
-        assert!(
-            plan.orphans.is_empty(),
-            "a session currently owned by another restored window must never become a recovered duplicate"
         );
     }
 
@@ -1012,8 +977,7 @@ impl<R: Runtime> AppState<R> {
         });
     }
 
-    pub async fn report_host_restore_settled(&self, window_label: String, claims: Vec<String>) {
-        let _ = claims; // a reported tree is intent, not registered ownership
+    pub async fn report_host_restore_settled(&self, window_label: String) {
         self.host_restore_pending_windows.remove(&window_label);
         if !restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) { return; }
         self.release_host_restore_sweep(false).await;

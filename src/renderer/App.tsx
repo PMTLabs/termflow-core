@@ -536,19 +536,9 @@ const App: React.FC = () => {
     }
 
     // StateManager has finished restoring this window's complete persisted pane
-    // tree. Tell Rust which host session keys this window will claim before it
-    // considers any other live host session a recovered orphan.
-    const claims: string[] = [];
-    const collect = (node: any) => {
-      if (!node) return;
-      if (node.type === 'terminal' && node.terminalId) {
-        claims.push(node.sessionKey ?? node.terminalId);
-      }
-      node.children?.forEach(collect);
-    };
-    Object.values(store.getState().panes.treesByTabId).forEach(collect);
+    // tree. Report completion so Rust can release this window from the sweep.
     try {
-      await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label, claims);
+      await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label);
     } catch (error) {
       console.warn('Failed to report host restore completion:', error);
     }

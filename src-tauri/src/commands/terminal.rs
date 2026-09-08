@@ -203,9 +203,8 @@ pub async fn create_terminal(
 pub async fn report_host_restore_settled(
     state: State<'_, AppState>,
     window_label: String,
-    claimed_session_keys: Vec<String>,
 ) -> Result<(), String> {
-    state.report_host_restore_settled(window_label, claimed_session_keys).await;
+    state.report_host_restore_settled(window_label).await;
     Ok(())
 }
 
