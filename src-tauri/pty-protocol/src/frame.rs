@@ -285,6 +285,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_purposeful_arm_still_decodes_on_a_pre_purpose_host() {
+        // The OTHER direction, and the one adopt+warn makes real: a new app is
+        // allowed to connect to a stale old host, and then arms it with a
+        // purpose that host's decoder has never heard of. The extra Option byte
+        // must not desync it — it must read as the unlabelled/indefinite arm.
+        let encoded = encode(&Frame::Ctrl(Control::ArmDetach {
+            req: 7,
+            timeout_secs: 600,
+            token: "token".into(),
+            purpose: Some(ArmDetachPurpose::Local),
+        }));
+        let old: LegacyFrame = bincode::deserialize(&encoded[5..])
+            .expect("a pre-purpose host must still decode a purposeful arm");
+        assert_eq!(
+            Frame::from(old),
+            Frame::Ctrl(Control::ArmDetach {
+                req: 7,
+                timeout_secs: 600,
+                token: "token".into(),
+                purpose: None,
+            }),
+            "an old host cannot see the purpose, so it must fall back to unlabelled"
+        );
+    }
+
     #[tokio::test]
     async fn read_frame_rejects_oversized_len_before_alloc() {
         // Header claims a payload larger than MAX_FRAME_LEN. read_frame must

@@ -291,15 +291,62 @@ mod preflight_wiring_tests {
         );
     }
 
+    /// The argument list of every `arm_detach` call in a file, excluding this
+    /// test module. Scoping to the call site is load-bearing: a whole-file
+    /// `contains` matched the assertion literals BELOW, in this very file, so
+    /// the offload site passed even when it was mutated to send `None`.
+    fn arm_detach_args(src: &str) -> Vec<String> {
+        let production = src.split("mod preflight_wiring_tests").next().unwrap_or(src);
+        let mut out = Vec::new();
+        for (open, _) in production.match_indices(".arm_detach(") {
+            let start = open + ".arm_detach(".len();
+            let mut depth = 1usize;
+            for (off, ch) in production[start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            out.push(production[start..start + off].to_string());
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
     #[test]
     fn all_arm_call_sites_send_the_intended_purpose() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let offload = std::fs::read_to_string(root.join("commands/update.rs")).unwrap();
-        let own_update = std::fs::read_to_string(root.join("updater.rs")).unwrap();
-        let sibling = std::fs::read_to_string(root.join("api_server/system.rs")).unwrap();
-        assert!(offload.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"));
-        assert!(own_update.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"));
-        assert!(sibling.contains("arm_detach(SIBLING_ARM_SECS, &token, None)"));
+        let read = |rel: &str| {
+            let args = arm_detach_args(&std::fs::read_to_string(root.join(rel)).unwrap());
+            assert_eq!(args.len(), 1, "{rel}: expected exactly one arm_detach call");
+            args.into_iter().next().unwrap()
+        };
+
+        // Both LOCAL sites label the arm, so a future deadline can apply to them.
+        for local in ["commands/update.rs", "updater.rs"] {
+            let args = read(local);
+            assert!(
+                args.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"),
+                "{local}: a local arm must be labelled Local, got: {args}"
+            );
+        }
+
+        // The sibling site must stay UNLABELLED — a different profile's update
+        // must never install a deadline on terminals its user never touched.
+        let sibling = read("api_server/system.rs");
+        assert!(
+            !sibling.contains("ArmDetachPurpose"),
+            "a sibling-armed hold must carry no purpose, got: {sibling}"
+        );
+        assert!(
+            sibling.contains("None"),
+            "sibling arm must pass an explicit None, got: {sibling}"
+        );
     }
 
     /// The asymmetry that produced the report: the panel showed offload as
