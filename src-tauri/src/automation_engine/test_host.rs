@@ -441,3 +441,236 @@ pub(crate) fn strip_comments(source: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// **Every `.rs` file under `src/`, walked at test time rather than named at compile time.**
+///
+/// A census built on `include_str!` of a hardcoded list is only ever as wide as that list, and the
+/// list is a thing someone has to remember. Two ways it goes quietly wrong:
+///
+/// - **A scanned file is split.** The code moves out from under the scan into a sibling nobody
+///   listed, and the census then reports green over a remnant. Moving a split file to the
+///   `foo/mod.rs` layout makes a *stale* path a compile error — but nothing can make a *missing*
+///   path an error, because by definition nothing points at it.
+/// - **A new file simply appears.** This is not hypothetical here: `webview_power`'s "no other file
+///   restores a window directly" scanned `lib.rs` and `commands.rs`, and `native_notify.rs` had been
+///   calling `unminimize()` directly — the exact thing it forbids — for as long as that function has
+///   existed. The guard was green the whole time. Widening it to this walk is what found it.
+///
+/// So the corpus is derived from the filesystem: a file is scanned because it EXISTS, not because
+/// someone remembered it. `CARGO_MANIFEST_DIR` is baked at compile time, so the walk is anchored to
+/// this crate rather than to the working directory a test happens to run from.
+///
+/// **The floor is the point.** A census over an empty corpus passes perfectly, so the one failure
+/// this helper must never have is returning nothing — a wrong root, or a checkout without sources,
+/// would silently disarm every caller at once. Asserting the size here means one floor protects all
+/// of them, instead of each census needing to remember its own.
+///
+/// Returns `(path relative to `src/`, [`strip_comments`]ed contents)`, sorted, with `/` separators
+/// on every platform so callers can match paths literally.
+pub(crate) fn crate_sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut out = Vec::new();
+    let mut stack = vec![root.clone()];
+
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("cannot walk {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("a readable directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let rel = path
+                    .strip_prefix(&root)
+                    .expect("walked from root")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+                out.push((rel, strip_comments(&text)));
+            }
+        }
+    }
+
+    out.sort();
+    assert!(
+        out.len() >= 50,
+        "the source walk reached {} files: it is pointed somewhere wrong, and every census built \
+         on it is now asserting over almost nothing",
+        out.len()
+    );
+    out
+}
+
+/// Every name in `exempt` must be a file the scan actually walks.
+///
+/// An exemption naming a file outside `sources` is invisible: it never fails, never shows up in a
+/// diff, and reads as a considered decision while covering nothing. A split is what orphans one —
+/// the file it named became a directory of smaller files, and the census went on excusing a name
+/// nobody writes to any more. `d0bcbc8` removed one such exemption from a single census; this is
+/// the same check moved into the two helpers, so a census built on either gets it for free.
+///
+/// **It is not reached by every census in the crate**, and the earlier wording here claimed it was.
+/// A census that filters by filename without going through [`files_containing`] or
+/// [`automation_commands_in`] is on its own: `commands/terminal.rs`'s spawn-site audit is the one
+/// that does, and it carries a stronger check of its own (each allowed path must still exist *and*
+/// still contain a spawn call). A third such census would have to be written the same way.
+///
+/// Deliberately only an EXISTENCE check. Whether an exemption must *also* still contain the thing
+/// it excuses is a per-call-site decision, and at least one call site needs it not to: the resolver
+/// census in `automation_commands` assembles its needle precisely so this file does not match it,
+/// and exempts the file anyway so that a literal appearing here later cannot satisfy the anchor.
+fn assert_exemptions_are_live(sources: &[(String, String)], exempt: &[&str], census: &str) {
+    for name in exempt {
+        assert!(
+            sources.iter().any(|(path, _)| path == name),
+            "`{name}` is exempted from the `{census}` census but is not in the scanned set: the \
+             exemption covers nothing and should be deleted rather than carried"
+        );
+    }
+}
+
+/// Paths in `sources`, excluding `exempt`, whose text contains `needle`.
+///
+/// **Split out from its censuses so they can be run against a corpus that DOES contain a
+/// violation.** A source census has exactly one interesting failure mode — passing over a corpus
+/// that could never have produced a hit — and the only thing that settles it is showing the scan
+/// dirty. A mutation does that once, in a transcript, and stops being true the moment anyone edits
+/// the scan. A negative-control pair does it by construction and keeps doing it: the census below
+/// and its `..._reports_a_violation` twin are the same call, and the twin fails if the predicate
+/// ever stops finding what it is for.
+pub(crate) fn files_containing<'a>(
+    sources: &'a [(String, String)],
+    needle: &str,
+    exempt: &[&str],
+) -> Vec<&'a str> {
+    assert_exemptions_are_live(sources, exempt, needle);
+
+    sources
+        .iter()
+        .filter(|(path, _)| !exempt.contains(&path.as_str()))
+        .filter(|(_, src)| src.contains(needle))
+        .map(|(path, _)| path.as_str())
+        .collect()
+}
+
+/// Every `#[tauri::command]` body in `sources` (excluding `exempt`) that touches the automation
+/// store, as `(file, command name)`.
+///
+/// Same reason as [`files_containing`]: the census that calls this asserts an empty result, and an
+/// empty result is what a broken scan returns too.
+pub(crate) fn automation_commands_in<'a>(
+    sources: &'a [(String, String)],
+    exempt: &[&str],
+) -> (Vec<(&'a str, String)>, usize) {
+    // ASSEMBLED. This file is itself part of the corpus the census walks, so a literal marker here
+    // makes the helper match itself: the split yields the rest of this function as a "command
+    // body", and the `automations.` needle a few lines down is in it. That is not a hypothetical —
+    // it failed exactly this way the first time the predicate moved out of the test and into here.
+    assert_exemptions_are_live(sources, exempt, "automation command");
+
+    let marker = format!("#[{}]", "tauri::command");
+    let mut found = Vec::new();
+    let mut scanned = 0;
+    for (path, code) in sources
+        .iter()
+        .filter(|(path, _)| !exempt.contains(&path.as_str()))
+    {
+        for body in code.split(marker.as_str()).skip(1) {
+            scanned += 1;
+            if body.contains("automation_store") || body.contains("automations.") {
+                let name = body
+                    .split("fn ")
+                    .nth(1)
+                    .and_then(|s| s.split('(').next())
+                    .unwrap_or("?")
+                    .trim()
+                    .to_string();
+                found.push((path.as_str(), name));
+            }
+        }
+    }
+    (found, scanned)
+}
+
+#[cfg(test)]
+mod exemption_tests {
+    use super::{automation_commands_in, files_containing};
+
+    /// The negative control for the stale-exemption check — the half that makes it mean anything.
+    ///
+    /// A guard against a stale exemption is worth nothing until it is shown to fire, which is the
+    /// same argument the censuses themselves rest on: "no exemption is stale" and "the check can no
+    /// longer detect a stale one" are otherwise the same green tick.
+    #[test]
+    #[should_panic(expected = "is not in the scanned set")]
+    fn an_exemption_naming_a_file_that_is_gone_is_rejected() {
+        let corpus = vec![("kept.rs".to_string(), "let _ = thing();".to_string())];
+        let _ = files_containing(&corpus, "thing(", &["split_away.rs"]);
+    }
+
+    /// **The same control on the OTHER predicate.** Both scanning helpers take an `exempt` list, so
+    /// guarding one and not the other would leave the class half fixed — and the unguarded half is
+    /// the one whose census carries the larger exemption. Two tests rather than one because a
+    /// `#[should_panic]` cannot say WHICH call panicked.
+    #[test]
+    #[should_panic(expected = "is not in the scanned set")]
+    fn a_stale_exemption_is_rejected_by_the_command_census_too() {
+        let corpus = vec![("kept.rs".to_string(), "fn ping() {}".to_string())];
+        let _ = automation_commands_in(&corpus, &["split_away.rs"]);
+    }
+
+    /// The other half: a live exemption still suppresses its own file and nothing else. Without
+    /// this, the check above could be satisfied by a helper that rejects *every* exemption, live
+    /// ones included — which would make the guard fire always and mean nothing.
+    #[test]
+    fn a_live_exemption_suppresses_only_itself() {
+        let corpus = vec![
+            ("gate.rs".to_string(), "let _ = thing();".to_string()),
+            ("offender.rs".to_string(), "let _ = thing();".to_string()),
+            ("quiet.rs".to_string(), "let _ = other();".to_string()),
+        ];
+        assert_eq!(
+            files_containing(&corpus, "thing(", &["gate.rs"]),
+            vec!["offender.rs"],
+            "the exemption must remove the gate and nothing else"
+        );
+    }
+
+    /// **The positive half for the OTHER helper**, which the first version of this module left out.
+    ///
+    /// Both `#[should_panic]` tests are satisfied by a helper that panics on any non-empty exempt
+    /// list, so each needs a partner showing a LIVE exemption is honoured rather than rejected.
+    /// `files_containing` had one and `automation_commands_in` did not — the guard was controlled
+    /// on one of the two helpers it had just been extracted to cover, which is the same class the
+    /// guard itself polices, one level up.
+    ///
+    /// **The corpus markers are ASSEMBLED, and that is not decoration.** This file is walked by the
+    /// real `no_automation_command_lives_outside_this_module` census, so a literal marker here is a
+    /// command body as far as that census is concerned — and the `automations.` needle sits right
+    /// after it. The first version of this test spelled them out and made the census report
+    /// `test_host.rs` as the home of two stray automation commands. The sibling control in
+    /// `automation_commands.rs` can use literals safely only because that file is the one the
+    /// census exempts; this one is not.
+    #[test]
+    fn a_live_exemption_is_honoured_by_the_command_census_too() {
+        let marker = format!("#[{}]", "tauri::command");
+        let corpus = vec![
+            (
+                "gate.rs".to_string(),
+                format!("{marker}\npub async fn legit() {{ automations.reload(); }}"),
+            ),
+            (
+                "offender.rs".to_string(),
+                format!("{marker}\npub async fn sneak() {{ automations.reload(); }}"),
+            ),
+        ];
+        let (found, scanned) = automation_commands_in(&corpus, &["gate.rs"]);
+        assert_eq!(
+            found,
+            vec![("offender.rs", "sneak".to_string())],
+            "the exemption must remove the gate and nothing else"
+        );
+        assert_eq!(scanned, 1, "the exempted file must not be counted toward the floor");
+    }
+}
