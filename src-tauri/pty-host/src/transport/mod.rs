@@ -22,6 +22,8 @@
 
 use crate::manager::{Disposition, LocalHold, SessionManager};
 use std::sync::Arc;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 #[cfg(not(windows))]
 use std::time::Instant;
@@ -42,10 +44,13 @@ struct SystemActiveClock {
     #[cfg(not(windows))]
     origin: Instant,
     #[cfg(windows)]
-    origin_ticks: Option<u64>,
+    origin_ticks: AtomicU64,
 }
 
 impl SystemActiveClock {
+    #[cfg(windows)]
+    const NO_ORIGIN: u64 = u64::MAX;
+
     fn new() -> Self {
         #[cfg(windows)]
         let origin_ticks = unbiased_interrupt_ticks();
@@ -53,8 +58,29 @@ impl SystemActiveClock {
             #[cfg(not(windows))]
             origin: Instant::now(),
             #[cfg(windows)]
-            origin_ticks,
+            origin_ticks: AtomicU64::new(origin_ticks.unwrap_or(Self::NO_ORIGIN)),
         }
+    }
+
+    #[cfg(windows)]
+    fn elapsed_from_ticks(&self, ticks: Option<u64>) -> Option<Duration> {
+        let ticks = ticks?;
+        let observed = self.origin_ticks.load(Ordering::Acquire);
+        let origin = if observed == Self::NO_ORIGIN {
+            self.origin_ticks
+                .compare_exchange(
+                    Self::NO_ORIGIN,
+                    ticks,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .unwrap_or_else(|existing| existing)
+        } else {
+            observed
+        };
+        Some(Duration::from_nanos(
+            ticks.saturating_sub(origin).saturating_mul(100),
+        ))
     }
 }
 
@@ -62,10 +88,7 @@ impl ActiveClock for SystemActiveClock {
     fn now(&self) -> Option<Duration> {
         #[cfg(windows)]
         {
-            let ticks = unbiased_interrupt_ticks()?;
-            return Some(Duration::from_nanos(
-                ticks.saturating_sub(self.origin_ticks?).saturating_mul(100),
-            ));
+            return self.elapsed_from_ticks(unbiased_interrupt_ticks());
         }
         #[cfg(not(windows))]
         {
@@ -449,6 +472,21 @@ mod tests {
         fn now(&self) -> Option<Duration> {
             *self.0.lock().unwrap()
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn system_active_clock_recovers_when_initial_samples_fail() {
+        let clock = SystemActiveClock {
+            origin_ticks: AtomicU64::new(SystemActiveClock::NO_ORIGIN),
+        };
+        assert_eq!(clock.elapsed_from_ticks(None), None);
+        assert_eq!(clock.elapsed_from_ticks(None), None);
+        assert_eq!(clock.elapsed_from_ticks(Some(1_000)), Some(Duration::ZERO));
+        assert_eq!(
+            clock.elapsed_from_ticks(Some(1_050)),
+            Some(Duration::from_nanos(5_000))
+        );
     }
 
     /// Regression for a non-cancel-safe `read_frame`: the header is delivered
