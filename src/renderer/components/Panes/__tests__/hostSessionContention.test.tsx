@@ -24,6 +24,7 @@ import { TerminalPane } from '../TerminalPane';
 import { store } from '../../../store';
 import { addTab, clearAllTabs } from '../../../store/slices/tabsSlice';
 import { addTabTree, resetPanes } from '../../../store/slices/panesSlice';
+import { markProvisionalRecovery } from '../../../services/provisionalRecovery';
 
 let container: HTMLDivElement;
 let root: Root;
@@ -32,8 +33,8 @@ const mount = (terminalId: string) => {
   root.render(<Provider store={store}><TerminalPane paneId={terminalId} terminalId={terminalId} isActive onSplit={() => {}} onClose={() => {}} onFocus={() => {}} /></Provider>);
 };
 
-const addRecoveryTab = (tabId: string, terminalId: string, multiPane = false) => {
-  store.dispatch(addTab({ id: tabId, title: 'Recovered terminal', shellType: 'default' }));
+const addRecoveryTab = (tabId: string, terminalId: string, multiPane = false, title = 'Recovered terminal') => {
+  store.dispatch(addTab({ id: tabId, title, shellType: 'default' }));
   store.dispatch(addTabTree({ tabId, tree: multiPane ? {
     id: 'split', type: 'split', direction: 'horizontal', children: [
       { id: terminalId, type: 'terminal', terminalId, sessionKey: 'S' },
@@ -62,6 +63,7 @@ const settle = async () => { await act(async () => { await Promise.resolve(); aw
 describe('recovery create contention', () => {
   it('removes the losing recovery tab and never closes a host session', async () => {
     addRecoveryTab('tb-loser', 'tm-loser');
+    markProvisionalRecovery('tm-loser');
     createTerminal.mockRejectedValueOnce(new Error('host-session-contended: host session S is already registered'));
     act(() => mount('tm-loser'));
     await settle();
@@ -69,6 +71,21 @@ describe('recovery create contention', () => {
     expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-loser')).toBeUndefined();
     expect(store.getState().panes.treesByTabId['tb-loser']).toBeUndefined();
     expect(closeTerminal).not.toHaveBeenCalled();
+  });
+
+  it('keeps a migrated pane with a session key after contention', async () => {
+    addRecoveryTab('tb-migrated', 'tm-migrated', false, 'Migrated user tab');
+    createTerminal.mockRejectedValueOnce(new Error('host-session-contended: host session S is already registered'));
+    act(() => mount('tm-migrated'));
+    await settle();
+
+    expect(store.getState().tabs.tabs.find(tab => tab.id === 'tb-migrated')).toMatchObject({
+      id: 'tb-migrated', title: 'Migrated user tab',
+    });
+    expect(store.getState().panes.treesByTabId['tb-migrated']).toMatchObject({
+      type: 'terminal', terminalId: 'tm-migrated', sessionKey: 'S',
+    });
+    expect(container.textContent).toContain('Failed to start shell');
   });
 
   it('keeps a tab and shows startup failure for an ordinary create error', async () => {

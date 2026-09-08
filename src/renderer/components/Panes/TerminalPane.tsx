@@ -23,6 +23,7 @@ import { reattachPromptGate, takeArmProbePending } from '../../services/reattach
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
+import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import './TerminalPane.css';
 
@@ -287,6 +288,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     initPromise
       .then(async pid => {
+        // Spend a provisional-recovery mark on its first settle, successful or
+        // failed. A later create failure belongs to an established user pane.
+        takeProvisionalRecovery(terminalId);
         console.log(`TerminalPane: Created terminal ${terminalId} with process ${pid}`);
         // Backlog 011: if the backend REATTACHED this terminal after a core-restart
         // hot-swap, reconcile could not seed the command-suggest prompt gate (the
@@ -348,8 +352,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         terminalInitMap.delete(terminalId);
         terminalInitPromises.delete(terminalId);
         terminalInitLock.delete(terminalId);
+        const isProvisionalRecovery = takeProvisionalRecovery(terminalId);
         const state = store.getState();
-        const tabId = sessionKey && isHostSessionContended(error)
+        const tabId = isProvisionalRecovery && isHostSessionContended(error)
           ? findTabIdByTerminalId(state.panes.treesByTabId, terminalId)
           : null;
         const tree = tabId ? state.panes.treesByTabId[tabId] : null;

@@ -7,6 +7,8 @@
  * isolation (see __tests__/apiCreatedTab.test.ts).
  */
 
+import { markProvisionalRecovery } from './provisionalRecovery';
+
 export interface ApiCreatedTabOptions {
   targetTabId: string;
   name?: string;
@@ -205,6 +207,12 @@ export function runApiCreateMode0(
     shellType: profile || deps.defaultProfile || 'default',
     sessionKey: detail.sessionKey,
   };
+
+  // Only surface_host_orphans produces this event shape. Persisted/migrated
+  // panes may also carry sessionKey, so record the event provenance separately.
+  if (detail.sessionKey && leafId) {
+    markProvisionalRecovery(leafId);
+  }
 
   // Seed the window map (API/persistence) BEFORE the tab enters the `tabs`
   // slice below. The authoritative Redux tree (`addTabTree`) is dispatched
