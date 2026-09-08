@@ -701,6 +701,7 @@ pub(crate) async fn fleet_local_run(
                 crate::commands::SpawnRequest {
                     leaf_id: fleet_leaf_id.clone(),
                     session_key: None,
+                    claim_token: None,
                     owning_tab_id: Some(fleet_tab_id.clone()),
                     cols: 80,
                     rows: 24,

@@ -1,11 +1,12 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useSelector, useDispatch } from 'react-redux';
 import { TerminalDisplay } from '../Terminal/TerminalDisplay';
 import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
 import { renamePanes } from '../../store/slices/panesSlice';
-import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId, findClaimTokenByTerminalId } from '../../store/slices/paneTreeOps';
 import { usePaneMuteState } from './usePaneMuteState';
 import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
@@ -279,6 +280,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
       findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
+      findClaimTokenByTerminalId(store.getState().panes.treesByTabId, terminalId),
     );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
@@ -286,6 +288,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     initPromise
       .then(async pid => {
         console.log(`TerminalPane: Created terminal ${terminalId} with process ${pid}`);
+        const recoverySessionKey = findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId);
+        const recoveryClaimToken = findClaimTokenByTerminalId(store.getState().panes.treesByTabId, terminalId);
+        if (recoverySessionKey && recoveryClaimToken) {
+          await invoke('acknowledge_host_recovery', { sessionKey: recoverySessionKey, claimToken: recoveryClaimToken });
+        }
 
         // Backlog 011: if the backend REATTACHED this terminal after a core-restart
         // hot-swap, reconcile could not seed the command-suggest prompt gate (the

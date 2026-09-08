@@ -66,6 +66,7 @@ pub async fn create_terminal(
     // created on this build. Threaded through so a pane whose leaf the migration
     // rewrote still reattaches to its already-armed session.
     session_key: Option<String>,
+    claim_token: Option<String>,
 ) -> Result<String, String> {
     let profiles = pty_manager::get_available_shells();
     let mut shell_name = "default".to_string();
@@ -152,6 +153,7 @@ pub async fn create_terminal(
             SpawnRequest {
                 leaf_id: tid,
                 session_key: session_key.clone(),
+                claim_token: claim_token.clone(),
                 owning_tab_id: owning_tab_id.clone(),
                 cols,
                 rows,
@@ -197,6 +199,27 @@ pub async fn create_terminal(
     }
 
     Ok(id)
+}
+
+/// Marks a delivered recovery event as actively being registered by its target
+/// renderer. Retries may reclaim only events which never reached this boundary.
+#[tauri::command]
+pub fn begin_host_recovery_registration(
+    state: State<'_, AppState>, session_key: String, claim_token: String,
+) -> Result<(), String> {
+    state.begin_host_recovery_registration(&session_key, &claim_token)
+        .then_some(())
+        .ok_or_else(|| "recovery claim is no longer deliverable".to_string())
+}
+
+/// Renderer acknowledgement after the pane tree and backend registration exist.
+#[tauri::command]
+pub fn acknowledge_host_recovery(
+    state: State<'_, AppState>, session_key: String, claim_token: String,
+) -> Result<(), String> {
+    state.acknowledge_host_recovery(&session_key, &claim_token)
+        .then_some(())
+        .ok_or_else(|| "recovery claim is not awaiting acknowledgement".to_string())
 }
 
 #[tauri::command]
@@ -316,6 +339,8 @@ pub(crate) struct SpawnRequest {
     /// build, whose host session is still keyed by the old `tb-` id and would be
     /// orphaned by a rename — the protocol has no rename verb (design 014 §A2).
     pub session_key: Option<String>,
+    /// Present only for a recovery create delivered by the backend claim path.
+    pub claim_token: Option<String>,
     pub owning_tab_id: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -345,6 +370,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     let SpawnRequest {
         leaf_id: id,
         session_key,
+        claim_token,
         owning_tab_id,
         cols,
         rows,
@@ -392,10 +418,12 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // anything created on this build and the old `tb-` id for a migrated one.
     let session_key = session_key.unwrap_or_else(|| id.clone());
 
-    if let Some((_, pid)) = state.host_reattach_pending.remove(&session_key) {
+    let claimed_pid = state.claim_host_registration(&session_key, claim_token.as_deref())?;
+    if let Some(pid) = claimed_pid {
         let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
         let process_id = ident.process_id.clone();
         register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+        state.host_session_registered(&session_key, claim_token.as_deref());
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
@@ -424,6 +452,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
     let process_id = ident.process_id.clone();
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+    state.host_session_registered(&session_key, claim_token.as_deref());
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -463,6 +492,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             // Undo the provisional registration, then fall back in-process. Clean
             // up by the PROCESS id — that is what was registered.
             state.cleanup_terminal_state(&process_id);
+            state.abandon_host_session_claim(&session_key);
             host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e)
         }
     }
@@ -894,8 +924,8 @@ pub async fn close_terminal(
     let close_started = std::time::Instant::now();
 
     // Get the terminal info to retrieve the PID + renderer id.
-    let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
-        (terminal.pid, terminal.renderer_terminal_id.clone())
+    let (pid, tab_id, session_key) = if let Some(terminal) = state.terminals.get(&id) {
+        (terminal.pid, terminal.renderer_terminal_id.clone(), terminal.session_key.clone())
     } else {
         return Err("Terminal not found".to_string());
     };
@@ -906,6 +936,7 @@ pub async fn close_terminal(
         // Kill the process tree (parent and all children)
         crate::pty_manager::kill_process_tree(pid);
     }
+    state.forget_host_session_claim(&session_key);
 
     // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
     // the old inline cleanup leaked). Dropping the pty also EOFs the reader.

@@ -27,6 +27,23 @@ pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
 /// 2J-cleared frames never enter scrollback, so this stays TUI-safe.
 pub const SCROLLBACK_LINES: usize = 5000;
 
+/// Exclusive recovery/registration ownership for one pty-host session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostSessionClaimState {
+    Reserved,
+    DeliveredAwaitingAck,
+    RegistrationInProgress,
+    Registered,
+    Abandoned,
+}
+
+#[derive(Clone, Debug)]
+pub struct HostSessionClaim {
+    pub state: HostSessionClaimState,
+    pub pid: u32,
+    pub token: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Terminal {
     pub id: String,
@@ -561,11 +578,10 @@ pub struct AppState<R: Runtime = Wry> {
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
     // present here, restoring the real pid.
-    pub host_reattach_pending: Arc<DashMap<String, u32>>,
+    pub host_session_claims: Arc<DashMap<String, HostSessionClaim>>,
     pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
     pub host_restore_claims: Arc<DashMap<String, ()>>,
     pub host_restore_released: Arc<AtomicBool>,
-    pub host_recovery_surfaced: Arc<DashMap<String, ()>>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
     // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
     // renderer (take_reattach_prompt_hook) after createTerminal resolves, so it can re-seed
@@ -662,11 +678,10 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
             identity: self.identity.clone(),
-            host_reattach_pending: self.host_reattach_pending.clone(),
+            host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_claims: self.host_restore_claims.clone(),
             host_restore_released: self.host_restore_released.clone(),
-            host_recovery_surfaced: self.host_recovery_surfaced.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
             pty_host_connecting: self.pty_host_connecting.clone(),

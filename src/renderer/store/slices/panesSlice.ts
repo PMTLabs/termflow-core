@@ -41,6 +41,8 @@ export interface PaneNode {
    *  `tb-` id — renaming it there would orphan an armed session, because the
    *  pty-host protocol has no rename verb (design 014 §A2). */
   sessionKey?: string;
+  /** One-shot backend recovery delivery capability; never persisted intentionally. */
+  claimToken?: string;
   /** The tab this pane was seeded for.
    *
    *  Recorded because design 014 removed the equality `root leaf === tab.id`,

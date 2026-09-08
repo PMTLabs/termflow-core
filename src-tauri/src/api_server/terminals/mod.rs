@@ -341,6 +341,7 @@ pub(crate) async fn create_terminal(
             leaf_id: identity.renderer_terminal_id.clone(),
             // Freshly minted leaf, so nothing legacy to preserve.
             session_key: None,
+            claim_token: None,
             owning_tab_id: Some(identity.owning_tab_id.clone()),
             cols,
             rows,

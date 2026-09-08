@@ -59,6 +59,13 @@ fn plan_reconnect(
     plan
 }
 
+fn recovery_delivery_transition(claim: &mut HostSessionClaim, pid: u32, token: String) -> bool {
+    if matches!(claim.state, HostSessionClaimState::Reserved | HostSessionClaimState::Abandoned) {
+        *claim = HostSessionClaim { state: HostSessionClaimState::DeliveredAwaitingAck, pid, token: Some(token) };
+        true
+    } else { false }
+}
+
 #[cfg(test)]
 mod restore_sweep_gate_tests {
     use super::restore_sweep_may_release;
@@ -122,9 +129,117 @@ mod restore_sweep_gate_tests {
         assert!(!plan.teardown.contains(&new_tab), "a terminal absent from the older host answer was created too late to be declared dead");
         assert!(!plan.orphans.iter().any(|session| session.tab_id == new_tab), "the newly registered terminal is not surfaced as an orphan");
     }
+
+    #[test]
+    fn unacknowledged_delivery_becomes_retryable_but_inflight_delivery_does_not() {
+        let mut lost = super::HostSessionClaim { state: super::HostSessionClaimState::DeliveredAwaitingAck, pid: 7, token: Some("old".into()) };
+        lost.state = super::HostSessionClaimState::Abandoned;
+        lost.token = None;
+        assert!(super::recovery_delivery_transition(&mut lost, 7, "retry".into()), "rejects the old permanent-surfaced implementation: a lost event must be deliverable again");
+        let mut inflight = super::HostSessionClaim { state: super::HostSessionClaimState::RegistrationInProgress, pid: 7, token: Some("live".into()) };
+        assert!(!super::recovery_delivery_transition(&mut inflight, 7, "duplicate".into()), "rejects retrying every unacknowledged event: an in-flight renderer create must not receive a second pane");
+    }
+
+    #[test]
+    fn recovery_and_restore_registration_have_one_winner() {
+        let mut reserved = super::HostSessionClaim { state: super::HostSessionClaimState::Reserved, pid: 9, token: None };
+        // Simulate the restore worker consuming the entry before recovery tries
+        // its entry transition. The old separate maps allowed both operations.
+        reserved.state = super::HostSessionClaimState::RegistrationInProgress;
+        assert!(!super::recovery_delivery_transition(&mut reserved, 9, "second".into()), "rejects check-then-insert recovery: a concurrent registration must keep its exclusive claim");
+    }
 }
 
 impl<R: Runtime> AppState<R> {
+    /// Reserve a listed host session for the renderer which already knows it.
+    /// This is an entry operation so recovery cannot slip a second owner between
+    /// the observation and reservation.
+    pub fn reserve_host_session(&self, session_key: &str, pid: u32) {
+        self.host_session_claims.entry(session_key.to_string()).or_insert(HostSessionClaim {
+            state: HostSessionClaimState::Reserved, pid, token: None,
+        });
+    }
+
+    /// Atomically make an unowned/reserved host session deliverable. A delivered
+    /// or registering claim is intentionally not re-emitted.
+    pub fn deliver_host_recovery(&self, session_key: &str, pid: u32) -> Option<String> {
+        use dashmap::mapref::entry::Entry;
+        let token = uuid::Uuid::new_v4().to_string();
+        match self.host_session_claims.entry(session_key.to_string()) {
+            Entry::Vacant(v) => {
+                v.insert(HostSessionClaim { state: HostSessionClaimState::DeliveredAwaitingAck, pid, token: Some(token.clone()) });
+                Some(token)
+            }
+            Entry::Occupied(mut o) => recovery_delivery_transition(o.get_mut(), pid, token.clone()).then_some(token),
+        }
+    }
+
+    /// The renderer calls this before it asks us to create the recovered pane.
+    /// It is the explicit boundary that prevents retry from racing an event which
+    /// has reached a live renderer but has not completed registration yet.
+    pub fn begin_host_recovery_registration(&self, session_key: &str, token: &str) -> bool {
+        self.host_session_claims.get_mut(session_key).map(|mut claim| {
+            if claim.state == HostSessionClaimState::DeliveredAwaitingAck && claim.token.as_deref() == Some(token) {
+                claim.state = HostSessionClaimState::RegistrationInProgress;
+                true
+            } else { false }
+        }).unwrap_or(false)
+    }
+
+    /// Claim a session for backend registration. A non-token renderer restore
+    /// may consume only a Reserved entry; a recovery pane must carry its token.
+    pub fn claim_host_registration(&self, session_key: &str, token: Option<&str>) -> Result<Option<u32>, String> {
+        use dashmap::mapref::entry::Entry;
+        match self.host_session_claims.entry(session_key.to_string()) {
+            Entry::Vacant(v) => {
+                v.insert(HostSessionClaim { state: HostSessionClaimState::RegistrationInProgress, pid: 0, token: None });
+                Ok(None)
+            }
+            Entry::Occupied(mut o) => match o.get().state {
+                HostSessionClaimState::Reserved => {
+                    let pid = o.get().pid;
+                    o.get_mut().state = HostSessionClaimState::RegistrationInProgress;
+                    Ok(Some(pid))
+                }
+                HostSessionClaimState::RegistrationInProgress if token.is_some() && o.get().token.as_deref() == token => Ok(Some(o.get().pid)),
+                HostSessionClaimState::Registered => Err(format!("host session {session_key} is already registered")),
+                _ => Err(format!("host session {session_key} is claimed by another recovery")),
+            }
+        }
+    }
+
+    pub fn host_session_registered(&self, session_key: &str, token: Option<&str>) {
+        if let Some(mut claim) = self.host_session_claims.get_mut(session_key) {
+            // Recovery remains awaiting the renderer acknowledgement. Ordinary
+            // creates have no delivery token and complete at backend registration.
+            if claim.token.is_none() || token.is_none() { claim.state = HostSessionClaimState::Registered; }
+        }
+    }
+
+    pub fn acknowledge_host_recovery(&self, session_key: &str, token: &str) -> bool {
+        self.host_session_claims.get_mut(session_key).map(|mut claim| {
+            if claim.state == HostSessionClaimState::RegistrationInProgress && claim.token.as_deref() == Some(token) {
+                claim.state = HostSessionClaimState::Registered; true
+            } else { false }
+        }).unwrap_or(false)
+    }
+
+    pub fn abandon_host_session_claim(&self, session_key: &str) {
+        if let Some(mut claim) = self.host_session_claims.get_mut(session_key) {
+            if !matches!(claim.state, HostSessionClaimState::Registered) { claim.state = HostSessionClaimState::Abandoned; claim.token = None; }
+        }
+    }
+
+    pub fn forget_host_session_claim(&self, session_key: &str) { self.host_session_claims.remove(session_key); }
+
+    fn expire_unacknowledged_host_deliveries(&self) {
+        for mut entry in self.host_session_claims.iter_mut() {
+            if entry.state == HostSessionClaimState::DeliveredAwaitingAck {
+                entry.state = HostSessionClaimState::Abandoned;
+                entry.token = None;
+            }
+        }
+    }
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
     /// to the renderer leaf used by persisted canvas edges. Owning tab ids are not
     /// identities here: a tab can contain more than one live leaf.
@@ -211,11 +326,10 @@ impl<R: Runtime> AppState<R> {
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
             identity: crate::identity_index::IdentityIndex::new(),
-            host_reattach_pending: Arc::new(DashMap::new()),
+            host_session_claims: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
             host_restore_claims: Arc::new(DashMap::new()),
             host_restore_released: Arc::new(AtomicBool::new(false)),
-            host_recovery_surfaced: Arc::new(DashMap::new()),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
@@ -486,7 +600,7 @@ impl<R: Runtime> AppState<R> {
         // RP-1: install the host into the update-stable runtime dir and run it
         // from there (outside the swapped app payload) so it survives an update.
         let launch = crate::pty_host_client::resolve_host_launch().ok_or_else(|| {
-            "pty-host sidecar binary not found (set TERMFLOW_PTY_HOST_BIN)".to_string()
+            "pty-host sidecar executable could not be resolved (set TERMFLOW_PTY_HOST_BIN)".to_string()
         })?;
         let sidecar = launch.path;
         let pipe = crate::pty_host_client::resolve_pipe();
@@ -507,7 +621,7 @@ impl<R: Runtime> AppState<R> {
         // Advertised host pid (if any): connect_or_spawn refuses to spawn a
         // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
         let record_pid = record.as_ref().map(|r| r.pid);
-        match crate::pty_host_client::host_build_disposition(record.as_ref(), &launch.build_id) {
+        match crate::pty_host_client::host_build_disposition(record.as_ref(), launch.build_id.as_deref()) {
             crate::pty_host_client::HostBuildDisposition::Current => {}
             crate::pty_host_client::HostBuildDisposition::Stale { observed, expected } => log::warn!(
                 "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
@@ -625,7 +739,7 @@ impl<R: Runtime> AppState<R> {
         };
 
         let (mut client, origin) =
-            crate::pty_host_client::connect_or_spawn(&sidecar, &launch.build_id, &pipe, &token, record_pid, deps)
+            crate::pty_host_client::connect_or_spawn(&sidecar, launch.build_id.as_deref(), &pipe, &token, record_pid, deps)
                 .await
                 .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);
@@ -676,7 +790,7 @@ impl<R: Runtime> AppState<R> {
                     // concurrent create re-adopt one at offset 0 straight into
                     // its live parser (review 007 F-1).
                     if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
-                        self.host_reattach_pending.insert(meta.tab_id.clone(), meta.pid);
+                        self.reserve_host_session(&meta.tab_id, meta.pid);
                     }
                 }
                 // Any remaining tombstone names a session this (authoritative)
@@ -727,6 +841,7 @@ impl<R: Runtime> AppState<R> {
         self.host_terminals.remove(id);
         if let Some(key) = session_key {
             self.host_stream_offsets.remove(&key);
+            self.forget_host_session_claim(&key);
         }
         self.cleanup_terminal_state(id);
         let _ = self.app_handle.emit(
@@ -887,7 +1002,7 @@ impl<R: Runtime> AppState<R> {
             // ensure_pty_host re-listed this session into host_reattach_pending;
             // it is attached in place now, so a later createTerminal for the same
             // id must not re-adopt it.
-            self.host_reattach_pending.remove(&a.tab_id);
+            self.forget_host_session_claim(&a.tab_id);
         }
         for t in plan.teardown {
             if !still_current() {
@@ -917,10 +1032,13 @@ impl<R: Runtime> AppState<R> {
         }
         let state = self.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            let pending: Vec<String> = state.host_restore_pending_windows.iter().map(|e| e.key().clone()).collect();
-            if !pending.is_empty() {
-                log::warn!("[HOTSWAP] host restore sweep proceeding after 60s without acknowledgements from: {}", pending.join(", "));
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if state.exiting.load(Ordering::Acquire) { break; }
+                // A listener-less delivery becomes retryable; an explicit
+                // RegistrationInProgress is never touched here.
+                state.expire_unacknowledged_host_deliveries();
+                state.host_restore_released.store(false, Ordering::Release);
                 state.release_host_restore_sweep(true).await;
             }
         });
@@ -984,20 +1102,16 @@ impl<R: Runtime> AppState<R> {
             // A terminal can be created between a listing and this UI pass.
             // The current ownership map, rather than a restore snapshot, is
             // authoritative at the point recovery would become visible.
-            if self.host_sessions_by_key().contains_key(&orphan.tab_id) {
-                continue;
-            }
-            if self.host_recovery_surfaced.insert(orphan.tab_id.clone(), ()).is_some() {
-                continue;
-            }
-            self.host_reattach_pending.insert(orphan.tab_id.clone(), orphan.pid);
+            if self.host_sessions_by_key().contains_key(&orphan.tab_id) { continue; }
+            let Some(claim_token) = self.deliver_host_recovery(&orphan.tab_id, orphan.pid) else { continue; };
             let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
             if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
                 "rendererTerminalId": leaf_id, "sessionKey": orphan.tab_id,
+                "claimToken": claim_token,
                 "targetWindow": self.resolve_active_window_label(),
             })) {
-                self.host_recovery_surfaced.remove(&orphan.tab_id);
+                self.abandon_host_session_claim(&orphan.tab_id);
                 log::warn!("[HOTSWAP] failed to surface recovered session {}: {e}", orphan.tab_id);
             }
         }
