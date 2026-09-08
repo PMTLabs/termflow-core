@@ -65,6 +65,8 @@ fn claim_is_owned_by(claim: &HostSessionClaim, process_id: &str) -> bool {
     claim.process_id.as_deref() == Some(process_id)
 }
 
+pub const HOST_SESSION_CONTENDED: &str = "host-session-contended";
+
 #[cfg(test)]
 mod restore_sweep_gate_tests {
     use super::restore_sweep_may_release;
@@ -192,8 +194,8 @@ impl<R: Runtime> AppState<R> {
                     o.get_mut().state = HostSessionClaimState::RegistrationInProgress;
                     Ok(Some(pid))
                 }
-                HostSessionClaimState::Registered => Err(format!("host session {session_key} is already registered")),
-                _ => Err(format!("host session {session_key} is claimed by another recovery")),
+                HostSessionClaimState::Registered => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is already registered")),
+                _ => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is claimed by another recovery")),
             }
         }
     }

@@ -4,11 +4,11 @@ import { TerminalDisplay } from '../Terminal/TerminalDisplay';
 import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
-import { renamePanes } from '../../store/slices/panesSlice';
+import { removeTabTree, renamePanes } from '../../store/slices/panesSlice';
 import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import { usePaneMuteState } from './usePaneMuteState';
 import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
-import { clearTabExited, setAutoTabTitle } from '../../store/slices/tabsSlice';
+import { clearTabExited, removeTab, setAutoTabTitle } from '../../store/slices/tabsSlice';
 import { markSessionClosed, clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { BellIcon } from '../UI/BellIcon';
 import { resetZoom, ZOOM_DEFAULT } from '../../store/slices/zoomSlice';
@@ -22,6 +22,7 @@ import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration }
 import { reattachPromptGate, takeArmProbePending } from '../../services/reattachGate';
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
+import { isHostSessionContended } from '../../services/hostSessionContention';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import './TerminalPane.css';
 
@@ -276,9 +277,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) ?? undefined;
 
     // Create the promise and store it immediately
+    const sessionKey = findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId);
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
-      findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
+      sessionKey,
     );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
@@ -346,6 +348,17 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         terminalInitMap.delete(terminalId);
         terminalInitPromises.delete(terminalId);
         terminalInitLock.delete(terminalId);
+        const state = store.getState();
+        const tabId = sessionKey && isHostSessionContended(error)
+          ? findTabIdByTerminalId(state.panes.treesByTabId, terminalId)
+          : null;
+        const tree = tabId ? state.panes.treesByTabId[tabId] : null;
+        if (tabId && tree?.type === 'terminal' && tree.terminalId === terminalId) {
+          console.info(`TerminalPane: recovery contention lost for ${terminalId}; removing provisional tab ${tabId}`);
+          dispatch(removeTab(tabId));
+          dispatch(removeTabTree(tabId));
+          return;
+        }
         setStartupFailed(true);
       });
 
