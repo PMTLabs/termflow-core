@@ -1347,12 +1347,37 @@ mod api_spawn_routing_tests {
 
     #[test]
     fn no_module_outside_the_router_spawns_a_terminal_in_process() {
-        // `commands/terminal.rs` IS the router (it owns `spawn_routed` and its
-        // in-process `host_fallback`); `pty_manager.rs` declares the function.
-        // Every other module must go through `spawn_routed`.
-        const ALLOWED: [&str; 2] = ["commands/terminal.rs", "pty_manager.rs"];
+        // `commands/terminal.rs` IS the router: it owns `spawn_routed` and the in-process
+        // `host_fallback`, and those two are the spawn sites this exempts. Every other
+        // module must go through `spawn_routed`.
+        //
+        // `pty_manager.rs` used to sit here too, on the grounds that it "declares the
+        // function". It was removed for two reasons: that file is `pty_manager/spawn.rs`
+        // now, so the name could never match anything the walk produces — and the
+        // declaration was never a hit in the first place, because `calls_spawn_terminal`
+        // rejects a preceding `fn`. It exempted nothing, and read as a considered decision
+        // while doing it. The loop below is what stops that happening again.
+        const ALLOWED: [&str; 1] = ["commands/terminal.rs"];
 
-        let offenders: Vec<String> = crate_sources()
+        let sources = crate_sources();
+
+        // **An exemption that cannot match is invisible.** It never fails, never appears in
+        // any diff, and silently widens the moment its file is renamed or split — which is
+        // exactly how the entry above rotted. So each one must name a file that still
+        // exists AND still contains the thing it is excusing.
+        for name in ALLOWED {
+            let (_, text) = sources
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("`{name}` is exempted but no longer exists"));
+            assert!(
+                text.lines().any(|l| calls_spawn_terminal(l)),
+                "`{name}` is exempted but has no spawn site left: the exemption covers \
+                 nothing and should be deleted rather than carried"
+            );
+        }
+
+        let offenders: Vec<String> = sources
             .iter()
             .filter(|(name, _)| !ALLOWED.contains(&name.as_str()))
             .flat_map(|(name, text)| {
