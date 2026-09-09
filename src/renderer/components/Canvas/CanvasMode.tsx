@@ -39,7 +39,7 @@ import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
-import { applySpacing, computeSpacingBudget } from './canvasSpacing';
+import { applySpacing } from './canvasSpacing';
 import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
@@ -192,14 +192,9 @@ export const CanvasMode: React.FC = () => {
       window.removeEventListener('pointercancel', onUp);
     };
   }, []);
-  // The expensive half (a 30-iteration overlap search) does not depend on zoom at all — see
-  // `computeSpacingBudget`'s own note — so it is memoised on the LAYOUT alone. Without this
-  // split, `applySpacing` re-ran that search on every `vp.z` change, i.e. every tick of a live
-  // wheel/pinch zoom.
-  const spacingBudget = useMemo(() => computeSpacingBudget(presentationModel), [presentationModel]);
   const spacing = useMemo(
-    () => applySpacing(presentationModel, vp.z, dynamicSpacing && !dragActive, spacingBudget),
-    [presentationModel, vp.z, dynamicSpacing, dragActive, spacingBudget],
+    () => applySpacing(presentationModel, vp.z, dynamicSpacing && !dragActive),
+    [presentationModel, vp.z, dynamicSpacing, dragActive],
   );
   // Only the two consumers that read POSITION for something other than drag/spawn math ever see
   // these: paint culling/tiers, wires, and the two render loops below. Drag origins, spawn
