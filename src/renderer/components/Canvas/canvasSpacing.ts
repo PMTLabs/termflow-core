@@ -107,7 +107,10 @@ interface OverlappingFrameComponent {
 
 /**
  * Transitive components of ACTUALLY overlapping DRAWN frames. A component is rigid: all of its
- * frames and member nodes receive one delta, but no union bounds are created or swept.
+ * frames and member nodes receive one delta, but no union bounds are created or swept. A
+ * multi-frame component is deliberately immovable: frames manually dragged into overlap do not
+ * tighten. Normal `arrange()` output has no overlapping frames, so its components are all single
+ * frames and retain ordinary Dynamic Spacing.
  */
 function overlappingFrameComponents(frames: Rect[]): OverlappingFrameComponent[] {
   const seen = new Array(frames.length).fill(false);
@@ -193,16 +196,14 @@ function sweepAxis(rects: Rect[], axis: 'x' | 'y', z: number, zBase: number, min
 }
 
 /**
- * `sweepAxis` for rigid components of real frames. Components are ordered by their leading
- * member, and every member's bound reads already-placed frames at their NEW position. Each
- * member proposes an allowance no later than its own bound; taking the maximum allowance gives
- * the component's least movement, so its shared delta cannot overrun any member's bound.
+ * `sweepAxis` with overlapping-frame components held as immovable obstacles. Every multi-frame
+ * component is seeded into `placed` before the sweep, so it constrains every singleton regardless
+ * of ordering. Only singleton components move, sorted by their sole frame's start exactly as
+ * `sweepAxis` does.
  *
- * Component membership is the transitive closure of `rectsOverlap` on the drawn frames. Thus two
- * frames in different components do not overlap; if such a pair has a negative gap on this axis,
- * it is disjoint on the other axis and fails the lane test. Frames in the same component are
- * never compared. Therefore the negative-gap skip cannot give different deltas to frames that
- * must move together.
+ * This restores the ordering guarantee: any singleton that can constrain another from earlier on
+ * this axis has a smaller start and is already placed. Immovable components never move, so their
+ * already-overlapping frames stay together and cannot be pulled apart.
  */
 function sweepComponentAxis(
   rects: Rect[],
@@ -215,43 +216,33 @@ function sweepComponentAxis(
   const startOf = (r: Rect) => (axis === 'x' ? r.x : r.y);
   const sizeOf = (r: Rect) => (axis === 'x' ? r.w : r.h);
   const laneOf = (r: Rect) => (axis === 'x' ? { start: r.y, size: r.h } : { start: r.x, size: r.w });
-  const leadingEdge = (component: OverlappingFrameComponent) =>
-    Math.min(...component.frameIndexes.map((index) => startOf(rects[index])));
-
-  const order = components.map((_, i) => i).sort((i, j) => leadingEdge(components[i]) - leadingEdge(components[j]));
+  const immovable = components.filter((component) => component.frameIndexes.length > 1);
+  const order = components
+    .filter((component) => component.frameIndexes.length === 1)
+    .map((component) => component.frameIndexes[0])
+    .sort((i, j) => startOf(rects[i]) - startOf(rects[j]));
   const out = rects.map((r) => ({ ...r }));
-  const placed: number[] = [];
+  const placed = immovable.flatMap((component) => component.frameIndexes);
 
-  for (const componentIndex of order) {
-    const component = components[componentIndex];
-    let componentDelta = Number.NEGATIVE_INFINITY;
+  for (const idx of order) {
+    const r = rects[idx];
+    const start = startOf(r);
+    const lane = laneOf(r);
+    let bound = Number.NEGATIVE_INFINITY;
 
-    for (const idx of component.frameIndexes) {
-      const r = rects[idx];
-      const start = startOf(r);
-      const lane = laneOf(r);
-      let bound = Number.NEGATIVE_INFINITY;
-
-      for (const j of placed) {
-        const other = rects[j];
-        const otherLane = laneOf(other);
-        if (!spansOverlap(lane.start, lane.size, otherLane.start, otherLane.size)) continue;
-        const originalGap = start - (startOf(other) + sizeOf(other));
-        if (originalGap < 0) continue;
-        const b = startOf(out[j]) + sizeOf(out[j]) + targetGap(originalGap, z, zBase, minGapScreenPx);
-        if (b > bound) bound = b;
-      }
-
-      const allowance = bound === Number.NEGATIVE_INFINITY ? 0 : Math.min(0, bound - start);
-      componentDelta = Math.max(componentDelta, allowance);
+    for (const j of placed) {
+      const other = rects[j];
+      const otherLane = laneOf(other);
+      if (!spansOverlap(lane.start, lane.size, otherLane.start, otherLane.size)) continue;
+      const originalGap = start - (startOf(other) + sizeOf(other));
+      if (originalGap < 0) continue;
+      const b = startOf(out[j]) + sizeOf(out[j]) + targetGap(originalGap, z, zBase, minGapScreenPx);
+      if (b > bound) bound = b;
     }
 
-    for (const idx of component.frameIndexes) {
-      out[idx] = axis === 'x'
-        ? { ...out[idx], x: startOf(rects[idx]) + componentDelta }
-        : { ...out[idx], y: startOf(rects[idx]) + componentDelta };
-      placed.push(idx);
-    }
+    const newStart = bound === Number.NEGATIVE_INFINITY ? start : Math.min(start, bound);
+    out[idx] = axis === 'x' ? { ...out[idx], x: newStart } : { ...out[idx], y: newStart };
+    placed.push(idx);
   }
   return out;
 }
@@ -301,15 +292,15 @@ export interface SpacingResult {
  * the layout rect by `d` translates the painted one by exactly `d`.
  *
  * Hierarchical, matching the approved design (plan/039 §4): group frames tighten toward each
- * other first. Frames whose DRAWN rects overlap form a rigid component. The sweep still reads
- * each real frame, but applies the least movement permitted by any component member to every
- * member node and frame in that component; no union bounds are swept. A group frame's own centre
- * is not its members' centre (`fitGroupFrame` pads the top and bottom differently, for the label
- * — see `canvasLayout.ts`), so pulling a node independently toward its frame's new position
- * would drift it even in a single-node group. Translating instead keeps every node rigidly
- * attached to its moving frame, exactly like a manual group drag (`moveGroupBy`) already does.
- * Each group's own nodes then get a second, independent tighten toward their siblings, on top of
- * whatever step 1 already moved them by.
+ * other first. Frames whose DRAWN rects overlap form an immovable rigid component; only
+ * single-frame components tighten. This means two group frames manually dragged into overlap do
+ * not tighten, while normal `arrange()` output (which has no overlapping frames) keeps ordinary
+ * Dynamic Spacing. A group frame's own centre is not its members' centre (`fitGroupFrame` pads
+ * the top and bottom differently, for the label — see `canvasLayout.ts`), so pulling a node
+ * independently toward its frame's new position would drift it even in a single-node group.
+ * Translating instead keeps every node rigidly attached to its moving frame, exactly like a
+ * manual group drag (`moveGroupBy`) already does. Each group's own nodes then get a second,
+ * independent tighten toward their siblings, on top of whatever step 1 already moved them by.
  *
  * Returns the ORIGINAL rects, unchanged, when `enabled` is false or `z` is at or below
  * `SPACING_Z_BASE` — the identity fast path that makes toggling off (or zooming back down) an

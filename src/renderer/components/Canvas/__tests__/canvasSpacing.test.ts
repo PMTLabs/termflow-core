@@ -1,5 +1,5 @@
 import { NODE_H, NODE_W, paintedNodeRect, Rect } from '../canvasGeometry';
-import { drawnFrameRect, GAP_X, GROUP_GAP, PAD, PAD_SCREEN_MAX, PAD_TOP } from '../canvasLayout';
+import { drawnFrameRect, fitGroupFrame, GAP_X, GROUP_GAP, PAD, PAD_SCREEN_MAX, PAD_TOP } from '../canvasLayout';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
 import {
   applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, spacingOffsets, SPACING_Z_BASE,
@@ -38,6 +38,23 @@ const noOverlap = (rects: Rect[]) => {
   }
   return true;
 };
+
+const rectsOverlap = (a: Rect, b: Rect) =>
+  !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
+
+/** Deterministic inline PRNG for the randomized spacing property. */
+const mulberry32 = (seed: number) => {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B79F5) | 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 0x100000000;
+  };
+};
+
+const sameRect = (a: Rect, b: Rect) => a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
 
 /** The gap two AABBs actually leave along whichever axis separates them, or a negative number
  *  if they overlap. */
@@ -448,6 +465,57 @@ describe('applySpacing', () => {
       expect(Math.abs(out.groupRects['tb-d'].x - model.groups[3].rect.x)
         + Math.abs(out.groupRects['tb-d'].y - model.groups[3].rect.y)).toBeGreaterThan(0);
     });
+
+    it('does not move an interleaved overlapping component across a later singleton', () => {
+      // At z=2, only A/B and B/C overlap, making ABC an immovable component. C starts to the
+      // right of D even though ABC leads before D. Ordering that whole component by A's start
+      // used to move C left across D; seeding ABC as an obstacle keeps both frames and terminals
+      // clear while D still tightens vertically toward B.
+      const z = 2;
+      const drawnOffset = drawnFrameRect({ x: 0, y: 0, w: 0, h: 0 }, z);
+      const layoutForDrawn = (r: Rect): Rect => ({
+        x: r.x - drawnOffset.x,
+        y: r.y - drawnOffset.y,
+        w: r.w - drawnOffset.w,
+        h: r.h - drawnOffset.h,
+      });
+      const drawn = [
+        { x: 0, y: 0, w: 1000, h: 1900 },
+        { x: 2000, y: 0, w: 1000, h: 1000 },
+        { x: 2800, y: 800, w: 3000, h: 1000 },
+        { x: 5000, y: 1600, w: 1000, h: 1000 },
+        { x: 4000, y: 2000, w: 500, h: 500 },
+      ];
+      const e = node('e', 'tb-e', { x: 12, y: 17.25, w: NODE_W, h: NODE_H });
+      const a = node('a', 'tb-a', { x: 2012, y: 17.25, w: NODE_W, h: NODE_H });
+      const b = node('b', 'tb-b', { x: 2812, y: 817.25, w: NODE_W, h: NODE_H });
+      const c = node('c', 'tb-c', { x: 5012, y: 2017.25, w: NODE_W, h: NODE_H });
+      const d = node('d', 'tb-d', { x: 4012, y: 2017.25, w: NODE_W, h: NODE_H });
+      const model: CanvasModel = {
+        nodes: [e, a, b, c, d],
+        groups: [
+          group('tb-e', layoutForDrawn(drawn[0]), ['e']),
+          group('tb-a', layoutForDrawn(drawn[1]), ['a']),
+          group('tb-b', layoutForDrawn(drawn[2]), ['b']),
+          group('tb-c', layoutForDrawn(drawn[3]), ['c']),
+          group('tb-d', layoutForDrawn(drawn[4]), ['d']),
+        ],
+      };
+      const rawFrames = model.groups.map((g) => drawnFrameRect(g.rect, z));
+      expect(noOverlap(model.nodes.map((n) => n.rect))).toBe(true);
+      expect(gapBetween(rawFrames[1], rawFrames[2])).toBe(-Infinity);
+      expect(gapBetween(rawFrames[2], rawFrames[3])).toBe(-Infinity);
+
+      const out = applySpacing(model, z, true);
+      const spacedFrames = model.groups.map((g) => drawnFrameRect(out.groupRects[g.tabId], z));
+
+      for (let i = 0; i < rawFrames.length; i++) {
+        for (let j = i + 1; j < rawFrames.length; j++) {
+          if (noOverlap([rawFrames[i], rawFrames[j]])) expect(noOverlap([spacedFrames[i], spacedFrames[j]])).toBe(true);
+        }
+      }
+      expect(noOverlap(model.nodes.map((n) => out.nodeRects[n.terminalId]))).toBe(true);
+    });
   });
 
   describe('spacingOffsets — the displacement the drag camera compensates for', () => {
@@ -496,6 +564,191 @@ describe('applySpacing', () => {
       const offsets = spacingOffsets(model, applySpacing(model, 3, false));
       for (const n of model.nodes) expect(offsets.nodes[n.terminalId]).toEqual({ dx: 0, dy: 0 });
       for (const g of model.groups) expect(offsets.groups[g.tabId]).toEqual({ dx: 0, dy: 0 });
+    });
+  });
+
+  describe('randomized spacing properties', () => {
+    const PROPERTY_CASES = 256;
+    const PROPERTY_SEED = 0x5EED_A5;
+    // Two non-overlapping deterministic stretches give a broad sample without making the
+    // focused suite slow; together they cover 512 generated models.
+    const PROPERTY_BATCH_STARTS = [0, 4000];
+
+    const generatedModel = (seed: number): CanvasModel => {
+      const random = mulberry32(seed);
+      const randomInt = (exclusive: number) => Math.floor(random() * exclusive);
+      // Half the seeds deliberately generate a clear singleton lane pair, so conditional
+      // liveness is exercised often; even seeds retain the broad, unconstrained corpus.
+      if ((seed & 1) === 1) {
+        const y = (randomInt(13) - 6) * 350;
+        const leftX = (randomInt(7) - 6) * 500;
+        const rightX = leftX + (2 + randomInt(5)) * 500;
+        const left = node('property-g0-n0', 'property-g0', { x: leftX, y, w: NODE_W, h: NODE_H });
+        const right = node('property-g1-n0', 'property-g1', { x: rightX, y, w: NODE_W, h: NODE_H });
+        const leftFrame = fitGroupFrame([left.rect]);
+        const rightFrame = fitGroupFrame([right.rect]);
+        if (!leftFrame || !rightFrame) throw new Error('property generator created an empty group');
+        return {
+          nodes: [left, right],
+          groups: [
+            group('property-g0', leftFrame, [left.terminalId]),
+            group('property-g1', rightFrame, [right.terminalId]),
+          ],
+        };
+      }
+      const groupCount = 1 + randomInt(6);
+      const nodeCounts = Array.from({ length: groupCount }, () => 1 + randomInt(4));
+      // Unique 500x350 grid cells keep terminals clear while random group membership creates
+      // both compact and sprawling real shrink-wrapped frames that often overlap each other.
+      const cells = Array.from({ length: 13 * 13 }, (_, i) => i);
+      for (let i = cells.length - 1; i > 0; i--) {
+        const j = randomInt(i + 1);
+        [cells[i], cells[j]] = [cells[j], cells[i]];
+      }
+
+      let nextCell = 0;
+      const nodes: CanvasNodeModel[] = [];
+      const groups: CanvasGroupModel[] = [];
+      for (let gi = 0; gi < groupCount; gi++) {
+        const tabId = `property-g${gi}`;
+        const members: CanvasNodeModel[] = [];
+        for (let ni = 0; ni < nodeCounts[gi]; ni++) {
+          const cell = cells[nextCell++];
+          const x = ((cell % 13) - 6) * 500;
+          const y = (Math.floor(cell / 13) - 6) * 350;
+          const member = node(`${tabId}-n${ni}`, tabId, { x, y, w: NODE_W, h: NODE_H });
+          nodes.push(member);
+          members.push(member);
+        }
+        const frame = fitGroupFrame(members.map((member) => member.rect));
+        if (!frame) throw new Error('property generator created an empty group');
+        groups.push(group(tabId, frame, members.map((member) => member.terminalId)));
+      }
+      return { nodes, groups };
+    };
+
+    const propertyFailure = (seed: number, z: number, model: CanvasModel, detail: string): never => {
+      const fixture = {
+        nodes: model.nodes.map(({ terminalId, tabId, rect }) => ({ terminalId, tabId, rect })),
+        groups: model.groups.map(({ tabId, rect, nodeIds }) => ({ tabId, rect, nodeIds })),
+      };
+      throw new Error(`applySpacing randomized property failed: ${detail}\nseed=${seed}\nz=${z}\nmodel=${JSON.stringify(fixture)}`);
+    };
+
+    const tightenableSingletonPair = (frames: Rect[], z: number): string | undefined => {
+      const seen = new Array(frames.length).fill(false);
+      const singleton = new Set<number>();
+      for (let start = 0; start < frames.length; start++) {
+        if (seen[start]) continue;
+        const indexes: number[] = [];
+        const pending = [start];
+        seen[start] = true;
+        while (pending.length > 0) {
+          const index = pending.pop()!;
+          indexes.push(index);
+          for (let candidate = 0; candidate < frames.length; candidate++) {
+            if (seen[candidate] || !rectsOverlap(frames[index], frames[candidate])) continue;
+            seen[candidate] = true;
+            pending.push(candidate);
+          }
+        }
+        if (indexes.length === 1) singleton.add(indexes[0]);
+      }
+
+      for (let i = 0; i < frames.length; i++) {
+        if (!singleton.has(i)) continue;
+        for (let j = i + 1; j < frames.length; j++) {
+          if (!singleton.has(j)) continue;
+          for (const axis of ['x', 'y'] as const) {
+            const otherAxis = axis === 'x' ? 'y' : 'x';
+            const first = frames[i][axis] <= frames[j][axis] ? frames[i] : frames[j];
+            const second = first === frames[i] ? frames[j] : frames[i];
+            const laneOverlaps = first[otherAxis] < second[otherAxis] + second[otherAxis === 'x' ? 'w' : 'h']
+              && second[otherAxis] < first[otherAxis] + first[otherAxis === 'x' ? 'w' : 'h'];
+            const size = axis === 'x' ? 'w' : 'h';
+            const gap = second[axis] - (first[axis] + first[size]);
+            // `targetGap` shrinks strictly only when the base-zoom screen gap exceeds its floor.
+            if (laneOverlaps && gap > MIN_GAP_SCREEN_PX + 1 && gap * z > MIN_GAP_SCREEN_PX + 1) {
+              return `${i}/${j} along ${axis}, gap=${gap}`;
+            }
+          }
+        }
+      }
+      return undefined;
+    };
+
+    it('preserves spatial safety, rect identity properties, and overlapping-frame rigidity across seeded shrink-wrapped models', () => {
+      let livenessEligible = 0;
+      for (const batchStart of PROPERTY_BATCH_STARTS) {
+        const seeds = mulberry32(PROPERTY_SEED);
+        for (let skipped = 0; skipped < batchStart; skipped++) seeds();
+        for (let caseIndex = 0; caseIndex < PROPERTY_CASES; caseIndex++) {
+          const seed = Math.floor(seeds() * 0x100000000) >>> 0;
+        const zoomRandom = mulberry32(seed ^ 0xA5A5_A5A5);
+        const z = SPACING_Z_BASE + zoomRandom() * (6.35 - SPACING_Z_BASE);
+        const model = generatedModel(seed);
+        const disabled = applySpacing(model, z, false);
+        const baseZoom = applySpacing(model, SPACING_Z_BASE, true);
+        const spaced = applySpacing(model, z, true);
+        const failIf = (condition: boolean, detail: string) => {
+          if (condition) propertyFailure(seed, z, model, `batch=${batchStart}; case=${caseIndex}; ${detail}`);
+        };
+
+        for (const n of model.nodes) {
+          failIf(!sameRect(disabled.nodeRects[n.terminalId], n.rect), `disabled changed node ${n.terminalId}`);
+          failIf(!sameRect(baseZoom.nodeRects[n.terminalId], n.rect), `base zoom changed node ${n.terminalId}`);
+          const out = spaced.nodeRects[n.terminalId];
+          failIf(out.x > n.rect.x + 1e-9 || out.y > n.rect.y + 1e-9, `node moved later: ${n.terminalId}`);
+          failIf(out.w !== n.rect.w || out.h !== n.rect.h, `node resized: ${n.terminalId}`);
+        }
+        for (const g of model.groups) {
+          failIf(!sameRect(disabled.groupRects[g.tabId], g.rect), `disabled changed group ${g.tabId}`);
+          failIf(!sameRect(baseZoom.groupRects[g.tabId], g.rect), `base zoom changed group ${g.tabId}`);
+          const out = spaced.groupRects[g.tabId];
+          failIf(out.x > g.rect.x + 1e-9 || out.y > g.rect.y + 1e-9, `group moved later: ${g.tabId}`);
+          failIf(out.w !== g.rect.w || out.h !== g.rect.h, `group resized: ${g.tabId}`);
+        }
+
+        const rawFrames = model.groups.map((g) => drawnFrameRect(g.rect, z));
+        const spacedFrames = model.groups.map((g) => drawnFrameRect(spaced.groupRects[g.tabId], z));
+        const livenessPair = z > SPACING_Z_BASE ? tightenableSingletonPair(rawFrames, z) : undefined;
+        if (livenessPair) {
+          livenessEligible++;
+          const totalGroupDisplacement = model.groups.reduce((total, g) => {
+            const out = spaced.groupRects[g.tabId];
+            return total + Math.abs(out.x - g.rect.x) + Math.abs(out.y - g.rect.y);
+          }, 0);
+          failIf(totalGroupDisplacement <= 1e-9, `tightenable singleton pair made no group progress: ${livenessPair}`);
+        }
+        for (let i = 0; i < model.groups.length; i++) {
+          for (let j = i + 1; j < model.groups.length; j++) {
+            if (!rectsOverlap(rawFrames[i], rawFrames[j])) {
+              failIf(rectsOverlap(spacedFrames[i], spacedFrames[j]), `new drawn-frame overlap: ${model.groups[i].tabId}/${model.groups[j].tabId}`);
+            } else {
+              const a = model.groups[i];
+              const b = model.groups[j];
+              const adx = spaced.groupRects[a.tabId].x - a.rect.x;
+              const ady = spaced.groupRects[a.tabId].y - a.rect.y;
+              const bdx = spaced.groupRects[b.tabId].x - b.rect.x;
+              const bdy = spaced.groupRects[b.tabId].y - b.rect.y;
+              failIf(Math.abs(adx - bdx) > 1e-9 || Math.abs(ady - bdy) > 1e-9,
+                `overlapping frames lost rigidity: ${a.tabId}/${b.tabId}`);
+            }
+          }
+        }
+
+          const rawNodes = model.nodes.map((n) => paintedNodeRect(n.rect, z, false));
+          const spacedNodes = model.nodes.map((n) => paintedNodeRect(spaced.nodeRects[n.terminalId], z, false));
+          for (let i = 0; i < model.nodes.length; i++) {
+            for (let j = i + 1; j < model.nodes.length; j++) {
+              if (!rectsOverlap(rawNodes[i], rawNodes[j])) {
+                failIf(rectsOverlap(spacedNodes[i], spacedNodes[j]), `new painted-terminal overlap: ${model.nodes[i].terminalId}/${model.nodes[j].terminalId}`);
+              }
+            }
+          }
+        }
+      }
+      expect(livenessEligible).toBeGreaterThan(256);
     });
   });
 });

@@ -14,6 +14,7 @@ const DRAG = code(path.resolve(__dirname, '../useCanvasDrag.ts'));
 const SIDEBAR_DRAG = code(path.resolve(__dirname, '../useSidebarDrag.ts'));
 const ARRANGE = code(path.resolve(__dirname, '../useArrange.ts'));
 const VIEWPORT = code(path.resolve(__dirname, '../CanvasViewport.tsx'));
+const APP = code(path.resolve(__dirname, '../../../App.tsx'));
 const SLICE = code(path.resolve(__dirname, '../../../store/slices/canvasSlice.ts'));
 const FLY_TO_WORLD = (() => {
   const start = MODE.indexOf('const flyToWorld = useCallback(');
@@ -33,7 +34,18 @@ const GROUP_DRAG = (() => {
   const end = DRAG.indexOf('const onUp = () => {', start);
   return start < 0 || end < 0 ? '' : DRAG.slice(start, end);
 })();
-const GEOMETRY_DISPATCHES = [MODE, DRAG, SIDEBAR_DRAG, ARRANGE]
+const PRESENTATION_MODEL = (() => {
+  const start = MODE.indexOf('const presentationModel = useMemo(');
+  const end = MODE.indexOf('\n  const flyTo = useFlyTo();', start);
+  return start < 0 || end < 0 ? '' : MODE.slice(start, end);
+})();
+const CANVAS_DRAG_INPUT = (() => {
+  const start = MODE.indexOf('const drag = useCanvasDrag(');
+  const inputStart = start + 'const drag = useCanvasDrag('.length;
+  const end = MODE.indexOf(', beginRealDrag);', inputStart);
+  return start < 0 || end < 0 ? '' : MODE.slice(inputStart, end).trim();
+})();
+const GEOMETRY_DISPATCHES = [APP, MODE, DRAG, SIDEBAR_DRAG, ARRANGE]
   .flatMap((source) => source.match(/dispatch\((?:setNodeGeom|setGroupGeom|moveGroupGeom|applyArrange)\([\s\S]*?\)\);/g) ?? []);
 
 describe('Dynamic Spacing consumers (plan/039)', () => {
@@ -158,11 +170,27 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(SLICE).not.toContain('canvasSpacing.applySpacing(');
     expect(SLICE).not.toContain('applySpacing(state');
     // The reducer cannot distinguish a bad payload. Every production geometry writer must feed
-    // it raw layout expressions; this is a complete, counted census across spawn, canvas drag,
-    // sidebar regroup, and arrange.
-    expect(GEOMETRY_DISPATCHES).toHaveLength(11);
+    // it raw layout expressions; this is a complete, counted census across App agent spawn,
+    // CanvasMode spawn, canvas drag, sidebar regroup, and arrange.
+    expect(GEOMETRY_DISPATCHES).toHaveLength(12);
     for (const dispatch of GEOMETRY_DISPATCHES) {
       expect(dispatch).not.toMatch(/\b(?:spacing|spaced)\w*/i);
     }
+  });
+
+  it('feeds every geometry writer from a raw model, before its final dispatch expression', () => {
+    // Group dragging snapshots node rects at pointer-down, so its input must be the raw model
+    // with only the shown-group filter applied. This binds the call site to the definition,
+    // rather than treating `presentationModel` as a magic name.
+    expect(CANVAS_DRAG_INPUT).toBe('presentationModel');
+    expect(PRESENTATION_MODEL).toContain('({ ...model, groups: shownGroups })');
+    expect(PRESENTATION_MODEL).not.toMatch(/\b(?:spacing|spaced)\w*/i);
+
+    // The other paths which can persist canvas geometry likewise receive raw selectors/plans.
+    expect(MODE).toContain('const arrange = useArrange(model, edges);');
+    expect(SIDEBAR).toContain('const drag = useSidebarDrag(model);');
+    expect(APP).toContain('buildCanvasModel(state),');
+    expect(APP).toContain('dispatch(setNodeGeom({ id: plan.terminalId, rect: plan.rect }));');
+    expect(APP).not.toMatch(/\b(?:spacing|spaced)\w*/i);
   });
 });
