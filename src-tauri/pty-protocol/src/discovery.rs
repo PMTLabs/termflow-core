@@ -126,8 +126,23 @@ mod tests {
         }
     }
 
+    /// A directory this test alone owns.
+    ///
+    /// The nanos below are NOT a unique name: where the clock is coarser than a
+    /// nanosecond (macOS), two of these tests running on parallel harness
+    /// threads derive the SAME directory, and each ends by removing it — so the
+    /// first to finish deletes the second's scratch and its `write_record`
+    /// fails with NotFound, far from the line that caused it. The pid keeps
+    /// concurrent `cargo test` PROCESSES apart; the counter keeps threads apart
+    /// inside one process, whatever the clock does.
     fn scratch() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("tfrec-{}", uuid_like()));
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "tfrec-{}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            uuid_like()
+        ));
         std::fs::create_dir_all(&d).unwrap();
         d
     }
