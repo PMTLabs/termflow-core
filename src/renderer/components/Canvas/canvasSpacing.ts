@@ -17,22 +17,22 @@ import { CanvasModel } from './canvasSelectors';
 /** The zoom at and below which spacing never applies — the layout a canvas was arranged at. */
 export const SPACING_Z_BASE = 1;
 
-/** However far past `SPACING_Z_BASE` the zoom goes, the pull factor never shrinks past this —
- *  spacing tightens gaps, it never lets nodes collapse onto their group's centre. */
-export const SPACING_FLOOR = 0.35;
+/** Smallest world-space gap Dynamic Spacing will ever leave between two rects: small and
+ *  fixed, so adjacent terminals (or adjacent group frames) never visually touch however far
+ *  the zoom pulls, and so the actual pull can go much further than the old 65% cap without
+ *  ever letting rects merge. */
+export const MIN_GAP = 6;
 
 /**
  * How much of a rect's distance to its pull target survives at zoom `z`. `1` = untouched.
  *
  * `zBase / z` rather than a fixed curve, so a canvas arranged at a different baseline (none
- * exists yet, but nothing here assumes `1`) would scale the same way. Floored, never zero, so
- * `applySpacing`'s pull is always a fraction short of "on top of the target" — the overlap
- * clamp in `maxSafePull` is what actually stops two rects from touching, but this keeps the
- * INTENDED pull from ever asking for that either.
+ * exists yet, but nothing here assumes `1`) would scale the same way. It keeps shrinking toward
+ * zero as zoom rises; the minimum-gap clamp in `maxSafePull` is what stops rects from touching.
  */
 export function spacingFactor(z: number, zBase: number = SPACING_Z_BASE): number {
   if (!(z > 0) || z <= zBase) return 1;
-  return Math.max(SPACING_FLOOR, zBase / z);
+  return zBase / z;
 }
 
 /** The centre of a rect. */
@@ -60,13 +60,16 @@ function pulledRect(r: Rect, target: { x: number; y: number }, p: number): Rect 
   return { x: cx - r.w / 2, y: cy - r.h / 2, w: r.w, h: r.h };
 }
 
-/** O(n²) in `rects.length` — fine at canvas-sized groups, worth revisiting (e.g. a sweep line)
- *  if a single group's member count ever grows into the hundreds. */
-function anyOverlap(rects: Rect[]): boolean {
+/** Whether any pair of rects leaves less than `minGap` clearance. O(n²) in `rects.length` —
+ *  fine at canvas-sized groups, worth revisiting (e.g. a sweep line) if a single group's member
+ *  count ever grows into the hundreds. */
+function tooClose(rects: Rect[], minGap: number): boolean {
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
       const a = rects[i], b = rects[j];
-      if (!(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y)) return true;
+      const clears = a.x + a.w + minGap <= b.x || b.x + b.w + minGap <= a.x
+        || a.y + a.h + minGap <= b.y || b.y + b.h + minGap <= a.y;
+      if (!clears) return true;
     }
   }
   return false;
@@ -74,31 +77,31 @@ function anyOverlap(rects: Rect[]): boolean {
 
 /**
  * The largest pull fraction `p` in `[0, 1]` that moves every item toward `target` (see
- * `pulledRect`) without making any pair of them overlap.
+ * `pulledRect`) without leaving any pair of them less than `minGap` apart.
  *
  * **Why a search, not a closed form.** Two rects converging on one shared point shrink their
  * centre-to-centre distance linearly and monotonically in `p` (distance at `p` is exactly
- * `(1 - p)` times distance at `0`), so "do any two overlap" flips at most once as `p` rises from
- * 0 to 1 — which is exactly what makes bisection valid here, and also what gives `applySpacing`
- * its monotonic-in-zoom guarantee for free (see its own note).
+ * `(1 - p)` times distance at `0`), so "do any two get too close" flips at most once as `p`
+ * rises from 0 to 1 — which is exactly what makes bisection valid here, and also what gives
+ * `applySpacing` its monotonic-in-zoom guarantee for free (see its own note).
  *
  * Independent of zoom, deliberately: the target and the starting rects are the only inputs, so
  * a caller may compute this once per layout change and reuse it at every zoom instead of
  * re-searching every frame.
  *
- * Assumes the rects do NOT already overlap at `p = 0`. If they do — the only way that happens
- * is a manual drag that has already put two nodes on top of each other — this returns `0`
- * rather than search: Dynamic Spacing did not create that overlap and has no safe direction to
- * resolve it in, so the least surprising thing it can do is nothing.
+ * Assumes the rects already have at least `minGap` clearance at `p = 0`. If they do not — for
+ * example, a manual drag put two nodes touching — this returns `0` rather than search: Dynamic
+ * Spacing did not create that proximity and has no safe direction to resolve it in, so the least
+ * surprising thing it can do is nothing.
  */
-function maxSafePull(items: { rect: Rect }[], target: { x: number; y: number }): number {
+function maxSafePull(items: { rect: Rect }[], target: { x: number; y: number }, minGap: number): number {
   if (items.length <= 1) return 1;
   const rectsAt = (p: number) => items.map((it) => pulledRect(it.rect, target, p));
-  if (anyOverlap(rectsAt(0))) return 0;
+  if (tooClose(rectsAt(0), minGap)) return 0;
   let lo = 0, hi = 1;
   for (let i = 0; i < 30; i++) {
     const mid = (lo + hi) / 2;
-    if (anyOverlap(rectsAt(mid))) hi = mid; else lo = mid;
+    if (tooClose(rectsAt(mid), minGap)) hi = mid; else lo = mid;
   }
   return lo;
 }
@@ -133,6 +136,7 @@ export function computeSpacingBudget(model: CanvasModel): SpacingBudget {
     ? maxSafePull(
       model.groups.map((g) => ({ rect: g.rect })),
       centroidOf(model.groups.map((g) => g.rect)),
+      MIN_GAP,
     )
     : 1;
 
@@ -143,6 +147,7 @@ export function computeSpacingBudget(model: CanvasModel): SpacingBudget {
     nodePullByGroup[g.tabId] = maxSafePull(
       members.map((n) => ({ rect: n.rect })),
       centroidOf(members.map((n) => n.rect)),
+      MIN_GAP,
     );
   }
   return { groupPull, nodePullByGroup };

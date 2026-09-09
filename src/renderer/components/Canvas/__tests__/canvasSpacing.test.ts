@@ -1,7 +1,7 @@
 import { Rect } from '../canvasGeometry';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
 import {
-  applySpacing, computeSpacingBudget, spacingFactor, SPACING_FLOOR, SPACING_Z_BASE,
+  applySpacing, computeSpacingBudget, spacingFactor, MIN_GAP, SPACING_Z_BASE,
 } from '../canvasSpacing';
 
 const node = (id: string, tabId: string, rect: Rect): CanvasNodeModel => ({
@@ -38,6 +38,13 @@ const noOverlap = (rects: Rect[]) => {
   return true;
 };
 
+/** The gap two AABBs actually leave along whichever axis separates them, or a negative number
+ *  if they overlap. Mirrors the clearance `tooClose` in `canvasSpacing.ts` checks. */
+const gapBetween = (a: Rect, b: Rect) => Math.max(
+  a.x + a.w <= b.x ? b.x - (a.x + a.w) : b.x + b.w <= a.x ? a.x - (b.x + b.w) : -Infinity,
+  a.y + a.h <= b.y ? b.y - (a.y + a.h) : b.y + b.h <= a.y ? a.y - (b.y + b.h) : -Infinity,
+);
+
 describe('spacingFactor', () => {
   it('is the identity at and below the base zoom', () => {
     expect(spacingFactor(SPACING_Z_BASE)).toBe(1);
@@ -53,8 +60,14 @@ describe('spacingFactor', () => {
     expect(c).toBeLessThan(b);
   });
 
-  it('is floored rather than collapsing to zero at extreme zoom', () => {
-    expect(spacingFactor(1000)).toBe(SPACING_FLOOR);
+  it('keeps shrinking toward zero at extreme zoom — no fixed floor of its own', () => {
+    // A fixed fraction-of-original floor (there used to be one at 0.35) caps the pull at the
+    // same 65% no matter how far past it you zoom, which is exactly why gaps between groups
+    // stayed visibly large at high zoom (Tam, 2026-09-09). The only floor left is the geometric
+    // minimum-gap clamp in `applySpacing`/`maxSafePull`, not this function.
+    expect(spacingFactor(1000)).toBeGreaterThan(0);
+    expect(spacingFactor(1000)).toBeLessThan(0.01);
+    expect(spacingFactor(100)).toBeLessThan(spacingFactor(10));
   });
 
   it('is a no-op for a zoom that cannot happen', () => {
@@ -66,6 +79,14 @@ describe('applySpacing', () => {
   const twoNodeModel = (): CanvasModel => ({
     nodes: [node('n1', 'tb-a', { x: 0, y: 0, w: 340, h: 210 }), node('n2', 'tb-a', { x: 1000, y: 0, w: 340, h: 210 })],
     groups: [group('tb-a', { x: -20, y: -30, w: 1360, h: 260 }, ['n1', 'n2'])],
+  });
+
+  const twoGroupModel = (): CanvasModel => ({
+    nodes: [node('n1', 'tb-a', { x: 0, y: 0, w: 340, h: 210 }), node('n2', 'tb-b', { x: 2000, y: 0, w: 340, h: 210 })],
+    groups: [
+      group('tb-a', { x: -20, y: -30, w: 380, h: 260 }, ['n1']),
+      group('tb-b', { x: 1980, y: -30, w: 380, h: 260 }, ['n2']),
+    ],
   });
 
   it('leaves every rect exactly as stored when disabled', () => {
@@ -110,13 +131,7 @@ describe('applySpacing', () => {
   });
 
   it('pulls two groups closer together at high zoom, without overlap', () => {
-    const model: CanvasModel = {
-      nodes: [node('n1', 'tb-a', { x: 0, y: 0, w: 340, h: 210 }), node('n2', 'tb-b', { x: 2000, y: 0, w: 340, h: 210 })],
-      groups: [
-        group('tb-a', { x: -20, y: -30, w: 380, h: 260 }, ['n1']),
-        group('tb-b', { x: 1980, y: -30, w: 380, h: 260 }, ['n2']),
-      ],
-    };
+    const model = twoGroupModel();
     const before = model.groups.map((g) => g.rect);
     const beforeGap = before[1].x - (before[0].x + before[0].w);
 
@@ -126,6 +141,44 @@ describe('applySpacing', () => {
 
     expect(afterGap).toBeLessThan(beforeGap);
     expect(noOverlap(after)).toBe(true);
+  });
+
+  it('leaves only MIN_GAP between well-separated nodes at extreme zoom', () => {
+    const model = twoNodeModel();
+    const out = applySpacing(model, 200, true);
+    const gap = gapBetween(out.nodeRects['n1'], out.nodeRects['n2']);
+
+    expect(gap).toBeGreaterThanOrEqual(MIN_GAP - 1e-6);
+    expect(gap).toBeLessThan(MIN_GAP + 5);
+  });
+
+  it('preserves MIN_GAP while nodes and groups keep tightening through high zoom', () => {
+    const nodeModel = twoNodeModel();
+    const groupModel = twoGroupModel();
+    let nodeGapAt2 = 0;
+    let groupGapAt2 = 0;
+    let nodeGapAt40 = 0;
+    let groupGapAt40 = 0;
+
+    for (let z = 1; z <= 40; z += 1) {
+      const nodes = applySpacing(nodeModel, z, true).nodeRects;
+      const groups = applySpacing(groupModel, z, true).groupRects;
+      const nodeGap = gapBetween(nodes['n1'], nodes['n2']);
+      const groupGap = gapBetween(groups['tb-a'], groups['tb-b']);
+      expect(nodeGap).toBeGreaterThanOrEqual(MIN_GAP - 1e-9);
+      expect(groupGap).toBeGreaterThanOrEqual(MIN_GAP - 1e-9);
+      if (z === 2) {
+        nodeGapAt2 = nodeGap;
+        groupGapAt2 = groupGap;
+      }
+      if (z === 40) {
+        nodeGapAt40 = nodeGap;
+        groupGapAt40 = groupGap;
+      }
+    }
+
+    expect(nodeGapAt40).toBeLessThan(nodeGapAt2);
+    expect(groupGapAt40).toBeLessThan(groupGapAt2);
   });
 
   it('never introduces an overlap across a swept range of zoom', () => {
@@ -152,6 +205,8 @@ describe('applySpacing', () => {
       nodes: [node('n1', 'tb-a', { x: 0, y: 0, w: 340, h: 210 }), node('n2', 'tb-a', { x: 340, y: 0, w: 340, h: 210 })],
       groups: [group('tb-a', { x: -20, y: -30, w: 720, h: 260 }, ['n1', 'n2'])],
     };
+    // A zero gap is already below MIN_GAP, so tooClose(..., MIN_GAP) gives this group no pull.
+    expect(gapBetween(model.nodes[0].rect, model.nodes[1].rect)).toBe(0);
     const out = applySpacing(model, 6, true);
     expect(out.nodeRects['n1']).toEqual(model.nodes[0].rect);
     expect(out.nodeRects['n2']).toEqual(model.nodes[1].rect);
