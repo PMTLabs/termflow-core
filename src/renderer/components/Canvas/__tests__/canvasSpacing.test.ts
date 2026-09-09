@@ -687,6 +687,16 @@ describe('applySpacing', () => {
         const zoomRandom = mulberry32(seed ^ 0xA5A5_A5A5);
         const z = SPACING_Z_BASE + zoomRandom() * (6.35 - SPACING_Z_BASE);
         const model = generatedModel(seed);
+        // Snapshot the stored geometry BEFORE any call, by value. Every "unchanged" assertion
+        // below otherwise compares the result against the very object the transform was handed,
+        // and `applySpacing` returns the input rect itself on its identity paths — so an
+        // implementation that mutated a stored rect in place (`Object.assign(layout[i], …)`
+        // instead of allocating a fresh one) would move the expected value in lockstep with the
+        // actual one and pass. That is not a hypothetical oracle nicety: not mutating the stored
+        // rects IS the feature's core invariant (plan/039 §2, render-time only), so the one
+        // property most worth pinning was the one comparing against a baseline that could move.
+        const storedNodeRects = new Map(model.nodes.map((n) => [n.terminalId, { ...n.rect }]));
+        const storedGroupRects = new Map(model.groups.map((g) => [g.tabId, { ...g.rect }]));
         const disabled = applySpacing(model, z, false);
         const baseZoom = applySpacing(model, SPACING_Z_BASE, true);
         const spaced = applySpacing(model, z, true);
@@ -695,18 +705,23 @@ describe('applySpacing', () => {
         };
 
         for (const n of model.nodes) {
-          failIf(!sameRect(disabled.nodeRects[n.terminalId], n.rect), `disabled changed node ${n.terminalId}`);
-          failIf(!sameRect(baseZoom.nodeRects[n.terminalId], n.rect), `base zoom changed node ${n.terminalId}`);
+          const stored = storedNodeRects.get(n.terminalId)!;
+          // The transform must not have touched the model it was handed.
+          failIf(!sameRect(n.rect, stored), `applySpacing MUTATED stored node ${n.terminalId}`);
+          failIf(!sameRect(disabled.nodeRects[n.terminalId], stored), `disabled changed node ${n.terminalId}`);
+          failIf(!sameRect(baseZoom.nodeRects[n.terminalId], stored), `base zoom changed node ${n.terminalId}`);
           const out = spaced.nodeRects[n.terminalId];
-          failIf(out.x > n.rect.x + 1e-9 || out.y > n.rect.y + 1e-9, `node moved later: ${n.terminalId}`);
-          failIf(out.w !== n.rect.w || out.h !== n.rect.h, `node resized: ${n.terminalId}`);
+          failIf(out.x > stored.x + 1e-9 || out.y > stored.y + 1e-9, `node moved later: ${n.terminalId}`);
+          failIf(out.w !== stored.w || out.h !== stored.h, `node resized: ${n.terminalId}`);
         }
         for (const g of model.groups) {
-          failIf(!sameRect(disabled.groupRects[g.tabId], g.rect), `disabled changed group ${g.tabId}`);
-          failIf(!sameRect(baseZoom.groupRects[g.tabId], g.rect), `base zoom changed group ${g.tabId}`);
+          const stored = storedGroupRects.get(g.tabId)!;
+          failIf(!sameRect(g.rect, stored), `applySpacing MUTATED stored group ${g.tabId}`);
+          failIf(!sameRect(disabled.groupRects[g.tabId], stored), `disabled changed group ${g.tabId}`);
+          failIf(!sameRect(baseZoom.groupRects[g.tabId], stored), `base zoom changed group ${g.tabId}`);
           const out = spaced.groupRects[g.tabId];
-          failIf(out.x > g.rect.x + 1e-9 || out.y > g.rect.y + 1e-9, `group moved later: ${g.tabId}`);
-          failIf(out.w !== g.rect.w || out.h !== g.rect.h, `group resized: ${g.tabId}`);
+          failIf(out.x > stored.x + 1e-9 || out.y > stored.y + 1e-9, `group moved later: ${g.tabId}`);
+          failIf(out.w !== stored.w || out.h !== stored.h, `group resized: ${g.tabId}`);
         }
 
         const rawFrames = model.groups.map((g) => drawnFrameRect(g.rect, z));
