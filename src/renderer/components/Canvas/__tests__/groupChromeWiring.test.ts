@@ -73,14 +73,19 @@ describe('CanvasMode feeds them', () => {
     expect(MODE).toContain('allCollapsed(model.nodes, tiers, vp.z, revealHidden)');
   });
 
-  it('computes chip offsets only while collapsed', () => {
+  it('computes chip offsets only while collapsed, from the SPACED groups', () => {
     // A chip is the only consumer, and it only exists when collapsed — running the layout the
     // rest of the time would be work per viewport change for nothing.
-    expect(MODE).toContain('collapsed ? chipOffsets(shownGroups, vp.z) : {}');
+    //
+    // `spacedShownGroups`, not `shownGroups`: the nudge exists to stop two chips colliding ON
+    // SCREEN, so it is a question about drawn positions. Dynamic Spacing moves groups closer
+    // together as the zoom rises, which is precisely when chips start colliding — computing the
+    // nudge from the stored rects would space chips for a layout the user is not looking at.
+    expect(MODE).toContain('collapsed ? chipOffsets(spacedShownGroups, vp.z) : {}');
   });
 
   it('recomputes them when the zoom or the groups change', () => {
-    const deps = /\[collapsed, shownGroups, vp\.z\]/.exec(MODE);
+    const deps = /\[collapsed, spacedShownGroups, vp\.z\]/.exec(MODE);
     expect(deps).not.toBeNull();
   });
 

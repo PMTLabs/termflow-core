@@ -86,6 +86,11 @@ describe('sanitizeCanvasState', () => {
     expect(large.viewport.z).toBe(2.8);
   });
 
+  it('defaults Dynamic Spacing to off, and restores a persisted true', () => {
+    expect(sanitize({ viewport: { x: 0, y: 0, z: 1 }, nodes: {}, groups: {} })!.dynamicSpacing).toBe(false);
+    expect(sanitize({ viewport: { x: 0, y: 0, z: 1 }, nodes: {}, groups: {}, dynamicSpacing: true })!.dynamicSpacing).toBe(true);
+  });
+
   it('rejects a rect with zero or negative dimensions', () => {
     const out = sanitize(
       { viewport: { x: 0, y: 0, z: 1 }, nodes: { 'tm-1': { x: 0, y: 0, w: 0, h: 210 } }, groups: {} },

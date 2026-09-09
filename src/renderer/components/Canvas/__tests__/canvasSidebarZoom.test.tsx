@@ -88,7 +88,7 @@ const render = () => {
     root.render(
       <Provider store={store}>
         <CanvasMetricsContext.Provider value={DEFAULT_METRICS}>
-          <CanvasSidebar model={model} vw={900} vh={600} />
+          <CanvasSidebar model={model} vw={900} vh={600} onFlyToNode={() => undefined} />
         </CanvasMetricsContext.Provider>
       </Provider>,
     );

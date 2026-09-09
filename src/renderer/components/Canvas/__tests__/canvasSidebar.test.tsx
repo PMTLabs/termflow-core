@@ -19,8 +19,7 @@ import tabsReducer from '../../../store/slices/tabsSlice';
 // `ShellProfileIcon` (Req 6) reads `state.settings.shellProfiles` — real reducer, empty default
 // list, so every row falls through to the emoji fallback rather than resolving a real icon.
 import settingsReducer from '../../../store/slices/settingsSlice';
-import { CanvasSidebar, ROW_FLY_ZOOM } from '../CanvasSidebar';
-import { centreOn, FLY_MS } from '../viewportStyles';
+import { CanvasSidebar } from '../CanvasSidebar';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { DEFAULT_METRICS, NODE_W, NODE_H, Rect } from '../canvasGeometry';
 import { fitGroupFrame, GAP_X } from '../canvasLayout';
@@ -83,6 +82,7 @@ let container: HTMLDivElement;
 let root: Root;
 let store: EnhancedStore;
 let updateTerminalName: jest.Mock;
+let onFlyToNode: jest.Mock<void, [string]>;
 
 beforeAll(() => {
   (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -118,6 +118,7 @@ beforeEach(() => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  onFlyToNode = jest.fn();
 });
 
 afterEach(() => {
@@ -130,7 +131,7 @@ const render = (m: CanvasModel = model) => {
     root.render(
       <Provider store={store}>
         <CanvasMetricsContext.Provider value={DEFAULT_METRICS}>
-          <CanvasSidebar model={m} vw={900} vh={600} />
+          <CanvasSidebar model={m} vw={900} vh={600} onFlyToNode={onFlyToNode} />
         </CanvasMetricsContext.Provider>
       </Provider>,
     );
@@ -419,7 +420,7 @@ describe('CanvasSidebar — group rename', () => {
 });
 
 describe('CanvasSidebar — selection', () => {
-  it('unhides a hidden row before selecting and flying to it', () => {
+  it('delegates a hidden row to CanvasMode\'s unified identity-aware destination', () => {
     const hidden: CanvasModel = {
       ...model,
       nodes: model.nodes.map((n) => n.terminalId === 'tm-2' ? { ...n, hidden: true } : n),
@@ -427,55 +428,12 @@ describe('CanvasSidebar — selection', () => {
     store.dispatch({ type: 'canvas/hydrateCanvas', payload: { hidden: { 'tm-2': true } } });
     render(hidden);
     act(() => { rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    const s = store.getState() as { canvas: { hidden: Record<string, true>; selectedId: string | null } };
-    expect(s.canvas.hidden['tm-2']).toBeUndefined();
-    expect(s.canvas.selectedId).toBe('tm-2');
+    expect(onFlyToNode).toHaveBeenCalledWith('tm-2');
   });
-  it('selects the node a row click names', () => {
+  it('delegates the row identity, rather than implementing a second camera rule', () => {
     render();
     act(() => { rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    const s = store.getState() as { canvas: { selectedId: string | null } };
-    expect(s.canvas.selectedId).toBe('tm-2');
-  });
-
-  /**
-   * Design §10: this is the answer to "the terminal is in a group but off-screen", so the click
-   * has to MOVE the viewport — and it has to fly rather than jump, since a jump at canvas
-   * altitude arrives with no sense of where it came from.
-   *
-   * The frame queue is driven by hand: `useFlyTo` dispatches from inside a rAF callback, which
-   * under jsdom's real timer lands outside `act` and makes the assertion a race.
-   */
-  it('flies to the node, centred, at the zoom floor', () => {
-    const realRaf = window.requestAnimationFrame;
-    const queued: ((t: number) => void)[] = [];
-    window.requestAnimationFrame = ((cb: (t: number) => void) => { queued.push(cb); return queued.length; }) as typeof window.requestAnimationFrame;
-    try {
-      const target = rect(4000, 3000);
-      const far: CanvasModel = {
-        ...model,
-        nodes: model.nodes.map((n) => (n.terminalId === 'tm-2' ? { ...n, rect: target } : n)),
-      };
-      render(far);
-      const vp = () => (store.getState() as { canvas: { viewport: { x: number; y: number; z: number } } }).canvas.viewport;
-      const before = vp();
-
-      act(() => { rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-      // A frame was asked for and nothing has moved yet — the flight is animated, not a jump.
-      expect(queued).toHaveLength(1);
-      expect(vp()).toEqual(before);
-
-      // A timestamp past FLY_MS, so the flight lands in one frame and the destination can be
-      // asserted exactly rather than as "something changed". A timestamp BELOW the start would
-      // extrapolate backwards, which is why it is derived from the clock rather than written as 0.
-      act(() => { queued.shift()!(performance.now() + FLY_MS * 2); });
-      // The floor is a FLOOR: the viewport starts at z = 1, which is already closer, so the
-      // flight must keep it rather than zooming back out to 0.85.
-      expect(vp()).toEqual(centreOn(target, 900, 600, Math.max(before.z, ROW_FLY_ZOOM), DEFAULT_METRICS.zMax));
-      expect(vp().z).toBe(before.z);
-    } finally {
-      window.requestAnimationFrame = realRaf;
-    }
+    expect(onFlyToNode).toHaveBeenCalledWith('tm-2');
   });
 });
 
@@ -605,9 +563,10 @@ describe('CanvasSidebar — drag and resize', () => {
     render();
     dragRowTo(1, 'tb-b');
     act(() => { rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    expect(canvas().selectedId).toBeNull();
+    expect(onFlyToNode).not.toHaveBeenCalled();
     act(() => { rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    expect(canvas().selectedId).not.toBeNull();
+    expect(onFlyToNode).toHaveBeenCalledTimes(1);
+    expect(onFlyToNode).toHaveBeenCalledWith('tm-1');
   });
 
   it('lifts the row and shows a ghost while dragging', () => {

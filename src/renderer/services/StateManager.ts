@@ -114,6 +114,9 @@ export function sanitizeCanvasState(
     // Math.max/Math.min pair, and a NaN here reaches the stylesheet as an invalid calc().
     sidebarZoom: Math.max(SIDEBAR_ZOOM_MIN, Math.min(SIDEBAR_ZOOM_MAX, finite(c.sidebarZoom, 1))),
     hidden,
+    // Off by default (plan/039 P0: must be explicitly enabled) — same fallback shape as
+    // `sidebarOpen`, just the opposite default value.
+    dynamicSpacing: typeof c.dynamicSpacing === 'boolean' ? c.dynamicSpacing : false,
   };
 }
 
@@ -339,6 +342,7 @@ class StateManagerClass {
           sidebarWidth: state.canvas.sidebarWidth,
           sidebarZoom: state.canvas.sidebarZoom,
           hidden: state.canvas.hidden,
+          dynamicSpacing: state.canvas.dynamicSpacing,
         },
       };
 
