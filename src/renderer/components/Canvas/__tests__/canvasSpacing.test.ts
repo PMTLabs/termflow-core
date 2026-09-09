@@ -1,6 +1,8 @@
 import { Rect } from '../canvasGeometry';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
-import { applySpacing, spacingFactor, SPACING_FLOOR, SPACING_Z_BASE } from '../canvasSpacing';
+import {
+  applySpacing, computeSpacingBudget, spacingFactor, SPACING_FLOOR, SPACING_Z_BASE,
+} from '../canvasSpacing';
 
 const node = (id: string, tabId: string, rect: Rect): CanvasNodeModel => ({
   terminalId: id,
@@ -153,6 +155,37 @@ describe('applySpacing', () => {
     const out = applySpacing(model, 6, true);
     expect(out.nodeRects['n1']).toEqual(model.nodes[0].rect);
     expect(out.nodeRects['n2']).toEqual(model.nodes[1].rect);
+  });
+
+  it('gives the same result whether the caller precomputes a budget or lets applySpacing compute one itself', () => {
+    const model = twoNodeModel();
+    const budget = computeSpacingBudget(model);
+    for (const z of [1, 2, 4, 7]) {
+      expect(applySpacing(model, z, true, budget)).toEqual(applySpacing(model, z, true));
+    }
+  });
+
+  it('lets one budget be reused safely across every zoom — the whole point of splitting it out', () => {
+    const model = twoNodeModel();
+    const budget = computeSpacingBudget(model);
+    let lastGap = Infinity;
+    for (let z = 1; z <= 8; z += 0.5) {
+      const out = applySpacing(model, z, true, budget);
+      const gap = out.nodeRects['n2'].x - (out.nodeRects['n1'].x + out.nodeRects['n1'].w);
+      expect(noOverlap([out.nodeRects['n1'], out.nodeRects['n2']])).toBe(true);
+      expect(gap).toBeLessThanOrEqual(lastGap + 1e-9);
+      lastGap = gap;
+    }
+  });
+
+  it('budgets a group/single-member group at 1 — nothing to clamp, so nothing to search for', () => {
+    const model: CanvasModel = {
+      nodes: [node('n1', 'tb-a', { x: 500, y: 500, w: 340, h: 210 })],
+      groups: [group('tb-a', { x: 480, y: 470, w: 380, h: 260 }, ['n1'])],
+    };
+    const budget = computeSpacingBudget(model);
+    expect(budget.groupPull).toBe(1);
+    expect(budget.nodePullByGroup['tb-a']).toBe(1);
   });
 
   it('does not resize a node or a group', () => {

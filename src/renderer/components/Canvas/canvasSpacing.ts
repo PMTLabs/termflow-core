@@ -60,6 +60,8 @@ function pulledRect(r: Rect, target: { x: number; y: number }, p: number): Rect 
   return { x: cx - r.w / 2, y: cy - r.h / 2, w: r.w, h: r.h };
 }
 
+/** O(n²) in `rects.length` — fine at canvas-sized groups, worth revisiting (e.g. a sweep line)
+ *  if a single group's member count ever grows into the hundreds. */
 function anyOverlap(rects: Rect[]): boolean {
   for (let i = 0; i < rects.length; i++) {
     for (let j = i + 1; j < rects.length; j++) {
@@ -106,20 +108,69 @@ export interface SpacingResult {
   groupRects: Record<string, Rect>;
 }
 
+export interface SpacingBudget {
+  /** Max safe pull fraction for the group-level step (toward the canvas centroid). `1` when
+   *  there is nothing to clamp (0 or 1 group). */
+  groupPull: number;
+  /** Max safe pull fraction for each group's own node-level step (toward its sibling centroid),
+   *  keyed by `tabId`. `1` for a group with 0 or 1 member. */
+  nodePullByGroup: Record<string, number>;
+}
+
+/**
+ * The overlap-safety budget for `model`'s CURRENT layout — the expensive half of `applySpacing`,
+ * split out because `maxSafePull` does not depend on zoom (its own note: pairwise distance
+ * shrinks by the same `(1 - p)` factor for ANY shared target, so the target's exact location —
+ * and therefore how far `z` has pulled toward it — never enters the overlap search).
+ *
+ * A caller may compute this once per LAYOUT change and reuse it at every zoom tick instead of
+ * re-running the bisection on every wheel event — which matters, because `applySpacing` used to
+ * do exactly that: a full O(groups² + Σ members²) × 30-iteration search on every `vp.z` change,
+ * i.e. every tick of a live pinch/wheel zoom. `CanvasMode` memoises this on the model alone.
+ */
+export function computeSpacingBudget(model: CanvasModel): SpacingBudget {
+  const groupPull = model.groups.length > 0
+    ? maxSafePull(
+      model.groups.map((g) => ({ rect: g.rect })),
+      centroidOf(model.groups.map((g) => g.rect)),
+    )
+    : 1;
+
+  const nodePullByGroup: Record<string, number> = {};
+  for (const g of model.groups) {
+    const members = model.nodes.filter((n) => g.nodeIds.includes(n.terminalId));
+    if (members.length <= 1) { nodePullByGroup[g.tabId] = 1; continue; }
+    nodePullByGroup[g.tabId] = maxSafePull(
+      members.map((n) => ({ rect: n.rect })),
+      centroidOf(members.map((n) => n.rect)),
+    );
+  }
+  return { groupPull, nodePullByGroup };
+}
+
 /**
  * The spacing-adjusted position of every node and group in `model`, at zoom `z`.
  *
  * Hierarchical, matching the approved design (plan/039 §4): groups are pulled toward the whole
  * canvas's centroid first, then each group's own nodes are pulled toward that group's
- * (already-moved) centre. Both levels clamp against their own overlap via `maxSafePull` — never
+ * (already-moved) centre. Both levels clamp against their own overlap via `budget` — never
  * against `GAP_X`/`GAP_Y`/`GROUP_GAP`, which are layout constants this deliberately never reads
  * (see the module note: spacing is a rendering rule, not a second layout).
+ *
+ * `budget` is optional and computed on the fly when omitted, so this stays correct on its own —
+ * only slower under a rapid zoom, which is exactly the case `computeSpacingBudget` exists to let
+ * a caller avoid by passing one in.
  *
  * Returns the ORIGINAL rects, unchanged, when `enabled` is false or `z` is at or below
  * `SPACING_Z_BASE` — the identity fast path that makes toggling off (or zooming back down) an
  * exact revert rather than an animated one, because there is nothing left to un-apply.
  */
-export function applySpacing(model: CanvasModel, z: number, enabled: boolean): SpacingResult {
+export function applySpacing(
+  model: CanvasModel,
+  z: number,
+  enabled: boolean,
+  budget?: SpacingBudget,
+): SpacingResult {
   const nodeRects: Record<string, Rect> = {};
   const groupRects: Record<string, Rect> = {};
   for (const n of model.nodes) nodeRects[n.terminalId] = n.rect;
@@ -128,6 +179,7 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   const k = enabled ? spacingFactor(z) : 1;
   if (k >= 1) return { nodeRects, groupRects };
   const pWant = 1 - k;
+  const b = budget ?? computeSpacingBudget(model);
 
   // Step 1 — groups toward the canvas centroid, TRANSLATING every member node by the same
   // delta as its frame. A group frame's own centre is not its members' centre (`fitGroupFrame`
@@ -138,8 +190,7 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   // independent tightening on top (step 2), never a second way to reposition inside a group.
   if (model.groups.length > 0) {
     const canvasCentre = centroidOf(model.groups.map((g) => g.rect));
-    const items = model.groups.map((g) => ({ rect: g.rect }));
-    const p = Math.min(pWant, maxSafePull(items, canvasCentre));
+    const p = Math.min(pWant, b.groupPull);
     for (const g of model.groups) {
       const moved = pulledRect(g.rect, canvasCentre, p);
       groupRects[g.tabId] = moved;
@@ -156,14 +207,22 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   }
 
   // Step 2 — each group's own nodes tighten toward THEIR OWN shared centroid (not the frame's),
-  // on top of whatever step 1 already moved them by.
+  // on top of whatever step 1 already moved them by. `b.nodePullByGroup` was computed against
+  // the ORIGINAL (untranslated) members, which is safe: step 1 moves every member of one group
+  // by the same rigid delta, and a uniform translation changes no pairwise distance — the exact
+  // property `maxSafePull`'s own note relies on to be target-independent in the first place.
+  //
+  // `g.nodeIds` is membership, not visibility — a member the user has individually hidden still
+  // counts toward its siblings' centroid. Deliberate: whether that member is even in `model` at
+  // all is `CanvasMode`'s call (this module never reads `hidden`/`revealHidden`), and a member
+  // that is merely paint-culled or invisible right now can become visible again without this
+  // recomputing anything — it would be strange for the same input to answer differently.
   for (const g of model.groups) {
     const members = model.nodes.filter((n) => g.nodeIds.includes(n.terminalId));
     if (members.length <= 1) continue;
     const translated = members.map((n) => nodeRects[n.terminalId]);
     const siblingCentre = centroidOf(translated);
-    const items = translated.map((r) => ({ rect: r }));
-    const p = Math.min(pWant, maxSafePull(items, siblingCentre));
+    const p = Math.min(pWant, b.nodePullByGroup[g.tabId] ?? 1);
     members.forEach((n, i) => {
       nodeRects[n.terminalId] = pulledRect(translated[i], siblingCentre, p);
     });
