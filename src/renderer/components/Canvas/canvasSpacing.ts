@@ -20,27 +20,59 @@ import { CanvasModel } from './canvasSelectors';
  * neighbour, and a node row is `340` wide but only `GAP_X` (10) apart from the next node. Scaling
  * distance-to-target by a fraction `p` shrinks a pair's gap by `(1-p)*(gap+size) - size`, which
  * is dominated by `size` the instant `size >> gap` — for those two real numbers, the largest safe
- * `p` before two rects violate `MIN_GAP` works out to about 5% and 1% respectively, regardless of
- * zoom. That is why gaps stayed visibly large at any real zoom even after the min-gap floor was
- * added: the pull itself could barely move anything. Shrinking the GAP directly has no such
- * floor — a rect's own size never enters the calculation — so it can tighten all the way to
- * `MIN_GAP` no matter how big the rects are.
+ * `p` before two rects violate a minimum gap works out to about 5% and 1% respectively,
+ * regardless of zoom. That is why gaps stayed visibly large at any real zoom even after a
+ * min-gap floor was added: the pull itself could barely move anything. Shrinking the GAP
+ * directly has no such floor — a rect's own size never enters the calculation — so it can
+ * tighten however far the floor below allows, no matter how big the rects are.
+ *
+ * **The floor is anchored in SCREEN pixels, not world units.** On-screen size is world size ×
+ * `z`, so a floor fixed in WORLD units looks fine at the zoom it was tuned for and then grows
+ * without bound on screen as `z` keeps rising — precisely "still big at max zoom": every world
+ * unit of floor gap costs `z` more screen pixels the further in you go. `targetGap` instead
+ * blends the desired gap in SCREEN space, from the pair's own on-screen gap at `SPACING_Z_BASE`
+ * (untouched) down toward `MIN_GAP_SCREEN_PX` as `z → ∞`, then converts back to world units for
+ * `sweepAxis` to apply. The screen-space gap this produces is bounded by
+ * `max(originalScreenGap, MIN_GAP_SCREEN_PX)` for every `z` and strictly decreases toward
+ * `MIN_GAP_SCREEN_PX` — it can shrink further, it can never grow.
  */
 
 /** The zoom at and below which spacing never applies — the layout a canvas was arranged at. */
 export const SPACING_Z_BASE = 1;
 
-/** Smallest world-space gap Dynamic Spacing will ever leave between two rects: small and
- *  fixed, so adjacent terminals (or adjacent group frames) never visually touch however far
- *  the zoom pulls. */
-export const MIN_GAP = 6;
+/** Smallest on-screen gap Dynamic Spacing will ever leave between two rects, in SCREEN pixels —
+ *  small, fixed, and zoom-invariant, so adjacent terminals (or adjacent group frames) never
+ *  visually touch, and never balloon back open, however far the zoom goes. See `targetGap`. */
+export const MIN_GAP_SCREEN_PX = 6;
 
 /**
- * How much of a gap survives at zoom `z`, as a multiplier on the ORIGINAL gap. `1` = untouched.
+ * The world-space gap Dynamic Spacing leaves for a pair whose ORIGINAL world gap was
+ * `originalGap`, at zoom `z`.
  *
- * `zBase / z` rather than a fixed curve, so a canvas arranged at a different baseline (none
- * exists yet, but nothing here assumes `1`) would scale the same way. It keeps shrinking toward
- * zero as zoom rises; `sweepAxis`'s own `MIN_GAP` clamp is what stops a gap from disappearing.
+ * `originalGap * zBase` is that pair's own on-screen gap at the base zoom (untouched — spacing
+ * never applies at or below `zBase`). The target on-screen gap blends linearly, in `zBase / z`,
+ * from that value down toward `minGapScreenPx` as `z` grows — reaching it only in the limit, so
+ * the shrink is smooth, not a snap. Dividing back by `z` gives the world-space gap that produces
+ * exactly that screen size at the current zoom.
+ *
+ * Never returns MORE than `originalGap`: a pair whose on-screen gap was already at or under
+ * `minGapScreenPx` at `zBase` is left exactly as-is rather than pushed apart to reach the floor —
+ * this function only ever shrinks a gap, the same guarantee the old WORLD-unit floor made, just
+ * expressed in screen terms now.
+ */
+function targetGap(originalGap: number, z: number, zBase: number, minGapScreenPx: number): number {
+  const originalScreenGap = originalGap * zBase;
+  if (originalScreenGap <= minGapScreenPx) return originalGap;
+  const screenGap = minGapScreenPx + (originalScreenGap - minGapScreenPx) * (zBase / z);
+  return screenGap / z;
+}
+
+/**
+ * `1` at or below `SPACING_Z_BASE` (or for a zoom that cannot happen), `zBase / z` above it.
+ * `applySpacing` only uses this as an identity GATE (`>= 1` means "do nothing") — the actual
+ * shrink math lives in `targetGap`, not here. Kept as its own function because "is spacing a
+ * no-op at this zoom" is asked from more than one place and the `z <= zBase` edge case is easy
+ * to get backwards.
  */
 export function spacingFactor(z: number, zBase: number = SPACING_Z_BASE): number {
   if (!(z > 0) || z <= zBase) return 1;
@@ -57,8 +89,8 @@ function spansOverlap(aStart: number, aSize: number, bStart: number, bSize: numb
 /**
  * Shrinks the gap between every pair of rects that are adjacent along `axis` AND share a lane on
  * the other axis (their extents there overlap — e.g. two frames in the same row, for
- * `axis: 'x'`) toward `minGap`, scaled by `k`. Only ever moves a rect along `axis`; the other
- * axis, and every rect's size, are untouched.
+ * `axis: 'x'`) toward `targetGap(gap, z, zBase, minGapScreenPx)`. Only ever moves a rect along
+ * `axis`; the other axis, and every rect's size, are untouched.
  *
  * Walks rects in sorted order along `axis` and compares each one only to its immediate
  * predecessor in that order — not every lane-mate, just the nearest one. That misses shrinking a
@@ -67,12 +99,11 @@ function spansOverlap(aStart: number, aSize: number, bStart: number, bSize: numb
  * it is never unsafe: a rect that is not a lane-mate of its immediate predecessor simply inherits
  * that predecessor's already-applied shift as a rigid translation, which preserves — never
  * shrinks past, never widens — whatever gap it already had to its actual neighbours. Since every
- * rect only ever moves earlier along `axis` (shift is monotonically non-increasing) and every
- * shrink stops at `minGap` (or preserves the original gap untouched if it started below
- * `minGap` already — this never pushes two rects apart), no pair can end up overlapping that did
- * not already overlap before this ran.
+ * rect only ever moves earlier along `axis` (shift is monotonically non-increasing) and
+ * `targetGap` never returns more than the gap it was given, no pair can end up overlapping that
+ * did not already overlap before this ran.
  */
-function sweepAxis(rects: Rect[], axis: 'x' | 'y', k: number, minGap: number): Rect[] {
+function sweepAxis(rects: Rect[], axis: 'x' | 'y', z: number, zBase: number, minGapScreenPx: number): Rect[] {
   const order = rects.map((_, i) => i).sort((i, j) => (
     axis === 'x' ? rects[i].x - rects[j].x : rects[i].y - rects[j].y
   ));
@@ -90,7 +121,7 @@ function sweepAxis(rects: Rect[], axis: 'x' | 'y', k: number, minGap: number): R
         const prevOut = out[prevIdx];
         const prevEnd = axis === 'x' ? prevOut.x + prevOut.w : prevOut.y + prevOut.h;
         const currentGap = newStart - prevEnd;
-        const desiredGap = currentGap < minGap ? currentGap : Math.max(minGap, currentGap * k);
+        const desiredGap = targetGap(currentGap, z, zBase, minGapScreenPx);
         const reduction = currentGap - desiredGap;
         shift -= reduction;
         newStart -= reduction;
@@ -104,8 +135,8 @@ function sweepAxis(rects: Rect[], axis: 'x' | 'y', k: number, minGap: number): R
 
 /** `rects` after one gap-shrink pass along X, then one along Y — see `sweepAxis`. Sequential,
  *  not simultaneous: the Y pass's lane test reads the X positions the X pass already produced. */
-function tighten(rects: Rect[], k: number, minGap: number): Rect[] {
-  return sweepAxis(sweepAxis(rects, 'x', k, minGap), 'y', k, minGap);
+function tighten(rects: Rect[], z: number, zBase: number, minGapScreenPx: number): Rect[] {
+  return sweepAxis(sweepAxis(rects, 'x', z, zBase, minGapScreenPx), 'y', z, zBase, minGapScreenPx);
 }
 
 export interface SpacingResult {
@@ -135,12 +166,11 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   for (const n of model.nodes) nodeRects[n.terminalId] = n.rect;
   for (const g of model.groups) groupRects[g.tabId] = g.rect;
 
-  const k = enabled ? spacingFactor(z) : 1;
-  if (k >= 1) return { nodeRects, groupRects };
+  if (!enabled || spacingFactor(z) >= 1) return { nodeRects, groupRects };
 
   if (model.groups.length > 1) {
     const before = model.groups.map((g) => g.rect);
-    const after = tighten(before, k, MIN_GAP);
+    const after = tighten(before, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
     model.groups.forEach((g, i) => {
       groupRects[g.tabId] = after[i];
       const dx = after[i].x - before[i].x;
@@ -157,7 +187,7 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
     const members = model.nodes.filter((n) => g.nodeIds.includes(n.terminalId));
     if (members.length <= 1) continue;
     const before = members.map((n) => nodeRects[n.terminalId]);
-    const after = tighten(before, k, MIN_GAP);
+    const after = tighten(before, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
     members.forEach((n, i) => { nodeRects[n.terminalId] = after[i]; });
   }
 

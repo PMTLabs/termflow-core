@@ -1,7 +1,7 @@
 import { NODE_H, NODE_W, Rect } from '../canvasGeometry';
 import { GAP_X, GROUP_GAP, PAD, PAD_TOP } from '../canvasLayout';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
-import { applySpacing, MIN_GAP, spacingFactor, SPACING_Z_BASE } from '../canvasSpacing';
+import { applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, SPACING_Z_BASE } from '../canvasSpacing';
 
 const node = (id: string, tabId: string, rect: Rect): CanvasNodeModel => ({
   terminalId: id,
@@ -198,18 +198,23 @@ describe('applySpacing', () => {
       const out = applySpacing(model, 4, true);
       const afterGap = gapBetween(out.groupRects['tb-a'], out.groupRects['tb-b']);
       // A scale-toward-centroid pull on this exact shape (372-wide frame, 28-wide gap) could
-      // only ever close ~5% of the gap before a frame violated MIN_GAP — i.e. afterGap would
+      // only ever close ~5% of the gap before two frames got too close — i.e. afterGap would
       // stay above ~26.5. The gap-shrink sweep has no such floor.
       expect(afterGap).toBeLessThan(beforeGap * 0.5);
       expect(noOverlap([out.groupRects['tb-a'], out.groupRects['tb-b']])).toBe(true);
     });
 
-    it('tightens adjacent group frames all the way to MIN_GAP at high zoom', () => {
+    it('tightens adjacent group frames to a SCREEN gap near MIN_GAP_SCREEN_PX at high zoom — never bigger, however far z goes', () => {
       const model = adjacentGroupsModel();
-      const out = applySpacing(model, 50, true);
-      const afterGap = gapBetween(out.groupRects['tb-a'], out.groupRects['tb-b']);
-      expect(afterGap).toBeGreaterThanOrEqual(MIN_GAP - 1e-6);
-      expect(afterGap).toBeLessThan(MIN_GAP + 2);
+      // The regression this pins: an earlier version floored the WORLD gap at a fixed value, so
+      // the on-screen gap (world x z) grew without bound as z rose — "still big at max zoom".
+      for (const z of [50, 500, 5000]) {
+        const out = applySpacing(model, z, true);
+        const worldGap = gapBetween(out.groupRects['tb-a'], out.groupRects['tb-b']);
+        const screenGap = worldGap * z;
+        expect(screenGap).toBeGreaterThanOrEqual(MIN_GAP_SCREEN_PX - 1e-6);
+        expect(screenGap).toBeLessThan(MIN_GAP_SCREEN_PX + 2);
+      }
     });
 
     it('translates each frame\'s only node rigidly along with it', () => {
@@ -226,36 +231,39 @@ describe('applySpacing', () => {
       const out = applySpacing(model, 4, true);
       const afterGap = gapBetween(out.nodeRects['n1'], out.nodeRects['n2']);
       // A scale-toward-centroid pull on this exact shape (340-wide node, 10-wide gap) could
-      // only ever close ~1% of the gap before a node violated MIN_GAP — i.e. afterGap would
-      // stay above ~9.9. The gap-shrink sweep reaches the MIN_GAP floor itself instead.
+      // only ever close ~1% of the gap before two nodes got too close — i.e. afterGap would
+      // stay above ~9.9. The gap-shrink sweep gets much closer to MIN_GAP_SCREEN_PX instead.
       expect(afterGap).toBeLessThan(GAP_X - 1);
       expect(noOverlap([out.nodeRects['n1'], out.nodeRects['n2']])).toBe(true);
     });
 
-    it('tightens two adjacent nodes in one row all the way to MIN_GAP at high zoom', () => {
+    it('tightens two adjacent nodes in one row to a SCREEN gap near MIN_GAP_SCREEN_PX at high zoom — never bigger, however far z goes', () => {
       const model = adjacentNodesModel();
-      const out = applySpacing(model, 50, true);
-      const afterGap = gapBetween(out.nodeRects['n1'], out.nodeRects['n2']);
-      expect(afterGap).toBeGreaterThanOrEqual(MIN_GAP - 1e-6);
-      expect(afterGap).toBeLessThan(MIN_GAP + 2);
+      for (const z of [50, 500, 5000]) {
+        const out = applySpacing(model, z, true);
+        const worldGap = gapBetween(out.nodeRects['n1'], out.nodeRects['n2']);
+        const screenGap = worldGap * z;
+        expect(screenGap).toBeGreaterThanOrEqual(MIN_GAP_SCREEN_PX - 1e-6);
+        expect(screenGap).toBeLessThan(MIN_GAP_SCREEN_PX + 2);
+      }
     });
 
-    it('keeps tightening monotonically through a realistic zoom sweep, never below MIN_GAP', () => {
+    it('keeps tightening monotonically (in SCREEN space) through a realistic zoom sweep, never below MIN_GAP_SCREEN_PX', () => {
       const groupModel = adjacentGroupsModel();
       const nodeModel = adjacentNodesModel();
-      let lastGroupGap = Infinity;
-      let lastNodeGap = Infinity;
+      let lastGroupScreenGap = Infinity;
+      let lastNodeScreenGap = Infinity;
       for (let z = 1; z <= 40; z += 1) {
         const groupOut = applySpacing(groupModel, z, true);
         const nodeOut = applySpacing(nodeModel, z, true);
-        const groupGap = gapBetween(groupOut.groupRects['tb-a'], groupOut.groupRects['tb-b']);
-        const nodeGap = gapBetween(nodeOut.nodeRects['n1'], nodeOut.nodeRects['n2']);
-        expect(groupGap).toBeGreaterThanOrEqual(MIN_GAP - 1e-9);
-        expect(nodeGap).toBeGreaterThanOrEqual(MIN_GAP - 1e-9);
-        expect(groupGap).toBeLessThanOrEqual(lastGroupGap + 1e-9);
-        expect(nodeGap).toBeLessThanOrEqual(lastNodeGap + 1e-9);
-        lastGroupGap = groupGap;
-        lastNodeGap = nodeGap;
+        const groupScreenGap = gapBetween(groupOut.groupRects['tb-a'], groupOut.groupRects['tb-b']) * z;
+        const nodeScreenGap = gapBetween(nodeOut.nodeRects['n1'], nodeOut.nodeRects['n2']) * z;
+        expect(groupScreenGap).toBeGreaterThanOrEqual(MIN_GAP_SCREEN_PX - 1e-9);
+        expect(nodeScreenGap).toBeGreaterThanOrEqual(MIN_GAP_SCREEN_PX - 1e-9);
+        expect(groupScreenGap).toBeLessThanOrEqual(lastGroupScreenGap + 1e-9);
+        expect(nodeScreenGap).toBeLessThanOrEqual(lastNodeScreenGap + 1e-9);
+        lastGroupScreenGap = groupScreenGap;
+        lastNodeScreenGap = nodeScreenGap;
       }
     });
 
