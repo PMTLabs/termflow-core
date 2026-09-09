@@ -178,6 +178,18 @@ describe('useArrange — reduced motion', () => {
 });
 
 describe('useArrange — the animation', () => {
+  it('does not write a node that becomes hidden during the frozen animation', () => {
+    mount();
+    act(() => arrange());
+    const hidden = {
+      ...model,
+      nodes: model.nodes.map((n) => n.terminalId === 'tm-2' ? { ...n, hidden: true } : n),
+    };
+    mount(hidden);
+    const before = canvasState().nodes['tm-2'];
+    flush(clock + ARRANGE_MS * 2);
+    expect(canvasState().nodes['tm-2']).toEqual(before);
+  });
   it('comes to rest exactly on the target', () => {
     mount();
     act(() => arrange());

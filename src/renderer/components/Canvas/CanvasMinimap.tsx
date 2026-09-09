@@ -41,8 +41,10 @@ export const CanvasMinimap: React.FC<{
    *  two. The SIZE of the step is this component's to decide, because only it holds the
    *  projection the step is measured against. */
   onPan?: (dxScreen: number, dyScreen: number) => void;
-  revealHidden?: boolean;
-}> = ({ model, vp, vw, vh, onPick, onPan, revealHidden = false }) => {
+  revealHidden: boolean;
+  /** REQUIRED: an omitted list silently reintroduces phantom hidden-group bounds. */
+  shownGroups: CanvasModel['groups'];
+}> = ({ model, vp, vw, vh, onPick, onPan, revealHidden, shownGroups }) => {
   // The viewport's own world rect. Derived through `screenToWorld` rather than by inverting the
   // transform by hand, so it cannot disagree with the pan/zoom maths everything else uses.
   const view: Rect = useMemo(() => {
@@ -60,9 +62,9 @@ export const CanvasMinimap: React.FC<{
    * pan out past the content, which is what every canvas minimap does.
    */
   const t = useMemo(() => {
-    const bounds = boundsOf([...model.groups.map((g) => g.rect), view]);
+    const bounds = boundsOf([...shownGroups.map((g) => g.rect), view]);
     return minimapTransform(bounds ?? view, MINIMAP_W, MINIMAP_H);
-  }, [model.groups, view]);
+  }, [shownGroups, view]);
 
   /** The world point drawn under a client-space pointer. */
   const worldAt = useCallback((el: HTMLDivElement, cx: number, cy: number) => {
@@ -180,7 +182,7 @@ export const CanvasMinimap: React.FC<{
       aria-label="Workspace minimap — click to fly there, drag the view box to pan, arrow keys to pan"
       title="Click to fly there · drag the view box to pan · arrow keys to pan"
     >
-      {model.groups.map((g) => (
+      {shownGroups.map((g) => (
         <div key={g.tabId} className="canvas-minigroup" style={box(g.rect)} />
       ))}
       {model.nodes.filter((n) => revealHidden || !n.hidden).map((n) => (

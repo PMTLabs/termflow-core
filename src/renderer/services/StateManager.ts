@@ -16,6 +16,7 @@ import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
 import { apiBase } from '../api/apiBase';
+import { isVirtualTab } from './tabKinds';
 // `stateKey` is deliberately NOT imported: the session key is per WINDOW now
 // (plan 018), and the profile-only key would put every window back on one blob.
 import { sessionStateKey, isSlotZero } from './windowScope';
@@ -504,6 +505,14 @@ class StateManagerClass {
         if (appState.tabPanes) {
           console.log('Restoring tab panes mapping for all tabs:', Object.keys(appState.tabPanes));
           restoreTabPanesInPlace(appState.tabPanes);
+          // Seed Redux before tabs become observable. TerminalContainer's prune is correctly
+          // allowed to remove genuinely gone geometry, but an empty pre-seed map is not an
+          // authoritative workspace and must not erase restored node or hidden state.
+          for (const tab of appState.tabs || []) {
+            if (tab?.id && !isVirtualTab(tab.shellType) && tab.id in appState.tabPanes) {
+              dispatch(addTabTree({ tabId: tab.id, tree: appState.tabPanes[tab.id] }));
+            }
+          }
         }
 
         // The canvas tab restores FIRST, wherever it was persisted (`plan/024` Req 3).

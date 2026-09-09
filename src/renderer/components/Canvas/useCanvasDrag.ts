@@ -138,7 +138,9 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
         gd.moved = true;
         const { dx, dy } = worldDelta(e.clientX - gd.startX, e.clientY - gd.startY, z);
         const moved = moveGroupBy(gd.frame, gd.nodes, gd.ids, dx, dy);
-        // ONE transition for the frame and every member. This was a dispatch per member,
+        // ONE transition for the frame and every member. Hidden members deliberately move with
+        // their group: a group drag translates a whole tab, and leaving one behind would detach
+        // it from siblings and make it reappear somewhere unrelated.
         // so a 100-terminal group produced 101 Redux actions per pointer event — each one
         // invalidating the canvas selector and re-running layout mid-gesture.
         const nodes: Record<string, Rect> = {};

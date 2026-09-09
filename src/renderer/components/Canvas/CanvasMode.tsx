@@ -161,6 +161,13 @@ export const CanvasMode: React.FC = () => {
     () => revealHidden ? model.nodes : model.nodes.filter((n) => !n.hidden),
     [model.nodes, revealHidden],
   );
+  // Presentation/targeting share this one eligibility list; the model stays complete for
+  // membership, panes and hosts, while invisible frames cannot become phantom destinations.
+  const shownGroups = useMemo(
+    () => model.groups.filter((g) => revealHidden || !g.allHidden),
+    [model.groups, revealHidden],
+  );
+  const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
   // Read ONCE here and passed down, not subscribed to per node — see `CanvasNode`'s prop doc.
   const busyCue = useSelector((s: RootState) => s.settings.canvasBusyCue);
   // Session-closed state and the terminal font size, for the overlay's banner (`plan/024` Req 4).
@@ -282,7 +289,7 @@ export const CanvasMode: React.FC = () => {
     [model, vp, size],
   );
 
-  const collapsed = allCollapsed(model.nodes, tiers, vp.z);
+  const collapsed = allCollapsed(model.nodes, tiers, vp.z, revealHidden);
 
   /**
    * Keeps collapsed chips off each other.
@@ -293,8 +300,8 @@ export const CanvasMode: React.FC = () => {
    * collapsed, which is the only time a chip is rendered at all.
    */
   const chipNudge = useMemo(
-    () => (collapsed ? chipOffsets(model.groups, vp.z) : {}),
-    [collapsed, model.groups, vp.z],
+    () => (collapsed ? chipOffsets(shownGroups, vp.z) : {}),
+    [collapsed, shownGroups, vp.z],
   );
 
   /** USER-hidden alone — deliberately not `isHidden`, which is also true for a merely culled
@@ -304,6 +311,14 @@ export const CanvasMode: React.FC = () => {
     (id: string) => hiddenNodeIds.has(id) && !revealHidden,
     [hiddenNodeIds, revealHidden],
   );
+  // `tiers` is intentionally only the reveal-aware promotion budget. Policy reconciliation,
+  // however, owns every mounted terminal, including re-hidden ones that must be explicitly
+  // demoted rather than silently left outside its inventory.
+  const policyTiers = useMemo(() => {
+    const all = { ...tiers };
+    for (const n of model.nodes) if (!(n.terminalId in all)) all[n.terminalId] = 'group';
+    return all;
+  }, [tiers, model.nodes]);
 
   // Whether a node PAINTS. Extracted because the wire mask and the node's own `hidden` prop
   // must agree exactly — a mask hole for a node that is not there shows the 30% ghost against
@@ -338,8 +353,8 @@ export const CanvasMode: React.FC = () => {
   // lives in `canvasSelectors` so it can be tested — see `snapshotNodeIds` for why the
   // intersection with `visible` is load-bearing rather than an optimisation.
   const snapshotIds = useMemo(
-    () => snapshotNodeIds(paintedNodes, tiers, visible, collapsed),
-    [paintedNodes, tiers, visible, collapsed],
+    () => snapshotNodeIds(model.nodes, tiers, visible, collapsed, revealHidden),
+    [model.nodes, tiers, visible, collapsed, revealHidden],
   );
 
   // Keep the cache to what is actually on screen. Snapshots are cheap to refetch, and an entry
@@ -385,10 +400,10 @@ export const CanvasMode: React.FC = () => {
     });
   }, [overlayId, vp, size, hostBoxes]);
 
-  useCanvasRenderPolicy(tiers, focusedId, recent);
+  useCanvasRenderPolicy(policyTiers, focusedId, recent, hiddenNodeIds);
 
   // Node drag, group drag and cross-group re-homing (Tasks 11 + 12).
-  const drag = useCanvasDrag(model);
+  const drag = useCanvasDrag(presentationModel);
 
   // Auto-arrange (Task 13). A button, never automatic — design 010 D10: a canvas that
   // rearranges itself while you are looking away destroys the spatial memory the whole
@@ -578,9 +593,9 @@ export const CanvasMode: React.FC = () => {
    * frame would re-render every tab in the strip for the whole gesture.
    */
   useEffect(() => {
-    const id = nearestGroupToCentre(model.groups, vp, size.w, size.h);
+    const id = nearestGroupToCentre(shownGroups, vp, size.w, size.h);
     if (id !== nearestGroupId) dispatch(setNearestGroup(id));
-  }, [model.groups, vp, size, nearestGroupId, dispatch]);
+  }, [shownGroups, vp, size, nearestGroupId, dispatch]);
 
   /** Frame the whole workspace.
    *
@@ -588,17 +603,17 @@ export const CanvasMode: React.FC = () => {
    *  `buildModel`), so their union already contains every node — and an EMPTIED group keeps its
    *  stored frame and is still part of the workspace, which a node-only union would drop. */
   const fitAll = useCallback(() => {
-    const b = boundsOf(model.groups.filter((g) => revealHidden || !g.allHidden).map((g) => g.rect));
+    const b = boundsOf(shownGroups.map((g) => g.rect));
     if (b) flyTo(fitViewport(b, size.w, size.h, metrics.zMax));
-  }, [model.groups, revealHidden, flyTo, size, metrics]);
+  }, [shownGroups, flyTo, size, metrics]);
 
   /** Frame the group you are working in — the selected node's, falling back to the one the
    *  marker is already pointing at, so the key always does something. */
   const fitGroup = useCallback(() => {
     const tabId = model.nodes.find((n) => n.terminalId === selectedId)?.tabId ?? nearestGroupId;
-    const g = model.groups.find((x) => x.tabId === tabId && (revealHidden || !x.allHidden));
+    const g = shownGroups.find((x) => x.tabId === tabId);
     if (g) flyTo(fitViewport(g.rect, size.w, size.h, metrics.zMax));
-  }, [model, revealHidden, selectedId, nearestGroupId, flyTo, size, metrics]);
+  }, [model.nodes, shownGroups, selectedId, nearestGroupId, flyTo, size, metrics]);
 
   /** One arrow-key step, in screen pixels. Relative, so this callback never reads the viewport
    *  and stays referentially stable — see `panViewport` for why that matters to the listener
@@ -992,7 +1007,7 @@ export const CanvasMode: React.FC = () => {
         overlay={!overlayId ? (
           <>
             <CanvasBeacons beacons={beacons} onPick={flyToNode} />
-            {model.groups.some((g) => revealHidden || !g.allHidden) && (
+            {shownGroups.length > 0 && (
               <CanvasMinimap
                 model={model}
                 vp={vp}
@@ -1000,6 +1015,7 @@ export const CanvasMode: React.FC = () => {
                 vh={size.h}
                 onPick={flyToWorld}
                 revealHidden={revealHidden}
+                shownGroups={shownGroups}
                 // Already in screen pixels — the minimap sized the step against its own
                 // projection, which is the only place that scale is known.
                 onPan={panScreen}
@@ -1033,7 +1049,7 @@ export const CanvasMode: React.FC = () => {
             <path className="canvas-ghostwire" d={wire.ghost} />
           </svg>
         )}
-        {model.groups.filter((g) => revealHidden || !g.allHidden).map((g) => (
+        {shownGroups.map((g) => (
           <CanvasGroupFrame
             key={g.tabId}
             group={g}

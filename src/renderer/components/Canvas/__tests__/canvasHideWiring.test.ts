@@ -18,6 +18,12 @@ describe('hidden canvas consumers', () => {
     expect(MODE).not.toContain("model.nodes.find((n) => n.terminalId === id)?.hidden");
   });
 
+  it('hands the derived presentation list to the minimap rather than allowing its full-model fallback', () => {
+    const minimap = /<CanvasMinimap[\s\S]*?\/>/.exec(MODE)?.[0] ?? '';
+    expect(minimap).toContain('shownGroups={shownGroups}');
+    expect(minimap).toContain('revealHidden={revealHidden}');
+  });
+
   it('keeps the toolbar and its recovery action after the final node is hidden', () => {
     expect(MODE).toContain('{!overlayId && (model.groups.length > 0 || hiddenCount > 0) && (');
     expect(MODE).toContain('Hidden{hiddenCount > 0 ? ` (${hiddenCount})` : \'\'}');

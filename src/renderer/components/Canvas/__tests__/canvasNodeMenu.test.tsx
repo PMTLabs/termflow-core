@@ -102,7 +102,9 @@ describe('the node menu offers more than the destructive action', () => {
     const hide = itemMatching('Hide from the canvas');
     click(hide);
     expect(handlers.onToggleHide).toHaveBeenCalledTimes(1);
-    expect(labels().indexOf('Hide from the canvas')).toBeLessThan(labels().indexOf('Close Terminal'));
+    const divider = [...document.querySelectorAll('.canvas-menu .context-menu-divider')].at(-1)!;
+    expect(divider).not.toBeNull();
+    expect(hide.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     render(false, true);
     expect(labels()).toContain('Show on the canvas');
   });

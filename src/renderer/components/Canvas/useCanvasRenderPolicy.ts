@@ -36,6 +36,7 @@ export function useCanvasRenderPolicy(
   tiers: Record<string, LodTier>,
   focusedId: string | null,
   recent: readonly string[],
+  hiddenIds: ReadonlySet<string> = new Set(),
 ): void {
   const suppressed = useRef<ReadonlySet<string>>(new Set());
   const snapshot = useRef<RenderPolicySnapshot | null>(null);
@@ -70,9 +71,7 @@ export function useCanvasRenderPolicy(
 
   useEffect(() => {
     const ids = Object.keys(tiers);
-    if (!ids.length) return;
-
-    const desired = desiredPolicies(tiers, suppressed.current);
+    const desired = desiredPolicies(tiers, suppressed.current, hiddenIds);
     // Nothing to do: this frame wants exactly the policies already applied. The common
     // case during a pan, and skipping it here keeps the settle timer from being armed
     // and re-armed for the whole gesture.
@@ -101,5 +100,5 @@ export function useCanvasRenderPolicy(
     }, SETTLE_MS);
 
     return () => clearTimeout(timer);
-  }, [tiers, focusedId, recent]);
+  }, [tiers, focusedId, recent, hiddenIds]);
 }

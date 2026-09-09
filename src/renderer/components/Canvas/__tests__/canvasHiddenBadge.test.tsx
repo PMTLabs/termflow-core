@@ -16,7 +16,7 @@ afterEach(() => { act(() => root.unmount()); container.remove(); });
 describe('CanvasHiddenBadge', () => {
   it('renders nothing without hidden terminals, then renders the pane face', () => {
     act(() => root.render(<CanvasHiddenForTerminal key="empty" terminalId="tm-a" />));
-    expect(container.textContent).toBe('');
+    expect(container.querySelector('.canvas-hidden-badge')).toBeNull();
     hidden = { 'tm-a': true };
     act(() => root.render(<CanvasHiddenForTerminal key="hidden" terminalId="tm-a" />));
     expect(container.querySelector('.canvas-hidden-badge')!.title).toBe('Hidden from the canvas');

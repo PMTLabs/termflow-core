@@ -40,6 +40,16 @@ describe('canvasSlice', () => {
     s = canvasReducer(s, hydrateCanvas({ hidden: ['tm-not-an-object'] as any }));
     expect(s.hidden).toEqual({ 'tm-b': true });
   });
+  it('reconciles interaction ids when re-hide makes their selected node invisible', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeHidden({ id: 'tm-a', hidden: true }));
+    s = canvasReducer(s, setRevealHidden(true));
+    s = canvasReducer(s, selectNode('tm-a'));
+    s = canvasReducer(s, focusNode('tm-a'));
+    s = canvasReducer(s, setOverlayNode('tm-a'));
+    s = canvasReducer(s, setRevealHidden(false));
+    expect([s.selectedId, s.focusedId, s.overlayId]).toEqual([null, null, null]);
+  });
   it('starts at an identity viewport', () => {
     const s = init();
     expect(s.viewport).toEqual({ x: 0, y: 0, z: 1 });

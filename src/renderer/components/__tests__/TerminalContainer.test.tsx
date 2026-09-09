@@ -29,6 +29,7 @@ import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
+import canvasReducer, { hydrateCanvas } from '../../store/slices/canvasSlice';
 import panesReducer, {
   addTabTree, setActiveTabId, removePaneFromTab, insertPaneIntoTab,
 } from '../../store/slices/panesSlice';
@@ -54,7 +55,7 @@ jest.mock('../Panes/PaneManager', () => ({
 import { TerminalContainer } from '../TerminalContainer';
 
 function makeStore() {
-  return configureStore({ reducer: { tabs: tabsReducer, panes: panesReducer } });
+  return configureStore({ reducer: { tabs: tabsReducer, panes: panesReducer, canvas: canvasReducer } });
 }
 
 describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () => {
@@ -179,6 +180,23 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     // createTerminal call, which performs the actual host-session claim.
     expect(registerExistingTerminal).not.toHaveBeenCalled();
     expect(result.paneTree.sessionKey).toBe('tm-host-session01');
+  });
+
+  it('waits for authoritative trees before pruning restored canvas state, then prunes a genuinely gone terminal', async () => {
+    const store = makeStore();
+    const tabId = 'tb-restored';
+    (window as any).tabPanes[tabId] = { id: 'pn-restored', type: 'terminal', terminalId: 'tm-restored' };
+    store.dispatch(hydrateCanvas({
+      nodes: { 'tm-restored': { x: 9, y: 8, w: 340, h: 210 }, 'tm-gone': { x: 1, y: 2, w: 340, h: 210 } },
+      hidden: { 'tm-restored': true, 'tm-gone': true },
+    }));
+    store.dispatch(addTab({ id: tabId, title: 'Restored', shellType: 'bash' } as any));
+    await mount(store);
+    const canvas = store.getState().canvas;
+    expect(canvas.nodes['tm-restored']).toBeDefined();
+    expect(canvas.hidden['tm-restored']).toBe(true);
+    expect(canvas.nodes['tm-gone']).toBeUndefined();
+    expect(canvas.hidden['tm-gone']).toBeUndefined();
   });
 
   // AMENDED by design 014 — the contrast this case existed to draw is GONE, and

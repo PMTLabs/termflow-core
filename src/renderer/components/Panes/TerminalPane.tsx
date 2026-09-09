@@ -704,7 +704,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 name is printed because a pane has room for one; the `+N` is how the rest are
                 offered, and the context menu is where they are read. */}
             <AutomationArmedForTerminal terminalId={terminalId ?? null} compact={false} />
-            <CanvasHiddenForTerminal terminalId={terminalId ?? null} />
+            <span style={{ '--canvas-hidden-size': '14px' } as React.CSSProperties}>
+              <CanvasHiddenForTerminal terminalId={terminalId ?? null} />
+            </span>
           </div>
           <div className="terminal-pane-controls">
             <button

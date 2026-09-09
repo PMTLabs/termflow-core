@@ -4,11 +4,11 @@ import type { RootState } from '../../store';
 import { EyeIcon } from './EyeIcon';
 import './canvasHiddenBadge.css';
 
-const CanvasHiddenBadge: React.FC<{ count: number; tab: boolean }> = ({ count, tab }) => {
+const CanvasHiddenBadge: React.FC<{ count: number; tab: boolean }> = React.memo(({ count, tab }) => {
   if (count === 0) return null;
   const title = tab ? `${count} terminal${count === 1 ? '' : 's'} in this tab ${count === 1 ? 'is' : 'are'} hidden from the canvas` : 'Hidden from the canvas';
   return <span className="canvas-hidden-badge" title={title}><EyeIcon slashed size={14} />{tab && count > 1 && <span>{`+${count - 1}`}</span>}</span>;
-};
+});
 
 const CanvasHiddenForTerminalImpl: React.FC<{ terminalId: string | null }> = ({ terminalId }) => {
   const hidden = useSelector((s: RootState) => terminalId ? !!s.canvas.hidden[terminalId] : false);

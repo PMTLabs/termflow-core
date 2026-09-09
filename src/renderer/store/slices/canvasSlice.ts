@@ -126,6 +126,13 @@ const clampWidth = (w: number) => Math.max(SIDEBAR_MIN, Math.min(SIDEBAR_MAX, w)
 const clampZoom = (z: number) =>
   (Number.isFinite(z) ? Math.max(SIDEBAR_ZOOM_MIN, Math.min(SIDEBAR_ZOOM_MAX, z)) : 1);
 
+/** Remove interaction references that would otherwise point at a node no longer painted. */
+const reconcileHiddenInteraction = (state: CanvasState) => {
+  if (state.selectedId && state.hidden[state.selectedId]) state.selectedId = null;
+  if (state.focusedId && state.hidden[state.focusedId]) state.focusedId = null;
+  if (state.overlayId && state.hidden[state.overlayId]) state.overlayId = null;
+};
+
 const canvasSlice = createSlice({
   name: 'canvas',
   initialState,
@@ -274,13 +281,14 @@ const canvasSlice = createSlice({
       const { id, hidden } = action.payload;
       if (hidden) {
         state.hidden[id] = true;
-        if (state.selectedId === id) state.selectedId = null;
-        if (state.focusedId === id) state.focusedId = null;
-        if (state.overlayId === id) state.overlayId = null;
+        reconcileHiddenInteraction(state);
       } else delete state.hidden[id];
     },
     unhideAll: (state) => { state.hidden = {}; },
-    setRevealHidden: (state, action: PayloadAction<boolean>) => { state.revealHidden = action.payload; },
+    setRevealHidden: (state, action: PayloadAction<boolean>) => {
+      state.revealHidden = action.payload;
+      if (!action.payload) reconcileHiddenInteraction(state);
+    },
     pruneCanvasGeometry: (
       state,
       action: PayloadAction<{ terminalIds: string[]; tabIds: string[] }>

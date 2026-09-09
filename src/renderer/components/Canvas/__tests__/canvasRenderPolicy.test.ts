@@ -8,6 +8,10 @@ import {
 const tiers = (m: Record<string, LodTier>) => m;
 
 describe('desiredPolicies', () => {
+  it('explicitly demotes a hidden gpu terminal without removing it from policy ownership', () => {
+    const d = desiredPolicies(tiers({ hidden: 'gpu', visible: 'gpu' }), new Set(), new Set(['hidden']));
+    expect(d).toEqual({ hidden: 'dom', visible: 'webgl' });
+  });
   it('asks for webgl only at the gpu tier', () => {
     const d = desiredPolicies(
       tiers({ a: 'gpu', b: 'live', c: 'snapshot', d: 'chip', e: 'group' }),
