@@ -1,4 +1,5 @@
-import { Rect } from './canvasGeometry';
+import { paintedNodeRect, Rect } from './canvasGeometry';
+import { drawnFrameRect } from './canvasLayout';
 import { CanvasModel } from './canvasSelectors';
 
 /**
@@ -147,6 +148,18 @@ export interface SpacingResult {
 /**
  * The spacing-adjusted position of every node and group in `model`, at zoom `z`.
  *
+ * **Sweeps DRAWN geometry, not layout rects — this is the whole ballgame.** A group frame is
+ * not painted on its layout rect: `drawnFrameRect` rescales its padding into a screen band, so
+ * above z≈1.5 each border is inset by `PAD - PAD_SCREEN_MAX/z` world units per side, and that
+ * inset GROWS with zoom. A node likewise paints `headSlack(z)` shorter than its rect above zoom
+ * 1 (`paintedNodeRect`). Tightening the layout rects therefore fixed a box nobody can see: the
+ * layout gap fell 28 → 13 screen px from z=1 to z=3 while the gap between the DRAWN borders rose
+ * 28 → 61, and terminal-to-terminal went 60 → 109. Zooming in pushed things APART, which is the
+ * exact opposite of the feature's purpose. So each level sweeps the rects as PAINTED and applies
+ * the resulting translation back to the layout rect — legitimate because both `drawnFrameRect`
+ * and `paintedNodeRect` are rigid functions of the layout rect at a fixed `z`, so translating
+ * the layout rect by `d` translates the painted one by exactly `d`.
+ *
  * Hierarchical, matching the approved design (plan/039 §4): group frames tighten toward each
  * other first, TRANSLATING every member node by the same delta as its frame — a group frame's
  * own centre is not its members' centre (`fitGroupFrame` pads the top and bottom differently, for
@@ -169,12 +182,13 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   if (!enabled || spacingFactor(z) >= 1) return { nodeRects, groupRects };
 
   if (model.groups.length > 1) {
-    const before = model.groups.map((g) => g.rect);
-    const after = tighten(before, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
+    const layout = model.groups.map((g) => g.rect);
+    const drawn = layout.map((r) => drawnFrameRect(r, z));
+    const tightened = tighten(drawn, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
     model.groups.forEach((g, i) => {
-      groupRects[g.tabId] = after[i];
-      const dx = after[i].x - before[i].x;
-      const dy = after[i].y - before[i].y;
+      const dx = tightened[i].x - drawn[i].x;
+      const dy = tightened[i].y - drawn[i].y;
+      groupRects[g.tabId] = { ...layout[i], x: layout[i].x + dx, y: layout[i].y + dy };
       if (dx === 0 && dy === 0) return;
       for (const id of g.nodeIds) {
         const r = nodeRects[id];
@@ -186,9 +200,16 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   for (const g of model.groups) {
     const members = model.nodes.filter((n) => g.nodeIds.includes(n.terminalId));
     if (members.length <= 1) continue;
-    const before = members.map((n) => nodeRects[n.terminalId]);
-    const after = tighten(before, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
-    members.forEach((n, i) => { nodeRects[n.terminalId] = after[i]; });
+    const layout = members.map((n) => nodeRects[n.terminalId]);
+    const painted = layout.map((r) => paintedNodeRect(r, z, false));
+    const tightened = tighten(painted, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
+    members.forEach((n, i) => {
+      nodeRects[n.terminalId] = {
+        ...layout[i],
+        x: layout[i].x + (tightened[i].x - painted[i].x),
+        y: layout[i].y + (tightened[i].y - painted[i].y),
+      };
+    });
   }
 
   return { nodeRects, groupRects };
