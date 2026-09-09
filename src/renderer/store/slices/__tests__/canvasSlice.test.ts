@@ -3,7 +3,7 @@ import canvasReducer, {
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, setSidebarZoom, setNodeHidden, unhideAll, setRevealHidden, SIDEBAR_ZOOM_MIN, SIDEBAR_ZOOM_MAX,
-  pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
+  setDynamicSpacing, pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
 
@@ -201,6 +201,16 @@ describe('canvasSlice', () => {
 
   it('opens and closes the sidebar', () => {
     expect(canvasReducer(init(), setSidebarOpen(false)).sidebarOpen).toBe(false);
+  });
+
+  it('defaults Dynamic Spacing to off, and toggles it', () => {
+    expect(init().dynamicSpacing).toBe(false);
+    expect(canvasReducer(init(), setDynamicSpacing(true)).dynamicSpacing).toBe(true);
+  });
+
+  it('hydrates a persisted Dynamic Spacing toggle, and ignores an absent one', () => {
+    expect(canvasReducer(init(), hydrateCanvas({ dynamicSpacing: true })).dynamicSpacing).toBe(true);
+    expect(canvasReducer(init(), hydrateCanvas({})).dynamicSpacing).toBe(false);
   });
 
   it('prunes geometry for terminals and tabs that no longer exist', () => {

@@ -21,6 +21,10 @@ export interface CanvasPersisted {
   sidebarZoom: number;
   /** Terminals the user has hidden from the canvas. A present key means hidden. */
   hidden: Record<string, true>;
+  /** Toolbar toggle (plan/039): tighten node/group spacing at render time as the user zooms
+   *  in. Persisted like every other toolbar toggle, but never itself moves a node or group —
+   *  see `canvasSpacing.applySpacing`. Off by default; must be explicitly enabled. */
+  dynamicSpacing: boolean;
 }
 
 /**
@@ -100,6 +104,7 @@ const initialState: CanvasState = {
   sidebarWidth: 250,
   sidebarZoom: 1,
   hidden: {},
+  dynamicSpacing: false,
   revealHidden: false,
   selectedId: null,
   selectedEdgeId: null,
@@ -285,6 +290,9 @@ const canvasSlice = createSlice({
       } else delete state.hidden[id];
     },
     unhideAll: (state) => { state.hidden = {}; },
+    setDynamicSpacing: (state, action: PayloadAction<boolean>) => {
+      state.dynamicSpacing = action.payload;
+    },
     setRevealHidden: (state, action: PayloadAction<boolean>) => {
       state.revealHidden = action.payload;
       if (!action.payload) reconcileHiddenInteraction(state);
@@ -328,6 +336,7 @@ const canvasSlice = createSlice({
       if (p.hidden && typeof p.hidden === 'object' && !Array.isArray(p.hidden)) {
         state.hidden = Object.fromEntries(Object.entries(p.hidden).filter(([, value]) => value === true)) as Record<string, true>;
       }
+      if (typeof p.dynamicSpacing === 'boolean') state.dynamicSpacing = p.dynamicSpacing;
     },
   },
 });
@@ -337,7 +346,7 @@ export const {
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, setSidebarZoom, setNodeHidden, unhideAll, setRevealHidden,
-  pruneCanvasGeometry, hydrateCanvas,
+  setDynamicSpacing, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 
 export default canvasSlice.reducer;

@@ -8,6 +8,7 @@ import { RootState } from '../../store';
 import {
   CanvasEdge, addEdge, focusNode, panViewport, removeEdge, selectEdge, selectNode, setEdges,
   setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen, setNodeHidden, setRevealHidden,
+  setDynamicSpacing,
 } from '../../store/slices/canvasSlice';
 import { addTabTree, focusPaneInTab } from '../../store/slices/panesSlice';
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
@@ -38,6 +39,7 @@ import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
+import { applySpacing } from './canvasSpacing';
 import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
@@ -168,6 +170,43 @@ export const CanvasMode: React.FC = () => {
     [model.groups, revealHidden],
   );
   const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
+
+  /**
+   * Dynamic Spacing (plan/039) — the toolbar toggle that tightens node/group spacing above
+   * zoom 1. `dragActive` freezes it (falls back to the untouched rects) for the duration of any
+   * press on a node header or group label, moved or not: without this, a drag's origin is
+   * always the RAW stored rect (`onHeaderPointerDown` below is deliberately given `n.rect`,
+   * never a spacing-adjusted one — dragging must write real geometry, never a compacted one),
+   * so if spacing kept applying mid-drag the rendered node would track the cursor at the wrong
+   * rate. A plain click freezes it for the same instant and is not worth telling apart from a
+   * drag — both start and end inside one pointerdown/pointerup pair, too short to notice.
+   */
+  const dynamicSpacing = useSelector((s: RootState) => s.canvas.dynamicSpacing);
+  const [dragActive, setDragActive] = useState(false);
+  useEffect(() => {
+    const onUp = () => setDragActive(false);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    return () => {
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+  }, []);
+  const spacing = useMemo(
+    () => applySpacing(presentationModel, vp.z, dynamicSpacing && !dragActive),
+    [presentationModel, vp.z, dynamicSpacing, dragActive],
+  );
+  // Only the two consumers that read POSITION for something other than drag/spawn math ever see
+  // these: paint culling/tiers, wires, and the two render loops below. Drag origins, spawn
+  // placement and the node/group menus keep reading `model`/`presentationModel` directly.
+  const spacedNodes = useMemo(
+    () => model.nodes.map((n) => ({ ...n, rect: spacing.nodeRects[n.terminalId] ?? n.rect })),
+    [model.nodes, spacing],
+  );
+  const spacedShownGroups = useMemo(
+    () => shownGroups.map((g) => ({ ...g, rect: spacing.groupRects[g.tabId] ?? g.rect })),
+    [shownGroups, spacing],
+  );
   // Read ONCE here and passed down, not subscribed to per node — see `CanvasNode`'s prop doc.
   const busyCue = useSelector((s: RootState) => s.settings.canvasBusyCue);
   // Session-closed state and the terminal font size, for the overlay's banner (`plan/024` Req 4).
@@ -272,7 +311,12 @@ export const CanvasMode: React.FC = () => {
 
   const tiers = useMemo(() => {
     const rects: Record<string, Rect> = {};
-    for (const n of model.nodes) rects[n.terminalId] = n.rect;
+    // Dynamic Spacing only ever moves a rect, never resizes it, so the WIDTH half of the tier
+    // ladder (`baseTier`) is unaffected either way — but the visibility half (`isVisible`,
+    // culling a node to `snapshot`) reads position, and has to agree with wherever the node is
+    // actually DRAWN, or a node that spacing brought on screen would still render as a
+    // placeholder.
+    for (const n of spacedNodes) rects[n.terminalId] = n.rect;
     return assignTiers({
       ids: paintedNodes.map((n) => n.terminalId),
       rects,
@@ -282,11 +326,11 @@ export const CanvasMode: React.FC = () => {
       focusedId,
       recent,
     });
-  }, [paintedNodes, vp, size, focusedId, recent]);
+  }, [spacedNodes, paintedNodes, vp, size, focusedId, recent]);
 
   const visible = useMemo(
-    () => visibleNodeIds(model.nodes, vp, size.w, size.h),
-    [model, vp, size],
+    () => visibleNodeIds(spacedNodes, vp, size.w, size.h),
+    [spacedNodes, vp, size],
   );
 
   const collapsed = allCollapsed(model.nodes, tiers, vp.z, revealHidden);
@@ -341,13 +385,13 @@ export const CanvasMode: React.FC = () => {
   const { wireRects, maskRects } = useMemo(() => {
     const all: Record<string, Rect> = {};
     const painted: Record<string, Rect> = {};
-    for (const n of model.nodes) {
+    for (const n of spacedNodes) {
       const box = paintedNodeRect(n.rect, vp.z, tiers[n.terminalId] === 'chip');
       all[n.terminalId] = box;
       if (!isHidden(n.terminalId) && n.terminalId !== overlayId) painted[n.terminalId] = box;
     }
     return { wireRects: all, maskRects: painted };
-  }, [model.nodes, tiers, vp.z, isHidden, overlayId]);
+  }, [spacedNodes, tiers, vp.z, isHidden, overlayId]);
 
   // At the snapshot tier, on screen, and not swallowed by a whole-canvas collapse. The rule
   // lives in `canvasSelectors` so it can be tested — see `snapshotNodeIds` for why the
@@ -593,15 +637,22 @@ export const CanvasMode: React.FC = () => {
    * frame would re-render every tab in the strip for the whole gesture.
    */
   useEffect(() => {
-    const id = nearestGroupToCentre(shownGroups, vp, size.w, size.h);
+    // The spacing-adjusted rects, so the marker names whichever group is actually centred on
+    // screen — not wherever it would be with Dynamic Spacing off.
+    const id = nearestGroupToCentre(spacedShownGroups, vp, size.w, size.h);
     if (id !== nearestGroupId) dispatch(setNearestGroup(id));
-  }, [shownGroups, vp, size, nearestGroupId, dispatch]);
+  }, [spacedShownGroups, vp, size, nearestGroupId, dispatch]);
 
   /** Frame the whole workspace.
    *
    *  Group rects, not node rects: a non-empty frame shrink-wraps its terminals (see
    *  `buildModel`), so their union already contains every node — and an EMPTIED group keeps its
-   *  stored frame and is still part of the workspace, which a node-only union would drop. */
+   *  stored frame and is still part of the workspace, which a node-only union would drop.
+   *
+   *  Deliberately `shownGroups`, never `spacedShownGroups`: this decides the zoom Dynamic
+   *  Spacing's own factor is a function OF, so framing the already-tightened layout would feed
+   *  the transform's output back into its input. Every other camera target below (`fitGroup`,
+   *  row fly-to, the node/group chip clicks) makes the same choice for the same reason. */
   const fitAll = useCallback(() => {
     const b = boundsOf(shownGroups.map((g) => g.rect));
     if (b) flyTo(fitViewport(b, size.w, size.h, metrics.zMax));
@@ -1049,7 +1100,7 @@ export const CanvasMode: React.FC = () => {
             <path className="canvas-ghostwire" d={wire.ghost} />
           </svg>
         )}
-        {shownGroups.map((g) => (
+        {spacedShownGroups.map((g) => (
           <CanvasGroupFrame
             key={g.tabId}
             group={g}
@@ -1058,7 +1109,8 @@ export const CanvasMode: React.FC = () => {
             chipOffset={chipNudge[g.tabId]}
             dropTarget={drag.dropTabId === g.tabId}
             moving={drag.movingTabId === g.tabId}
-            onLabelPointerDown={drag.onGroupLabelPointerDown(g.tabId)}
+            // Freezes Dynamic Spacing for the press — see the note beside `dragActive`.
+            onLabelPointerDown={(e) => { setDragActive(true); drag.onGroupLabelPointerDown(g.tabId)(e); }}
             onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax))}
             // `preventDefault` because nothing else suppresses the browser's own menu here: the
             // viewport bails out on `.canvas-glabel` and `.canvas-gchip` without preventing
@@ -1087,8 +1139,10 @@ export const CanvasMode: React.FC = () => {
         {model.nodes.map((n) => {
           const isOverlaid = overlay !== null && n.terminalId === overlayId;
           // The overlaid node is the SAME node with a different world rect — no second host,
-          // no relocation, no fit. See `overlayGeometry`.
-          const node = isOverlaid ? { ...n, rect: overlay!.rect } : n;
+          // no relocation, no fit. See `overlayGeometry`. Otherwise, Dynamic Spacing's rect if
+          // it moved this one — `n` itself stays the RAW node below (`onHeaderPointerDown`
+          // still needs its true stored rect as the drag origin, never the spaced one).
+          const node = isOverlaid ? { ...n, rect: overlay!.rect } : { ...n, rect: spacing.nodeRects[n.terminalId] ?? n.rect };
           const tier = isOverlaid ? 'gpu' : (tiers[n.terminalId] ?? 'group');
           return (
             <CanvasNode
@@ -1112,7 +1166,13 @@ export const CanvasMode: React.FC = () => {
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               // The ORIGINAL rect, never the overlay's: dragging an overlaid node would
               // otherwise start from a screen-filling box and fling it across the world.
-              onHeaderPointerDown={isOverlaid ? undefined : drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)}
+              // Freezes Dynamic Spacing for the press — see the note beside `dragActive`. The
+              // ORIGINAL rect, still, never `node.rect`/the spaced one — same reason the comment
+              // above already gives for why an overlaid node passes `n.rect`, not `overlay.rect`.
+              onHeaderPointerDown={isOverlaid ? undefined : (e) => {
+                setDragActive(true);
+                drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)(e);
+              }}
               onDoubleClick={focusTerminal(n.terminalId)}
               onChipClick={() => flyTo(centreOn(
                 aimedNodeRect(n.rect, NODE_CHIP_ZOOM), size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax,
@@ -1173,6 +1233,17 @@ export const CanvasMode: React.FC = () => {
             title={`Grid each group's terminals, then the groups themselves (${combos.arrange})`}
           >
             Arrange
+          </button>
+          {/* plan/039. A render-time transform, not a second layout — off by default (P0),
+              and never itself a source of truth for a node or group's position. */}
+          <button
+            type="button"
+            className="canvas-tbtn"
+            aria-pressed={dynamicSpacing}
+            onClick={() => dispatch(setDynamicSpacing(!dynamicSpacing))}
+            title={`${dynamicSpacing ? 'Disable' : 'Enable'} Dynamic Spacing — tighten node and group spacing automatically as you zoom in`}
+          >
+            Dynamic Spacing
           </button>
           <button type="button" className="canvas-tbtn" aria-pressed={revealHidden}
             disabled={hiddenCount === 0} onClick={() => dispatch(setRevealHidden(!revealHidden))}
