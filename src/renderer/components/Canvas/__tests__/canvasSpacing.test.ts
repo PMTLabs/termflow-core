@@ -282,6 +282,40 @@ describe('applySpacing', () => {
       }
     });
 
+    /** Four tabs, laid out the way `arrange()` wraps them: a 2x2 grid of single-node groups.
+     *  This is Tam's actual canvas in the 2026-09-09 screenshots. */
+    const gridModel = (): CanvasModel => {
+      const cells = [
+        singleNodeGroup('tb-a', 0, 0),
+        singleNodeGroup('tb-b', FRAME_W + GROUP_GAP, 0),
+        singleNodeGroup('tb-c', 0, FRAME_H + GROUP_GAP),
+        singleNodeGroup('tb-d', FRAME_W + GROUP_GAP, FRAME_H + GROUP_GAP),
+      ];
+      return { nodes: cells.map((c) => c.node), groups: cells.map((c) => c.group) };
+    };
+
+    it('tightens a 2x2 GRID of groups on both axes — the layout an immediate-predecessor sweep silently skipped', () => {
+      // The bug this pins: sorting a 2x2 grid by x interleaves the rows (A row1, C row2, B row1,
+      // D row2), so a sweep that compares each rect only to its immediate predecessor in sort
+      // order finds every consecutive pair in DIFFERENT rows, fails the lane test every time and
+      // tightens NOTHING. Tam saw exactly zero movement on a four-tab canvas while every
+      // single-row fixture in this file passed.
+      const model = gridModel();
+      const z = 3;
+      const out = applySpacing(model, z, true);
+
+      const colGap = gapBetween(drawnFrameRect(out.groupRects['tb-a'], z), drawnFrameRect(out.groupRects['tb-b'], z));
+      const rowGap = gapBetween(drawnFrameRect(out.groupRects['tb-a'], z), drawnFrameRect(out.groupRects['tb-c'], z));
+      const rawColGap = gapBetween(drawnFrameRect(model.groups[0].rect, z), drawnFrameRect(model.groups[1].rect, z));
+      const rawRowGap = gapBetween(drawnFrameRect(model.groups[0].rect, z), drawnFrameRect(model.groups[2].rect, z));
+
+      expect(colGap).toBeLessThan(rawColGap / 2);
+      expect(rowGap).toBeLessThan(rawRowGap / 2);
+      // The second row must compact onto the first the same way, not be left behind.
+      const secondRowColGap = gapBetween(drawnFrameRect(out.groupRects['tb-c'], z), drawnFrameRect(out.groupRects['tb-d'], z));
+      expect(secondRowColGap).toBeCloseTo(colGap, 6);
+    });
+
     it('never lets what is DRAWN overlap across a realistic multi-group row and zoom sweep', () => {
       // Checked on the painted boxes, not the layout rects: above z≈1.5 a tightened layout rect
       // legitimately overlaps its neighbour, because each frame is DRAWN well inside it. What

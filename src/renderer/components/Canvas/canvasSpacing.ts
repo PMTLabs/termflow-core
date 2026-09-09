@@ -88,48 +88,60 @@ function spansOverlap(aStart: number, aSize: number, bStart: number, bSize: numb
 }
 
 /**
- * Shrinks the gap between every pair of rects that are adjacent along `axis` AND share a lane on
- * the other axis (their extents there overlap — e.g. two frames in the same row, for
- * `axis: 'x'`) toward `targetGap(gap, z, zBase, minGapScreenPx)`. Only ever moves a rect along
- * `axis`; the other axis, and every rect's size, are untouched.
+ * Shrinks the gap between rects that are adjacent along `axis` AND share a lane on the other
+ * axis (their extents there overlap — e.g. two frames in the same row, for `axis: 'x'`) toward
+ * `targetGap(gap, z, zBase, minGapScreenPx)`. Only ever moves a rect along `axis`; the other
+ * axis, and every rect's size, are untouched.
  *
- * Walks rects in sorted order along `axis` and compares each one only to its immediate
- * predecessor in that order — not every lane-mate, just the nearest one. That misses shrinking a
- * gap between two lane-mates that have some unrelated, differently-laned rect sitting between
- * them in sort order (rare on a real canvas, which lays groups and nodes out in clean rows), but
- * it is never unsafe: a rect that is not a lane-mate of its immediate predecessor simply inherits
- * that predecessor's already-applied shift as a rigid translation, which preserves — never
- * shrinks past, never widens — whatever gap it already had to its actual neighbours. Since every
- * rect only ever moves earlier along `axis` (shift is monotonically non-increasing) and
- * `targetGap` never returns more than the gap it was given, no pair can end up overlapping that
- * did not already overlap before this ran.
+ * Walks rects in sorted order along `axis` and, for each, takes the tightest bound imposed by
+ * EVERY already-placed lane-mate — not merely its immediate predecessor in sort order.
+ *
+ * **That distinction is the whole correctness of this function, not a refinement.** A canvas of
+ * four tabs is a 2×2 grid, and sorting a 2×2 grid by x interleaves the rows — `A(row1)`,
+ * `C(row2)`, `B(row1)`, `D(row2)` — so every consecutive PAIR straddles two rows and fails the
+ * lane test. An immediate-predecessor sweep therefore tightens nothing at all on the most
+ * ordinary multi-row canvas there is, while looking perfectly correct on the single-row fixtures
+ * a test suite reaches for first. Comparing against all placed lane-mates makes each row compact
+ * along its own chain, which is what a grid needs.
+ *
+ * Safe by construction: a lane-mate `j` placed earlier contributes the lower bound
+ * `end(out[j]) + targetGap(originalGap)`, and since `out[j]` only ever moved earlier and
+ * `targetGap` never exceeds the gap it was given, that bound never pushes a rect LATER than
+ * where it started. So every rect only moves earlier, and no pair that was clear before can end
+ * up overlapping.
  */
 function sweepAxis(rects: Rect[], axis: 'x' | 'y', z: number, zBase: number, minGapScreenPx: number): Rect[] {
-  const order = rects.map((_, i) => i).sort((i, j) => (
-    axis === 'x' ? rects[i].x - rects[j].x : rects[i].y - rects[j].y
-  ));
+  const startOf = (r: Rect) => (axis === 'x' ? r.x : r.y);
+  const sizeOf = (r: Rect) => (axis === 'x' ? r.w : r.h);
+  const laneOf = (r: Rect) => (axis === 'x' ? { start: r.y, size: r.h } : { start: r.x, size: r.w });
+
+  const order = rects.map((_, i) => i).sort((i, j) => startOf(rects[i]) - startOf(rects[j]));
   const out = rects.map((r) => ({ ...r }));
-  let shift = 0;
-  let prevIdx = -1;
+  const placed: number[] = [];
+
   for (const idx of order) {
     const r = rects[idx];
-    let newStart = (axis === 'x' ? r.x : r.y) + shift;
-    if (prevIdx >= 0) {
-      const prev = rects[prevIdx];
-      const otherA = axis === 'x' ? { start: r.y, size: r.h } : { start: r.x, size: r.w };
-      const otherB = axis === 'x' ? { start: prev.y, size: prev.h } : { start: prev.x, size: prev.w };
-      if (spansOverlap(otherA.start, otherA.size, otherB.start, otherB.size)) {
-        const prevOut = out[prevIdx];
-        const prevEnd = axis === 'x' ? prevOut.x + prevOut.w : prevOut.y + prevOut.h;
-        const currentGap = newStart - prevEnd;
-        const desiredGap = targetGap(currentGap, z, zBase, minGapScreenPx);
-        const reduction = currentGap - desiredGap;
-        shift -= reduction;
-        newStart -= reduction;
-      }
+    const start = startOf(r);
+    const lane = laneOf(r);
+    // The tightest lower bound any already-placed lane-mate imposes. A rect with none is the
+    // first in its lane and simply stays where it is; the rest of its lane compacts onto it.
+    let bound = Number.NEGATIVE_INFINITY;
+
+    for (const j of placed) {
+      const other = rects[j];
+      const otherLane = laneOf(other);
+      if (!spansOverlap(lane.start, lane.size, otherLane.start, otherLane.size)) continue;
+      // Only rects genuinely BEFORE this one along `axis` constrain it. A negative gap means
+      // they already overlap on this axis, which spacing did not cause and will not resolve.
+      const originalGap = start - (startOf(other) + sizeOf(other));
+      if (originalGap < 0) continue;
+      const b = startOf(out[j]) + sizeOf(out[j]) + targetGap(originalGap, z, zBase, minGapScreenPx);
+      if (b > bound) bound = b;
     }
+
+    const newStart = bound === Number.NEGATIVE_INFINITY ? start : Math.min(start, bound);
     out[idx] = axis === 'x' ? { ...out[idx], x: newStart } : { ...out[idx], y: newStart };
-    prevIdx = idx;
+    placed.push(idx);
   }
   return out;
 }
