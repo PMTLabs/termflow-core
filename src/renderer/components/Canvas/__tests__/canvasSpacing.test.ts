@@ -1,7 +1,9 @@
 import { NODE_H, NODE_W, paintedNodeRect, Rect } from '../canvasGeometry';
 import { drawnFrameRect, GAP_X, GROUP_GAP, PAD, PAD_SCREEN_MAX, PAD_TOP } from '../canvasLayout';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
-import { applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, SPACING_Z_BASE } from '../canvasSpacing';
+import {
+  applyFrozenOffsets, applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, spacingOffsets, SPACING_Z_BASE,
+} from '../canvasSpacing';
 
 const node = (id: string, tabId: string, rect: Rect): CanvasNodeModel => ({
   terminalId: id,
@@ -250,13 +252,46 @@ describe('applySpacing', () => {
       }
     });
 
-    it('translates each frame\'s only node rigidly along with it', () => {
-      const model = adjacentGroupsModel();
-      const out = applySpacing(model, 8, true);
-      const frameA = out.groupRects['tb-a'];
-      const nodeA = out.nodeRects['tb-a-n'];
-      expect(nodeA.x - frameA.x).toBe(PAD);
-      expect(nodeA.y - frameA.y).toBe(PAD_TOP);
+    it('translates each frame\'s only node rigidly along with it, on BOTH axes, for a frame that actually moved', () => {
+      // Identifying the frame by "it is a frame" is too few fields: the first frame in a row is
+      // the anchor and never moves, so an oracle that happens to pick it passes even if members
+      // are not translated at all. Pin a frame with a NON-ZERO delta, and pin dy as well as dx —
+      // mutating `y: r.y + dy` to `y: r.y` otherwise survives the whole suite, because every
+      // multi-group fixture here is a single horizontal row where dy is zero anyway.
+      const model = gridModel();
+      const z = 3;
+      const out = applySpacing(model, z, true);
+      for (const tabId of ['tb-b', 'tb-c', 'tb-d']) {
+        const raw = model.groups.find((g) => g.tabId === tabId)!.rect;
+        const moved = out.groupRects[tabId];
+        const node = out.nodeRects[`${tabId}-n`];
+        const dx = moved.x - raw.x;
+        const dy = moved.y - raw.y;
+        // tb-b moves only in x, tb-c only in y, tb-d in both — between them every axis is
+        // covered by a frame that genuinely moved.
+        expect(Math.abs(dx) + Math.abs(dy)).toBeGreaterThan(0);
+        expect(node.x - moved.x).toBeCloseTo(PAD, 9);
+        expect(node.y - moved.y).toBeCloseTo(PAD_TOP, 9);
+      }
+      expect(out.groupRects['tb-c'].y - model.groups[2].rect.y).toBeLessThan(0);
+      expect(out.nodeRects['tb-c-n'].y - model.nodes[2].rect.y).toBeLessThan(0);
+    });
+
+    it('tightens a column of sibling nodes vertically, not only a row horizontally', () => {
+      // Replacing `tighten(painted, ...)` with a bare x-only sweep survives every other fixture
+      // here, because they are all horizontal rows.
+      const above = node('n1', 'tb-a', { x: PAD, y: PAD_TOP, w: NODE_W, h: NODE_H });
+      const below = node('n2', 'tb-a', { x: PAD, y: PAD_TOP + NODE_H + 400, w: NODE_W, h: NODE_H });
+      const model: CanvasModel = {
+        nodes: [above, below],
+        groups: [group('tb-a', { x: 0, y: 0, w: PAD * 2 + NODE_W, h: PAD_TOP + PAD + NODE_H * 2 + 400 }, ['n1', 'n2'])],
+      };
+      const z = 3;
+      const out = applySpacing(model, z, true);
+      const before = below.rect.y - (above.rect.y + above.rect.h);
+      const after = out.nodeRects['n2'].y - (out.nodeRects['n1'].y + out.nodeRects['n1'].h);
+      expect(after).toBeLessThan(before / 2);
+      expect(out.nodeRects['n1'].x).toBe(above.rect.x);
     });
 
     it('tightens two adjacent nodes in one row well past the ~1% a scale-toward-centroid pull could manage', () => {
@@ -329,6 +364,64 @@ describe('applySpacing', () => {
         expect(noOverlap(frames)).toBe(true);
         expect(noOverlap(nodes)).toBe(true);
       }
+    });
+
+    it('does not slide a member across into an overlapping group\'s terminal', () => {
+      // Step 1 skips frames that ALREADY overlap — there is no gap between them to shrink — which
+      // leaves step 2 free to tighten one group's members straight across into the other group's
+      // terminal, since its safety proof only covers one member set. Only a manual drag can
+      // produce overlapping frames; the answer there is to leave those members alone.
+      const a1 = node('a1', 'tb-a', { x: 0, y: 0, w: NODE_W, h: NODE_H });
+      const a2 = node('a2', 'tb-a', { x: 1000, y: 0, w: NODE_W, h: NODE_H });
+      const b1 = node('b1', 'tb-b', { x: 400, y: 0, w: NODE_W, h: NODE_H });
+      const model: CanvasModel = {
+        nodes: [a1, a2, b1],
+        groups: [
+          group('tb-a', { x: -PAD, y: -PAD_TOP, w: 1000 + NODE_W + PAD * 2, h: PAD_TOP + PAD + NODE_H }, ['a1', 'a2']),
+          group('tb-b', { x: 400 - PAD, y: -PAD_TOP, w: NODE_W + PAD * 2, h: PAD_TOP + PAD + NODE_H }, ['b1']),
+        ],
+      };
+      expect(noOverlap([a1.rect, a2.rect, b1.rect])).toBe(true);
+
+      for (const z of [2, 3, 4, 6.35]) {
+        const out = applySpacing(model, z, true);
+        const rects = ['a1', 'a2', 'b1'].map((id) => out.nodeRects[id]);
+        expect(noOverlap(rects)).toBe(true);
+      }
+    });
+  });
+
+  describe('drag freeze', () => {
+    it('holds the offset constant while the stored rect moves, so a drag never jumps', () => {
+      const model = adjacentGroupsModel();
+      const z = 3;
+      const live = applySpacing(model, z, true);
+      const frozen = spacingOffsets(model, live);
+
+      // At the instant of the press, the frozen transform must reproduce the live one exactly —
+      // that is what makes grabbing a node not move it.
+      const atPress = applyFrozenOffsets(model, frozen);
+      expect(atPress.nodeRects['tb-b-n']).toEqual(live.nodeRects['tb-b-n']);
+      expect(atPress.groupRects['tb-b']).toEqual(live.groupRects['tb-b']);
+
+      // Now the drag writes real geometry: the stored rect moves by the pointer delta. The
+      // rendered node must move by exactly that delta too, so it tracks the pointer 1:1.
+      const dragged: CanvasModel = {
+        ...model,
+        nodes: model.nodes.map((n) => (n.terminalId === 'tb-b-n'
+          ? { ...n, rect: { ...n.rect, x: n.rect.x + 137, y: n.rect.y - 42 } } : n)),
+      };
+      const during = applyFrozenOffsets(dragged, frozen);
+      expect(during.nodeRects['tb-b-n'].x - atPress.nodeRects['tb-b-n'].x).toBeCloseTo(137, 9);
+      expect(during.nodeRects['tb-b-n'].y - atPress.nodeRects['tb-b-n'].y).toBeCloseTo(-42, 9);
+    });
+
+    it('is the identity when spacing was not applying at the moment of the press', () => {
+      const model = adjacentGroupsModel();
+      const frozen = spacingOffsets(model, applySpacing(model, 3, false));
+      const out = applyFrozenOffsets(model, frozen);
+      for (const n of model.nodes) expect(out.nodeRects[n.terminalId]).toEqual(n.rect);
+      for (const g of model.groups) expect(out.groupRects[g.tabId]).toEqual(g.rect);
     });
   });
 });

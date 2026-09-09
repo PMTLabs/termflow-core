@@ -33,9 +33,12 @@ import { CanvasModel } from './canvasSelectors';
  * unit of floor gap costs `z` more screen pixels the further in you go. `targetGap` instead
  * blends the desired gap in SCREEN space, from the pair's own on-screen gap at `SPACING_Z_BASE`
  * (untouched) down toward `MIN_GAP_SCREEN_PX` as `z → ∞`, then converts back to world units for
- * `sweepAxis` to apply. The screen-space gap this produces is bounded by
- * `max(originalScreenGap, MIN_GAP_SCREEN_PX)` for every `z` and strictly decreases toward
- * `MIN_GAP_SCREEN_PX` — it can shrink further, it can never grow.
+ * `sweepAxis` to apply. For a pair whose gap `targetGap` actually shrinks — i.e. one already
+ * wider than `MIN_GAP_SCREEN_PX` on screen at `zBase` — the resulting screen gap decreases
+ * monotonically in `z` toward `MIN_GAP_SCREEN_PX` and never exceeds its `zBase` value. A pair
+ * that starts TIGHTER than that floor is returned untouched, so its own screen gap still grows
+ * with zoom like any other world distance; spacing declines to push two rects apart to reach a
+ * minimum, which would be a stranger result than leaving them alone.
  */
 
 /** The zoom at and below which spacing never applies — the layout a canvas was arranged at. */
@@ -85,6 +88,11 @@ export function spacingFactor(z: number, zBase: number = SPACING_Z_BASE): number
  *  stacked and merely incidental neighbours in sort order. */
 function spansOverlap(aStart: number, aSize: number, bStart: number, bSize: number): boolean {
   return aStart < bStart + bSize && bStart < aStart + aSize;
+}
+
+/** Whether two rects overlap on both axes — i.e. actually collide. */
+function rectsOverlap(a: Rect, b: Rect): boolean {
+  return spansOverlap(a.x, a.w, b.x, b.w) && spansOverlap(a.y, a.h, b.y, b.h);
 }
 
 /**
@@ -209,9 +217,18 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
     });
   }
 
-  for (const g of model.groups) {
+  // Step 2 tightens each group's own members toward each other. Its safety proof is LOCAL to
+  // one member set, so it says nothing about a member ending up on top of some OTHER group's
+  // terminal — which it can, if the two frames overlap: frames that already overlap are skipped
+  // by step 1 (nothing to shrink between them), leaving one group free to slide a node across
+  // into the other. Only a manual drag can produce overlapping frames, and the least surprising
+  // answer there is to leave that group's members alone rather than invent a resolution.
+  const drawnFrames = model.groups.map((g) => drawnFrameRect(groupRects[g.tabId], z));
+  for (const [gi, g] of model.groups.entries()) {
     const members = model.nodes.filter((n) => g.nodeIds.includes(n.terminalId));
     if (members.length <= 1) continue;
+    const collides = drawnFrames.some((other, oi) => oi !== gi && rectsOverlap(drawnFrames[gi], other));
+    if (collides) continue;
     const layout = members.map((n) => nodeRects[n.terminalId]);
     const painted = layout.map((r) => paintedNodeRect(r, z, false));
     const tightened = tighten(painted, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
@@ -224,5 +241,55 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
     });
   }
 
+  return { nodeRects, groupRects };
+}
+
+/** The translation Dynamic Spacing is currently applying to each rect, keyed by id. */
+export interface SpacingOffsets {
+  nodes: Record<string, { dx: number; dy: number }>;
+  groups: Record<string, { dx: number; dy: number }>;
+}
+
+/**
+ * The offset `spacing` represents relative to `model`'s stored rects.
+ *
+ * Captured when a drag begins, so the gesture can keep applying the SAME translation while the
+ * underlying stored rect moves with the pointer — see `applyFrozenOffsets`.
+ */
+export function spacingOffsets(model: CanvasModel, spacing: SpacingResult): SpacingOffsets {
+  const nodes: SpacingOffsets['nodes'] = {};
+  for (const n of model.nodes) {
+    const s = spacing.nodeRects[n.terminalId];
+    nodes[n.terminalId] = s ? { dx: s.x - n.rect.x, dy: s.y - n.rect.y } : { dx: 0, dy: 0 };
+  }
+  const groups: SpacingOffsets['groups'] = {};
+  for (const g of model.groups) {
+    const s = spacing.groupRects[g.tabId];
+    groups[g.tabId] = s ? { dx: s.x - g.rect.x, dy: s.y - g.rect.y } : { dx: 0, dy: 0 };
+  }
+  return { nodes, groups };
+}
+
+/**
+ * `model`'s CURRENT rects, each shifted by the offset it had when `offsets` was captured.
+ *
+ * This is what a drag renders with, and it is not the same thing as switching spacing off. A
+ * press used to do the latter, which does not freeze the transform — it REMOVES it, so the
+ * grabbed node jumped from its tightened position to its stored one the instant it was touched
+ * (~90 screen px on an ordinary four-tab canvas) and kept that offset from the pointer for the
+ * whole gesture. Holding the offset constant instead lets the node track the pointer exactly
+ * while the drag still writes real, untightened geometry underneath.
+ */
+export function applyFrozenOffsets(model: CanvasModel, offsets: SpacingOffsets): SpacingResult {
+  const nodeRects: Record<string, Rect> = {};
+  const groupRects: Record<string, Rect> = {};
+  for (const n of model.nodes) {
+    const d = offsets.nodes[n.terminalId];
+    nodeRects[n.terminalId] = d ? { ...n.rect, x: n.rect.x + d.dx, y: n.rect.y + d.dy } : n.rect;
+  }
+  for (const g of model.groups) {
+    const d = offsets.groups[g.tabId];
+    groupRects[g.tabId] = d ? { ...g.rect, x: g.rect.x + d.dx, y: g.rect.y + d.dy } : g.rect;
+  }
   return { nodeRects, groupRects };
 }

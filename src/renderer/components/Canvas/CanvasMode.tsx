@@ -39,7 +39,7 @@ import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
-import { applySpacing } from './canvasSpacing';
+import { applyFrozenOffsets, applySpacing, SpacingOffsets, spacingOffsets } from './canvasSpacing';
 import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
@@ -173,18 +173,38 @@ export const CanvasMode: React.FC = () => {
 
   /**
    * Dynamic Spacing (plan/039) — the toolbar toggle that tightens node/group spacing above
-   * zoom 1. `dragActive` freezes it (falls back to the untouched rects) for the duration of any
-   * press on a node header or group label, moved or not: without this, a drag's origin is
-   * always the RAW stored rect (`onHeaderPointerDown` below is deliberately given `n.rect`,
-   * never a spacing-adjusted one — dragging must write real geometry, never a compacted one),
-   * so if spacing kept applying mid-drag the rendered node would track the cursor at the wrong
-   * rate. A plain click freezes it for the same instant and is not worth telling apart from a
-   * drag — both start and end inside one pointerdown/pointerup pair, too short to notice.
+   * zoom 1.
+   *
+   * Fed the SHOWN nodes, not the whole model. A group frame is shrink-wrapped around its shown
+   * members only (`selectCanvasModel`'s `drawnFrame`), so letting a hidden member pull on its
+   * siblings tightens toward a rect the frame does not contain — enough to slide the one visible
+   * terminal clean outside its own frame.
+   *
+   * A press on a node header or group label FREEZES the transform for the gesture, by holding
+   * the offset it had at pointerdown (`spacingOffsets`) and re-applying it to the moving stored
+   * rect. It deliberately does not switch spacing off: that removes the transform rather than
+   * freezing it, so the grabbed node jumps to its stored position the instant it is touched.
+   * Drag origins stay on the RAW rect either way — a drag must write real geometry, never a
+   * compacted one. A plain click freezes for the same instant and is not worth telling apart.
    */
   const dynamicSpacing = useSelector((s: RootState) => s.canvas.dynamicSpacing);
-  const [dragActive, setDragActive] = useState(false);
+  const spacingModel = useMemo(
+    () => ({ nodes: paintedNodes, groups: shownGroups }),
+    [paintedNodes, shownGroups],
+  );
+  const liveSpacing = useMemo(
+    () => applySpacing(spacingModel, vp.z, dynamicSpacing),
+    [spacingModel, vp.z, dynamicSpacing],
+  );
+  const [frozenOffsets, setFrozenOffsets] = useState<SpacingOffsets | null>(null);
+  const freezeSourceRef = useRef({ model: spacingModel, spacing: liveSpacing });
+  freezeSourceRef.current = { model: spacingModel, spacing: liveSpacing };
+  const beginDragFreeze = useCallback(() => {
+    const { model: m, spacing: s } = freezeSourceRef.current;
+    setFrozenOffsets(spacingOffsets(m, s));
+  }, []);
   useEffect(() => {
-    const onUp = () => setDragActive(false);
+    const onUp = () => setFrozenOffsets(null);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onUp);
     return () => {
@@ -193,8 +213,25 @@ export const CanvasMode: React.FC = () => {
     };
   }, []);
   const spacing = useMemo(
-    () => applySpacing(presentationModel, vp.z, dynamicSpacing && !dragActive),
-    [presentationModel, vp.z, dynamicSpacing, dragActive],
+    () => (frozenOffsets ? applyFrozenOffsets(spacingModel, frozenOffsets) : liveSpacing),
+    [frozenOffsets, spacingModel, liveSpacing],
+  );
+  /**
+   * Where `id` will be DRAWN once the camera has arrived at `destZ` — the rect a fly-to must
+   * aim at, not the stored one.
+   *
+   * Spacing is a function of zoom alone, never of viewport translation, so evaluating it at the
+   * DESTINATION zoom is well-defined and introduces no feedback: pick the zoom, ask where the
+   * target lands at that zoom, centre on that. Aiming at the stored rect instead centres the
+   * camera on empty canvas — by more than a screen width on a sparse layout.
+   */
+  const targetRectAt = useCallback(
+    (destZ: number, kind: 'node' | 'group', id: string, raw: Rect): Rect => {
+      if (!dynamicSpacing) return raw;
+      const s = applySpacing(spacingModel, destZ, true);
+      return (kind === 'node' ? s.nodeRects[id] : s.groupRects[id]) ?? raw;
+    },
+    [dynamicSpacing, spacingModel],
   );
   // Only the two consumers that read POSITION for something other than drag/spawn math ever see
   // these: paint culling/tiers, wires, and the two render loops below. Drag origins, spawn
@@ -704,10 +741,14 @@ export const CanvasMode: React.FC = () => {
     // `aimedNodeRect`, not `n.rect`: both calls POINT at the node, and the reserved rect
     // carries up to a title bar of slack the node does not paint. Testing it made a fully
     // visible node near the bottom edge report as clipped and fly for nothing.
-    if (n && !isFullyVisible(vp, aimedNodeRect(n.rect, vp.z), size.w, size.h, FRAME_INSET)) {
-      flyTo(centreOn(aimedNodeRect(n.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
+    // Both the visibility test and the destination read where the node is DRAWN, not where it
+    // is stored — otherwise stepping onto a spaced node reports the wrong one as off-screen and
+    // then flies to empty canvas.
+    const aim = n ? aimedNodeRect(targetRectAt(vp.z, 'node', next, n.rect), vp.z) : null;
+    if (aim && !isFullyVisible(vp, aim, size.w, size.h, FRAME_INSET)) {
+      flyTo(centreOn(aim, size.w, size.h, vp.z, metrics.zMax));
     }
-  }, [model.nodes, paintedNodes, selectedId, dispatch, vp, size, flyTo, metrics]);
+  }, [model.nodes, paintedNodes, selectedId, dispatch, vp, size, flyTo, metrics, targetRectAt]);
 
   /**
    * Every node, read through a ref by the two key listeners below.
@@ -839,11 +880,22 @@ export const CanvasMode: React.FC = () => {
     // The DESTINATION zoom, in both places: the drawn height is a function of the zoom the
     // camera arrives at, not the one it leaves from.
     const z = Math.max(vp.z, ROW_FLY_ZOOM);
-    flyTo(centreOn(aimedNodeRect(n.rect, z), size.w, size.h, z, metrics.zMax));
-  }, [model.nodes, dispatch, flyTo, size, vp.z, metrics]);
+    flyTo(centreOn(aimedNodeRect(targetRectAt(z, 'node', terminalId, n.rect), z), size.w, size.h, z, metrics.zMax));
+  }, [model.nodes, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
 
-  /** A minimap click: pan to that world point, keeping the zoom the user chose. A zero-size
-   *  rect is a point as far as `centreOn` is concerned. */
+  /**
+   * A minimap click: pan to that world point, keeping the zoom the user chose. A zero-size
+   * rect is a point as far as `centreOn` is concerned.
+   *
+   * Stays on RAW world coordinates, deliberately, because the minimap DRAWS the raw layout — a
+   * fixed-scale overview cannot show a transform that is a function of the main viewport's zoom
+   * without jittering every time you wheel. The click and the map it was aimed at therefore
+   * agree with each other, which is the property that matters; the rendered content sits within
+   * one spacing displacement of the point, never further, because spacing only ever moves rects
+   * closer together. The same reasoning covers `fitEverything`/`fitGroup` below: they frame RAW
+   * bounds, which always CONTAIN the tightened layout, so nothing they promise to show can end
+   * up outside the frame.
+   */
   const flyToWorld = useCallback((w: { x: number; y: number }) => {
     flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));
   }, [flyTo, size, vp.z, metrics]);
@@ -1113,9 +1165,11 @@ export const CanvasMode: React.FC = () => {
             chipOffset={chipNudge[g.tabId]}
             dropTarget={drag.dropTabId === g.tabId}
             moving={drag.movingTabId === g.tabId}
-            // Freezes Dynamic Spacing for the press — see the note beside `dragActive`.
-            onLabelPointerDown={(e) => { setDragActive(true); drag.onGroupLabelPointerDown(g.tabId)(e); }}
-            onChipClick={() => flyTo(centreOn(g.rect, size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax))}
+            // Freezes Dynamic Spacing for the press — see the note beside `dynamicSpacing`.
+            onLabelPointerDown={(e) => { beginDragFreeze(); drag.onGroupLabelPointerDown(g.tabId)(e); }}
+            onChipClick={() => flyTo(centreOn(
+              targetRectAt(GROUP_CHIP_ZOOM, 'group', g.tabId, g.rect), size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax,
+            ))}
             // `preventDefault` because nothing else suppresses the browser's own menu here: the
             // viewport bails out on `.canvas-glabel` and `.canvas-gchip` without preventing
             // anything. `stopPropagation` for the reason `CanvasNode` gives — the bail list and
@@ -1170,16 +1224,17 @@ export const CanvasMode: React.FC = () => {
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               // The ORIGINAL rect, never the overlay's: dragging an overlaid node would
               // otherwise start from a screen-filling box and fling it across the world.
-              // Freezes Dynamic Spacing for the press — see the note beside `dragActive`. The
-              // ORIGINAL rect, still, never `node.rect`/the spaced one — same reason the comment
-              // above already gives for why an overlaid node passes `n.rect`, not `overlay.rect`.
+              // Freezes Dynamic Spacing for the press — see the note beside `dynamicSpacing`.
+              // The ORIGINAL rect, still, never `node.rect`/the spaced one — same reason the
+              // comment above already gives for why an overlaid node passes `n.rect`.
               onHeaderPointerDown={isOverlaid ? undefined : (e) => {
-                setDragActive(true);
+                beginDragFreeze();
                 drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)(e);
               }}
               onDoubleClick={focusTerminal(n.terminalId)}
               onChipClick={() => flyTo(centreOn(
-                aimedNodeRect(n.rect, NODE_CHIP_ZOOM), size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax,
+                aimedNodeRect(targetRectAt(NODE_CHIP_ZOOM, 'node', n.terminalId, n.rect), NODE_CHIP_ZOOM),
+                size.w, size.h, NODE_CHIP_ZOOM, metrics.zMax,
               ))}
               combos={combos}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}

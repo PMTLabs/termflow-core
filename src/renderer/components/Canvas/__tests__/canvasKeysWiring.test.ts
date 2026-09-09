@@ -483,8 +483,12 @@ describe('stepping and zooming from the keyboard', () => {
   /** Only flies when the node is not already framed, and never changes the zoom. Centring a
    *  node you can already see yanks the viewport for nothing — on a key people hold down. */
   it('flies only when the target is off screen, at the zoom the user chose', () => {
-    expect(STEP).toContain('!isFullyVisible(vp, aimedNodeRect(n.rect, vp.z), size.w, size.h, FRAME_INSET)');
-    expect(STEP).toContain('centreOn(aimedNodeRect(n.rect, vp.z), size.w, size.h, vp.z, metrics.zMax)');
+    // Both the test and the destination read the same `aim`, and `aim` is where the node is
+    // DRAWN (Dynamic Spacing may have moved it), not where it is stored — otherwise a spaced
+    // node reports the wrong visibility and then the camera flies to empty canvas.
+    expect(STEP).toContain("aimedNodeRect(targetRectAt(vp.z, 'node', next, n.rect), vp.z)");
+    expect(STEP).toContain('!isFullyVisible(vp, aim, size.w, size.h, FRAME_INSET)');
+    expect(STEP).toContain('centreOn(aim, size.w, size.h, vp.z, metrics.zMax)');
   });
 
   /** Both calls POINT at the node, so both take the DRAWN box. The reserved rect carries up
