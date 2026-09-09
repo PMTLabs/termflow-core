@@ -20,7 +20,14 @@ describe('hidden canvas consumers', () => {
 
   it('hands the derived presentation list to the minimap rather than allowing its full-model fallback', () => {
     const minimap = /<CanvasMinimap[\s\S]*?\/>/.exec(MODE)?.[0] ?? '';
-    expect(minimap).toContain('shownGroups={shownGroups}');
+    // `spacedShownGroups`, not `shownGroups`, since plan/039 put the minimap in DISPLAY space so
+    // its content, view rectangle and click all share one coordinate system. That does NOT relax
+    // this test's claim: `spacedShownGroups` is derived FROM `shownGroups`, so it still carries
+    // the hidden-membership filtering, and a regression to the full `model.groups` would fail
+    // here exactly as before. The assertion below pins that derivation so the two cannot drift.
+    expect(minimap).toContain('shownGroups={spacedShownGroups}');
+    expect(MODE).toContain('const spacedShownGroups = useMemo(');
+    expect(MODE).toContain('shownGroups.map((g) => ({ ...g, rect: spacing.groupRects[g.tabId] ?? g.rect }))');
     expect(minimap).toContain('revealHidden={revealHidden}');
   });
 

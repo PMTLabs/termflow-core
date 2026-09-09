@@ -180,8 +180,17 @@ describe('framing what was just created', () => {
     expect(spawnBody).toContain(
       "targetRectAt(vp.z, 'node', plan.leafId, plan.rect, postSpawnSpacingModel)");
     expect(spawnBody).toContain('nodes: [...paintedNodes, spawnedNode],');
-    // The new group must be in it too, or step 1 of the transform sees a group count that does
-    // not match reality and tightens the wrong set.
+
+    // The new GROUP has to be in the model too, and asserting `...shownGroups` alone does not say
+    // so — deleting the appended group entirely leaves that spread, the spawned node and the
+    // helper call all intact. Step 1 of the transform tightens group frames against each other,
+    // so a model one group short tightens a different set than the one about to render, and the
+    // camera aims at a rect the app never draws. Pin the group's three load-bearing fields:
+    // which tab it is, that it CONTAINS the new node, and that its frame is fitted to the
+    // node's own rect rather than borrowed from a neighbour.
+    expect(spawnBody).toContain('tabId: plan.tab.id, title: plan.tab.title,');
+    expect(spawnBody).toContain('nodeIds: [plan.leafId],');
+    expect(spawnBody).toContain('rect: fitGroupFrame([plan.rect]) ?? plan.rect,');
     expect(spawnBody).toContain('...shownGroups,');
   });
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewport, panViewport } from '../../store/slices/canvasSlice';
@@ -308,7 +308,9 @@ export const CanvasViewport: React.FC<{
  * Shared deliberately: Tasks 14, 18 and 23 all need animated viewport flight, and
  * without one helper each would invent an incompatible curve and duration.
  */
-export function useFlyTo() {
+export type FlyTo = ((to: Viewport, onDone?: () => void) => void) & { cancel: () => void };
+
+export function useFlyTo(): FlyTo {
   const dispatch = useDispatch();
   const raf = useRef<number | null>(null);
   const vpRef = useRef<Viewport>({ x: 0, y: 0, z: 1 });
@@ -326,7 +328,12 @@ export function useFlyTo() {
   // `transform: scale()`, so input handed over mid-flight lands on the wrong cells.
   // A caller counting FLY_MS on its own timer would get the reduced-motion case wrong
   // and would have to keep its own copy of the duration.
-  return useCallback((to: Viewport, onDone?: () => void) => {
+  const cancel = useCallback(() => {
+    if (raf.current) cancelAnimationFrame(raf.current);
+    raf.current = null;
+  }, []);
+
+  const flyTo = useCallback((to: Viewport, onDone?: () => void) => {
     if (raf.current) cancelAnimationFrame(raf.current);
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(setViewport(to));
@@ -349,6 +356,8 @@ export function useFlyTo() {
     };
     raf.current = requestAnimationFrame(step);
   }, [dispatch]);
+
+  return useMemo(() => Object.assign(flyTo, { cancel }), [flyTo, cancel]);
 }
 
 export default CanvasViewport;

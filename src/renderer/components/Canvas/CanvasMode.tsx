@@ -172,6 +172,7 @@ export const CanvasMode: React.FC = () => {
     [model.groups, revealHidden],
   );
   const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
+  const flyTo = useFlyTo();
 
   /** A screen-pixel pan, used by keys, the minimap, and the two real-drag transitions below. */
   const panScreen = useCallback((dx: number, dy: number) => {
@@ -197,6 +198,8 @@ export const CanvasMode: React.FC = () => {
   freezeSourceRef.current = { model: spacingModel, spacing: liveSpacing, z: vp.z };
   const draggedTargetRef = useRef<DragTarget | null>(null);
   const beginRealDrag = useCallback((target: DragTarget) => {
+    // `useFlyTo` writes absolute interpolated viewports; stop it before either compensation pan.
+    flyTo.cancel();
     // This is the last render the user saw, immediately before the raw geometry dispatch.
     const source = freezeSourceRef.current;
     if (!source) return;
@@ -207,7 +210,7 @@ export const CanvasMode: React.FC = () => {
       panScreen(pan.dx, pan.dy);
     }
     draggedTargetRef.current = target;
-  }, [panScreen]);
+  }, [flyTo, panScreen]);
   const drag = useCanvasDrag(presentationModel, beginRealDrag);
   const spacing = useMemo(
     () => (drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing),
@@ -217,6 +220,7 @@ export const CanvasMode: React.FC = () => {
   useLayoutEffect(() => {
     if (wasDraggingRef.current && !drag.dragActive) {
       // Runs after the drop's geometry/re-home dispatches, so this is the NEW live offset.
+      flyTo.cancel();
       const target = draggedTargetRef.current;
       if (target) {
         const offsets = spacingOffsets(spacingModel, liveSpacing);
@@ -229,7 +233,7 @@ export const CanvasMode: React.FC = () => {
       draggedTargetRef.current = null;
     }
     wasDraggingRef.current = drag.dragActive;
-  }, [drag.dragActive, spacingModel, liveSpacing, vp.z, panScreen]);
+  }, [drag.dragActive, spacingModel, liveSpacing, vp.z, flyTo, panScreen]);
   /**
    * Where `id` will be DRAWN once the camera has arrived at `destZ` — the rect a fly-to must
    * aim at, not the stored one.
@@ -351,8 +355,6 @@ export const CanvasMode: React.FC = () => {
     typeof window === 'undefined' ? 1920 : window.innerWidth,
     typeof window === 'undefined' ? 1040 : window.innerHeight,
   ));
-  const flyTo = useFlyTo();
-
   /**
    * Is this canvas still on screen?
    *
@@ -708,8 +710,8 @@ export const CanvasMode: React.FC = () => {
    *
    *  Deliberately `shownGroups`, never `spacedShownGroups`: this decides the zoom Dynamic
    *  Spacing's own factor is a function OF, so framing the already-tightened layout would feed
-   *  the transform's output back into its input. Every other camera target below (`fitGroup`,
-   *  row fly-to, the node/group chip clicks) makes the same choice for the same reason. */
+   *  the transform's output back into its input. Id-addressed camera targets separately resolve
+   *  their DISPLAY-space centre at the zoom this raw fit selected. */
   const fitAll = useCallback(() => {
     const b = boundsOf(shownGroups.map((g) => g.rect));
     if (b) flyTo(fitViewport(b, size.w, size.h, metrics.zMax));
@@ -919,15 +921,11 @@ export const CanvasMode: React.FC = () => {
     ));
   }, [model.nodes, model.groups, paintedNodes, revealHidden, spacingModel, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
 
-  /** A minimap click is RAW map hit testing, but a group it identifies must be centred where it
-   * is DISPLAYED in the main viewport. Empty map space remains a raw point destination. */
+  /** The minimap projects DISPLAY geometry, so its picked world point is already a main-canvas
+   * display-space destination. */
   const flyToWorld = useCallback((w: { x: number; y: number }) => {
-    const g = shownGroups.find((x) =>
-      w.x >= x.rect.x && w.x <= x.rect.x + x.rect.w && w.y >= x.rect.y && w.y <= x.rect.y + x.rect.h,
-    );
-    const target = g ? targetRectAt(vp.z, 'group', g.tabId, g.rect) : { x: w.x, y: w.y, w: 0, h: 0 };
-    flyTo(centreOn(target, size.w, size.h, vp.z, metrics.zMax));
-  }, [shownGroups, targetRectAt, flyTo, size, vp.z, metrics]);
+    flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));
+  }, [flyTo, size, vp.z, metrics]);
 
   /**
    * Close a node's terminal by handing the request to the surface that owns it — see
@@ -1162,13 +1160,13 @@ export const CanvasMode: React.FC = () => {
             <CanvasBeacons beacons={beacons} onPick={flyToNode} />
             {shownGroups.length > 0 && (
               <CanvasMinimap
-                model={model}
+                model={{ ...model, nodes: spacedNodes }}
                 vp={vp}
                 vw={size.w}
                 vh={size.h}
                 onPick={flyToWorld}
                 revealHidden={revealHidden}
-                shownGroups={shownGroups}
+                shownGroups={spacedShownGroups}
                 // Already in screen pixels — the minimap sized the step against its own
                 // projection, which is the only place that scale is known.
                 onPan={panScreen}
@@ -1205,10 +1203,8 @@ export const CanvasMode: React.FC = () => {
         {shownGroups.map((g) => (
           <CanvasGroupFrame
             key={g.tabId}
-            // Dynamic Spacing's rect if it moved this one; `g` itself stays the RAW group below
-            // (`onChipClick` still needs its true stored rect as the camera target — flying to
-            // an already-tightened rect would feed the transform's own output back into it,
-            // same reasoning as `fitAll`'s note above).
+            // Render the DISPLAY rect, while the chip supplies the RAW identity rect to
+            // `targetRectAt`, which resolves its destination-zoom DISPLAY counterpart.
             group={{ ...g, rect: spacing.groupRects[g.tabId] ?? g.rect }}
             zoom={vp.z}
             collapsed={collapsed}

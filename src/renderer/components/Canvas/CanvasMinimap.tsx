@@ -30,6 +30,7 @@ export const MINIMAP_H = 112;
 const VIEW_RECT = '.canvas-miniview';
 
 export const CanvasMinimap: React.FC<{
+  /** The same DISPLAY-space node positions the main canvas is painting. */
   model: CanvasModel;
   vp: Viewport;
   vw: number;
@@ -42,7 +43,7 @@ export const CanvasMinimap: React.FC<{
    *  projection the step is measured against. */
   onPan?: (dxScreen: number, dyScreen: number) => void;
   revealHidden: boolean;
-  /** REQUIRED: an omitted list silently reintroduces phantom hidden-group bounds. */
+  /** REQUIRED DISPLAY-space frames; an omitted list silently reintroduces phantom bounds. */
   shownGroups: CanvasModel['groups'];
 }> = ({ model, vp, vw, vh, onPick, onPan, revealHidden, shownGroups }) => {
   // The viewport's own world rect. Derived through `screenToWorld` rather than by inverting the

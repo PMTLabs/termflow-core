@@ -4,7 +4,12 @@ import { readSource } from '../../../utils/readSource';
 const MODE = readSource(path.resolve(__dirname, '../CanvasMode.tsx'));
 const SIDEBAR = readSource(path.resolve(__dirname, '../CanvasSidebar.tsx'));
 const DRAG = readSource(path.resolve(__dirname, '../useCanvasDrag.ts'));
+const VIEWPORT = readSource(path.resolve(__dirname, '../CanvasViewport.tsx'));
 const SLICE = readSource(path.resolve(__dirname, '../../../store/slices/canvasSlice.ts'));
+const FLY_TO_WORLD = (() => {
+  const start = MODE.indexOf('const flyToWorld = useCallback(');
+  return start < 0 ? '' : MODE.slice(start, MODE.indexOf('\n  }, [', start));
+})();
 
 describe('Dynamic Spacing consumers (plan/039)', () => {
   it('feeds the spacing-adjusted rects to tiers, culling and wire geometry, not the raw model', () => {
@@ -41,24 +46,32 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(MODE).toContain("targetRectAt(vp.z, 'node', plan.leafId, plan.rect, postSpawnSpacingModel)");
   });
 
-  it('keeps raw geometry for choosing fit zoom and minimap hit testing, then targets display space', () => {
+  it('keeps raw geometry for choosing fit zoom and uses display geometry throughout the minimap', () => {
     // Global fit remains raw because its bounds contain every inward-spaced rect. A single-group
     // fit chooses zoom from raw dimensions too, but centres on its display-space location.
     expect(MODE).toContain('boundsOf(shownGroups.map((g) => g.rect))');
     expect(MODE).toContain("targetRectAt(fitted.z, 'group', g.tabId, g.rect)");
-    expect(MODE).toContain("targetRectAt(vp.z, 'group', g.tabId, g.rect)");
-    expect(MODE).toContain('w.x >= x.rect.x && w.x <= x.rect.x + x.rect.w');
-    expect(MODE).toContain('const target = g ? targetRectAt');
+    expect(FLY_TO_WORLD).toContain('flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));');
+    expect(FLY_TO_WORLD).not.toContain('shownGroups.find(');
   });
 
   it('keeps the "frame everything" camera targets off the transform they would otherwise feed back into', () => {
     expect(MODE).toContain('boundsOf(shownGroups.map((g) => g.rect))');
   });
 
-  it('leaves the minimap on the raw model — a fixed-scale overview, not a zoomed spatial view', () => {
+  it('projects the same display layout as the main canvas at its own fixed minimap scale', () => {
     const minimap = /<CanvasMinimap[\s\S]*?\/>/.exec(MODE)?.[0] ?? '';
-    expect(minimap).toContain('shownGroups={shownGroups}');
-    expect(minimap).not.toContain('spacedShownGroups');
+    expect(minimap).toContain('model={{ ...model, nodes: spacedNodes }}');
+    expect(minimap).toContain('shownGroups={spacedShownGroups}');
+    expect(minimap).not.toContain('shownGroups={shownGroups}');
+  });
+
+  it('cancels absolute fly-to frames before either drag compensation pan', () => {
+    // A `setViewport(lerpViewport(...))` frame captured before the drag would overwrite an
+    // otherwise correct relative pan. Entry cancels it synchronously; exit repeats the guard.
+    expect((MODE.match(/flyTo\.cancel\(\);/g) ?? [])).toHaveLength(2);
+    expect(VIEWPORT).toContain('const cancel = useCallback(() => {');
+    expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel }), [flyTo, cancel]);');
   });
 
   it('uses raw geometry only for a real slop-crossed drag and compensates both transitions', () => {

@@ -418,48 +418,35 @@ describe('applySpacing', () => {
         .toBeCloseTo(out.groupRects['tb-b'].x - model.groups[2].rect.x, 9);
     });
 
-    it('keeps merging components whose bounds overlap, so a frame inside another component\'s bounds cannot be pulled into it', () => {
-      // In drawn coordinates, A=(0,0,1200,1200) overlaps B=(600,600,1200,1200), whose union
-      // contains C=(1320,0,360,360). C touches neither A nor B. D=(-1200,0,360,360) is clear
-      // of all three but gives AB and C different X constraints. Stopping after initial frame
-      // connectivity makes C move much farther left than A and collide with a1.
-      const z = 3;
-      const drawnOffset = drawnFrameRect({ x: 0, y: 0, w: 0, h: 0 }, z);
-      const layoutForDrawn = (r: Rect): Rect => ({
-        x: r.x - drawnOffset.x,
-        y: r.y - drawnOffset.y,
-        w: r.w - drawnOffset.w,
-        h: r.h - drawnOffset.h,
-      });
-      const drawn = {
-        d: { x: -1200, y: 0, w: 360, h: 360 },
-        a: { x: 0, y: 0, w: 1200, h: 1200 },
-        b: { x: 600, y: 600, w: 1200, h: 1200 },
-        c: { x: 1320, y: 0, w: 360, h: 360 },
-      };
-      const d1 = node('d1', 'tb-d', { x: -1200, y: 0, w: NODE_W, h: NODE_H });
+    it('still tightens a clear group beyond an overlapping component instead of chaining through union bounds', () => {
+      // Real shrink-wrapped frames at z=3: A and B overlap, while C overlaps neither of them
+      // but would overlap their union bounds; D would then overlap that expanded union too. A
+      // union-bounds sweep turns all four into one anchored component and moves nothing. Sweeping
+      // real frames leaves only A/B rigid, so D is still free to tighten against B.
       const a1 = node('a1', 'tb-a', { x: 0, y: 0, w: NODE_W, h: NODE_H });
+      const a2 = node('a2', 'tb-a', { x: 1000, y: 1000, w: NODE_W, h: NODE_H });
       const b1 = node('b1', 'tb-b', { x: 600, y: 600, w: NODE_W, h: NODE_H });
-      const c1 = node('c1', 'tb-c', { x: 1320, y: 0, w: NODE_W, h: NODE_H });
+      const b2 = node('b2', 'tb-b', { x: 1600, y: 1600, w: NODE_W, h: NODE_H });
+      const c1 = node('c1', 'tb-c', { x: 1900, y: 0, w: NODE_W, h: NODE_H });
+      const d1 = node('d1', 'tb-d', { x: 2100, y: 1300, w: NODE_W, h: NODE_H });
+      const frameH = PAD_TOP + PAD + NODE_H;
       const model: CanvasModel = {
-        nodes: [d1, a1, b1, c1],
+        nodes: [a1, a2, b1, b2, c1, d1],
         groups: [
-          group('tb-d', layoutForDrawn(drawn.d), ['d1']),
-          group('tb-a', layoutForDrawn(drawn.a), ['a1']),
-          group('tb-b', layoutForDrawn(drawn.b), ['b1']),
-          group('tb-c', layoutForDrawn(drawn.c), ['c1']),
+          group('tb-a', { x: -PAD, y: -PAD_TOP, w: 1000 + NODE_W + PAD * 2, h: 1000 + frameH }, ['a1', 'a2']),
+          group('tb-b', { x: 600 - PAD, y: 600 - PAD_TOP, w: 1000 + NODE_W + PAD * 2, h: 1000 + frameH }, ['b1', 'b2']),
+          group('tb-c', { x: 1900 - PAD, y: -PAD_TOP, w: PAD * 2 + NODE_W, h: frameH }, ['c1']),
+          group('tb-d', { x: 2100 - PAD, y: 1300 - PAD_TOP, w: PAD * 2 + NODE_W, h: frameH }, ['d1']),
         ],
       };
-      expect(noOverlap([d1.rect, a1.rect, b1.rect, c1.rect])).toBe(true);
-      expect(gapBetween(drawn.a, drawn.b)).toBe(-Infinity);
-      expect(gapBetween(drawn.a, drawn.c)).toBe(120);
-      expect(gapBetween(drawn.b, drawn.c)).toBe(240);
+      const z = 3;
+      expect(noOverlap(model.nodes.map((n) => n.rect))).toBe(true);
+      expect(gapBetween(drawnFrameRect(model.groups[0].rect, z), drawnFrameRect(model.groups[1].rect, z))).toBe(-Infinity);
 
       const out = applySpacing(model, z, true);
 
-      expect(noOverlap([out.nodeRects.a1, out.nodeRects.c1])).toBe(true);
-      expect(out.groupRects['tb-a'].x - model.groups[1].rect.x)
-        .toBeCloseTo(out.groupRects['tb-c'].x - model.groups[3].rect.x, 9);
+      expect(Math.abs(out.groupRects['tb-d'].x - model.groups[3].rect.x)
+        + Math.abs(out.groupRects['tb-d'].y - model.groups[3].rect.y)).toBeGreaterThan(0);
     });
   });
 
@@ -472,15 +459,25 @@ describe('applySpacing', () => {
      * renders, nothing throws, and the grabbed node simply jumps. That is why this is asserted
      * against `applySpacing`'s own output rather than a hand-written number.
      */
-    it('reports each rect displacement from stored to spaced, for nodes and groups alike', () => {
-      const model = adjacentGroupsModel();
+    it('reports each rect displacement from stored to spaced, including vertical group motion and a sibling-only offset', () => {
+      // tb-b moves vertically as a group; tb-a's lower sibling moves vertically again during
+      // step 2. This prevents a zero-dy map or a node map copied from group offsets from passing.
+      const a1 = node('a1', 'tb-a', { x: PAD, y: PAD_TOP, w: NODE_W, h: NODE_H });
+      const a2 = node('a2', 'tb-a', { x: PAD, y: PAD_TOP + NODE_H + 400, w: NODE_W, h: NODE_H });
+      const b1 = node('b1', 'tb-b', { x: PAD, y: 1400 + PAD_TOP, w: NODE_W, h: NODE_H });
+      const model: CanvasModel = {
+        nodes: [a1, a2, b1],
+        groups: [
+          group('tb-a', { x: 0, y: 0, w: PAD * 2 + NODE_W, h: PAD_TOP + PAD + NODE_H * 2 + 400 }, ['a1', 'a2']),
+          group('tb-b', { x: 0, y: 1400, w: PAD * 2 + NODE_W, h: PAD_TOP + PAD + NODE_H }, ['b1']),
+        ],
+      };
       const z = 3;
       const live = applySpacing(model, z, true);
       const offsets = spacingOffsets(model, live);
 
-      // Non-vacuous: this fixture must actually be displaced at this zoom, or every assertion
-      // below would pass just as well against a function that returned zeroes.
-      expect(offsets.groups['tb-b'].dx).not.toBeCloseTo(0, 6);
+      expect(offsets.groups['tb-b'].dy).not.toBeCloseTo(0, 6);
+      expect(offsets.nodes.a2.dy).not.toBeCloseTo(offsets.groups['tb-a'].dy, 6);
 
       for (const n of model.nodes) {
         const d = offsets.nodes[n.terminalId];
