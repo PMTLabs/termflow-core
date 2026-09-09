@@ -17,6 +17,7 @@ export interface SidebarRow {
   isRunning: boolean;
   /** Still TAB-level (plan/020 §0 D2, §6) — a known remaining instance, not an oversight. */
   hasUnseenOutput: boolean;
+  hidden: boolean;
 }
 
 export interface SidebarGroup {
@@ -120,6 +121,7 @@ export function buildSidebarTree(
         shellType: n.shellType,
         isRunning: n.isRunning,
         hasUnseenOutput: n.hasUnseenOutput,
+        hidden: n.hidden,
       });
     }
 

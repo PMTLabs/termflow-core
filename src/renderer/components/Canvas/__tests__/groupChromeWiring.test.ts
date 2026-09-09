@@ -70,17 +70,17 @@ describe('the label is capped and the chip is not', () => {
 describe('CanvasMode feeds them', () => {
   it('passes the zoom to the collapse rule', () => {
     // The rule is now a legibility question, and legibility is a function of the zoom.
-    expect(MODE).toContain('allCollapsed(model.nodes, tiers, vp.z)');
+    expect(MODE).toContain('allCollapsed(model.nodes, tiers, vp.z, revealHidden)');
   });
 
   it('computes chip offsets only while collapsed', () => {
     // A chip is the only consumer, and it only exists when collapsed — running the layout the
     // rest of the time would be work per viewport change for nothing.
-    expect(MODE).toContain('collapsed ? chipOffsets(model.groups, vp.z) : {}');
+    expect(MODE).toContain('collapsed ? chipOffsets(shownGroups, vp.z) : {}');
   });
 
   it('recomputes them when the zoom or the groups change', () => {
-    const deps = /\[collapsed, model\.groups, vp\.z\]/.exec(MODE);
+    const deps = /\[collapsed, shownGroups, vp\.z\]/.exec(MODE);
     expect(deps).not.toBeNull();
   });
 

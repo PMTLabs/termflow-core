@@ -3,9 +3,9 @@ import type { CanvasNodeModel, CanvasGroupModel } from '../canvasSelectors';
 
 const rect = { x: 0, y: 0, w: 340, h: 210 };
 const node = (id: string, tabId: string, title: string, shellType = 'zsh'): CanvasNodeModel =>
-  ({ terminalId: id, tabId, paneId: `pn-${id}`, title, shellType, rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false });
+  ({ terminalId: id, tabId, paneId: `pn-${id}`, title, shellType, rect, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false, hidden: false });
 const group = (tabId: string, title: string, nodeIds: string[]): CanvasGroupModel =>
-  ({ tabId, title, rect, nodeIds, anyRunning: false });
+  ({ tabId, title, rect, nodeIds, anyRunning: false, allHidden: false });
 
 const nodes = [
   node('tm-1', 'tb-a', 'zsh'),
@@ -39,6 +39,11 @@ describe('basename', () => {
 });
 
 describe('buildSidebarTree', () => {
+  it('keeps hidden rows present and flags them for the recovery marker', () => {
+    const hidden = { ...nodes[0], hidden: true };
+    const tree = buildSidebarTree([hidden, ...nodes.slice(1)], groups, '', cwds);
+    expect(tree[0].rows.find((r) => r.terminalId === 'tm-1')).toMatchObject({ hidden: true });
+  });
   it('nests terminals under their group in tab order', () => {
     const t = buildSidebarTree(nodes, groups, '', cwds);
     expect(t.map((g) => g.tabId)).toEqual(['tb-a', 'tb-b']);

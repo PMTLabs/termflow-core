@@ -476,7 +476,7 @@ describe('stepping and zooming from the keyboard', () => {
    * another — neither wrong enough to notice until you tried to follow one with the other.
    */
   it('steps in the model\'s own order', () => {
-    expect(STEP).toContain('model.nodes.map((n) => n.terminalId)');
+    expect(STEP).toContain('paintedNodes.map((n) => n.terminalId)');
     expect(STEP).not.toMatch(/\.sort\(/);
   });
 

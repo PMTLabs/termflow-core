@@ -21,10 +21,13 @@ import { LodTier, priorityOrder } from './canvasGeometry';
 export function desiredPolicies(
   tiers: Record<string, LodTier>,
   suppressed: ReadonlySet<string>,
+  hidden: ReadonlySet<string> = new Set(),
 ): Record<string, RenderPolicy> {
   const out: Record<string, RenderPolicy> = {};
   for (const [id, tier] of Object.entries(tiers)) {
-    out[id] = tier === 'gpu' && !suppressed.has(id) ? 'webgl' : 'dom';
+    // Explicit DOM keeps this terminal in the reconciler's ownership inventory. Omitting it
+    // would leave an existing WebGL context counted as external and therefore undemotable.
+    out[id] = tier === 'gpu' && !suppressed.has(id) && !hidden.has(id) ? 'webgl' : 'dom';
   }
   return out;
 }

@@ -241,6 +241,26 @@ describe('saveState writes every persisted canvas field', () => {
   });
 });
 
+describe('workspaceSnapshot writes every persisted canvas field', () => {
+  it('keeps its hand-written canvas projection in step with CanvasPersisted', () => {
+    const read = (rel: string) => require('fs').readFileSync(require('path').resolve(__dirname, rel), 'utf-8');
+    const fields = [...(/export interface CanvasPersisted \{([\s\S]*?)\n\}/.exec(read('../../store/slices/canvasSlice.ts'))![1]
+      .matchAll(/^\s*(\w+)\s*\??:/gm))].map((m) => m[1]);
+    const src = read('../workspaceSnapshot.ts').replace(/\/\*[\s\S]*?\*\//g, '');
+    const literal = /canvas: \{([\s\S]*?)\},\s*capturedAt:/.exec(src)![1];
+    expect(fields.filter((field) => !new RegExp(`\\b${field}:`).test(literal))).toEqual([]);
+  });
+
+  it('prunes hidden ids for terminals that did not survive restore', () => {
+    const out = sanitize(
+      { viewport: { x: 0, y: 0, z: 1 }, nodes: {}, groups: {}, hidden: { 'tm-live': true, 'tm-dead': true } },
+      ['tm-live'],
+    )!;
+    expect(out.hidden).toEqual({ 'tm-live': true });
+    expect(out.hidden['tm-dead']).toBeUndefined();
+  });
+});
+
 describe('restoreZMax', () => {
   it('derives the ceiling the same way CanvasMode freezes it for the session', () => {
     expect(restoreZMax()).toBe(canvasMetrics(window.innerWidth, window.innerHeight).zMax);

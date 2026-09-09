@@ -76,10 +76,13 @@ const render = (vp: Viewport, opts: { pannable?: boolean } = {}) => act(() => {
       vw={VW}
       vh={VH}
       onPick={(w) => { picks.push(w); }}
+      revealHidden={false}
+      shownGroups={MODEL.groups}
       onPan={opts.pannable === false ? undefined : (dx, dy) => { pans.push([dx, dy]); }}
     />,
   );
 });
+
 
 const box = () => container.querySelector<HTMLElement>('.canvas-minimap')!;
 const viewRect = () => container.querySelector<HTMLElement>('.canvas-miniview')!;
@@ -134,6 +137,13 @@ afterEach(() => {
 });
 
 describe('the view rectangle is draggable', () => {
+  it('does not draw a minimap dot for a hidden terminal unless reveal mode is on', () => {
+    const hiddenModel = { ...MODEL, nodes: [{ ...MODEL.nodes[0], hidden: true }] };
+    act(() => root.render(<CanvasMinimap model={hiddenModel} vp={VP} vw={VW} vh={VH} onPick={() => {}} revealHidden={false} shownGroups={hiddenModel.groups} />));
+    expect(container.querySelector('.canvas-mininode')).toBeNull();
+    act(() => root.render(<CanvasMinimap model={hiddenModel} vp={VP} vw={VW} vh={VH} onPick={() => {}} revealHidden shownGroups={hiddenModel.groups} />));
+    expect(container.querySelector('.canvas-mininode')).not.toBeNull();
+  });
   it('found the rectangle it is dragging', () => {
     // Or every press below lands on nothing and the whole file passes vacuously.
     expect(viewRect()).not.toBeNull();

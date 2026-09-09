@@ -419,6 +419,18 @@ describe('CanvasSidebar — group rename', () => {
 });
 
 describe('CanvasSidebar — selection', () => {
+  it('unhides a hidden row before selecting and flying to it', () => {
+    const hidden: CanvasModel = {
+      ...model,
+      nodes: model.nodes.map((n) => n.terminalId === 'tm-2' ? { ...n, hidden: true } : n),
+    };
+    store.dispatch({ type: 'canvas/hydrateCanvas', payload: { hidden: { 'tm-2': true } } });
+    render(hidden);
+    act(() => { rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    const s = store.getState() as { canvas: { hidden: Record<string, true>; selectedId: string | null } };
+    expect(s.canvas.hidden['tm-2']).toBeUndefined();
+    expect(s.canvas.selectedId).toBe('tm-2');
+  });
   it('selects the node a row click names', () => {
     render();
     act(() => { rows()[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });

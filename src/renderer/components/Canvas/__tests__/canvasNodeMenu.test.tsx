@@ -30,6 +30,7 @@ let container: HTMLDivElement;
 let root: Root;
 let handlers: {
   onToggleOverlay: jest.Mock;
+  onToggleHide: jest.Mock;
   onOpenAsTab: jest.Mock;
   onCloseTerminal: jest.Mock;
   onDismiss: jest.Mock;
@@ -45,6 +46,7 @@ beforeEach(() => {
   root = createRoot(container);
   handlers = {
     onToggleOverlay: jest.fn(),
+    onToggleHide: jest.fn(),
     onOpenAsTab: jest.fn(),
     onCloseTerminal: jest.fn(),
     onDismiss: jest.fn(),
@@ -56,10 +58,10 @@ afterEach(() => {
   container.remove();
 });
 
-const render = (overlaid: boolean) => {
+const render = (overlaid: boolean, hidden = false) => {
   act(() => {
     root.render(
-      <CanvasNodeMenu x={40} y={60} title="server" overlaid={overlaid} {...handlers} />,
+      <CanvasNodeMenu x={40} y={60} title="server" overlaid={overlaid} hidden={hidden} {...handlers} />,
     );
   });
 };
@@ -95,6 +97,17 @@ const click = (el: Element) =>
   act(() => { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
 
 describe('the node menu offers more than the destructive action', () => {
+  it('matches the header tooltip, invokes hide, and remains before the destructive divider', () => {
+    render(false);
+    const hide = itemMatching('Hide from the canvas');
+    click(hide);
+    expect(handlers.onToggleHide).toHaveBeenCalledTimes(1);
+    const divider = [...document.querySelectorAll('.canvas-menu .context-menu-divider')].at(-1)!;
+    expect(divider).not.toBeNull();
+    expect(hide.compareDocumentPosition(divider) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    render(false, true);
+    expect(labels()).toContain('Show on the canvas');
+  });
   it('lists enlarge, open-in-tab, automations and close, in that order', () => {
     render(false);
     // `Automations` is present with NOTHING armed, and uncounted: the section is no longer a list
@@ -102,6 +115,7 @@ describe('the node menu offers more than the destructive action', () => {
     // `Automations (0)` here would be a count whose only content is that there is nothing to count.
     expect(labels()).toEqual([
       'Enlarge on the canvas',
+      'Hide from the canvas',
       'Open in its tab',
       'Automations',
       'Close Terminal',

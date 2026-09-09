@@ -1,0 +1,2 @@
+.canvas-hidden-badge { display: inline-flex; align-items: center; gap: 2px; flex: none; color: var(--text-tertiary, #666); font-size: var(--canvas-hidden-size, 14px); line-height: 1; }
+.canvas-hidden-badge svg { width: var(--canvas-hidden-size); height: var(--canvas-hidden-size); }

@@ -40,6 +40,38 @@ const stateWith = (overrides: any = {}) => ({
 }) as any;
 
 describe('buildCanvasModel', () => {
+  it('keeps later seed geometry stable when a preceding member is hidden, while reveal expands the drawn frame', () => {
+    const s = stateWith({ hidden: {} });
+    const before = buildCanvasModel(s);
+    const hidden = buildCanvasModel({ ...s, canvas: { ...s.canvas, hidden: { 'tm-2': true } } });
+    expect(hidden.nodes.find((n) => n.terminalId === 'tb-b')!.rect)
+      .toEqual(before.nodes.find((n) => n.terminalId === 'tb-b')!.rect);
+    const revealed = buildCanvasModel({ ...s, canvas: { ...s.canvas, hidden: { 'tm-2': true }, revealHidden: true } });
+    expect(revealed.groups.find((g) => g.tabId === 'tb-a')!.rect)
+      .toEqual(before.groups.find((g) => g.tabId === 'tb-a')!.rect);
+  });
+  it('stamps hidden nodes, marks an all-hidden group, and shrink-wraps only visible rects in a mixed stored/seeded tab', () => {
+    const s = stateWith({
+      nodes: { 'tm-b': { x: 1000, y: 500, w: NODE_W, h: NODE_H } },
+      hidden: { 'tm-a': true },
+    });
+    s.tabs.tabs = [{ id: 'tb-a', title: 'mixed', shellType: 'zsh', isActive: true }];
+    s.panes.treesByTabId = {
+      'tb-a': { id: 'pn-root', type: 'split', direction: 'horizontal', children: [
+        { id: 'pn-a', type: 'terminal', terminalId: 'tm-a', name: 'A', shellType: 'zsh' },
+        { id: 'pn-b', type: 'terminal', terminalId: 'tm-b', name: 'B', shellType: 'zsh' },
+        { id: 'pn-c', type: 'terminal', terminalId: 'tm-c', name: 'C', shellType: 'zsh' },
+      ] },
+    };
+    const m = buildCanvasModel(s);
+    expect(m.nodes.find((n) => n.terminalId === 'tm-a')!.hidden).toBe(true);
+    expect(m.groups[0].allHidden).toBe(false);
+    // A is seeded while B is stored, so `placed` is [B, A, C]. This exact bound proves the
+    // frame used index-aligned `rects`: filtering `placed` by leaf index drops B instead.
+    expect(m.groups[0].rect).toEqual({ x: 410, y: 60, w: 946, h: 666 });
+    const all = buildCanvasModel({ ...s, canvas: { ...s.canvas, hidden: { 'tm-a': true, 'tm-b': true, 'tm-c': true } } });
+    expect(all.groups[0].allHidden).toBe(true);
+  });
   it('produces one node per terminal across every tab', () => {
     const m = buildCanvasModel(stateWith());
     expect(m.nodes.map((n) => n.terminalId).sort()).toEqual(['tb-a', 'tb-b', 'tm-2']);
@@ -380,6 +412,11 @@ describe('labelMaxWidth', () => {
 });
 
 describe('allCollapsed', () => {
+  it('includes revealed hidden nodes in the collapse decision', () => {
+    const hidden = { ...n('hidden'), hidden: true };
+    expect(allCollapsed([hidden], tiers({ hidden: 'gpu' }), Z_TINY, false)).toBe(false);
+    expect(allCollapsed([hidden], tiers({ hidden: 'group' }), Z_TINY, true)).toBe(true);
+  });
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
     rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
@@ -470,6 +507,11 @@ describe('chipLabelScreenPx', () => {
  * component owning a 500 ms timer, for as long as it keeps returning it.
  */
 describe('snapshotNodeIds', () => {
+  it('polls a revealed hidden snapshot but not a re-hidden one', () => {
+    const hidden = { ...n('hidden'), hidden: true };
+    expect(snapshotNodeIds([hidden], { hidden: 'snapshot' }, new Set(['hidden']), false, false)).toEqual(new Set());
+    expect(snapshotNodeIds([hidden], { hidden: 'snapshot' }, new Set(['hidden']), false, true)).toEqual(new Set(['hidden']));
+  });
   const n = (id: string): CanvasNodeModel => ({
     terminalId: id, tabId: 'tb-a', paneId: `pn-${id}`, title: id, shellType: '',
     rect: { x: 0, y: 0, w: NODE_W, h: NODE_H }, isRunning: false, hasUnseenOutput: false, groupTitle: 'Group', exited: false,
@@ -490,6 +532,12 @@ describe('snapshotNodeIds', () => {
     const visible = new Set(['a']);
     const got = snapshotNodeIds(nodes, { a: 'snapshot', b: 'snapshot', c: 'snapshot' }, visible, false);
     expect([...got]).toEqual(['a']);
+  });
+
+  it('excludes a USER-hidden node that otherwise qualifies for snapshot polling', () => {
+    const hidden = { ...n('hidden'), hidden: true };
+    const got = snapshotNodeIds([hidden], { hidden: 'snapshot' }, new Set(['hidden']), false);
+    expect(got.size).toBe(0);
   });
 
   it('returns nothing when the whole workspace has collapsed to chips', () => {

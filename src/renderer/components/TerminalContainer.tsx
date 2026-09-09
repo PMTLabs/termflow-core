@@ -120,6 +120,10 @@ export const TerminalContainer: React.FC = () => {
   // `treesByTabId` is the authoritative store rather than the window mirror, which is
   // upsert-only by key.
   useEffect(() => {
+    if (!tabs.filter((tab) => !isVirtualTab(tab.shellType)).every((tab) => tab.id in treesByTabId)) return;
+    // A tree map is authoritative only after every real tab has an entry. In particular, restore
+    // publishes tabs and trees on adjacent dispatches; pruning between them would mistake the
+    // temporary empty map for an empty workspace and erase persisted geometry/hidden ids.
     const leafIds = new Set<string>();
     for (const tree of Object.values(treesByTabId)) {
       for (const terminalId of getAllTerminalIds(tree)) leafIds.add(terminalId);

@@ -7,7 +7,7 @@ import { getAllLeafIds } from '../../store/slices/paneTreeOps';
 import { RootState } from '../../store';
 import {
   CanvasEdge, addEdge, focusNode, panViewport, removeEdge, selectEdge, selectNode, setEdges,
-  setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen,
+  setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen, setNodeHidden, setRevealHidden,
 } from '../../store/slices/canvasSlice';
 import { addTabTree, focusPaneInTab } from '../../store/slices/panesSlice';
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
@@ -150,6 +150,24 @@ export const CanvasMode: React.FC = () => {
   const sidebarOpen = useSelector((s: RootState) => s.canvas.sidebarOpen);
   const edges = useSelector((s: RootState) => s.canvas.edges);
   const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
+  const revealHidden = useSelector((s: RootState) => s.canvas.revealHidden);
+  // This predicate runs in several per-node loops during every pan frame; keep its membership
+  // lookup constant-time instead of repeatedly scanning the model.
+  const hiddenNodeIds = useMemo(
+    () => new Set(model.nodes.filter((n) => n.hidden).map((n) => n.terminalId)),
+    [model.nodes],
+  );
+  const paintedNodes = useMemo(
+    () => revealHidden ? model.nodes : model.nodes.filter((n) => !n.hidden),
+    [model.nodes, revealHidden],
+  );
+  // Presentation/targeting share this one eligibility list; the model stays complete for
+  // membership, panes and hosts, while invisible frames cannot become phantom destinations.
+  const shownGroups = useMemo(
+    () => model.groups.filter((g) => revealHidden || !g.allHidden),
+    [model.groups, revealHidden],
+  );
+  const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
   // Read ONCE here and passed down, not subscribed to per node — see `CanvasNode`'s prop doc.
   const busyCue = useSelector((s: RootState) => s.settings.canvasBusyCue);
   // Session-closed state and the terminal font size, for the overlay's banner (`plan/024` Req 4).
@@ -256,7 +274,7 @@ export const CanvasMode: React.FC = () => {
     const rects: Record<string, Rect> = {};
     for (const n of model.nodes) rects[n.terminalId] = n.rect;
     return assignTiers({
-      ids: model.nodes.map((n) => n.terminalId),
+      ids: paintedNodes.map((n) => n.terminalId),
       rects,
       vp,
       vw: size.w,
@@ -264,14 +282,14 @@ export const CanvasMode: React.FC = () => {
       focusedId,
       recent,
     });
-  }, [model, vp, size, focusedId, recent]);
+  }, [paintedNodes, vp, size, focusedId, recent]);
 
   const visible = useMemo(
     () => visibleNodeIds(model.nodes, vp, size.w, size.h),
     [model, vp, size],
   );
 
-  const collapsed = allCollapsed(model.nodes, tiers, vp.z);
+  const collapsed = allCollapsed(model.nodes, tiers, vp.z, revealHidden);
 
   /**
    * Keeps collapsed chips off each other.
@@ -282,16 +300,33 @@ export const CanvasMode: React.FC = () => {
    * collapsed, which is the only time a chip is rendered at all.
    */
   const chipNudge = useMemo(
-    () => (collapsed ? chipOffsets(model.groups, vp.z) : {}),
-    [collapsed, model.groups, vp.z],
+    () => (collapsed ? chipOffsets(shownGroups, vp.z) : {}),
+    [collapsed, shownGroups, vp.z],
   );
+
+  /** USER-hidden alone — deliberately not `isHidden`, which is also true for a merely culled
+   *  or tier-demoted node. See `CanvasWiresProps.rects`: a wire to an off-screen node must
+   *  still draw, or connections blink in and out as the canvas pans. */
+  const userHidden = useCallback(
+    (id: string) => hiddenNodeIds.has(id) && !revealHidden,
+    [hiddenNodeIds, revealHidden],
+  );
+  // `tiers` is intentionally only the reveal-aware promotion budget. Policy reconciliation,
+  // however, owns every mounted terminal, including re-hidden ones that must be explicitly
+  // demoted rather than silently left outside its inventory.
+  const policyTiers = useMemo(() => {
+    const all = { ...tiers };
+    for (const n of model.nodes) if (!(n.terminalId in all)) all[n.terminalId] = 'group';
+    return all;
+  }, [tiers, model.nodes]);
 
   // Whether a node PAINTS. Extracted because the wire mask and the node's own `hidden` prop
   // must agree exactly — a mask hole for a node that is not there shows the 30% ghost against
   // open canvas, in the shape of a node.
   const isHidden = useCallback(
-    (id: string) => collapsed || (tiers[id] ?? 'group') === 'group' || !visible.has(id),
-    [collapsed, tiers, visible],
+    (id: string) => userHidden(id)
+      || collapsed || (tiers[id] ?? 'group') === 'group' || !visible.has(id),
+    [userHidden, collapsed, tiers, visible],
   );
 
   // TWO rect maps, and the split is load-bearing (see `CanvasWiresProps`): geometry needs every
@@ -318,8 +353,8 @@ export const CanvasMode: React.FC = () => {
   // lives in `canvasSelectors` so it can be tested — see `snapshotNodeIds` for why the
   // intersection with `visible` is load-bearing rather than an optimisation.
   const snapshotIds = useMemo(
-    () => snapshotNodeIds(model.nodes, tiers, visible, collapsed),
-    [model.nodes, tiers, visible, collapsed],
+    () => snapshotNodeIds(model.nodes, tiers, visible, collapsed, revealHidden),
+    [model.nodes, tiers, visible, collapsed, revealHidden],
   );
 
   // Keep the cache to what is actually on screen. Snapshots are cheap to refetch, and an entry
@@ -365,10 +400,10 @@ export const CanvasMode: React.FC = () => {
     });
   }, [overlayId, vp, size, hostBoxes]);
 
-  useCanvasRenderPolicy(tiers, focusedId, recent);
+  useCanvasRenderPolicy(policyTiers, focusedId, recent, hiddenNodeIds);
 
   // Node drag, group drag and cross-group re-homing (Tasks 11 + 12).
-  const drag = useCanvasDrag(model);
+  const drag = useCanvasDrag(presentationModel);
 
   // Auto-arrange (Task 13). A button, never automatic — design 010 D10: a canvas that
   // rearranges itself while you are looking away destroys the spatial memory the whole
@@ -558,9 +593,9 @@ export const CanvasMode: React.FC = () => {
    * frame would re-render every tab in the strip for the whole gesture.
    */
   useEffect(() => {
-    const id = nearestGroupToCentre(model.groups, vp, size.w, size.h);
+    const id = nearestGroupToCentre(shownGroups, vp, size.w, size.h);
     if (id !== nearestGroupId) dispatch(setNearestGroup(id));
-  }, [model.groups, vp, size, nearestGroupId, dispatch]);
+  }, [shownGroups, vp, size, nearestGroupId, dispatch]);
 
   /** Frame the whole workspace.
    *
@@ -568,17 +603,17 @@ export const CanvasMode: React.FC = () => {
    *  `buildModel`), so their union already contains every node — and an EMPTIED group keeps its
    *  stored frame and is still part of the workspace, which a node-only union would drop. */
   const fitAll = useCallback(() => {
-    const b = boundsOf(model.groups.map((g) => g.rect));
+    const b = boundsOf(shownGroups.map((g) => g.rect));
     if (b) flyTo(fitViewport(b, size.w, size.h, metrics.zMax));
-  }, [model.groups, flyTo, size, metrics]);
+  }, [shownGroups, flyTo, size, metrics]);
 
   /** Frame the group you are working in — the selected node's, falling back to the one the
    *  marker is already pointing at, so the key always does something. */
   const fitGroup = useCallback(() => {
     const tabId = model.nodes.find((n) => n.terminalId === selectedId)?.tabId ?? nearestGroupId;
-    const g = model.groups.find((x) => x.tabId === tabId);
+    const g = shownGroups.find((x) => x.tabId === tabId);
     if (g) flyTo(fitViewport(g.rect, size.w, size.h, metrics.zMax));
-  }, [model, selectedId, nearestGroupId, flyTo, size, metrics]);
+  }, [model.nodes, shownGroups, selectedId, nearestGroupId, flyTo, size, metrics]);
 
   /** One arrow-key step, in screen pixels. Relative, so this callback never reads the viewport
    *  and stays referentially stable — see `panViewport` for why that matters to the listener
@@ -611,7 +646,7 @@ export const CanvasMode: React.FC = () => {
    * they put it — this is "show me the next one", not "take me somewhere".
    */
   const stepNode = useCallback((dir: 1 | -1) => {
-    const next = stepNodeId(model.nodes.map((n) => n.terminalId), selectedId, dir);
+    const next = stepNodeId(paintedNodes.map((n) => n.terminalId), selectedId, dir);
     if (!next) return;
     dispatch(selectNode(next));
     const n = model.nodes.find((x) => x.terminalId === next);
@@ -621,7 +656,7 @@ export const CanvasMode: React.FC = () => {
     if (n && !isFullyVisible(vp, aimedNodeRect(n.rect, vp.z), size.w, size.h, FRAME_INSET)) {
       flyTo(centreOn(aimedNodeRect(n.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
     }
-  }, [model.nodes, selectedId, dispatch, vp, size, flyTo, metrics]);
+  }, [model.nodes, paintedNodes, selectedId, dispatch, vp, size, flyTo, metrics]);
 
   /**
    * Every node, read through a ref by the two key listeners below.
@@ -740,8 +775,8 @@ export const CanvasMode: React.FC = () => {
    *  branch here would keep this list empty even if that gate were removed, hiding the fact
    *  that the gate is what does the work. */
   const beacons = useMemo(
-    () => beaconLayout(model.nodes, vp, size.w, size.h),
-    [model.nodes, vp, size],
+    () => beaconLayout(paintedNodes, vp, size.w, size.h),
+    [paintedNodes, vp, size],
   );
 
   /** A beacon click. The same destination a sidebar row click gets — it is the same gesture,
@@ -784,13 +819,13 @@ export const CanvasMode: React.FC = () => {
    * without re-reading live state between dispatches.
    */
   const closeAllEnded = useCallback(() => {
-    const ended = model.nodes.filter((n) => n.exited);
+    const ended = model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden));
     const panesInTab = (tabId: string) => getAllLeafIds(treesByTabId[tabId] ?? null).length;
     closeEndedRequests(ended, panesInTab, isTerminalAlive).forEach((req) => {
       const { type, detail } = closeEventFor(req);
       window.dispatchEvent(new CustomEvent(type, { detail }));
     });
-  }, [model.nodes, treesByTabId]);
+  }, [model.nodes, revealHidden, treesByTabId]);
 
   /**
    * Create a terminal from the canvas — Tam's items 3 and 4.
@@ -936,7 +971,8 @@ export const CanvasMode: React.FC = () => {
 
   // For the toolbar's Close Ended button — how many nodes it would close, and whether there is
   // anything for it to do.
-  const endedCount = model.nodes.filter((n) => n.exited).length;
+  const endedCount = model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden)).length;
+  const hiddenCount = model.nodes.filter((n) => n.hidden).length;
 
   return (
     <CanvasMetricsContext.Provider value={metrics}>
@@ -971,13 +1007,15 @@ export const CanvasMode: React.FC = () => {
         overlay={!overlayId ? (
           <>
             <CanvasBeacons beacons={beacons} onPick={flyToNode} />
-            {model.groups.length > 0 && (
+            {shownGroups.length > 0 && (
               <CanvasMinimap
                 model={model}
                 vp={vp}
                 vw={size.w}
                 vh={size.h}
                 onPick={flyToWorld}
+                revealHidden={revealHidden}
+                shownGroups={shownGroups}
                 // Already in screen pixels — the minimap sized the step against its own
                 // projection, which is the only place that scale is known.
                 onPan={panScreen}
@@ -989,7 +1027,7 @@ export const CanvasMode: React.FC = () => {
         {/* Before the frames and nodes in document order; the two layers place themselves
             around them by z-index (1 under, 8 over), not by where they sit here. */}
         <CanvasWires
-          edges={edges}
+          edges={edges.filter((e) => !userHidden(e.from) && !userHidden(e.to))}
           rects={wireRects}
           masked={maskRects}
           hoveredId={near ? hoveredId : null}
@@ -1011,7 +1049,7 @@ export const CanvasMode: React.FC = () => {
             <path className="canvas-ghostwire" d={wire.ghost} />
           </svg>
         )}
-        {model.groups.map((g) => (
+        {shownGroups.map((g) => (
           <CanvasGroupFrame
             key={g.tabId}
             group={g}
@@ -1068,6 +1106,7 @@ export const CanvasMode: React.FC = () => {
               // Culling reads the node's ORIGINAL rect, which for an overlaid node can be far
               // off screen — the overlay would then be hidden the moment you opened it.
               hidden={!isOverlaid && isHidden(n.terminalId)}
+              nodeHidden={n.hidden}
               overlaid={isOverlaid}
               hostBox={hostBoxes[n.terminalId]}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
@@ -1081,6 +1120,7 @@ export const CanvasMode: React.FC = () => {
               combos={combos}
               onOpenAsTab={openAsTab(n.tabId, n.paneId)}
               onOpenOverlay={() => (isOverlaid ? closeOverlay() : dispatch(setOverlayNode(n.terminalId)))}
+              onToggleHide={() => dispatch(setNodeHidden({ id: n.terminalId, hidden: !n.hidden }))}
               onClose={() => closeNode(n)}
               // `n`, never `node`: `node` is the overlay's inflated copy, and the menu needs the
               // terminal's identity, not its current rect.
@@ -1113,7 +1153,7 @@ export const CanvasMode: React.FC = () => {
           Hidden while a node is overlaid. The overlay's backdrop lives in world space, so a
           button here paints over it — and it would then be the one spot on screen where a click
           does not dismiss the overlay, acting on a layout the user cannot see. */}
-      {!overlayId && model.groups.length > 0 && (
+      {!overlayId && (model.groups.length > 0 || hiddenCount > 0) && (
         <div className="canvas-toolbar">
           {/* `sidebarOpen` is in `canvasSlice` and persisted by Task 22; without a control it
               would be a stored field permanently stuck at its initial value. */}
@@ -1133,6 +1173,11 @@ export const CanvasMode: React.FC = () => {
             title={`Grid each group's terminals, then the groups themselves (${combos.arrange})`}
           >
             Arrange
+          </button>
+          <button type="button" className="canvas-tbtn" aria-pressed={revealHidden}
+            disabled={hiddenCount === 0} onClick={() => dispatch(setRevealHidden(!revealHidden))}
+            title={hiddenCount > 0 ? `${revealHidden ? 'Re-hide' : 'Reveal'} ${hiddenCount} hidden terminal${hiddenCount === 1 ? '' : 's'}` : 'No hidden terminals'}>
+            Hidden{hiddenCount > 0 ? ` (${hiddenCount})` : ''}
           </button>
           {/* Tam, 2026-08-24: a way to clear the "ended" tint in one press rather than closing
               each dead node by hand. Disabled rather than hidden at zero, matching the zoom
@@ -1214,6 +1259,8 @@ export const CanvasMode: React.FC = () => {
           // dismissed by a backdrop click while the menu is up, and a stale copy would then offer
           // "Shrink back to the canvas" for a node that is already back on it.
           overlaid={overlayId === nodeMenu.node.terminalId}
+          hidden={nodeMenu.node.hidden}
+          onToggleHide={() => dispatch(setNodeHidden({ id: nodeMenu.node.terminalId, hidden: !nodeMenu.node.hidden }))}
           // The SAME expressions the header buttons use (see the node's `onOpenOverlay` /
           // `onOpenAsTab` props below) rather than second implementations of them — one action
           // reached two ways has to be one action.

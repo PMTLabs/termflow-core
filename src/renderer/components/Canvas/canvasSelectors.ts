@@ -45,6 +45,7 @@ export interface CanvasNodeModel {
    * canvas node IS a pane.
    */
   exited: boolean;
+  hidden: boolean;
 }
 
 export interface CanvasGroupModel {
@@ -53,6 +54,7 @@ export interface CanvasGroupModel {
   rect: Rect;
   nodeIds: string[];
   anyRunning: boolean;
+  allHidden: boolean;
 }
 
 export interface CanvasModel {
@@ -178,6 +180,8 @@ function buildModel(
   trees: Record<string, PaneNode | null>,
   stored: Record<string, Rect>,
   storedGroups: Record<string, Rect>,
+  hidden: Record<string, true> = {},
+  revealHidden = false,
   runningTerminalIds: string[] = [],
   sessionExit: Record<string, { exitCode: number | null }> = {},
 ): CanvasModel {
@@ -234,7 +238,7 @@ function buildModel(
     if (!paneLeaves.length) {
       const kept = storedGroups[tab.id];
       if (kept) {
-        groups.push({ tabId: tab.id, title: tab.title, rect: kept, nodeIds: [], anyRunning: false });
+        groups.push({ tabId: tab.id, title: tab.title, rect: kept, nodeIds: [], anyRunning: false, allHidden: false });
       }
       continue;
     }
@@ -303,6 +307,7 @@ function buildModel(
         // instance"): per-pane clearing semantics ("viewing which pane clears it?") are
         // undefined, so every node in a tab still shares the tab's unseen flag.
         hasUnseenOutput: !!tab.hasUnseenOutput,
+        hidden: !!hidden[id],
       });
     });
 
@@ -312,7 +317,11 @@ function buildModel(
     // it agrees with `arrange`, whose group rects are exactly this shrink-wrap. The
     // consequence for Task 12: dragging a group must move its NODES; writing only
     // the group rect through `setGroupGeom` would be silently discarded here.
-    const drawnFrame = fitGroupFrame(placed) ?? frame;
+    // Occupancy is independent of visibility: hiding a node must never re-seed later tabs and
+    // erase the spatial memory this canvas exists to preserve.
+    const occupancyFrame = fitGroupFrame(rects) ?? frame;
+    // Frames describe what is currently shown. Reveal is a temporary shown state, not layout.
+    const drawnFrame = fitGroupFrame(rects.filter((_, i) => revealHidden || !hidden[paneLeaves[i].terminalId!])) ?? occupancyFrame;
     groups.push({
       tabId: tab.id,
       title: tab.title,
@@ -321,14 +330,15 @@ function buildModel(
       // Any MEMBER terminal running (Req 8) — strictly more accurate than the old
       // tab.isRunning proxy, and still the same field/meaning to a reader.
       anyRunning: nodeIds.some((nid) => running.has(nid)),
+      allHidden: nodeIds.length > 0 && nodeIds.every((nid) => !!hidden[nid]),
     });
 
     // Advance the seeding cursor on the frame that will actually be DRAWN, not on the box it
     // was seeded from. The two differ whenever a node carries a stored rect, and the drawn one
     // is the only one that can collide with the row below.
     if (!storedGroups[tab.id]) {
-      frameCursorX = drawnFrame.x + drawnFrame.w + GROUP_GAP;
-      rowMaxH = Math.max(rowMaxH, drawnFrame.h);
+      frameCursorX = occupancyFrame.x + occupancyFrame.w + GROUP_GAP;
+      rowMaxH = Math.max(rowMaxH, occupancyFrame.h);
     }
   }
 
@@ -404,6 +414,8 @@ export const selectCanvasModel = createSelector(
     (s: RootState) => s.panes.treesByTabId,
     (s: RootState) => s.canvas.nodes,
     (s: RootState) => s.canvas.groups,
+    (s: RootState) => s.canvas.hidden,
+    (s: RootState) => s.canvas.revealHidden,
     (s: RootState) => s.tabs.runningTerminalIds,
     (s: RootState) => s.sessionExit.byTerminalId,
   ],
@@ -416,6 +428,8 @@ export function buildCanvasModel(state: RootState): CanvasModel {
     state.panes.treesByTabId,
     state.canvas.nodes,
     state.canvas.groups,
+    state.canvas.hidden,
+    state.canvas.revealHidden,
     state.tabs.runningTerminalIds,
     state.sessionExit?.byTerminalId,
   );
@@ -490,10 +504,12 @@ export function allCollapsed(
   nodes: CanvasNodeModel[],
   tiers: Record<string, LodTier>,
   z: number,
+  revealHidden = false,
 ): boolean {
-  if (nodes.length === 0) return false;
+  const shown = nodes.filter((n) => !n.hidden || revealHidden);
+  if (shown.length === 0) return false;
   const nodeLabelsLegible = chipLabelScreenPx(z) >= MIN_TITLE_PX;
-  return nodes.every((n) => {
+  return shown.every((n) => {
     const tier = tiers[n.terminalId];
     return tier === 'group' || (tier === 'chip' && !nodeLabelsLegible);
   });
@@ -523,11 +539,13 @@ export function snapshotNodeIds(
   tiers: Record<string, LodTier>,
   visible: Set<string>,
   collapsed: boolean,
+  revealHidden = false,
 ): Set<string> {
   const out = new Set<string>();
   // Nothing is showing a screen when the whole workspace is group chips.
   if (collapsed) return out;
   for (const n of nodes) {
+    if (n.hidden && !revealHidden) continue;
     if (tiers[n.terminalId] === 'snapshot' && visible.has(n.terminalId)) out.add(n.terminalId);
   }
   return out;

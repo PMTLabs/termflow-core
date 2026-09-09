@@ -2,7 +2,7 @@ import canvasReducer, {
   setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
-  setSidebarOpen, setSidebarWidth, setSidebarZoom, SIDEBAR_ZOOM_MIN, SIDEBAR_ZOOM_MAX,
+  setSidebarOpen, setSidebarWidth, setSidebarZoom, setNodeHidden, unhideAll, setRevealHidden, SIDEBAR_ZOOM_MIN, SIDEBAR_ZOOM_MAX,
   pruneCanvasGeometry, hydrateCanvas, CanvasEdge,
 } from '../canvasSlice';
 import { MAX_INTERACTIVE } from '../../../components/Canvas/canvasGeometry';
@@ -12,6 +12,44 @@ const edge = (id: string, from: string, to: string): CanvasEdge =>
   ({ id, from, to, label: null, origin: 'user', createdAt: 1 });
 
 describe('canvasSlice', () => {
+  it('hides atomically, clearing only selection, focus and overlay that name that node', () => {
+    let s = init();
+    s = canvasReducer(s, selectNode('tm-a'));
+    s = canvasReducer(s, focusNode('tm-a'));
+    s = canvasReducer(s, setOverlayNode('tm-a'));
+    s = canvasReducer(s, setNodeHidden({ id: 'tm-a', hidden: true }));
+    expect(s.hidden).toEqual({ 'tm-a': true });
+    expect([s.selectedId, s.focusedId, s.overlayId]).toEqual([null, null, null]);
+    s = canvasReducer(s, setNodeHidden({ id: 'tm-a', hidden: false }));
+    expect(s.hidden).toEqual({});
+  });
+
+  it('keeps unrelated interaction ids, clears all hidden ids, reveals temporarily, and hydrates hidden', () => {
+    let s = init();
+    s = canvasReducer(s, selectNode('tm-other'));
+    s = canvasReducer(s, focusNode('tm-other'));
+    s = canvasReducer(s, setOverlayNode('tm-other'));
+    s = canvasReducer(s, setNodeHidden({ id: 'tm-a', hidden: true }));
+    expect([s.selectedId, s.focusedId, s.overlayId]).toEqual(['tm-other', 'tm-other', 'tm-other']);
+    s = canvasReducer(s, setRevealHidden(true));
+    expect(s.revealHidden).toBe(true);
+    s = canvasReducer(s, unhideAll());
+    expect(s.hidden).toEqual({});
+    s = canvasReducer(s, hydrateCanvas({ hidden: { 'tm-b': true } }));
+    expect(s.hidden).toEqual({ 'tm-b': true });
+    s = canvasReducer(s, hydrateCanvas({ hidden: ['tm-not-an-object'] as any }));
+    expect(s.hidden).toEqual({ 'tm-b': true });
+  });
+  it('reconciles interaction ids when re-hide makes their selected node invisible', () => {
+    let s = init();
+    s = canvasReducer(s, setNodeHidden({ id: 'tm-a', hidden: true }));
+    s = canvasReducer(s, setRevealHidden(true));
+    s = canvasReducer(s, selectNode('tm-a'));
+    s = canvasReducer(s, focusNode('tm-a'));
+    s = canvasReducer(s, setOverlayNode('tm-a'));
+    s = canvasReducer(s, setRevealHidden(false));
+    expect([s.selectedId, s.focusedId, s.overlayId]).toEqual([null, null, null]);
+  });
   it('starts at an identity viewport', () => {
     const s = init();
     expect(s.viewport).toEqual({ x: 0, y: 0, z: 1 });

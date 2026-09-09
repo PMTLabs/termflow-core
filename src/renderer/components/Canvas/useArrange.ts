@@ -50,7 +50,19 @@ export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = [
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = null;
 
-    const to = arrangeTarget(latest.current, latestEdges.current);
+    // Hiding is a view decision, but Arrange is destructive to spatial memory: moving an
+    // invisible node would make it reappear somewhere the user did not put it. Hidden nodes
+    // therefore stay out of this pass; after unhiding they may occupy a slot, and the user can
+    // press Arrange again to include them.
+    const visibleNodes = latest.current.nodes.filter((n) => !n.hidden);
+    const visibleIds = new Set(visibleNodes.map((n) => n.terminalId));
+    const visibleGroups = latest.current.groups
+      .map((g) => ({ ...g, nodeIds: g.nodeIds.filter((id) => visibleIds.has(id)) }))
+      .filter((g) => g.nodeIds.length > 0);
+    const visibleModel = { nodes: visibleNodes, groups: visibleGroups };
+    const to = arrangeTarget(visibleModel, latestEdges.current.filter(
+      (e) => visibleIds.has(e.from) && visibleIds.has(e.to),
+    ));
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(applyArrange(to));
       return;
@@ -68,7 +80,14 @@ export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = [
       // and deliberately kept anyway, because the two together are what make "Arrange lands on
       // the grid" hold no matter which one is edited next. Mutating either alone leaves the
       // property intact; mutating both breaks it, and `useArrange.test.tsx` pins that pair.
-      dispatch(applyArrange(k < 1 ? interpolateArrange(from, to, easeOutCubic(k)) : to));
+      const target = k < 1 ? interpolateArrange(from, to, easeOutCubic(k)) : to;
+      // Hide can happen after `to` was frozen. Re-check on every frame, including completion,
+      // so an in-flight Arrange never writes a newly hidden node's geometry.
+      const currentlyVisible = new Set(latest.current.nodes.filter((n) => !n.hidden).map((n) => n.terminalId));
+      dispatch(applyArrange({
+        groups: target.groups,
+        nodes: Object.fromEntries(Object.entries(target.nodes).filter(([id]) => currentlyVisible.has(id))),
+      }));
       if (k < 1) {
         raf.current = requestAnimationFrame(step);
         return;

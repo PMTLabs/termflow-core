@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
-import { selectNode, setSidebarZoom } from '../../store/slices/canvasSlice';
+import { selectNode, setNodeHidden, setSidebarZoom } from '../../store/slices/canvasSlice';
 import { renamePanes } from '../../store/slices/panesSlice';
 import { renameTab } from '../../services/renameTab';
 import { getAllCwdSnapshots } from '../../services/cwdSnapshot';
@@ -12,6 +12,7 @@ import { useCanvasMetrics } from './canvasMetricsContext';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
 import { useSidebarDrag } from './useSidebarDrag';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
+import { EyeIcon } from './EyeIcon';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -113,6 +114,7 @@ const Row: React.FC<RowProps> = ({
         'canvas-srow',
         selected ? 'selected' : '',
         row.isRunning ? 'running' : '',
+        row.hidden ? 'hidden' : '',
         lifting ? 'lifting' : '',
       ].filter(Boolean).join(' ')}
       onPointerDown={onPointerDown}
@@ -125,6 +127,7 @@ const Row: React.FC<RowProps> = ({
       <ShellProfileIcon shellType={row.shellType} />
       <span className="canvas-srow-title"><Title row={row} /></span>
       {row.disambiguator && <span className="canvas-srow-dis">{row.disambiguator}</span>}
+      {row.hidden && <span className="canvas-srow-hidden" title="Hidden from the canvas"><EyeIcon slashed size={13} /></span>}
       {/* The tab strip's own indicator, reused rather than restyled (design 010 §9). */}
       {row.hasUnseenOutput && <span className="tab-unseen-bell" title="New output you haven't seen yet">🔔</span>}
     </li>
@@ -195,6 +198,8 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
   const flyToNode = useCallback((terminalId: string) => {
     const n = model.nodes.find((x) => x.terminalId === terminalId);
     if (!n) return;
+    // A sidebar row is a recovery path. Do not select and fly to a rect that remains invisible.
+    if (n.hidden) dispatch(setNodeHidden({ id: terminalId, hidden: false }));
     dispatch(selectNode(terminalId));
     // The node's DRAWN box at the zoom we are flying to — see `aimedNodeRect`. Centring the
     // reserved rect leaves the node sitting high by half its title-bar slack, and this row

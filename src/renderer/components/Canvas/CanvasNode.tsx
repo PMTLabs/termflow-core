@@ -3,6 +3,7 @@ import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH, surfaceShift } 
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
+import { EyeIcon } from './EyeIcon';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import type { CanvasBusyCue } from './canvasBusyCue';
 import type { CanvasCombos } from './canvasGestures';
@@ -47,6 +48,8 @@ export const CanvasNode: React.FC<{
   linkTarget?: boolean;
   /** Paint-culled, or below the chip tier. Hides the node — never unmounts it. */
   hidden: boolean;
+  nodeHidden: boolean;
+  onToggleHide?: () => void;
   /** Which busy cue this node draws while `node.isRunning` — the user's `canvasBusyCue`
    *  setting (`plan/023`). Read ONCE by `CanvasMode` and threaded down, rather than with a
    *  `useSelector` here: that would be one store subscription per node, on a surface whose
@@ -85,9 +88,9 @@ export const CanvasNode: React.FC<{
   hostBox?: { w: number; h: number };
   children?: React.ReactNode;
 }> = ({
-  node, tier, zoom, selected, focused, dimmed, linkTarget, hidden, busyCue,
+  node, tier, zoom, selected, focused, dimmed, linkTarget, hidden, nodeHidden, busyCue,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
-  onClose, onContextMenu, overlaid, hostBox, combos, children,
+  onClose, onContextMenu, overlaid, hostBox, combos, children, onToggleHide,
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
@@ -135,6 +138,7 @@ export const CanvasNode: React.FC<{
         // This terminal's shell has exited (`plan/024` Req 4). Unconditional on tier: zoomed out
         // is exactly where you scan for what is still alive.
         node.exited ? 'ended' : '',
+        nodeHidden && !hidden ? 'ghost' : '',
       ].filter(Boolean).join(' ')}
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}
@@ -235,6 +239,15 @@ export const CanvasNode: React.FC<{
           )}
           {!isChip && <CanvasNodeAgent terminalId={node.terminalId} />}
           {!isChip && <span className="canvas-node-shell">{node.shellType}</span>}
+          {!isChip && onToggleHide && (
+            <button type="button" className="canvas-node-open canvas-node-hide"
+              title={nodeHidden ? 'Show on the canvas' : 'Hide from the canvas'}
+              aria-label={`${nodeHidden ? 'Show' : 'Hide'} ${node.title} ${nodeHidden ? 'on' : 'from'} the canvas`}
+              onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); onToggleHide(); }}>
+              <EyeIcon slashed={!nodeHidden} />
+            </button>
+          )}
           {/* Every handler on these buttons stops propagation, and each one is stopping a
               DIFFERENT gesture the node itself owns: pointerdown selects (and, from Task 12,
               starts a drag), click would bubble to the chip handler, and dblclick flies to

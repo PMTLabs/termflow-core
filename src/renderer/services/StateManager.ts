@@ -16,6 +16,7 @@ import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
 import { apiBase } from '../api/apiBase';
+import { isVirtualTab } from './tabKinds';
 // `stateKey` is deliberately NOT imported: the session key is per WINDOW now
 // (plan 018), and the profile-only key would put every window back on one blob.
 import { sessionStateKey, isSlotZero } from './windowScope';
@@ -92,11 +93,15 @@ export function sanitizeCanvasState(
   const liveTabs = new Set(tabIds);
   const nodes: Record<string, any> = {};
   const groups: Record<string, any> = {};
+  const hidden: Record<string, true> = {};
   for (const [id, r] of Object.entries(c.nodes ?? {})) {
     if (liveNodes.has(id) && isRect(r)) nodes[id] = r;
   }
   for (const [id, r] of Object.entries(c.groups ?? {})) {
     if (liveTabs.has(id) && isRect(r)) groups[id] = r;
+  }
+  if (c.hidden && typeof c.hidden === 'object' && !Array.isArray(c.hidden)) {
+    for (const [id, value] of Object.entries(c.hidden)) if (liveNodes.has(id) && value === true) hidden[id] = true;
   }
 
   return {
@@ -108,6 +113,7 @@ export function sanitizeCanvasState(
     // `finite` first, then the clamp — see `clampZoom` in `canvasSlice`: NaN survives a bare
     // Math.max/Math.min pair, and a NaN here reaches the stylesheet as an invalid calc().
     sidebarZoom: Math.max(SIDEBAR_ZOOM_MIN, Math.min(SIDEBAR_ZOOM_MAX, finite(c.sidebarZoom, 1))),
+    hidden,
   };
 }
 
@@ -332,6 +338,7 @@ class StateManagerClass {
           sidebarOpen: state.canvas.sidebarOpen,
           sidebarWidth: state.canvas.sidebarWidth,
           sidebarZoom: state.canvas.sidebarZoom,
+          hidden: state.canvas.hidden,
         },
       };
 
@@ -498,6 +505,14 @@ class StateManagerClass {
         if (appState.tabPanes) {
           console.log('Restoring tab panes mapping for all tabs:', Object.keys(appState.tabPanes));
           restoreTabPanesInPlace(appState.tabPanes);
+          // Seed Redux before tabs become observable. TerminalContainer's prune is correctly
+          // allowed to remove genuinely gone geometry, but an empty pre-seed map is not an
+          // authoritative workspace and must not erase restored node or hidden state.
+          for (const tab of appState.tabs || []) {
+            if (tab?.id && !isVirtualTab(tab.shellType) && tab.id in appState.tabPanes) {
+              dispatch(addTabTree({ tabId: tab.id, tree: appState.tabPanes[tab.id] }));
+            }
+          }
         }
 
         // The canvas tab restores FIRST, wherever it was persisted (`plan/024` Req 3).

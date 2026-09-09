@@ -171,11 +171,24 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
       // is nowhere to honour and the arrival is slotted into the grid instead (design §6.3).
       const to = m.groups.find((g) => g.tabId === toTabId);
       if (to) {
-        const r = regridGroup(to.rect, [...to.nodeIds, terminalId]);
+        // Hidden siblings move with a sidebar regroup and keep their relative layout: this is
+        // translating/regridding a whole destination tab, not Arrange's deliberate skip rule.
+        // Preserve them rather than letting them detach and reappear somewhere unrelated.
+        const visibleIds = to.nodeIds.filter((id) => !m.nodes.find((n) => n.terminalId === id)?.hidden);
+        const hiddenIds = to.nodeIds.filter((id) => !visibleIds.includes(id));
+        const r = regridGroup(to.rect, [...visibleIds, terminalId]);
         dispatch(setGroupGeom({ id: toTabId, rect: r.frame }));
         for (const [id, p] of Object.entries(r.nodes)) {
           const s = sizeOf(id);
           dispatch(setNodeGeom({ id, rect: { x: p.x, y: p.y, w: s.w, h: s.h } }));
+        }
+        // Regrid translates the visible layout; hidden members receive that same origin delta
+        // so their positions remain relative to their group instead of being left behind.
+        const dx = r.frame.x - to.rect.x;
+        const dy = r.frame.y - to.rect.y;
+        for (const id of hiddenIds) {
+          const s = sizeOf(id);
+          dispatch(setNodeGeom({ id, rect: { ...s, x: s.x + dx, y: s.y + dy } }));
         }
       }
 
