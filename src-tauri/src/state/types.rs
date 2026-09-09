@@ -27,6 +27,23 @@ pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
 /// 2J-cleared frames never enter scrollback, so this stays TUI-safe.
 pub const SCROLLBACK_LINES: usize = 5000;
 
+/// Exclusive recovery/registration ownership for one pty-host session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostSessionClaimState {
+    Reserved,
+    RegistrationInProgress,
+    Registered,
+}
+
+#[derive(Clone, Debug)]
+pub struct HostSessionClaim {
+    pub state: HostSessionClaimState,
+    pub pid: u32,
+    /// Process identity currently registered under this session, if any. This
+    /// stops a stale exit callback from retiring a replacement's claim.
+    pub process_id: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Terminal {
     pub id: String,
@@ -247,11 +264,110 @@ pub struct ChannelPayload {
 #[derive(Debug)]
 pub enum McpProcessHandle {
     Legacy(std::process::Child),
-    Sidecar(tauri_plugin_shell::process::CommandChild),
+    Sidecar {
+        child: tauri_plugin_shell::process::CommandChild,
+        /// The shell event drain sends once on `CommandEvent::Terminated`.
+        terminated: std::sync::mpsc::Receiver<()>,
+    },
 }
 
 use std::sync::Mutex;
 use std::collections::VecDeque;
+
+/// A process handle coupled to the generation that owns it. The counter and
+/// current handle are protected by one mutex so stale lifecycle work cannot
+/// select a replacement child between checking and removing it.
+pub struct GenerationSlot<T> {
+    next_generation: u64,
+    current: Option<(u64, T)>,
+}
+
+#[cfg(test)]
+mod generation_slot_tests {
+    use super::GenerationSlot;
+
+    #[test]
+    fn a_stale_spawn_cannot_replace_a_newer_slot_or_clear_it() {
+        let mut slot = GenerationSlot::new();
+        let old = slot.claim_generation();
+        let new = slot.claim_generation();
+        assert_eq!(slot.install_if_current(old, "old"), Err("old"));
+        assert_eq!(slot.install_if_current(new, "new"), Ok(None));
+        assert!(!slot.clear_if_current(old));
+        assert!(slot.is_present());
+        assert_eq!(slot.take_if_current(new), Some("new"));
+    }
+
+    #[test]
+    fn replacement_returns_the_displaced_handle_and_stop_invalidates_a_spawn_claim() {
+        let mut slot = GenerationSlot::new();
+        let first = slot.claim_generation();
+        assert_eq!(slot.install_if_current(first, "first-child"), Ok(None));
+        let replacement = slot.claim_generation();
+        assert_eq!(slot.install_if_current(replacement, "replacement-child"), Ok(Some("first-child")));
+        let in_flight = slot.claim_generation();
+        assert_eq!(slot.take(), Some("replacement-child"));
+        assert_eq!(slot.install_if_current(in_flight, "late-child"), Err("late-child"));
+    }
+}
+
+impl<T> GenerationSlot<T> {
+    pub fn new() -> Self {
+        Self {
+            next_generation: 0,
+            current: None,
+        }
+    }
+
+    pub fn claim_generation(&mut self) -> u64 {
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.next_generation
+    }
+
+    /// Installs a spawned child only if no later spawn has claimed the slot.
+    /// The caller must terminate the returned stale child itself.
+    pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<Option<T>, T> {
+        if self.next_generation == generation {
+            Ok(self.current.replace((generation, handle)).map(|(_, displaced)| displaced))
+        } else {
+            Err(handle)
+        }
+    }
+
+    pub fn clear_if_current(&mut self, generation: u64) -> bool {
+        if self.current.as_ref().is_some_and(|(current, _)| *current == generation) {
+            self.current = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_current(&self, generation: u64) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|(current, _)| *current == generation)
+    }
+
+    pub fn take_if_current(&mut self, generation: u64) -> Option<T> {
+        if self.current.as_ref().is_some_and(|(current, _)| *current == generation) {
+            self.current.take().map(|(_, handle)| handle)
+        } else {
+            None
+        }
+    }
+
+    pub fn take(&mut self) -> Option<T> {
+        // Stop is a lifecycle boundary: a child which has claimed a generation
+        // but has not installed yet must fail installation after this point.
+        self.claim_generation();
+        self.current.take().map(|(_, handle)| handle)
+    }
+
+    pub fn is_present(&self) -> bool {
+        self.current.is_some()
+    }
+}
 
 /// An in-flight cross-window pane drag. The source window registers it; the
 /// window the user releases over claims it (and the source removes its pane).
@@ -335,16 +451,12 @@ pub struct AppState<R: Runtime = Wry> {
     pub tmux_config: Arc<RwLock<TmuxConfig>>,
     // Active tmux sessions (terminal ID -> session)
     pub tmux_sessions: Arc<DashMap<String, Mutex<TmuxSession>>>,
-    // MCP Server process handle for graceful shutdown
-    pub mcp_process: Arc<Mutex<Option<McpProcessHandle>>>,
+    // MCP process handle and generation are one atomic ownership slot. A stale
+    // lifecycle operation may only take the generation it installed.
+    pub mcp_process: Arc<Mutex<GenerationSlot<McpProcessHandle>>>,
     // termflow-fabric peering sidecar handle for graceful shutdown. `None` when
     // the fabric binary is absent (open-core builds run fine without it).
-    pub fabric_process: Arc<Mutex<Option<tauri_plugin_shell::process::CommandChild>>>,
-    // Monotonic spawn generation for the fabric child. Each spawn bumps it; a child's drain
-    // task captures its generation and only clears `fabric_process` on Terminated if it is
-    // STILL the current one — so a respawn's old child dying can't null the new child's
-    // handle (re-review: fabric respawn stale-child race).
-    pub fabric_generation: Arc<AtomicU64>,
+    pub fabric_process: Arc<Mutex<GenerationSlot<tauri_plugin_shell::process::CommandChild>>>,
     // Loopback control port the fabric exposes its command/SSE API on. Dev/prod
     // isolated (see app_config::default_fabric_control_port), same as api/mcp ports.
     pub fabric_control_port: u16,
@@ -466,7 +578,9 @@ pub struct AppState<R: Runtime = Wry> {
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
     // present here, restoring the real pid.
-    pub host_reattach_pending: Arc<DashMap<String, u32>>,
+    pub host_session_claims: Arc<DashMap<String, HostSessionClaim>>,
+    pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
+    pub host_restore_released: Arc<AtomicBool>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
     // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
     // renderer (take_reattach_prompt_hook) after createTerminal resolves, so it can re-seed
@@ -533,7 +647,6 @@ impl<R: Runtime> Clone for AppState<R> {
             tmux_sessions: self.tmux_sessions.clone(),
             mcp_process: self.mcp_process.clone(),
             fabric_process: self.fabric_process.clone(),
-            fabric_generation: self.fabric_generation.clone(),
             fabric_control_port: self.fabric_control_port,
             keep_running_in_background: self.keep_running_in_background.clone(),
             network: self.network.clone(),
@@ -564,7 +677,9 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
             identity: self.identity.clone(),
-            host_reattach_pending: self.host_reattach_pending.clone(),
+            host_session_claims: self.host_session_claims.clone(),
+            host_restore_pending_windows: self.host_restore_pending_windows.clone(),
+            host_restore_released: self.host_restore_released.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),
             pty_host_connecting: self.pty_host_connecting.clone(),

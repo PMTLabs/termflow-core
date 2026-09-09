@@ -26,6 +26,9 @@ use tokio::sync::oneshot;
 /// Injected dependencies so the client stays decoupled from `AppState`.
 #[derive(Clone)]
 pub struct PtyHostDeps {
+    /// Per-profile credential used to authenticate the first reconnect
+    /// lifecycle probe to a held host.
+    pub lifecycle_token: String,
     pub output_tx: broadcast::Sender<ChannelPayload>,
     pub output_produced: Arc<AtomicU64>,
     /// Called on child exit: `(process_id, session_key, exit_cwd)`.
@@ -126,14 +129,29 @@ pub struct PtyHostClient {
     /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
     /// (no record) must only ever receive the fire-and-forget `Attach`.
     attach_acks: Arc<std::sync::atomic::AtomicBool>,
+    /// Lifecycle policy copied from the selected connection plan. This is
+    /// deliberately connection-owned so UI consumers never re-read a mutable
+    /// discovery record after connecting.
+    lifecycle: Arc<HostRetention>,
     /// Cleared by the reader task the moment the pipe closes (just before
     /// on_disconnect fires). Lets `ensure_pty_host` refuse to PUBLISH a client
     /// whose disconnect already ran — otherwise a drop during connection setup
     /// leaves a permanently-dead client installed that nothing will ever null.
     alive: Arc<std::sync::atomic::AtomicBool>,
+    lifecycle_token: Arc<String>,
 }
 
 impl PtyHostClient {
+    /// Retention advertised for this connected host. `Unknown` covers legacy,
+    /// absent, incomplete, and non-contract records; it never implies
+    /// indefinite retention.
+    pub fn host_retention(&self) -> HostRetention {
+        (*self.lifecycle).clone()
+    }
+
+    pub fn set_lifecycle(&mut self, lifecycle: HostRetention) {
+        self.lifecycle = Arc::new(lifecycle);
+    }
     fn next_req(&self) -> u64 {
         self.req_ctr.fetch_add(1, Ordering::Relaxed)
     }
@@ -282,20 +300,33 @@ impl PtyHostClient {
     /// must never treat that like an authoritative empty list, or a stale
     /// recovery pass would tear down live panes on a transport failure.
     pub async fn list_sessions(&self) -> Option<Vec<SessionMeta>> {
-        match self.request(|req| Control::ListSessions { req }).await {
+        let token = self.lifecycle_token.to_string();
+        match self
+            .request(move |req| Control::ListSessions {
+                req,
+                token: Some(token),
+            })
+            .await
+        {
             Some(Response::SessionList { sessions, .. }) => Some(sessions),
             _ => None,
         }
     }
 
     /// Arm the hot-swap hold; returns the epoch-ms deadline on ack.
-    pub async fn arm_detach(&self, timeout_secs: u64, token: &str) -> Result<u64, String> {
+    pub async fn arm_detach(
+        &self,
+        timeout_secs: u64,
+        token: &str,
+        purpose: Option<termflow_pty_protocol::ArmDetachPurpose>,
+    ) -> Result<u64, String> {
         let token = token.to_string();
         match self
             .request(move |req| Control::ArmDetach {
                 req,
                 timeout_secs,
                 token,
+                purpose,
             })
             .await
         {
@@ -353,6 +384,7 @@ where
     let req_ctr = Arc::new(AtomicU64::new(1));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let alive_r = alive.clone();
+    let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
 
     // Writer task.
     tokio::spawn(async move {
@@ -422,7 +454,9 @@ where
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        lifecycle: Arc::new(HostRetention::Unknown),
         alive,
+        lifecycle_token,
     }
 }
 
@@ -532,11 +566,12 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
 #[cfg(windows)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
+    build_id: Option<&str>,
     pipe: &str,
     token: &str,
     record_pid: Option<u32>,
     deps: PtyHostDeps,
-) -> std::io::Result<PtyHostClient> {
+) -> std::io::Result<(PtyHostClient, HostConnectionOrigin)> {
     use std::time::Duration;
     use tokio::net::windows::named_pipe::ClientOptions;
 
@@ -549,12 +584,12 @@ pub async fn connect_or_spawn(
         OPEN_GRACE_STEP,
     )
     .await;
-    let conn = match outcome {
+    let (conn, origin) = match outcome {
         OpenOutcome::Connected(c) => {
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
-            c
+            (c, HostConnectionOrigin::Adopted)
         }
         OpenOutcome::HostAliveUnreachable => {
             log::warn!(
@@ -570,7 +605,7 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, pipe, token)?;
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -579,12 +614,12 @@ pub async fn connect_or_spawn(
                     break;
                 }
             }
-            conn.ok_or_else(|| {
+            (conn.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "pty-host sidecar did not open its pipe",
                 )
-            })?
+            })?, HostConnectionOrigin::SpawnedHere)
         }
     };
     let (rd, wr) = tokio::io::split(conn);
@@ -592,7 +627,7 @@ pub async fn connect_or_spawn(
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
-    Ok(client)
+    Ok((client, origin))
 }
 
 /// Spawn the sidecar detached from the GUI's lifetime. Returns whether it broke
@@ -602,6 +637,7 @@ pub async fn connect_or_spawn(
 #[cfg(windows)]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
+    build_id: Option<&str>,
     pipe: &str,
     token: &str,
 ) -> std::io::Result<bool> {
@@ -638,6 +674,9 @@ fn spawn_sidecar_detached(
         c.env("TERMFLOW_PTY_PIPE", pipe)
             .env("TERMFLOW_PTY_TOKEN", token)
             .stdin(Stdio::null());
+        if let Some(build_id) = build_id {
+            c.env("TERMFLOW_PTY_BUILD_ID", build_id);
+        }
         match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
             Some(f) => {
                 c.stdout(f.try_clone().expect("clone log file handle"));
@@ -688,11 +727,12 @@ fn spawn_sidecar_detached(
 #[cfg(unix)]
 pub async fn connect_or_spawn(
     sidecar: &std::path::Path,
+    build_id: Option<&str>,
     pipe: &str, // socket path on Unix
     token: &str,
     record_pid: Option<u32>,
     deps: PtyHostDeps,
-) -> std::io::Result<PtyHostClient> {
+) -> std::io::Result<(PtyHostClient, HostConnectionOrigin)> {
     use std::time::Duration;
     use tokio::net::UnixStream;
 
@@ -705,12 +745,12 @@ pub async fn connect_or_spawn(
         OPEN_GRACE_STEP,
     )
     .await;
-    let conn = match outcome {
+    let (conn, origin) = match outcome {
         OpenOutcome::Connected(c) => {
             // An already-running host (possibly spawned by a PREVIOUS app
             // version — this is the update-survival adoption path).
             log::info!("[HOTSWAP] adopted already-running pty-host on {pipe}");
-            c
+            (c, HostConnectionOrigin::Adopted)
         }
         OpenOutcome::HostAliveUnreachable => {
             log::warn!(
@@ -726,7 +766,7 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, pipe, token)?;
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -735,12 +775,12 @@ pub async fn connect_or_spawn(
                     break;
                 }
             }
-            conn.ok_or_else(|| {
+            (conn.ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "pty-host sidecar did not open its socket",
                 )
-            })?
+            })?, HostConnectionOrigin::SpawnedHere)
         }
     };
     let (rd, wr) = tokio::io::split(conn);
@@ -748,7 +788,7 @@ pub async fn connect_or_spawn(
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
-    Ok(client)
+    Ok((client, origin))
 }
 
 /// Spawn the sidecar detached into its own session so a GUI exit (or a `SIGHUP`
@@ -760,6 +800,7 @@ pub async fn connect_or_spawn(
 #[cfg(unix)]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
+    build_id: Option<&str>,
     pipe: &str,
     token: &str,
 ) -> std::io::Result<bool> {
@@ -776,6 +817,9 @@ fn spawn_sidecar_detached(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(build_id) = build_id {
+        c.env("TERMFLOW_PTY_BUILD_ID", build_id);
+    }
     // RP-2: tell the host where to advertise itself (discovery record).
     if let Some(rp) = record_path() {
         c.env("TERMFLOW_PTY_RECORD", rp);
@@ -805,11 +849,12 @@ fn spawn_sidecar_detached(
 #[cfg(not(any(windows, unix)))]
 pub async fn connect_or_spawn(
     _sidecar: &std::path::Path,
+    _build_id: Option<&str>,
     _pipe: &str,
     _token: &str,
     _record_pid: Option<u32>,
     _deps: PtyHostDeps,
-) -> std::io::Result<PtyHostClient> {
+) -> std::io::Result<(PtyHostClient, HostConnectionOrigin)> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "pty-host sidecar is unsupported on this target",
@@ -1082,23 +1127,52 @@ fn install_host_into(
 /// failure, fall back to the bundled path so terminals still work (they just
 /// won't survive an update that swaps the payload).
 pub fn resolve_host_path() -> Option<std::path::PathBuf> {
+    resolve_host_launch().map(|launch| launch.path)
+}
+
+/// The exact descriptor used for both the host hash and `Command::new`.  The
+/// full digest is retained: the runtime directory uses only its first 8 bytes.
+/// A hash failure or missing source has no descriptor and callers must not
+/// claim that a host is current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostLaunch {
+    pub path: std::path::PathBuf,
+    pub build_id: Option<String>,
+}
+
+pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
-    match runtime_host_dir() {
+    let path = match runtime_host_dir() {
         Some(base) => match install_host_into(&src, &base) {
-            Ok(dest) => Some(dest),
+            Ok(dest) => dest,
             Err(e) => {
                 log::warn!(
                     "pty-host: could not install host into runtime dir ({e}); \
                      running from bundled path (won't survive a payload swap)"
                 );
-                Some(src)
+                src
             }
         },
         None => {
             log::warn!("pty-host: no per-user runtime dir; running from bundled path");
-            Some(src)
+            src
         }
-    }
+    };
+    let build_id = sha256_file(&path).map(|digest| hex_full(&digest)).map_err(|e| {
+        log::warn!(
+            "pty-host: could not read build identity for {} ({e}); adopting or launching unverified",
+            path.display()
+        );
+        e
+    }).ok();
+    Some(HostLaunch { path, build_id })
+}
+
+fn hex_full(digest: &[u8; 32]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(64);
+    for b in digest { let _ = write!(s, "{b:02x}"); }
+    s
 }
 
 /// What to do with a (possibly running) host, decided from its discovery record
@@ -1116,10 +1190,72 @@ pub enum ConnectPlan {
         version: u16,
         instance_id: u128,
         host_caps: u32,
+        lifecycle: HostRetention,
     },
     /// A new host is running but shares NO protocol version with us. Do NOT
     /// force-kill its sessions — coexist read-only / banner (design §10.3/§10.4).
     Incompatible { instance_id: u128 },
+}
+
+/// Provenance established by the connect-or-spawn operation, not by discovery.
+/// A record names a possible endpoint but cannot attest which process accepted
+/// the pipe connection; only this process's successful spawn is confirmed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostConnectionOrigin { SpawnedHere, Adopted }
+
+impl ConnectPlan {
+    pub fn retention_for(&self, origin: HostConnectionOrigin) -> HostRetention {
+        match origin {
+            HostConnectionOrigin::Adopted => HostRetention::Unknown,
+            HostConnectionOrigin::SpawnedHere => match self {
+                ConnectPlan::Bootstrap { lifecycle, .. } => lifecycle.clone(),
+                ConnectPlan::LegacyOrNone | ConnectPlan::Incompatible { .. } => HostRetention::Unknown,
+            },
+        }
+    }
+}
+
+/// Three-state lifecycle exposure for app consumers. This is not a capability
+/// bit: a bounded policy carries its active retention duration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostRetention {
+    Unknown,
+    Indefinite,
+    Bounded { active_secs: u64 },
+}
+
+/// Hash handling for a discovered host.  A mismatched or legacy-unknown host is
+/// deliberately adopted when its protocol/capabilities allow it; terminating
+/// live terminals to enforce freshness would be the worse failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostBuildDisposition { Current, Stale { observed: String, expected: String }, Unknown }
+
+pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: Option<&str>) -> HostBuildDisposition {
+    match (record.and_then(|r| r.build_id.as_deref()), expected) {
+        (_, None) => HostBuildDisposition::Unknown,
+        (Some(observed), Some(expected)) if observed == expected => HostBuildDisposition::Current,
+        (Some(observed), Some(expected)) => HostBuildDisposition::Stale { observed: observed.into(), expected: expected.into() },
+        (None, Some(_)) => HostBuildDisposition::Unknown,
+    }
+}
+
+fn advertised_retention(rec: &termflow_pty_protocol::HostRecord) -> HostRetention {
+    if rec.capabilities & termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT == 0 {
+        return HostRetention::Unknown;
+    }
+    match rec.lifecycle.as_ref() {
+        Some(termflow_pty_protocol::LifecycleContract {
+            version: 1,
+            retention: termflow_pty_protocol::RetentionPolicy::Indefinite,
+        }) => HostRetention::Indefinite,
+        Some(termflow_pty_protocol::LifecycleContract {
+            version: 1,
+            retention: termflow_pty_protocol::RetentionPolicy::Bounded { active_secs },
+        }) => HostRetention::Bounded {
+            active_secs: *active_secs,
+        },
+        _ => HostRetention::Unknown,
+    }
 }
 
 /// Decide how to connect from an already-read discovery record.
@@ -1133,12 +1269,16 @@ pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> Con
             ),
             (rec.proto_min, rec.proto_max),
         ) {
-            Some(version) => ConnectPlan::Bootstrap {
-                endpoint: rec.endpoint,
-                version,
-                instance_id: rec.instance_id,
-                host_caps: rec.capabilities,
-            },
+            Some(version) => {
+                let lifecycle = advertised_retention(&rec);
+                ConnectPlan::Bootstrap {
+                    endpoint: rec.endpoint,
+                    version,
+                    instance_id: rec.instance_id,
+                    host_caps: rec.capabilities,
+                    lifecycle,
+                }
+            }
             None => ConnectPlan::Incompatible {
                 instance_id: rec.instance_id,
             },
@@ -1238,6 +1378,7 @@ mod tests {
         let (tx, rx) = broadcast::channel(256);
         let produced = Arc::new(AtomicU64::new(0));
         let deps = PtyHostDeps {
+            lifecycle_token: "tok".into(),
             output_tx: tx,
             output_produced: produced.clone(),
             on_exit: Arc::new(|_, _, _| {}),

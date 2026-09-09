@@ -87,17 +87,27 @@ fn fabric_data_dir(app: &AppHandle) -> std::path::PathBuf {
     dir
 }
 
-/// Poll the fabric's loopback `/health` until it answers or the attempts run out.
-/// Best-effort and status/logging ONLY: it no longer gates the SSE event bridge (that
-/// starts unconditionally in [`start_fabric`]), so a slow answer never disables peering.
-async fn wait_for_fabric_health(control_port: u16) -> bool {
+/// Poll for a report without delaying the event bridge.  Old fabric binaries do
+/// not self-report a build and are deliberately accepted as `Unverified`.
+async fn wait_for_fabric_health(control_port: u16, owner: &str, expected_build: &str) -> crate::mcp_sidecar::SidecarAcceptance {
     // 500ms cadence; the budget covers first-run latency (Ed25519 keygen + OS keychain
     // access, which on Windows can block on a Credential Manager prompt) so the "healthy"
     // log line still fires on a slow cold start rather than a spurious failure warning.
     const HEALTH_ATTEMPTS: u32 = 40; // 40 × 500ms ≈ 20s
+    wait_for_fabric_health_within(control_port, owner, expected_build, HEALTH_ATTEMPTS).await
+}
+
+/// Split out only so a test can exhaust the budget without waiting the real
+/// ~20 s; production always passes the full budget.
+async fn wait_for_fabric_health_within(
+    control_port: u16,
+    owner: &str,
+    expected_build: &str,
+    attempts: u32,
+) -> crate::mcp_sidecar::SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the OS default.
     let client = crate::network_commands::localhost_client(1500);
-    for attempt in 1..=HEALTH_ATTEMPTS {
+    for attempt in 1..=attempts {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let url = format!("http://127.0.0.1:{}/health", control_port);
         let result = match &client {
@@ -106,8 +116,13 @@ async fn wait_for_fabric_health(control_port: u16) -> bool {
         };
         match result {
             Ok(resp) if resp.status().is_success() => {
-                log::info!("[FABRIC] Fabric healthy after {} attempt(s)", attempt);
-                return true;
+                let health: serde_json::Value = resp.json().await.unwrap_or_default();
+                let observed_owner = health.get("owner_id").and_then(|v| v.as_str());
+                let observed_build = health.get("build_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                match crate::mcp_sidecar::classify_sidecar_report(observed_owner, owner, observed_build, Some(expected_build)) {
+                    Some(result) => return result,
+                    None => log::debug!("[FABRIC] health attempt {attempt} has no owner id yet"),
+                }
             }
             Ok(resp) => log::debug!(
                 "[FABRIC] Health check attempt {} returned status: {}",
@@ -117,11 +132,15 @@ async fn wait_for_fabric_health(control_port: u16) -> bool {
             Err(e) => log::debug!("[FABRIC] Health check attempt {} failed: {}", attempt, e),
         }
     }
+    // Exhausting the budget means we heard NOTHING — which is exactly what the
+    // cadence comment above predicts on a first run that blocks on a Credential
+    // Manager prompt. Rejected stops our own fabric child, so returning it here
+    // would kill peering in the one scenario that budget was written for.
     log::warn!(
-        "[FABRIC] Fabric health check failed after {} attempts",
-        HEALTH_ATTEMPTS
+        "[FABRIC] Fabric health did not answer in {} attempts — continuing unverified",
+        attempts
     );
-    false
+    crate::mcp_sidecar::SidecarAcceptance::Unverified
 }
 
 /// Spawn the `termflow-fabric` sidecar. On spawn failure (binary absent / not
@@ -157,6 +176,8 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     };
     cfg.api_port = api_port;
 
+    let (launch_path, build_id) = crate::mcp_sidecar::resolved_tauri_sidecar("termflow-fabric")
+        .map_err(|e| format!("fabric build identity unavailable: {e}"))?;
     let mut sidecar_command = app
         .shell()
         .sidecar("termflow-fabric")
@@ -165,19 +186,29 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
         sidecar_command = sidecar_command.env(k, v);
     }
 
+    let generation = state
+        .fabric_process
+        .lock()
+        .map_err(|_| "fabric process slot lock poisoned".to_string())?
+        .claim_generation();
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[FABRIC] termflow-fabric sidecar spawned");
-
-    // Claim a spawn generation for THIS child. A later respawn bumps it, so this child's
-    // drain task can tell whether it still owns the stored handle before clearing it.
-    let generation = state
-        .fabric_generation
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-        .wrapping_add(1);
-
-    if let Ok(mut guard) = state.fabric_process.lock() {
-        *guard = Some(child);
+    let installed = match state.fabric_process.lock() {
+        Ok(mut slot) => slot.install_if_current(generation, child),
+        Err(_) => {
+            let _ = child.kill();
+            return Err("fabric process slot lock poisoned after spawn; killed uninstalled child".to_string());
+        }
+    };
+    match installed {
+        Ok(Some(displaced_child)) => { let _ = displaced_child.kill(); }
+        Ok(None) => {}
+        Err(stale_child) => {
+            let _ = stale_child.kill();
+            return Ok(());
+        }
     }
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
 
     // Drain the sidecar's stdout/stderr/event stream so its pipe never fills and
     // blocks the child (same pattern as the MCP sidecar). Crucially, watch for
@@ -186,30 +217,33 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     // handle lingers forever, `fabric_alive()` stays true, and `subscribe_fabric_events`
     // hammers `GET /events` against a dead port every 1s indefinitely.
     let drain_state = state.clone();
+    let drain_stop = stop_tx.clone();
     tauri::async_runtime::spawn(async move {
         use tauri_plugin_shell::process::CommandEvent;
         while let Some(event) = rx.recv().await {
             if let CommandEvent::Terminated(payload) = event {
+                let _ = drain_stop.send(true);
                 // Only clear the handle if we still own the current generation. During a
                 // respawn the OLD child is killed and a NEW one stored ~immediately; if the
                 // old child's Terminated arrives after that, this guard stops it from nulling
                 // the new child's handle (which would kill the event bridge and orphan the
                 // fabric) (re-review: fabric respawn stale-child race).
-                let current = drain_state
-                    .fabric_generation
-                    .load(std::sync::atomic::Ordering::SeqCst);
-                if current == generation {
+                let cleared = match drain_state.fabric_process.lock() {
+                    Ok(mut slot) => slot.clear_if_current(generation),
+                    Err(_) => {
+                        log::error!("[FABRIC] process slot lock poisoned while recording termination for generation {generation}");
+                        break;
+                    }
+                };
+                if cleared {
                     log::warn!(
                         "[FABRIC] termflow-fabric terminated (code={:?}, signal={:?}); clearing process handle",
                         payload.code,
                         payload.signal
                     );
-                    if let Ok(mut guard) = drain_state.fabric_process.lock() {
-                        *guard = None;
-                    }
                 } else {
                     log::debug!(
-                        "[FABRIC] stale fabric child (gen {generation}) terminated after respawn (current gen {current}); keeping new handle"
+                        "[FABRIC] stale fabric child (gen {generation}) terminated after respawn; keeping current handle"
                     );
                 }
             }
@@ -224,13 +258,25 @@ pub async fn start_fabric(app: AppHandle, state: AppState) -> Result<(), String>
     // Windows Credential Manager can prompt) the poll timed out even though the fabric later
     // came up, so the bridge NEVER started that session and no `peer:event` (incl. incoming
     // pairing requests) reached the renderer until an app restart.
-    tauri::async_runtime::spawn(subscribe_fabric_events(app, state));
+    let verify_state = state.clone();
+    let stream_build_id = build_id.clone();
+    tauri::async_runtime::spawn(subscribe_fabric_events(app, state, generation, stream_build_id, stop_rx));
 
-    // Health poll retained for status/logging only (it no longer gates eventing). Raised
-    // attempt budget tolerates first-run keychain latency.
+    // A new child handle is not proof that the shared control port is its
+    // listener.  Verify asynchronously so slow first-run key generation cannot
+    // lose pairing events; only a rejection stops OUR generation's handle.
     tauri::async_runtime::spawn(async move {
-        let _ = wait_for_fabric_health(control_port).await;
+        match wait_for_fabric_health(control_port, &verify_state.instance_id, &build_id).await {
+            crate::mcp_sidecar::SidecarAcceptance::Verified => log::info!("[FABRIC] build-verified descriptor={}", launch_path.display()),
+            crate::mcp_sidecar::SidecarAcceptance::Unverified => log::warn!("[FABRIC] health did not establish a matching build identity; continuing unverified"),
+            crate::mcp_sidecar::SidecarAcceptance::Rejected => {
+                log::error!("[FABRIC] foreign or mismatched listener; stopping only our spawned generation");
+                let _ = stop_tx.send(true);
+                shutdown_fabric_generation(&verify_state, generation);
+            }
+        }
     });
+
     Ok(())
 }
 
@@ -249,22 +295,24 @@ pub(crate) fn fabric_installed<R: tauri::Runtime>(state: &AppState<R>) -> bool {
     state
         .fabric_process
         .lock()
-        .map(|g| option_handle_present(&g))
+        .map(|g| g.is_present())
         .unwrap_or(false)
 }
 
 /// Pure predicate: is an `Option` handle present? Extracted so the gate's logic is
 /// unit-testable without constructing an `AppState` (which needs `mock_app`).
-fn option_handle_present<T>(guard: &Option<T>) -> bool {
-    guard.is_some()
-}
-
 /// Subscribe to the fabric's SSE event stream (`GET /events` on the loopback
 /// control port) and re-emit each event to the renderer as a `peer:event` Tauri
 /// event (bridged to a DOM `CustomEvent` in `tauri-bridge.ts`). The stream is
 /// long-lived; on drop or error it reconnects after a short delay, but only while
 /// the fabric is still alive (its child handle is present).
-async fn subscribe_fabric_events(app: AppHandle, state: AppState) {
+async fn subscribe_fabric_events(
+    app: AppHandle,
+    state: AppState,
+    generation: u64,
+    expected_build: String,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     let url = format!("http://127.0.0.1:{}/events", state.fabric_control_port);
     // A dedicated client with NO total request timeout: SSE is a long-lived stream,
     // so the bounded-timeout localhost client used for one-shot control calls would
@@ -273,17 +321,34 @@ async fn subscribe_fabric_events(app: AppHandle, state: AppState) {
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    while fabric_alive(&state) {
-        match stream_fabric_events(&app, &client, &url).await {
+    while fabric_generation_is_current(&state, generation) && !subscription_cancelled(&stop) {
+        match stream_fabric_events(&app, &client, &url, &state.instance_id, &expected_build, &mut stop).await {
             Ok(()) => log::debug!("[FABRIC] event stream closed; will reconnect"),
             Err(e) => log::debug!("[FABRIC] event stream error: {}; will reconnect", e),
         }
-        if !fabric_alive(&state) {
+        if !fabric_generation_is_current(&state, generation) || subscription_cancelled(&stop) {
             break;
         }
-        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(tokio::time::Duration::from_millis(1000)) => {}
+            _ = stop.changed() => break,
+        }
     }
-    log::info!("[FABRIC] event subscriber stopped (fabric no longer alive)");
+    log::info!("[FABRIC] event subscriber stopped for generation {generation}");
+}
+
+fn fabric_generation_is_current<R: tauri::Runtime>(state: &AppState<R>, generation: u64) -> bool {
+    match state.fabric_process.lock() {
+        Ok(slot) => slot.is_current(generation),
+        Err(_) => {
+            log::error!("[FABRIC] process slot lock poisoned while checking generation {generation}; stopping subscription without classifying it stale");
+            false
+        }
+    }
+}
+
+fn subscription_cancelled(stop: &tokio::sync::watch::Receiver<bool>) -> bool {
+    *stop.borrow()
 }
 
 /// Open the SSE stream once and pump events until it ends or errors. Reads the
@@ -295,13 +360,30 @@ async fn stream_fabric_events(
     app: &AppHandle,
     client: &reqwest::Client,
     url: &str,
+    own_id: &str,
+    expected_build: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), reqwest::Error> {
-    let mut resp = client
+    if subscription_cancelled(stop) {
+        return Ok(());
+    }
+    let request = client
         .get(url)
         .header("Accept", "text/event-stream")
-        .send()
-        .await?
-        .error_for_status()?;
+        .send();
+    let mut resp = tokio::select! {
+        _ = stop.changed() => return Ok(()),
+        response = request => response?,
+    }
+    .error_for_status()?;
+
+    // Starting the bridge is deliberately independent from the slow startup
+    // verifier, but a successful /events response is not identity evidence.
+    // Verify this listener before it can emit a connection marker or payload.
+    if !stream_identity_allows_events(client, url, own_id, expected_build, stop).await? {
+        log::warn!("[FABRIC] refusing events from an unverified control listener");
+        return Ok(());
+    }
 
     // Signal the renderer that the event stream (re)connected, so it can re-hydrate the
     // pending-approvals consent queue — a pairing staged while the stream was down would
@@ -315,7 +397,12 @@ async fn stream_fabric_events(
     let mut buf: Vec<u8> = Vec::new();
     let mut data = String::new();
 
-    while let Some(chunk) = resp.chunk().await? {
+    loop {
+        let chunk = tokio::select! {
+            _ = stop.changed() => return Ok(()),
+            chunk = resp.chunk() => chunk?,
+        };
+        let Some(chunk) = chunk else { break };
         buf.extend_from_slice(&chunk);
         // A newline (0x0A) never appears inside a UTF-8 multibyte sequence, so
         // splitting the raw byte buffer on it is always codepoint-safe.
@@ -421,7 +508,7 @@ pub async fn respawn_fabric(app: AppHandle, state: AppState) {
     let was_running = state
         .fabric_process
         .lock()
-        .map(|g| g.is_some())
+        .map(|g| g.is_present())
         .unwrap_or(false);
     if !was_running {
         return;
@@ -435,14 +522,64 @@ pub async fn respawn_fabric(app: AppHandle, state: AppState) {
 }
 
 pub fn shutdown_fabric(state: &AppState) {
-    if let Ok(mut guard) = state.fabric_process.lock() {
-        if let Some(child) = guard.take() {
-            log::info!("[FABRIC] Shutting down termflow-fabric sidecar...");
-            if let Err(e) = child.kill() {
-                log::warn!("[FABRIC] Failed to kill fabric sidecar: {}", e);
-            }
-            log::info!("[FABRIC] Fabric sidecar terminated");
+    match state.fabric_process.lock() {
+        Ok(mut slot) => shutdown_fabric_child(slot.take()),
+        Err(_) => log::error!("[FABRIC] process slot lock poisoned during shutdown; unable to inspect ownership"),
+    }
+}
+
+async fn stream_identity_allows_events(
+    client: &reqwest::Client,
+    events_url: &str,
+    own_id: &str,
+    expected_build: &str,
+    stop: &mut tokio::sync::watch::Receiver<bool>,
+) -> Result<bool, reqwest::Error> {
+    let health_url = events_url.strip_suffix("/events").unwrap_or(events_url).to_string() + "/health";
+    let request = client.get(health_url).send();
+    let response = tokio::select! {
+        _ = stop.changed() => return Ok(false),
+        response = request => response?,
+    }.error_for_status()?;
+    let body: serde_json::Value = response.json().await.unwrap_or_else(|_| serde_json::json!({}));
+    let (reported_owner, observed_build) = stream_identity_from_health(&body);
+    Ok(stream_identity_is_acceptable(reported_owner, own_id, observed_build, expected_build))
+}
+
+/// Fabric's control API serializes its raw health value with serde's native
+/// snake_case field names. Keep extraction in one production helper so tests
+/// exercise the wire hop rather than pre-extracted predicate inputs.
+fn stream_identity_from_health(body: &serde_json::Value) -> (Option<&str>, Option<&str>) {
+    (
+        body.get("owner_id").and_then(|value| value.as_str()),
+        body.get("build_id").and_then(|value| value.as_str()).filter(|value| !value.is_empty()),
+    )
+}
+
+fn stream_identity_is_acceptable(
+    reported_owner: Option<&str>, own_id: &str, observed_build: Option<&str>, expected_build: &str,
+) -> bool {
+    matches!(
+        crate::mcp_sidecar::classify_sidecar_report(reported_owner, own_id, observed_build, Some(expected_build)),
+        Some(crate::mcp_sidecar::SidecarAcceptance::Verified | crate::mcp_sidecar::SidecarAcceptance::Unverified)
+    )
+}
+
+/// Stop only the current slot if it still belongs to this lifecycle operation.
+fn shutdown_fabric_generation(state: &AppState, generation: u64) {
+    match state.fabric_process.lock() {
+        Ok(mut slot) => shutdown_fabric_child(slot.take_if_current(generation)),
+        Err(_) => log::error!("[FABRIC] process slot lock poisoned during generation shutdown; unable to inspect ownership"),
+    }
+}
+
+fn shutdown_fabric_child(child: Option<tauri_plugin_shell::process::CommandChild>) {
+    if let Some(child) = child {
+        log::info!("[FABRIC] Shutting down termflow-fabric sidecar...");
+        if let Err(e) = child.kill() {
+            log::warn!("[FABRIC] Failed to kill fabric sidecar: {}", e);
         }
+        log::info!("[FABRIC] Fabric sidecar terminated");
     }
 }
 
@@ -607,6 +744,25 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn stream_acceptance_requires_the_spawned_owner_and_build_identity() {
+        assert!(stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", Some("build-g7"), "build-g7"));
+        assert!(stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", None, "build-g7"));
+        assert!(!stream_identity_is_acceptable(Some("foreign-owner"), "spawn-owner-g7", Some("build-g7"), "build-g7"));
+        assert!(!stream_identity_is_acceptable(Some("spawn-owner-g7"), "spawn-owner-g7", Some("wrong-build"), "build-g7"));
+        assert!(!stream_identity_is_acceptable(None, "spawn-owner-g7", Some("build-g7"), "build-g7"));
+    }
+
+    #[test]
+    fn stream_acceptance_reads_the_companion_snake_case_health_wire_fields() {
+        let health = serde_json::json!({ "owner_id": "spawn-owner-g7", "build_id": "build-g7" });
+        let (owner, build) = stream_identity_from_health(&health);
+        assert!(stream_identity_is_acceptable(owner, "spawn-owner-g7", build, "build-g7"), "rejects the camelCase-only extraction: the companion's real health body must open the event bridge");
+        let mismatch = serde_json::json!({ "owner_id": "spawn-owner-g7", "build_id": "wrong-build" });
+        let (owner, build) = stream_identity_from_health(&mismatch);
+        assert!(!stream_identity_is_acceptable(owner, "spawn-owner-g7", build, "build-g7"), "rejects an owner-only fix which silently accepts a real snake_case build mismatch");
+    }
+
+    #[test]
     fn fabric_env_carries_core_token_and_ports() {
         let cfg = NetworkConfig {
             api_port: 42031,
@@ -650,17 +806,54 @@ mod tests {
     }
 
     #[test]
-    fn option_handle_present_reflects_some_and_none() {
+    fn generation_slot_presence_reflects_installed_child() {
         // fabric_installed() reduces to "is the child handle present?" — pin that
         // predicate so the gate can't silently invert (installed when absent).
-        assert!(!super::option_handle_present::<()>(&None));
-        assert!(super::option_handle_present(&Some(())));
+        let mut slot = crate::state::GenerationSlot::new();
+        assert!(!slot.is_present());
+        let generation = slot.claim_generation();
+        slot.install_if_current(generation, ()).unwrap();
+        assert!(slot.is_present());
+    }
+
+    #[tokio::test]
+    async fn rejection_signal_cancels_a_generation_bound_subscription() {
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        assert!(!super::subscription_cancelled(&stop_rx));
+        stop_tx.send(true).unwrap();
+        stop_rx.changed().await.unwrap();
+        assert!(super::subscription_cancelled(&stop_rx));
+    }
+
+    #[test]
+    fn event_bridge_is_started_before_the_async_identity_verification() {
+        let source = include_str!("fabric_manager.rs");
+        let bridge = source.find("spawn(subscribe_fabric_events").unwrap();
+        let verify = bridge + source[bridge..].find("wait_for_fabric_health(control_port").unwrap();
+        assert!(bridge < verify, "slow or unavailable build identity must not suppress pairing events");
     }
 }
 
 #[cfg(test)]
 mod client_tests {
     use super::*;
+
+    /// The cadence comment above this poll says its budget exists to cover a
+    /// first run that blocks on a Windows Credential Manager prompt. `Rejected`
+    /// stops our own fabric child, so returning it on an exhausted budget would
+    /// kill peering in exactly the scenario the budget was written for — and
+    /// this poll previously could not disable anything at all.
+    #[tokio::test]
+    async fn an_unanswered_fabric_health_budget_is_unverified_not_rejected() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+            l.local_addr().expect("read the bound port").port()
+        };
+        assert_eq!(
+            wait_for_fabric_health_within(port, "ours", "expected", 1).await,
+            crate::mcp_sidecar::SidecarAcceptance::Unverified
+        );
+    }
 
     /// The `FabricClient` GETs `/health` from a real (stub) control server and
     /// parses the JSON body. Also proves the "not installed" signal: a request to a

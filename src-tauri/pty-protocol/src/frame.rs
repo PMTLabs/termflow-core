@@ -16,6 +16,15 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// before allocation.
 pub const MAX_FRAME_LEN: usize = 8 * 1024 * 1024;
 
+/// Authenticated origin of an armed detach hold. `None` is intentionally the
+/// legacy/unlabelled meaning: an indefinite hold. The host records this now;
+/// enforcement is a later lifecycle change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArmDetachPurpose {
+    /// This GUI explicitly offloaded itself or is applying its own update.
+    Local,
+}
+
 /// GUI → sidecar requests. Every request that expects a reply carries a `req`
 /// id the sidecar echoes in its [`Response`], so the GUI can demultiplex
 /// replies from the shared inbound stream.
@@ -24,11 +33,25 @@ pub enum Control {
     Spawn { req: u64, tab_id: String, spec: SpawnSpec },
     Resize { tab_id: String, cols: u16, rows: u16 },
     Close { tab_id: String },
-    ListSessions { req: u64 },
+    ListSessions {
+        req: u64,
+        /// Credentials for a reconnect lifecycle probe.  Older clients omit
+        /// this and retain their legacy, non-adopting behavior.
+        #[serde(default)]
+        token: Option<String>,
+    },
     /// Reattach `tab_id`, replaying buffered output from `from_offset`.
     Attach { req: u64, tab_id: String, from_offset: u64 },
     /// Arm hot-swap hold. `token` must match the sidecar's launch token.
-    ArmDetach { req: u64, timeout_secs: u64, token: String },
+    ArmDetach {
+        req: u64,
+        timeout_secs: u64,
+        token: String,
+        /// Trailing/defaulted for old clients that encoded this variant before
+        /// purposes existed. No purpose retains today's indefinite semantics.
+        #[serde(default)]
+        purpose: Option<ArmDetachPurpose>,
+    },
     Disarm { req: u64 },
     /// RP-3: like [`Control::Attach`] but the host confirms with
     /// [`Response::AttachAck`], so a reattaching GUI can verify each session was
@@ -118,7 +141,59 @@ pub fn decode(version: u8, payload: &[u8]) -> Result<Frame, DecodeError> {
     if version != PROTOCOL_VERSION {
         return Err(DecodeError(format!("unsupported version {version}")));
     }
-    bincode::deserialize(payload).map_err(|e| DecodeError(e.to_string()))
+    bincode::deserialize(payload)
+        .or_else(|current| {
+            // Bincode does not honor a trailing serde default when the old
+            // tuple-variant payload ends at EOF. Fall back to the exact
+            // pre-purpose wire shape so already-shipped ArmDetach frames keep
+            // their unlabelled/indefinite meaning.
+            bincode::deserialize::<LegacyFrame>(payload)
+                .map(Into::into)
+                .map_err(|_| current)
+        })
+        .map_err(|e| DecodeError(e.to_string()))
+}
+
+/// Exact pre-purpose frame layout, retained solely for decoding old clients.
+/// Keep variant order synchronized with the originally shipped protocol.
+#[derive(Deserialize)]
+enum LegacyControl {
+    Spawn { req: u64, tab_id: String, spec: SpawnSpec },
+    Resize { tab_id: String, cols: u16, rows: u16 },
+    Close { tab_id: String },
+    ListSessions { req: u64 },
+    Attach { req: u64, tab_id: String, from_offset: u64 },
+    ArmDetach { req: u64, timeout_secs: u64, token: String },
+    Disarm { req: u64 },
+    AttachAcked { req: u64, tab_id: String, from_offset: u64 },
+}
+
+#[derive(Deserialize)]
+enum LegacyFrame {
+    Ctrl(LegacyControl),
+    Resp(Response),
+    Data(Data),
+}
+
+impl From<LegacyFrame> for Frame {
+    fn from(value: LegacyFrame) -> Self {
+        match value {
+            LegacyFrame::Ctrl(ctrl) => Frame::Ctrl(match ctrl {
+                LegacyControl::Spawn { req, tab_id, spec } => Control::Spawn { req, tab_id, spec },
+                LegacyControl::Resize { tab_id, cols, rows } => Control::Resize { tab_id, cols, rows },
+                LegacyControl::Close { tab_id } => Control::Close { tab_id },
+                LegacyControl::ListSessions { req } => Control::ListSessions { req, token: None },
+                LegacyControl::Attach { req, tab_id, from_offset } => Control::Attach { req, tab_id, from_offset },
+                LegacyControl::ArmDetach { req, timeout_secs, token } => Control::ArmDetach {
+                    req, timeout_secs, token, purpose: None,
+                },
+                LegacyControl::Disarm { req } => Control::Disarm { req },
+                LegacyControl::AttachAcked { req, tab_id, from_offset } => Control::AttachAcked { req, tab_id, from_offset },
+            }),
+            LegacyFrame::Resp(response) => Frame::Resp(response),
+            LegacyFrame::Data(data) => Frame::Data(data),
+        }
+    }
 }
 
 /// Read one frame. Returns `Ok(None)` on a clean EOF at a frame boundary.
@@ -177,6 +252,69 @@ mod tests {
         let f = Frame::Ctrl(Control::Disarm { req: 1 });
         let buf = encode(&f);
         assert!(decode(99, &buf[5..]).is_err());
+    }
+
+    #[test]
+    fn arm_detach_purpose_roundtrips_in_both_shapes() {
+        for purpose in [None, Some(ArmDetachPurpose::Local)] {
+            let frame = Frame::Ctrl(Control::ArmDetach {
+                req: 7,
+                timeout_secs: 600,
+                token: "token".into(),
+                purpose,
+            });
+            let encoded = encode(&frame);
+            assert_eq!(decode(encoded[0], &encoded[5..]).unwrap(), frame);
+        }
+    }
+
+    #[test]
+    fn old_arm_detach_without_purpose_decodes_as_unlabelled() {
+        // This is the pre-purpose bincode layout of the existing ArmDetach
+        // variant: Frame::Ctrl index, Control::ArmDetach index, then req,
+        // timeout, and token.
+        let mut old = Vec::new();
+        old.extend_from_slice(&(0u32).to_le_bytes());
+        old.extend_from_slice(&(5u32).to_le_bytes());
+        old.extend_from_slice(&7u64.to_le_bytes());
+        old.extend_from_slice(&600u64.to_le_bytes());
+        old.extend_from_slice(&(5u64).to_le_bytes());
+        old.extend_from_slice(b"token");
+        assert_eq!(
+            decode(PROTOCOL_VERSION, &old).unwrap(),
+            Frame::Ctrl(Control::ArmDetach {
+                req: 7,
+                timeout_secs: 600,
+                token: "token".into(),
+                purpose: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_purposeful_arm_still_decodes_on_a_pre_purpose_host() {
+        // The OTHER direction, and the one adopt+warn makes real: a new app is
+        // allowed to connect to a stale old host, and then arms it with a
+        // purpose that host's decoder has never heard of. The extra Option byte
+        // must not desync it — it must read as the unlabelled/indefinite arm.
+        let encoded = encode(&Frame::Ctrl(Control::ArmDetach {
+            req: 7,
+            timeout_secs: 600,
+            token: "token".into(),
+            purpose: Some(ArmDetachPurpose::Local),
+        }));
+        let old: LegacyFrame = bincode::deserialize(&encoded[5..])
+            .expect("a pre-purpose host must still decode a purposeful arm");
+        assert_eq!(
+            Frame::from(old),
+            Frame::Ctrl(Control::ArmDetach {
+                req: 7,
+                timeout_secs: 600,
+                token: "token".into(),
+                purpose: None,
+            }),
+            "an old host cannot see the purpose, so it must fall back to unlabelled"
+        );
     }
 
     #[tokio::test]

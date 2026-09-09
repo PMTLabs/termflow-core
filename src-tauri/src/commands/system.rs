@@ -220,6 +220,25 @@ pub struct ConnectionHealth {
     pub conflict: bool,
 }
 
+/// A missing artifact identity is unverified, not a conflicting identity. Only
+/// a present, differing build ID can turn an otherwise owned MCP listener into
+/// a conflict.
+fn mcp_health_matches(
+    reported_owner: Option<&str>,
+    own_id: &str,
+    observed_build: Option<&str>,
+    expected_build: Option<&str>,
+) -> (bool, bool) {
+    let (owned, foreign) = crate::network_commands::classify_health_owner(reported_owner, own_id);
+    if !owned {
+        return (false, foreign);
+    }
+    if matches!((observed_build, expected_build), (Some(actual), Some(expected)) if !actual.is_empty() && actual != expected) {
+        return (false, true);
+    }
+    (true, false)
+}
+
 #[tauri::command]
 pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<ConnectionHealth>, String> {
     // Probe the ports we are ACTUALLY serving on, not the ones we were configured for.
@@ -281,21 +300,29 @@ pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<C
         conflict: api_conflict,
     });
 
-    // Check MCP Server — same ownership rule, plus activeSessions for the client count.
-    let (mcp_reported, mcp_clients): (Option<String>, Option<u32>) = match effective_mcp {
-        None => (None, None),
+    // Check MCP Server — ownership and a present build ID must both match. An
+    // absent build ID remains an explicitly unverified legacy/Node outcome.
+    let expected_mcp_build = effective_mcp
+        .and_then(|_| crate::mcp_sidecar::cached_tauri_sidecar_digest("termflow-mcp-server"));
+    let (mcp_reported, mcp_build, mcp_clients): (Option<String>, Option<String>, Option<u32>) = match effective_mcp {
+        None => (None, None, None),
         Some(port) => match client.get(format!("http://localhost:{}/health", port)).send().await {
             Ok(r) if r.status().is_success() => {
                 let j = r.json::<serde_json::Value>().await.unwrap_or_else(|_| serde_json::json!({}));
                 let id = j.get("instanceId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let build = j.get("buildId").and_then(|v| v.as_str()).map(str::to_string);
                 let sessions = j.get("activeSessions").and_then(|v| v.as_u64()).map(|v| v as u32);
-                (Some(id), sessions)
+                (Some(id), build, sessions)
             }
-            _ => (None, None),
+            _ => (None, None, None),
         },
     };
-    let (mcp_healthy, mcp_conflict) =
-        crate::network_commands::classify_health_owner(mcp_reported.as_deref(), &our_id);
+    let (mcp_healthy, mcp_conflict) = mcp_health_matches(
+        mcp_reported.as_deref(),
+        &our_id,
+        mcp_build.as_deref(),
+        expected_mcp_build.as_deref(),
+    );
 
     results.push(ConnectionHealth {
         name: "MCP Server".to_string(),
@@ -346,6 +373,27 @@ pub async fn generate_api_token(
     ).map_err(|e| e.to_string())?;
 
     Ok(token)
+}
+
+#[cfg(test)]
+mod health_tests {
+    use super::mcp_health_matches;
+
+    #[test]
+    fn a_present_wrong_mcp_build_is_a_conflict_but_missing_identity_is_unverified() {
+        assert_eq!(
+            mcp_health_matches(Some("ours"), "ours", Some("wrong"), Some("expected")),
+            (false, true)
+        );
+        assert_eq!(
+            mcp_health_matches(Some("ours"), "ours", None, Some("expected")),
+            (true, false)
+        );
+        assert_eq!(
+            mcp_health_matches(Some("ours"), "ours", Some("wrong"), None),
+            (true, false)
+        );
+    }
 }
 
 /// Resolve a possibly-bare executable name (e.g. "cmd.exe", "wsl.exe") to a full

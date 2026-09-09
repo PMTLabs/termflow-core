@@ -176,6 +176,16 @@ fn health_owner_matches(health: &serde_json::Value, my_instance_id: &str) -> boo
     }
 }
 
+fn health_build_matches(health: &serde_json::Value, expected: Option<&str>) -> bool {
+    match expected {
+        Some(expected) => match health.get("build_id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+            Some(actual) => actual == expected,
+            None => true, // Older fabric: owner is known, artifact identity is unavailable.
+        },
+        None => true,
+    }
+}
+
 /// Report whether the peering fabric is reachable, and (if so) its `/health` body.
 ///
 /// - Reachable → `{ "installed": true, "peerPort": …, ...health }` (the fabric's health
@@ -195,7 +205,8 @@ pub async fn fabric_status(state: State<'_, AppState>) -> Result<serde_json::Val
             // reports an owner id it must be ours. A mismatch means we reached a different
             // instance's fabric (a stale/shared control port), so report "not installed"
             // rather than exposing its peers/pairing to this renderer.
-            if !health_owner_matches(&health, &state.instance_id) {
+            let expected = crate::mcp_sidecar::cached_tauri_sidecar_digest("termflow-fabric");
+            if !health_owner_matches(&health, &state.instance_id) || !health_build_matches(&health, expected.as_deref()) {
                 return Ok(serde_json::json!({ "installed": false }));
             }
             let mut obj = health.as_object().cloned().unwrap_or_default();
@@ -432,6 +443,12 @@ mod tests {
         ));
         // Older fabric without an owner id → accepted (backward compatible).
         assert!(health_owner_matches(&json!({ "status": "ok" }), "inst-A"));
+    }
+
+    #[test]
+    fn missing_fabric_build_id_is_unverified_not_not_installed() {
+        assert!(health_build_matches(&json!({ "owner_id": "inst-A" }), Some("expected")));
+        assert!(!health_build_matches(&json!({ "build_id": "other" }), Some("expected")));
     }
 
     #[test]

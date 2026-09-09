@@ -15,7 +15,180 @@ use super::render::{FocusReportingTracker, render_full_scrollback, render_tail_l
 use super::reattach::plan_reattach;
 use super::types::*;
 
+fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> bool {
+    pending_windows == 0 && !already_released
+}
+
+/// May a claimed sweep KEEP the one-shot flag? Only a sweep that actually ran
+/// to completion. Claiming the flag and then failing — no host, no client, an
+/// unanswered listing — used to consume the only sweep there will ever be: the
+/// 60s backstop tests this same flag, so it could not rescue it either, and a
+/// live session no restored tab claims stayed invisible for the whole GUI
+/// lifetime. That is precisely the leak the sweep exists to close.
+fn sweep_claim_survives(completed: bool) -> bool {
+    completed
+}
+
+/// Reconcile a host answer with the ownership that existed before asking for it.
+/// Ownership observed after the answer was built can suppress recovery of an
+/// orphan, but cannot prove that the older answer killed that new terminal.
+fn plan_reconnect(
+    teardown_tabs: &[String],
+    sessions: &[termflow_pty_protocol::SessionMeta],
+    saved_offsets: &std::collections::HashMap<String, u64>,
+    current_owned_sessions: impl IntoIterator<Item = String>,
+) -> super::reattach::ReattachPlan {
+    let current_owned_sessions = current_owned_sessions.into_iter().collect::<std::collections::HashSet<_>>();
+    let mut plan = plan_reattach(teardown_tabs, sessions, saved_offsets);
+    plan.orphans.retain(|orphan| !current_owned_sessions.contains(&orphan.tab_id));
+    plan
+}
+
+fn session_needs_surface(is_registered: bool) -> bool { !is_registered }
+
+fn claim_is_owned_by(claim: &HostSessionClaim, process_id: &str) -> bool {
+    claim.process_id.as_deref() == Some(process_id)
+}
+
+pub const HOST_SESSION_CONTENDED: &str = "host-session-contended";
+
+#[cfg(test)]
+mod restore_sweep_gate_tests {
+    use super::restore_sweep_may_release;
+
+    #[test]
+    fn waits_for_every_window_then_releases_when_last_is_destroyed() {
+        assert!(!restore_sweep_may_release(1, false));
+        assert!(restore_sweep_may_release(0, false));
+    }
+
+    #[test]
+    fn a_released_sweep_never_releases_twice() {
+        assert!(!restore_sweep_may_release(0, true));
+    }
+
+    #[test]
+    fn only_a_completed_sweep_consumes_the_one_shot() {
+        assert!(super::sweep_claim_survives(true));
+        assert!(
+            !super::sweep_claim_survives(false),
+            "an incomplete sweep must hand the flag back: the backstop reads it too, \
+             so consuming it here strands an unclaimed live session for good"
+        );
+    }
+
+    #[test]
+    fn terminal_registered_after_list_snapshot_is_neither_torn_down_nor_an_orphan() {
+        let old_tab = "present-when-list-was-issued".to_string();
+        let new_tab = "registered-after-host-captured-list".to_string();
+        let listed_orphan = termflow_pty_protocol::SessionMeta {
+            tab_id: "unowned-host-session".into(), pid: 17, head_offset: 0, tail_offset: 4, alive: true,
+        };
+        let plan = super::plan_reconnect(
+            &[old_tab.clone()],
+            &[listed_orphan.clone()],
+            &std::collections::HashMap::new(),
+            [old_tab, new_tab.clone()],
+        );
+        assert_eq!(plan.teardown, vec!["present-when-list-was-issued"], "only pre-request ownership can be destructively reconciled");
+        assert_eq!(plan.orphans, vec![listed_orphan], "the fresh snapshot only suppresses already-owned host sessions");
+        assert!(!plan.teardown.contains(&new_tab), "a terminal absent from the older host answer was created too late to be declared dead");
+        assert!(!plan.orphans.iter().any(|session| session.tab_id == new_tab), "the newly registered terminal is not surfaced as an orphan");
+    }
+
+
+    #[test]
+    fn each_sweep_restates_unowned_sessions_but_never_registered_ones() {
+        assert!(super::session_needs_surface(false), "rejects already-surfaced suppression: a dropped create event must be stated again on the next sweep");
+        assert!(!super::session_needs_surface(true), "rejects a sweep that spams duplicate creates after registration wins");
+    }
+
+    #[test]
+    fn surfaced_orphans_are_reserved_before_the_recovery_event_is_emitted() {
+        let source = include_str!("terminals.rs").replace("\r\n", "\n");
+        let body = source
+            .rfind("\n    pub(crate) fn surface_host_orphans")
+            .map(|start| &source[start..])
+            .and_then(|rest| rest.split("    /// Clone out the connected client").next())
+            .expect("surface_host_orphans body");
+        let reserve = body.find("self.reserve_host_session(&orphan.tab_id, orphan.pid);").expect("orphan must reserve its listed PID");
+        let emit = body.find("self.app_handle.emit").expect("orphan must emit recovery event");
+        assert!(reserve < emit, "reservation must precede recovery emission");
+    }
+
+    #[test]
+    fn host_claim_retirement_uses_atomic_owner_guard_at_every_site() {
+        let source = include_str!("terminals.rs").replace("\r\n", "\n");
+        let retirement = source
+            .rfind("\n    pub fn forget_host_session_claim_if_owner")
+            .map(|start| &source[start..])
+            .and_then(|rest| rest.split("    /// Resolve either a PTY process id").next())
+            .expect("claim retirement body");
+        assert!(retirement.contains("remove_if"), "claim retirement must use DashMap::remove_if atomically");
+        assert!(
+            retirement.contains("claim_is_owned_by(claim, process_id)"),
+            "claim retirement must check that the stored claim belongs to process_id"
+        );
+        let teardown = source
+            .rfind("\n    pub fn teardown_host_terminal")
+            .map(|start| &source[start..])
+            .and_then(|rest| rest.split("    /// Reconnect to an already-running").next())
+            .expect("teardown_host_terminal body");
+        assert!(!teardown.contains("forget_host_session_claim("), "teardown must not bypass the owner guard");
+        // An absence assertion alone goes vacuous the moment the call is deleted
+        // outright — which would leak the claim and bring back the exit-then-Restart
+        // refusal this retirement exists to prevent. Pin the presence too.
+        assert!(
+            teardown.contains("forget_host_session_claim_if_owner(&key, id)"),
+            "teardown must still retire the claim it owns"
+        );
+    }
+}
+
 impl<R: Runtime> AppState<R> {
+    /// Reserve a listed host session for the renderer which already knows it.
+    /// This is an entry operation so recovery cannot slip a second owner between
+    /// the observation and reservation.
+    pub fn reserve_host_session(&self, session_key: &str, pid: u32) {
+        self.host_session_claims.entry(session_key.to_string()).or_insert(HostSessionClaim {
+            state: HostSessionClaimState::Reserved, pid, process_id: None,
+        });
+    }
+
+    /// Claim a session for backend registration. A recovery create consumes the
+    /// Reserved entry established from the host's authoritative listing.
+    pub fn claim_host_registration(&self, session_key: &str) -> Result<Option<u32>, String> {
+        use dashmap::mapref::entry::Entry;
+        match self.host_session_claims.entry(session_key.to_string()) {
+            Entry::Vacant(v) => {
+                v.insert(HostSessionClaim { state: HostSessionClaimState::RegistrationInProgress, pid: 0, process_id: None });
+                Ok(None)
+            }
+            Entry::Occupied(mut o) => match o.get().state {
+                HostSessionClaimState::Reserved => {
+                    let pid = o.get().pid;
+                    o.get_mut().state = HostSessionClaimState::RegistrationInProgress;
+                    Ok(Some(pid))
+                }
+                HostSessionClaimState::Registered => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is already registered")),
+                _ => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is claimed by another recovery")),
+            }
+        }
+    }
+
+    pub fn host_session_registered(&self, session_key: &str, process_id: &str) {
+        if let Some(mut claim) = self.host_session_claims.get_mut(session_key) {
+            claim.process_id = Some(process_id.to_string());
+            claim.state = HostSessionClaimState::Registered;
+        }
+    }
+
+    /// Retire only the registration owned by this exact process. A late Exit for
+    /// an old process must not erase a replacement which reused the session key.
+    pub fn forget_host_session_claim_if_owner(&self, session_key: &str, process_id: &str) {
+        self.host_session_claims.remove_if(session_key, |_, claim| claim_is_owned_by(claim, process_id));
+    }
+
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
     /// to the renderer leaf used by persisted canvas edges. Owning tab ids are not
     /// identities here: a tab can contain more than one live leaf.
@@ -66,9 +239,8 @@ impl<R: Runtime> AppState<R> {
             test_capture_id: Arc::new(RwLock::new(None)),
             tmux_config: Arc::new(RwLock::new(tmux_config)),
             tmux_sessions: Arc::new(DashMap::new()),
-            mcp_process: Arc::new(Mutex::new(None)),
-            fabric_process: Arc::new(Mutex::new(None)),
-            fabric_generation: Arc::new(AtomicU64::new(0)),
+            mcp_process: Arc::new(Mutex::new(crate::state::GenerationSlot::new())),
+            fabric_process: Arc::new(Mutex::new(crate::state::GenerationSlot::new())),
             fabric_control_port: crate::app_config::resolve_fabric_control_port(),
             keep_running_in_background: Arc::new(AtomicBool::new(false)),
             network: Arc::new(RwLock::new(network)),
@@ -103,7 +275,9 @@ impl<R: Runtime> AppState<R> {
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
             identity: crate::identity_index::IdentityIndex::new(),
-            host_reattach_pending: Arc::new(DashMap::new()),
+            host_session_claims: Arc::new(DashMap::new()),
+            host_restore_pending_windows: Arc::new(DashMap::new()),
+            host_restore_released: Arc::new(AtomicBool::new(false)),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
@@ -373,9 +547,10 @@ impl<R: Runtime> AppState<R> {
         }
         // RP-1: install the host into the update-stable runtime dir and run it
         // from there (outside the swapped app payload) so it survives an update.
-        let sidecar = crate::pty_host_client::resolve_host_path().ok_or_else(|| {
-            "pty-host sidecar binary not found (set TERMFLOW_PTY_HOST_BIN)".to_string()
+        let launch = crate::pty_host_client::resolve_host_launch().ok_or_else(|| {
+            "pty-host sidecar executable could not be resolved (set TERMFLOW_PTY_HOST_BIN)".to_string()
         })?;
+        let sidecar = launch.path;
         let pipe = crate::pty_host_client::resolve_pipe();
         let token = crate::pty_host_client::resolve_token();
 
@@ -394,7 +569,17 @@ impl<R: Runtime> AppState<R> {
         // Advertised host pid (if any): connect_or_spawn refuses to spawn a
         // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
         let record_pid = record.as_ref().map(|r| r.pid);
-        let (pipe, attach_acks) = match crate::pty_host_client::plan_connection(record) {
+        match crate::pty_host_client::host_build_disposition(record.as_ref(), launch.build_id.as_deref()) {
+            crate::pty_host_client::HostBuildDisposition::Current => {}
+            crate::pty_host_client::HostBuildDisposition::Stale { observed, expected } => log::warn!(
+                "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
+            ),
+            crate::pty_host_client::HostBuildDisposition::Unknown => log::warn!(
+                "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow"
+            ),
+        }
+        let connect_plan = crate::pty_host_client::plan_connection(record);
+        let (pipe, attach_acks) = match &connect_plan {
             crate::pty_host_client::ConnectPlan::LegacyOrNone => {
                 log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
                 (pipe, false)
@@ -404,13 +589,14 @@ impl<R: Runtime> AppState<R> {
                 version,
                 instance_id,
                 host_caps,
+                lifecycle: _,
             } => {
                 let acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
                 log::info!(
                     "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
                      caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks})"
                 );
-                (endpoint, acks)
+                (endpoint.clone(), acks)
             }
             crate::pty_host_client::ConnectPlan::Incompatible { instance_id } => {
                 // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
@@ -436,6 +622,7 @@ impl<R: Runtime> AppState<R> {
         let st_gap = self.clone();
         let st_disc = self.clone();
         let deps = crate::pty_host_client::PtyHostDeps {
+            lifecycle_token: token.clone(),
             output_tx: self.output_tx.clone(),
             output_produced: self.output_produced.clone(),
             on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
@@ -453,6 +640,7 @@ impl<R: Runtime> AppState<R> {
                 // Ring bookkeeping is keyed by the SESSION, not the process: it is
                 // the host's own offset and lives in the host's id space.
                 st_exit.host_stream_offsets.remove(&session_key);
+                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
                 // Drop the identity lookups LAST among the removals but before the
                 // emit — a leaked entry would route a later terminal's output at a
                 // process id that no longer exists.
@@ -499,11 +687,12 @@ impl<R: Runtime> AppState<R> {
             stream_offsets: self.host_stream_offsets.clone(),
         };
 
-        let client =
-            crate::pty_host_client::connect_or_spawn(&sidecar, &pipe, &token, record_pid, deps)
+        let (mut client, origin) =
+            crate::pty_host_client::connect_or_spawn(&sidecar, launch.build_id.as_deref(), &pipe, &token, record_pid, deps)
                 .await
                 .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);
+        client.set_lifecycle(connect_plan.retention_for(origin));
         // Record sessions that survived a hot-swap (tab_id -> pid) so
         // create_host_terminal reattaches instead of respawning. `None` means
         // the host did not answer — treat as unknown, never as empty.
@@ -549,8 +738,8 @@ impl<R: Runtime> AppState<R> {
                     // live tabs are still registered; queueing them would let a
                     // concurrent create re-adopt one at offset 0 straight into
                     // its live parser (review 007 F-1).
-                    if !owned_sessions.contains_key(&meta.tab_id) {
-                        self.host_reattach_pending.insert(meta.tab_id.clone(), meta.pid);
+                    if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
+                        self.reserve_host_session(&meta.tab_id, meta.pid);
                     }
                 }
                 // Any remaining tombstone names a session this (authoritative)
@@ -601,6 +790,7 @@ impl<R: Runtime> AppState<R> {
         self.host_terminals.remove(id);
         if let Some(key) = session_key {
             self.host_stream_offsets.remove(&key);
+            self.forget_host_session_claim_if_owner(&key, id);
         }
         self.cleanup_terminal_state(id);
         let _ = self.app_handle.emit(
@@ -627,11 +817,10 @@ impl<R: Runtime> AppState<R> {
         // design 014, so comparing the two directly matches NOTHING and sends
         // every live terminal to teardown — i.e. a transient pipe drop
         // (sleep/wake) would destroy every shell. Translate once, here.
-        let by_session = self.host_sessions_by_key();
-        let tabs: Vec<String> = by_session.keys().cloned().collect();
-        if tabs.is_empty() {
-            return;
-        }
+        let initial_by_session = self.host_sessions_by_key();
+        let tabs: Vec<String> = initial_by_session.keys().cloned().collect();
+        // Do not return when the app currently owns no tabs: the host can still
+        // hold live sessions which must be recovered into visible terminals.
         const BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000, 8000, 8000];
         let mut connected = false;
         for (i, ms) in BACKOFF_MS.iter().enumerate() {
@@ -692,18 +881,25 @@ impl<R: Runtime> AppState<R> {
             log::warn!("[HOTSWAP] recovery superseded (gen {my_gen} stale); aborting pass");
             return;
         }
+        // `tabs` is the pre-request snapshot and is the sole destructive
+        // authority. A terminal registered after the host built this answer is
+        // absent from `sessions`, but that is not evidence it has died.
+        // Fresh ownership is useful only to suppress orphan recovery.
+        let by_session = self.host_sessions_by_key();
         let saved: std::collections::HashMap<String, u64> = self
             .host_stream_offsets
             .iter()
             .map(|e| (e.key().clone(), *e.value()))
             .collect();
-        let (reattach, teardown) = plan_reattach(&tabs, &sessions, &saved);
+        let plan = plan_reconnect(&tabs, &sessions, &saved, by_session.keys().cloned());
         log::info!(
-            "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost",
-            reattach.len(),
-            teardown.len()
+            "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost, {} orphan(s) to recover",
+            plan.reattach.len(),
+            plan.teardown.len(),
+            plan.orphans.len()
         );
-        for a in reattach {
+        self.surface_host_orphans(plan.orphans);
+        for a in plan.reattach {
             if !still_current() {
                 log::warn!("[HOTSWAP] recovery superseded mid-reattach; aborting pass");
                 return;
@@ -752,12 +948,11 @@ impl<R: Runtime> AppState<R> {
                 .map(|t| (t.cols, t.rows))
                 .unwrap_or((80, 24));
             client.nudge_repaint(&a.tab_id, cols, rows);
-            // ensure_pty_host re-listed this session into host_reattach_pending;
-            // it is attached in place now, so a later createTerminal for the same
-            // id must not re-adopt it.
-            self.host_reattach_pending.remove(&a.tab_id);
+            // The registered terminal remains the exclusive owner across an
+            // in-place reconnect; deleting this claim would let a late create
+            // register a second identity for the same live host session.
         }
-        for t in teardown {
+        for t in plan.teardown {
             if !still_current() {
                 log::warn!("[HOTSWAP] recovery superseded mid-teardown; aborting pass");
                 return;
@@ -773,6 +968,91 @@ impl<R: Runtime> AppState<R> {
                 "[HOTSWAP] session {t} not held by the reconnected host; closing its pane"
             );
             self.teardown_host_terminal(&process_id);
+        }
+    }
+
+    pub fn begin_host_restore_sweep(&self, windows: impl IntoIterator<Item = String>) {
+        self.host_restore_pending_windows.clear();
+        self.host_restore_released.store(false, Ordering::Release);
+        for label in windows {
+            self.host_restore_pending_windows.insert(label, ());
+        }
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if state.exiting.load(Ordering::Acquire) { break; }
+                state.host_restore_released.store(false, Ordering::Release);
+                state.release_host_restore_sweep(true).await;
+            }
+        });
+    }
+
+    pub async fn report_host_restore_settled(&self, window_label: String) {
+        self.host_restore_pending_windows.remove(&window_label);
+        if !restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) { return; }
+        self.release_host_restore_sweep(false).await;
+    }
+
+    pub async fn host_restore_window_destroyed(&self, window_label: &str) {
+        self.host_restore_pending_windows.remove(window_label);
+        if restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) {
+            self.release_host_restore_sweep(false).await;
+        }
+    }
+
+    async fn release_host_restore_sweep(&self, forced: bool) {
+        // Validate BEFORE claiming the flag. `swap` marks the sweep released
+        // unconditionally, so claiming first and validating second lets a caller
+        // that arrives while windows are still pending poison the flag: the real
+        // release would return early until the periodic worker resets the flag
+        // and forces another pass. The guard belongs at this choke point, not
+        // in each caller.
+        if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
+        if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
+        if !sweep_claim_survives(self.run_host_restore_sweep().await) {
+            // Hand the one-shot back so the backstop — or a later report — can
+            // retry. The periodic worker also resets this flag before forcing
+            // another pass after a transient failure.
+            self.host_restore_released.store(false, Ordering::Release);
+            log::warn!("[HOTSWAP] restore sweep could not complete; leaving it retryable");
+        }
+    }
+
+    /// Runs the sweep. `false` means it did NOT complete and must stay retryable.
+    async fn run_host_restore_sweep(&self) -> bool {
+        if self.ensure_pty_host().await.is_err() {
+            return false;
+        }
+        let Some(client) = self.pty_host_clone() else { return false };
+        // An unanswered listing is unknown, never empty: do not surface or tear down.
+        let Some(sessions) = client.list_sessions().await else { return false };
+        let claims = self.host_sessions_by_key().into_keys().collect::<Vec<_>>();
+        let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
+        self.surface_host_orphans(plan.orphans);
+        true
+    }
+
+    /// The sole UI emission path for live host sessions that no known tab claims.
+    pub(crate) fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
+        use tauri::Emitter;
+        for orphan in orphans {
+            // A terminal can be created between a listing and this UI pass.
+            // The current ownership map, rather than a restore snapshot, is
+            // authoritative at the point recovery would become visible.
+            if !session_needs_surface(self.host_sessions_by_key().contains_key(&orphan.tab_id)) { continue; }
+            // This emission carries the authoritative PID from the host listing.
+            // Reserve it so a recovery create can never degrade into a fresh spawn
+            // merely because the reservation was absent.
+            self.reserve_host_session(&orphan.tab_id, orphan.pid);
+            let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
+            if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
+                "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
+                "rendererTerminalId": leaf_id, "sessionKey": orphan.tab_id,
+                "targetWindow": self.resolve_active_window_label(),
+            })) {
+                log::warn!("[HOTSWAP] failed to surface recovered session {}: {e}", orphan.tab_id);
+            }
         }
     }
 
@@ -905,6 +1185,7 @@ impl<R: Runtime> AppState<R> {
         }
         self.host_terminals.remove(id);
         self.host_stream_offsets.remove(&session_key);
+        self.forget_host_session_claim_if_owner(&session_key, id);
 
         // Announce the end HERE, because nothing downstream will.
         //
@@ -1058,10 +1339,11 @@ impl<R: Runtime> AppState<R> {
         // to fall back on. Reading the leaf after `terminals.remove` yields `None` and the purge
         // silently does nothing, which is invisible: the symptom is a restarted terminal that is
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
-        let leaf = self
+        let (leaf, session_key) = self
             .terminals
             .get(id)
-            .and_then(|t| t.renderer_terminal_id.clone());
+            .map(|t| (t.renderer_terminal_id.clone(), t.session_key.clone()))
+            .unwrap_or((None, id.to_string()));
         if let Some(leaf) = leaf {
             self.automations.runtime.forget_terminal(&leaf);
         }
@@ -1095,6 +1377,7 @@ impl<R: Runtime> AppState<R> {
         // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
         // in the routing set after its state is torn down.
         self.host_terminals.remove(id);
+        self.forget_host_session_claim_if_owner(&session_key, id);
     }
 }
 

@@ -54,6 +54,8 @@ use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
 use tokio::sync::broadcast;
 use crate::state::{AppState, McpProcessHandle};
+use std::io::Write;
+use std::time::Duration;
 
 use clap::Parser;
 
@@ -74,32 +76,129 @@ pub(crate) use window_restore::{restore_windows, show_or_focus_main_window};
 /// not resurrect a sidecar the user deliberately stopped — "the API moved" is a reason to
 /// re-point a running forwarder, never a reason to start one.
 pub(crate) fn mcp_alive(state: &AppState) -> bool {
-    state.mcp_process.lock().map(|g| g.is_some()).unwrap_or(false)
+    state.mcp_process.lock().map(|g| g.is_present()).unwrap_or(false)
+}
+
+/// Private stdin line protocol understood only by our spawned MCP child. It is
+/// intentionally not an HTTP/MCP method, so an MCP client cannot kill its host.
+const MCP_SHUTDOWN_COMMAND: &[u8] = b"TERMFLOW_SHUTDOWN\n";
+/// The Node/Bun sidecar allocates 750 ms to close transports and 750 ms to close
+/// HTTP. Two seconds includes scheduler/pipe slack; every shutdown path also
+/// uses a bounded termination confirmation before it reports completion.
+const MCP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn wait_for_legacy_exit(handle: &mut std::process::Child, timeout: Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match handle.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(e) => {
+                log::warn!("[MCP] Failed to poll legacy MCP Server: {e}");
+                return false;
+            }
+        }
+    }
+    false
+}
+
+fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
+    !completed
 }
 
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
-    if let Ok(mut guard) = state.mcp_process.lock() {
-        if let Some(child) = guard.take() {
+    match state.mcp_process.lock() {
+        Ok(mut slot) => {
+            if let Some(child) = slot.take() {
+                shutdown_mcp_handle(child);
+            }
+        }
+        Err(_) => log::error!("[MCP] process slot lock poisoned during shutdown; unable to inspect ownership"),
+    }
+}
+
+/// Stop only the child that belongs to a lifecycle operation's generation.
+pub(crate) fn shutdown_mcp_generation(state: &AppState, generation: u64) {
+    match state.mcp_process.lock() {
+        Ok(mut slot) => {
+            if let Some(child) = slot.take_if_current(generation) {
+                shutdown_mcp_handle(child);
+            }
+        }
+        Err(_) => log::error!("[MCP] process slot lock poisoned during generation shutdown; unable to inspect ownership"),
+    }
+}
+
+fn shutdown_mcp_handle(child: McpProcessHandle) {
             match child {
                 McpProcessHandle::Legacy(mut handle) => {
-                    log::info!("[MCP] Shutting down MCP Server (PID: {})...", handle.id());
-                    if let Err(e) = handle.kill() {
-                        log::warn!("[MCP] Failed to kill legacy MCP Server: {}", e);
+                    log::info!("[MCP] Gracefully shutting down MCP Server (PID: {})...", handle.id());
+                    let wrote = handle.stdin.as_mut().map(|stdin| stdin.write_all(MCP_SHUTDOWN_COMMAND)).transpose();
+                    if let Err(e) = wrote {
+                        log::warn!("[MCP] Failed to send legacy shutdown command: {}", e);
                     }
-                    if let Err(e) = handle.wait() {
-                        log::warn!("[MCP] Failed to wait for legacy MCP Server: {}", e);
+                    let completed = wait_for_legacy_exit(&mut handle, MCP_SHUTDOWN_TIMEOUT);
+                    if should_force_kill_after_graceful_wait(completed) {
+                        log::warn!("[MCP] Legacy shutdown exceeded {:?}; force-killing", MCP_SHUTDOWN_TIMEOUT);
+                        let killed = match handle.kill() {
+                            Ok(()) => true,
+                            Err(e) => {
+                            log::warn!("[MCP] Failed to kill legacy MCP Server: {}", e);
+                                false
+                            }
+                        };
+                        if !wait_for_legacy_exit(&mut handle, MCP_SHUTDOWN_TIMEOUT) {
+                            log::warn!("[MCP] Legacy MCP Server termination unconfirmed after force-kill (kill_succeeded={killed})");
+                        }
                     }
                 }
-                McpProcessHandle::Sidecar(handle) => {
-                    log::info!("[MCP] Shutting down MCP Server sidecar...");
-                    if let Err(e) = handle.kill() {
-                        log::warn!("[MCP] Failed to kill sidecar MCP Server: {}", e);
+                McpProcessHandle::Sidecar { mut child, terminated } => {
+                    log::info!("[MCP] Gracefully shutting down MCP Server sidecar (PID: {})...", child.pid());
+                    if let Err(e) = child.write(MCP_SHUTDOWN_COMMAND) {
+                        log::warn!("[MCP] Failed to send sidecar shutdown command: {}", e);
+                    }
+                    let completed = terminated.recv_timeout(MCP_SHUTDOWN_TIMEOUT).is_ok();
+                    if should_force_kill_after_graceful_wait(completed) {
+                        log::warn!("[MCP] Sidecar shutdown exceeded {:?}; force-killing", MCP_SHUTDOWN_TIMEOUT);
+                        let killed = match child.kill() {
+                            Ok(()) => true,
+                            Err(e) => {
+                            log::warn!("[MCP] Failed to kill sidecar MCP Server: {}", e);
+                                false
+                            }
+                        };
+                        if terminated.recv_timeout(MCP_SHUTDOWN_TIMEOUT).is_err() {
+                            log::warn!("[MCP] Sidecar MCP Server termination unconfirmed after force-kill (kill_succeeded={killed})");
+                        }
                     }
                 }
             }
 
-            log::info!("[MCP] MCP Server terminated");
-        }
+            log::info!("[MCP] MCP Server shutdown sequence finished");
+}
+
+#[cfg(test)]
+mod mcp_shutdown_tests {
+    use super::{should_force_kill_after_graceful_wait, wait_for_legacy_exit};
+    use std::time::Duration;
+
+    #[test]
+    fn only_an_incomplete_graceful_wait_requires_force_kill() {
+        assert!(!should_force_kill_after_graceful_wait(true));
+        assert!(should_force_kill_after_graceful_wait(false));
+    }
+
+    #[test]
+    fn force_kill_confirmation_deadline_does_not_wait_forever_for_a_live_legacy_child() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping -n 10 127.0.0.1 >NUL"])
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(!wait_for_legacy_exit(&mut child, Duration::from_millis(75)));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        child.kill().unwrap();
+        let _ = child.wait();
     }
 }
 
@@ -451,6 +550,7 @@ pub fn run() {
         // `main` is titled, so a restored window is configured identically to
         // one opened during the session.
         restore_windows(app.handle());
+        state.begin_host_restore_sweep(app.webview_windows().keys().cloned());
 
         // Get app handle for emitting events
         let app_handle = app.handle().clone();
@@ -550,7 +650,15 @@ pub fn run() {
                         Some(p) => {
                             mcp_net.mcp_port = p;
                             tauri::async_runtime::spawn(async move {
-                                respawn_mcp(mcp_app_handle, mcp_state, &mcp_net).await;
+                                let _op = mcp_state.network_op_lock.lock().await;
+                                let started = respawn_mcp(mcp_app_handle, mcp_state.clone(), &mcp_net).await;
+                                if !started {
+                                    let mut effective = mcp_state.effective_endpoints.write();
+                                    if effective.mcp_port == Some(p) {
+                                        effective.mcp_port = None;
+                                    }
+                                    log::error!("[MCP] boot startup was rejected or failed; endpoint unpublished");
+                                }
                             });
                         }
                         None => log::error!(
@@ -569,8 +677,12 @@ pub fn run() {
                     if crate::profile::current().is_primary() {
                         let fabric_state = api_state.clone();
                         tauri::async_runtime::spawn(async move {
+                            // Boot is lifecycle work too: serialize it with a
+                            // concurrent Stop/API-network transition before it
+                            // can claim or install a fabric generation.
+                            let _op = fabric_state.network_op_lock.lock().await;
                             if let Err(e) =
-                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state)
+                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state.clone())
                                     .await
                             {
                                 log::warn!(
@@ -628,6 +740,7 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
+        commands::report_host_restore_settled,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
@@ -648,6 +761,7 @@ pub fn run() {
         automation_commands::rearm_automation,
         commands::restart_for_update,
         commands::hotswap_available,
+        commands::connected_host_retention,
         commands::update_available,
         commands::take_reattach_prompt_hook,
         commands::probe_reattach_prompt_gate,
@@ -800,6 +914,11 @@ pub fn run() {
             // one's "already hidden" and skip its first real put_IsVisible.
             crate::webview_power::forget(window.label());
             if let Some(state) = app.try_state::<AppState>() {
+                let restore_state = (*state).clone();
+                let destroyed_label = window.label().to_string();
+                tauri::async_runtime::spawn(async move {
+                    restore_state.host_restore_window_destroyed(&destroyed_label).await;
+                });
                 state.window_titles.remove(window.label());
                 // Plan 018: a closed window must not be recreated at the next
                 // start. Persisted immediately, not debounced — the process may

@@ -7,6 +7,8 @@
  * isolation (see __tests__/apiCreatedTab.test.ts).
  */
 
+import { markProvisionalRecovery } from './provisionalRecovery';
+
 export interface ApiCreatedTabOptions {
   targetTabId: string;
   name?: string;
@@ -144,7 +146,14 @@ export interface ApiCreateMode0Result {
   /** The leaf the pane tree's root node ends up carrying — always a `tm-*`,
    *  never the tab's own id (design 014 §A1). */
   leafId?: string;
-  paneTree: { id: string; type: 'terminal'; terminalId?: string; name?: string; shellType?: string };
+  paneTree: {
+    id: string;
+    type: 'terminal';
+    terminalId?: string;
+    name?: string;
+    shellType?: string;
+    sessionKey?: string;
+  };
 }
 
 /**
@@ -169,6 +178,8 @@ export function runApiCreateMode0(
     rendererTerminalId?: string;
     owningTabId?: string;
     tabId?: string;
+    /** A pending pty-host session to adopt rather than a process already registered here. */
+    sessionKey?: string;
   },
   deps: ApiCreateMode0Deps,
 ): ApiCreateMode0Result {
@@ -182,7 +193,7 @@ export function runApiCreateMode0(
   // given), not to the tab id — must match the pane tree's terminalId or
   // TerminalPane's mount effect finds no registered process and spawns a
   // duplicate PTY.
-  if (leafId && terminalId) {
+  if (!detail.sessionKey && leafId && terminalId) {
     deps.registerExistingTerminal(leafId, terminalId);
   }
 
@@ -194,7 +205,14 @@ export function runApiCreateMode0(
     terminalId: leafId,
     name: name || 'Terminal',
     shellType: profile || deps.defaultProfile || 'default',
+    sessionKey: detail.sessionKey,
   };
+
+  // Only surface_host_orphans produces this event shape. Persisted/migrated
+  // panes may also carry sessionKey, so record the event provenance separately.
+  if (detail.sessionKey && leafId) {
+    markProvisionalRecovery(leafId);
+  }
 
   // Seed the window map (API/persistence) BEFORE the tab enters the `tabs`
   // slice below. The authoritative Redux tree (`addTabTree`) is dispatched

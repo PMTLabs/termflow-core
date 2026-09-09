@@ -16,7 +16,7 @@
 use crate::session::Session;
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use termflow_pty_protocol::{Control, Data, Response, SessionMeta};
+use termflow_pty_protocol::{ArmDetachPurpose, Control, Data, Response, SessionMeta};
 use tokio::sync::mpsc::Sender;
 
 /// Upper bound on an armed hold (24h). Prevents overflow and unbounded holds.
@@ -49,12 +49,28 @@ pub enum Disposition {
     Hold,
 }
 
+/// The identity of an explicitly-local absence.  The transport owns its clock,
+/// but the manager owns this generation so a re-arm/disarm cannot accidentally
+/// let an old timer kill a newly adopted connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalHold {
+    pub generation: u64,
+}
+
 pub struct SessionManager {
     sessions: HashMap<String, Session>,
     /// Absolute monotonic deadline; `Some` once armed, captured exactly once.
     armed_deadline: Option<Instant>,
     /// Epoch-ms mirror of `armed_deadline` for honest `ArmAck` reporting.
     armed_deadline_ms: Option<u64>,
+    /// The local-purpose lifecycle uses this state to establish a bounded
+    /// destructive absence deadline; other purposes remain non-destructive.
+    armed_purpose: Option<ArmDetachPurpose>,
+    armed_at: Option<Instant>,
+    /// Recorded when the GUI absence is confirmed (pipe disconnect), never at
+    /// arm acceptance.  The transport's suspend-excluding clock starts here.
+    absence_started_at: Option<Instant>,
+    generation: u64,
     expected_token: Option<String>,
     /// Whether this host can actually outlive the GUI (Windows: broke away from
     /// a kill-on-close job; Unix: is a session leader). If false, arming is a
@@ -80,6 +96,10 @@ impl SessionManager {
             sessions: HashMap::new(),
             armed_deadline: None,
             armed_deadline_ms: None,
+            armed_purpose: None,
+            armed_at: None,
+            absence_started_at: None,
+            generation: 0,
             expected_token,
             survivable,
             events,
@@ -98,6 +118,11 @@ impl SessionManager {
     #[cfg(test)]
     pub fn is_armed(&self) -> bool {
         self.armed_deadline.is_some()
+    }
+
+    #[cfg(test)]
+    fn armed_purpose(&self) -> Option<ArmDetachPurpose> {
+        self.armed_purpose
     }
 
     /// Number of hosted sessions whose child is still running. Drives the
@@ -129,7 +154,9 @@ impl SessionManager {
                     Ok(s) => {
                         let pid = s.pid();
                         self.sessions.insert(tab_id.clone(), s);
-                        let _ = self.responses.try_send(Response::Spawned { req, tab_id, pid });
+                        let _ = self
+                            .responses
+                            .try_send(Response::Spawned { req, tab_id, pid });
                     }
                     Err(e) => {
                         let _ = self.responses.try_send(Response::SpawnFailed {
@@ -148,7 +175,7 @@ impl SessionManager {
             Control::Close { tab_id } => {
                 self.sessions.remove(&tab_id);
             }
-            Control::ListSessions { req } => {
+            Control::ListSessions { req, .. } => {
                 let _ = self.responses.try_send(Response::SessionList {
                     req,
                     sessions: self.session_metas(),
@@ -192,6 +219,7 @@ impl SessionManager {
                 req,
                 timeout_secs,
                 token,
+                purpose,
             } => {
                 if self.expected_token.as_deref() != Some(token.as_str()) {
                     log::warn!("ArmDetach rejected: token mismatch");
@@ -208,21 +236,32 @@ impl SessionManager {
                     return;
                 }
                 let capped = timeout_secs.min(MAX_ARM_SECS);
+                self.armed_purpose = purpose;
+                self.armed_at = Some(Instant::now());
+                self.absence_started_at = None;
+                self.generation = self.generation.wrapping_add(1);
                 // Capture the deadline ONCE (checked add against overflow).
                 if self.armed_deadline.is_none() {
                     let deadline = Instant::now()
                         .checked_add(Duration::from_secs(capped))
                         .unwrap_or_else(Instant::now);
                     self.armed_deadline = Some(deadline);
-                    self.armed_deadline_ms = Some(now_ms().saturating_add(capped.saturating_mul(1000)));
+                    self.armed_deadline_ms =
+                        Some(now_ms().saturating_add(capped.saturating_mul(1000)));
                 }
                 // Always acknowledge the STORED deadline, never a recomputed one.
                 let deadline_ms = self.armed_deadline_ms.unwrap_or_else(now_ms);
-                let _ = self.responses.try_send(Response::ArmAck { req, deadline_ms });
+                let _ = self
+                    .responses
+                    .try_send(Response::ArmAck { req, deadline_ms });
             }
             Control::Disarm { req } => {
                 self.armed_deadline = None;
                 self.armed_deadline_ms = None;
+                self.armed_purpose = None;
+                self.armed_at = None;
+                self.absence_started_at = None;
+                self.generation = self.generation.wrapping_add(1);
                 let _ = self.responses.try_send(Response::DisarmAck { req });
             }
         }
@@ -263,6 +302,55 @@ impl SessionManager {
         }
         self.armed_deadline = None;
         self.armed_deadline_ms = None;
+        self.armed_purpose = None;
+        self.armed_at = None;
+        self.absence_started_at = None;
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Whether a control is an authenticated reconnect lifecycle frame.  Keep
+    /// this deliberately narrow: resize, close, attach and spawn must never
+    /// consume a detach hold merely because they were the first decoded frame.
+    pub fn authenticates_lifecycle(&self, ctrl: &Control) -> bool {
+        match ctrl {
+            Control::ListSessions {
+                token: Some(token),
+                ..
+            } => self.expected_token.as_deref() == Some(token.as_str()),
+            // Old clients cannot supply an identity token. Absence is not a
+            // failed authentication, so retain their lifecycle adoption path.
+            Control::ListSessions { token: None, .. } => true,
+            Control::ArmDetach { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
+            _ => false,
+        }
+    }
+
+    /// Starts a fresh deadline only after the GUI's absence is confirmed.  An
+    /// old arm is deliberately refreshed here: refusing it would turn an
+    /// ordinary pipe drop into immediate teardown.
+    pub fn begin_local_absence(&mut self) -> Option<LocalHold> {
+        if self.armed_purpose != Some(ArmDetachPurpose::Local) {
+            return None;
+        }
+        self.absence_started_at = Some(Instant::now());
+        self.generation = self.generation.wrapping_add(1);
+        Some(LocalHold {
+            generation: self.generation,
+        })
+    }
+
+    pub fn local_hold_is_current(&self, hold: LocalHold) -> bool {
+        self.armed_purpose == Some(ArmDetachPurpose::Local)
+            && self.absence_started_at.is_some()
+            && self.generation == hold.generation
+    }
+
+    /// Expiry is destructive: use the same bounded kill primitive as normal
+    /// teardown, then let `serve` return so `main` retracts only its own record.
+    pub fn expire_local_hold(&mut self, hold: LocalHold) {
+        if self.local_hold_is_current(hold) {
+            self.tear_down_sessions();
+        }
     }
 
     /// Kill every session and WAIT for the kills to actually run.
@@ -375,7 +463,10 @@ mod tests {
     /// A shell that outlives the teardown it was supposed to die in.
     fn long_lived_spec() -> termflow_pty_protocol::SpawnSpec {
         let (shell, args) = if cfg!(windows) {
-            ("cmd.exe", vec!["/c".to_string(), "ping -n 60 127.0.0.1 >NUL".to_string()])
+            (
+                "cmd.exe",
+                vec!["/c".to_string(), "ping -n 60 127.0.0.1 >NUL".to_string()],
+            )
         } else {
             ("/bin/sh", vec!["-c".to_string(), "sleep 60".to_string()])
         };
@@ -463,9 +554,8 @@ mod tests {
         m.set_teardown_grace(Duration::from_secs(120));
         let mut watched = Vec::new();
         for tab in ["tab-teardown-a", "tab-teardown-b"] {
-            let sess =
-                Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
-                    .expect("spawn a long-lived child");
+            let sess = Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
+                .expect("spawn a long-lived child");
             let pid = sess.pid();
             assert!(pid > 0, "need a real pid to assert against");
             // Presence before absence: a liveness oracle that only ever checks
@@ -484,7 +574,10 @@ mod tests {
         // teardown for a child that killed itself.
         for (tab, _pid, _done) in &watched {
             assert!(
-                m.sessions.get(*tab).expect("session still registered").is_alive(),
+                m.sessions
+                    .get(*tab)
+                    .expect("session still registered")
+                    .is_alive(),
                 "{tab} exited on its own before teardown — this run proves nothing"
             );
         }
@@ -536,6 +629,7 @@ mod tests {
             req: 1,
             timeout_secs: 600,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(m.is_armed(), "precondition: armed");
 
@@ -553,6 +647,7 @@ mod tests {
             req: 1,
             timeout_secs: 600,
             token: "tok".into(),
+            purpose: None,
         });
         m.on_gui_connect();
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
@@ -570,6 +665,7 @@ mod tests {
             req: 1,
             timeout_secs: 600,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
     }
@@ -585,7 +681,9 @@ mod tests {
             from_offset: 0,
         });
         match r.try_recv() {
-            Ok(Response::AttachAck { req, tab_id, alive, .. }) => {
+            Ok(Response::AttachAck {
+                req, tab_id, alive, ..
+            }) => {
                 assert_eq!(req, 7);
                 assert_eq!(tab_id, "ghost");
                 assert!(!alive, "unknown tab must ack alive=false");
@@ -603,7 +701,10 @@ mod tests {
             tab_id: "ghost".into(),
             from_offset: 0,
         });
-        assert!(r.try_recv().is_err(), "plain Attach must not produce a response");
+        assert!(
+            r.try_recv().is_err(),
+            "plain Attach must not produce a response"
+        );
     }
 
     #[test]
@@ -613,8 +714,22 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(m.is_armed());
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+    }
+
+    #[test]
+    fn arm_records_optional_purpose_without_changing_hold_behavior() {
+        let (mut m, _e, _r) = mgr();
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 300,
+            token: "tok".into(),
+            purpose: Some(ArmDetachPurpose::Local),
+        });
+        assert_eq!(m.armed_purpose(), Some(ArmDetachPurpose::Local));
         assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
     }
 
@@ -625,6 +740,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "WRONG".into(),
+            purpose: None,
         });
         assert!(!m.is_armed());
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
@@ -637,6 +753,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         m.handle_control(Control::Disarm { req: 2 });
         assert!(!m.is_armed());
@@ -650,12 +767,14 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         let first = m.armed_deadline.unwrap();
         m.handle_control(Control::ArmDetach {
             req: 2,
             timeout_secs: 9999,
             token: "tok".into(),
+            purpose: None,
         });
         assert_eq!(m.armed_deadline.unwrap(), first, "deadline not restarted");
     }
@@ -667,6 +786,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         let first_ack = match r.try_recv().unwrap() {
             Response::ArmAck { deadline_ms, .. } => deadline_ms,
@@ -677,12 +797,16 @@ mod tests {
             req: 2,
             timeout_secs: 99999,
             token: "tok".into(),
+            purpose: None,
         });
         let second_ack = match r.try_recv().unwrap() {
             Response::ArmAck { deadline_ms, .. } => deadline_ms,
             other => panic!("expected ArmAck, got {other:?}"),
         };
-        assert_eq!(first_ack, second_ack, "ArmAck must report the stored deadline");
+        assert_eq!(
+            first_ack, second_ack,
+            "ArmAck must report the stored deadline"
+        );
     }
 
     #[test]
@@ -692,6 +816,7 @@ mod tests {
             req: 1,
             timeout_secs: 300,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(!m.is_armed(), "must not arm when not survivable");
         assert!(
@@ -710,7 +835,99 @@ mod tests {
             req: 1,
             timeout_secs: u64::MAX,
             token: "tok".into(),
+            purpose: None,
         });
         assert!(m.is_armed());
+    }
+
+    fn arm_with(m: &mut SessionManager, purpose: Option<ArmDetachPurpose>) {
+        m.handle_control(Control::ArmDetach {
+            req: 1,
+            timeout_secs: 600,
+            token: "tok".into(),
+            purpose,
+        });
+        assert!(m.is_armed(), "fixture must actually arm");
+    }
+
+    /// The bound only exists if expiry really kills. TWO children, for the same
+    /// reason the unarmed-teardown test uses two: "killed the first one it
+    /// found" is the shape this loop gets wrong.
+    #[test]
+    fn expiring_a_local_hold_kills_every_live_child() {
+        let (mut m, _e, _r) = mgr();
+        m.set_teardown_grace(Duration::from_secs(120));
+        arm_with(&mut m, Some(ArmDetachPurpose::Local));
+        let hold = m
+            .begin_local_absence()
+            .expect("a Local arm must open a bounded window");
+
+        let mut pids = Vec::new();
+        for tab in ["tab-expire-a", "tab-expire-b"] {
+            let sess = Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
+                .expect("spawn a long-lived child");
+            let pid = sess.pid();
+            // Presence before absence: a "gone" oracle passes vacuously if the
+            // child never started.
+            assert!(pid_is_alive(pid), "{tab} must be alive before expiry");
+            m.sessions.insert(tab.into(), sess);
+            pids.push((tab, pid));
+        }
+
+        m.expire_local_hold(hold);
+
+        for (tab, pid) in pids {
+            assert!(
+                !pid_is_alive(pid),
+                "{tab} (pid {pid}) survived hold expiry — the bound is a promise the host does not keep"
+            );
+        }
+    }
+
+    /// A sibling profile's updater arms UNLABELLED. Bounding that would destroy
+    /// terminals whose user never pressed anything, so no window may open.
+    #[test]
+    fn an_unlabelled_arm_never_opens_a_bounded_window() {
+        let (mut m, _e, _r) = mgr();
+        arm_with(&mut m, None);
+        assert!(
+            m.begin_local_absence().is_none(),
+            "an unlabelled (sibling/legacy) arm must never become bounded"
+        );
+    }
+
+    /// REFRESH (plan 3.2): a second confirmed absence starts a FRESH window.
+    /// The retired generation must be inert — otherwise an ordinary pipe drop
+    /// carrying a stale deadline would destroy sessions with no grace at all.
+    #[test]
+    fn a_refreshed_absence_retires_the_earlier_generation() {
+        let (mut m, _e, _r) = mgr();
+        m.set_teardown_grace(Duration::from_secs(120));
+        arm_with(&mut m, Some(ArmDetachPurpose::Local));
+        let stale = m.begin_local_absence().expect("first absence opens a window");
+        let fresh = m.begin_local_absence().expect("a re-drop refreshes the window");
+        assert_ne!(stale, fresh, "a refresh must mint a new generation");
+        assert!(!m.local_hold_is_current(stale), "the old window is retired");
+        assert!(m.local_hold_is_current(fresh), "the new window is the live one");
+
+        let sess = Session::spawn(
+            "tab-refresh".into(),
+            &long_lived_spec(),
+            4096,
+            m.events.clone(),
+            true,
+        )
+        .expect("spawn a long-lived child");
+        let pid = sess.pid();
+        assert!(pid_is_alive(pid), "child must be alive before the stale expiry");
+        m.sessions.insert("tab-refresh".into(), sess);
+
+        // The stale timer firing late must be a no-op, not a teardown.
+        m.expire_local_hold(stale);
+        assert!(
+            pid_is_alive(pid),
+            "a retired generation's timer killed a session it no longer owns"
+        );
+        assert_eq!(m.live_session_count(), 1, "the session must still be held");
     }
 }

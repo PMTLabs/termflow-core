@@ -536,6 +536,14 @@ const App: React.FC = () => {
     } else if (postRestoreAction === 'openFolderTab') {
       openFolderTab(pendingOpenPath!);
     }
+
+    // StateManager has finished restoring this window's complete persisted pane
+    // tree. Report completion so Rust can release this window from the sweep.
+    try {
+      await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label);
+    } catch (error) {
+      console.warn('Failed to report host restore completion:', error);
+    }
   };
 
   /**
@@ -1066,11 +1074,15 @@ const App: React.FC = () => {
         // P0-A (Task 5's emit): the unambiguous ids. `terminalId`/`tabId` above
         // are the legacy pair this event has always carried.
         processId?: string; rendererTerminalId?: string; owningTabId?: string;
+        // A live pty-host session which has no app tab. Mode 0 creates a pane
+        // for it, whose normal createTerminal call consumes this pending key.
+        sessionKey?: string;
         // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
         // the edge itself was already written by the backend before this event was emitted.
         parentTerminalId?: string;
       };
       console.log('API: Creating terminal tab', options);
+
 
       const { name, profile, paneId, direction } = options;
       const { processId, leafId, owningTabId } = resolveApiCreateIds(options);

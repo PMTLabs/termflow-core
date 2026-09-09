@@ -82,7 +82,19 @@ async fn main() {
             proto_max: termflow_pty_protocol::PROTOCOL_MAX,
             endpoint: endpoint.0.clone(),
             // Drain/takeover is NOT implemented yet — do not advertise CAP_DRAIN.
-            capabilities: termflow_pty_protocol::CAP_ATTACH_ACK,
+            capabilities: termflow_pty_protocol::CAP_ATTACH_ACK
+                | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT,
+            // The bound applies only to an authenticated, purpose-labelled
+            // LOCAL hold. Legacy/unlabelled sibling holds remain indefinite.
+            lifecycle: Some(termflow_pty_protocol::LifecycleContract {
+                version: 1,
+                retention: termflow_pty_protocol::RetentionPolicy::Bounded {
+                    active_secs: termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+                },
+            }),
+            // This is a launch-time label, not executable attestation: a symlink
+            // can be retargeted or a file rewritten after the GUI hashes it.
+            build_id: std::env::var("TERMFLOW_PTY_BUILD_ID").ok(),
         };
         if let Err(e) = termflow_pty_protocol::write_record(&path, &rec) {
             eprintln!("termflow-pty-host: could not write discovery record: {e}");

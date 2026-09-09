@@ -1,9 +1,46 @@
 //! Update / hot-swap / offload preflight checks, and the reattach prompt-gate
 //! seed. Split out of the former `commands.rs`.
 
-use tauri::State;
-use crate::state::AppState;
 use super::window::flush_all_windows;
+use crate::state::AppState;
+use tauri::State;
+
+/// Lifecycle retention reported by the host this app is currently connected to.
+/// This deliberately reads the connected client, never discovery: a discovery
+/// record can be stale or replaced after the pipe connection is established.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+// `rename_all` renames the VARIANTS; the fields INSIDE a struct variant need
+// `rename_all_fields`. Without it this sent `active_secs` while the renderer
+// read `activeSecs`, so the panel and the confirm dialog both told the user
+// their shells were retained for "undefined seconds".
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ConnectedHostRetention {
+    Unknown,
+    Indefinite,
+    Bounded { active_secs: u64 },
+}
+
+impl From<crate::pty_host_client::HostRetention> for ConnectedHostRetention {
+    fn from(retention: crate::pty_host_client::HostRetention) -> Self {
+        match retention {
+            crate::pty_host_client::HostRetention::Unknown => Self::Unknown,
+            crate::pty_host_client::HostRetention::Indefinite => Self::Indefinite,
+            crate::pty_host_client::HostRetention::Bounded { active_secs } => {
+                Self::Bounded { active_secs }
+            }
+        }
+    }
+}
+
+/// Return the retention contract of the connected host. No connected client is
+/// also unknown: absence does not establish an indefinite retention promise.
+#[tauri::command]
+pub fn connected_host_retention(state: State<'_, AppState>) -> ConnectedHostRetention {
+    state
+        .pty_host_clone()
+        .map(|client| client.host_retention().into())
+        .unwrap_or(ConnectedHostRetention::Unknown)
+}
 
 /// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
 /// rebuild. The sidecar keeps every PTY (and its CLI) alive; the next launch
@@ -112,7 +149,10 @@ pub async fn take_reattach_prompt_hook(
     };
     let pid = state.terminals.get(&id).map(|t| t.pid).unwrap_or(0);
     let at_prompt = sample_at_prompt(hook, pid).await;
-    Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
+    Ok(Some(ReattachPromptGateSeed {
+        prompt_hook: hook,
+        at_prompt,
+    }))
 }
 
 /// Design 006 pre-mount probe: NON-consuming "would the gate arm right now?"
@@ -131,7 +171,10 @@ pub async fn probe_reattach_prompt_gate(
         return Ok(None);
     };
     let at_prompt = sample_at_prompt(hook, pid).await;
-    Ok(Some(ReattachPromptGateSeed { prompt_hook: hook, at_prompt }))
+    Ok(Some(ReattachPromptGateSeed {
+        prompt_hook: hook,
+        at_prompt,
+    }))
 }
 
 /// Strict at-prompt sample shared by the drain and the pre-mount probe
@@ -206,7 +249,13 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     let token = crate::pty_host_client::resolve_token();
     // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
     // exit and drop the pipe (10-minute safety window).
-    client.arm_detach(600, &token).await?;
+    client
+        .arm_detach(
+            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+            &token,
+            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        )
+        .await?;
     // Let every window persist its state (cwd snapshot included) before we drop
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
@@ -224,15 +273,36 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
 /// was in which preflight each caller ran.
 #[cfg(test)]
 mod preflight_wiring_tests {
+    /// The renderer reads `activeSecs` (see `ConnectedHostRetention` in
+    /// tauri-bridge.ts). Nothing else pinned this hop: the TypeScript test
+    /// hand-builds its object and the command test only checks which source the
+    /// command reads, so a field-name mismatch reached the user as "undefined
+    /// seconds" with every suite green. Assert the wire, not just both ends.
+    #[test]
+    fn bounded_retention_serializes_the_field_name_the_renderer_reads() {
+        let json =
+            serde_json::to_value(super::ConnectedHostRetention::Bounded { active_secs: 900 })
+                .expect("serialize");
+        assert_eq!(json["state"], "bounded");
+        assert_eq!(
+            json["activeSecs"], 900,
+            "renderer reads activeSecs; got: {json}"
+        );
+        assert!(
+            json.get("active_secs").is_none(),
+            "snake_case field would leave the renderer with undefined: {json}"
+        );
+    }
+
     /// The body of `fn <name>`, found by counting braces from its opening `{`.
     ///
     /// Brace counting rather than "the next N lines": a body that grows would
     /// silently fall out of a line-window and the assertion would pass by
     /// measuring nothing.
     fn fn_body(src: &str, signature: &str) -> String {
-        let start = src
-            .find(signature)
-            .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
+        let start = src.find(signature).unwrap_or_else(|| {
+            panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously")
+        });
         let rest = &src[start..];
         let open = rest.find('{').expect("no body");
         let mut depth = 0usize;
@@ -272,7 +342,12 @@ mod preflight_wiring_tests {
         // Named against the LIVE sibling APIs, not the removed
         // `sibling_instance_preflight`: a guard that watches for a function
         // nobody can call any more is trivially true and guards nothing.
-        for api in ["live_siblings_now", "describe_unarmable", "arm_siblings", "update_preflight"] {
+        for api in [
+            "live_siblings_now",
+            "describe_unarmable",
+            "arm_siblings",
+            "update_preflight",
+        ] {
             assert!(
                 !body.contains(api),
                 "Offload & Close must not consult siblings (`{api}` found) — it performs no \
@@ -285,6 +360,67 @@ mod preflight_wiring_tests {
         );
     }
 
+    /// The argument list of every `arm_detach` call in a file, excluding this
+    /// test module. Scoping to the call site is load-bearing: a whole-file
+    /// `contains` matched the assertion literals BELOW, in this very file, so
+    /// the offload site passed even when it was mutated to send `None`.
+    fn arm_detach_args(src: &str) -> Vec<String> {
+        let production = src
+            .split("mod preflight_wiring_tests")
+            .next()
+            .unwrap_or(src);
+        let mut out = Vec::new();
+        for (open, _) in production.match_indices(".arm_detach(") {
+            let start = open + ".arm_detach(".len();
+            let mut depth = 1usize;
+            for (off, ch) in production[start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            out.push(production[start..start + off].to_string());
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn all_arm_call_sites_send_the_intended_purpose() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let read = |rel: &str| {
+            let args = arm_detach_args(&std::fs::read_to_string(root.join(rel)).unwrap());
+            assert_eq!(args.len(), 1, "{rel}: expected exactly one arm_detach call");
+            args.into_iter().next().unwrap()
+        };
+
+        // Both LOCAL sites label the arm, so a future deadline can apply to them.
+        for local in ["commands/update.rs", "updater.rs"] {
+            let args = read(local);
+            assert!(
+                args.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"),
+                "{local}: a local arm must be labelled Local, got: {args}"
+            );
+        }
+
+        // The sibling site must stay UNLABELLED — a different profile's update
+        // must never install a deadline on terminals its user never touched.
+        let sibling = read("api_server/system.rs");
+        assert!(
+            !sibling.contains("ArmDetachPurpose"),
+            "a sibling-armed hold must carry no purpose, got: {sibling}"
+        );
+        assert!(
+            sibling.contains("None"),
+            "sibling arm must pass an explicit None, got: {sibling}"
+        );
+    }
+
     /// The asymmetry that produced the report: the panel showed offload as
     /// available while the button ran a stricter check, so the refusal arrived
     /// as a toast after the click. One shared function, so they cannot diverge.
@@ -293,8 +429,14 @@ mod preflight_wiring_tests {
         let src = source();
         let shown = fn_body(&src, "pub fn hotswap_available");
         let enforced = fn_body(&src, "pub async fn restart_for_update");
-        assert!(shown.contains("offload_preflight"), "panel must use the shared check: {shown}");
-        assert!(enforced.contains("offload_preflight"), "button must use the shared check");
+        assert!(
+            shown.contains("offload_preflight"),
+            "panel must use the shared check: {shown}"
+        );
+        assert!(
+            enforced.contains("offload_preflight"),
+            "button must use the shared check"
+        );
     }
 
     /// Update's reach IS real — Velopack kills every process under the install
@@ -302,8 +444,14 @@ mod preflight_wiring_tests {
     #[test]
     fn update_still_considers_siblings() {
         let body = fn_body(&source(), "pub fn update_preflight");
-        assert!(body.contains("live_siblings_now"), "update must enumerate siblings: {body}");
-        assert!(body.contains("hotswap_preflight"), "update must also guard our own terminals");
+        assert!(
+            body.contains("live_siblings_now"),
+            "update must enumerate siblings: {body}"
+        );
+        assert!(
+            body.contains("hotswap_preflight"),
+            "update must also guard our own terminals"
+        );
     }
 
     /// The two preflights must stay DIFFERENT functions. Collapsing them back
@@ -318,4 +466,3 @@ mod preflight_wiring_tests {
         );
     }
 }
-

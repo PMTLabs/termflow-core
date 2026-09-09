@@ -29,6 +29,8 @@ import { PeersPanel } from './PeersPanel';
 import { SnippetsPanel } from './SnippetsPanel';
 import { AboutLegalPanel } from './AboutLegalPanel';
 import { AutomationsPanel } from './Automations/AutomationsPanel';
+import { offloadRetentionCopy } from './offloadRetentionCopy';
+import type { ConnectedHostRetention } from '../../api/tauri-bridge';
 import {
     discardAutomationEditorDraft,
     isAutomationEditorDirty,
@@ -227,6 +229,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // app so the exe can be rebuilt; the next launch reattaches every terminal.
     const [offloadArmed, setOffloadArmed] = useState(false);
     const [offloading, setOffloading] = useState(false);
+    const [hostRetention, setHostRetention] = useState<ConnectedHostRetention>({ state: 'unknown' });
     // Preflight: null = available (offload will keep terminals alive → hide the
     // caveat); a string = the reason it's currently blocked (show it).
     const [hotswapBlockedReason, setHotswapBlockedReason] = useState<string | null>(null);
@@ -300,6 +303,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setOffloadArmed(false);
             void refreshHotswapPreflight();
             void refreshUpdateStatus();
+            void window.electronAPI?.connectedHostRetention?.()
+                .then(setHostRetention)
+                .catch(() => setHostRetention({ state: 'unknown' }));
             void window.electronAPI?.getAppVersion?.().then((v) => setAppVersion(v)).catch(() => {});
         }
     }, [activeCategory, refreshHotswapPreflight, refreshUpdateStatus]);
@@ -1982,14 +1988,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 <label className="setting-label">Offload &amp; rebuild (keep terminals running)</label>
                 <p className="help-text">
                     Detaches your running shells and their CLIs (Claude, codex, …) into the
-                    background PTY host and closes TermFlow so the app can be rebuilt. Launch
-                    the new build and every terminal reattaches automatically — mid-screen,
-                    no retype.
+                    background PTY host and closes TermFlow so the app can be rebuilt.
+                </p>
+                <p className="help-text">
+                    {offloadRetentionCopy(hostRetention)}
                 </p>
                 <ol className="help-text" style={{ margin: '8px 0 12px 18px', padding: 0 }}>
-                    <li>Click <strong>Offload &amp; Close</strong> — TermFlow closes; your terminals keep running.</li>
+                    <li>Click <strong>Offload &amp; Close</strong> — TermFlow closes and the host applies the policy above.</li>
                     <li>Rebuild the app.</li>
-                    <li>Launch the new build — it reattaches every terminal.</li>
+                    <li>Launch the new build while the host is available to reclaim the terminals.</li>
                 </ol>
                 <button
                     className="save-btn apply-btn"
@@ -2008,7 +2015,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     isOpen={offloadArmed}
                     destructive
                     title="Offload & Close TermFlow?"
-                    message="This closes TermFlow now — your terminals keep running in the background. Continue?"
+                    message={offloadRetentionCopy(hostRetention)}
                     onConfirm={doOffloadRebuild}
                     onCancel={() => setOffloadArmed(false)}
                     confirmText={offloading ? 'Offloading…' : 'Offload & Close'}

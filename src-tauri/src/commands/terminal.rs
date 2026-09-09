@@ -199,6 +199,15 @@ pub async fn create_terminal(
     Ok(id)
 }
 
+#[tauri::command]
+pub async fn report_host_restore_settled(
+    state: State<'_, AppState>,
+    window_label: String,
+) -> Result<(), String> {
+    state.report_host_restore_settled(window_label).await;
+    Ok(())
+}
+
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane
 /// currently lives in. Without it, dialogs a console program parents to
 /// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open
@@ -306,6 +315,7 @@ pub(crate) struct SpawnRequest {
     /// build, whose host session is still keyed by the old `tb-` id and would be
     /// orphaned by a rename — the protocol has no rename verb (design 014 §A2).
     pub session_key: Option<String>,
+    /// The pane-tree tab that owns this terminal, when known to the caller.
     pub owning_tab_id: Option<String>,
     pub cols: u16,
     pub rows: u16,
@@ -382,10 +392,12 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // anything created on this build and the old `tb-` id for a migrated one.
     let session_key = session_key.unwrap_or_else(|| id.clone());
 
-    if let Some((_, pid)) = state.host_reattach_pending.remove(&session_key) {
+    let claimed_pid = state.claim_host_registration(&session_key)?;
+    if let Some(pid) = claimed_pid {
         let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
         let process_id = ident.process_id.clone();
         register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+        state.host_session_registered(&session_key, &process_id);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
@@ -414,6 +426,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
     let process_id = ident.process_id.clone();
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+    state.host_session_registered(&session_key, &process_id);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -993,6 +1006,37 @@ mod scrollback_restore_tests {
                 display_label: None,
             },
         );
+    }
+
+    #[test]
+    fn surfacing_an_orphan_reserves_the_listed_pid_for_reattach() {
+        let (_app, state) = mock_state();
+        state.surface_host_orphans(vec![termflow_pty_protocol::SessionMeta {
+            tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
+        }]);
+
+        assert_eq!(state.claim_host_registration("S"), Ok(Some(4242)));
+    }
+
+    #[test]
+    fn claim_retirement_preserves_a_replacement_until_its_owner_exits() {
+        use crate::state::{HostSessionClaim, HostSessionClaimState};
+
+        let (_app, state) = mock_state();
+        state.host_session_claims.insert("S".into(), HostSessionClaim {
+            state: HostSessionClaimState::Registered,
+            pid: 4242,
+            process_id: Some("pc-replacement".into()),
+        });
+
+        state.forget_host_session_claim_if_owner("S", "pc-stale-exit");
+        let replacement = state.host_session_claims.get("S").expect("replacement claim survives stale retirement");
+        assert_eq!(replacement.state, HostSessionClaimState::Registered);
+        assert_eq!(replacement.process_id.as_deref(), Some("pc-replacement"));
+        drop(replacement);
+
+        state.forget_host_session_claim_if_owner("S", "pc-replacement");
+        assert!(state.host_session_claims.get("S").is_none());
     }
 
     /// The ratchet itself: stage_scrollback must seed the freshly-initialized

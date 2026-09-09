@@ -270,6 +270,7 @@ export function findSessionKeyByTerminalId(
   return undefined;
 }
 
+
 export function findTabIdByTerminalId(
   treesByTabId: Record<string, PaneNode | null>,
   terminalId: string,

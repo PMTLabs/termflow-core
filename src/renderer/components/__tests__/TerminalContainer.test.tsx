@@ -147,6 +147,40 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
     expect(el?.getAttribute('data-terminal-id')).not.toBe(tabId);
   });
 
+  it('leaves a recovered host session pending for the pane to adopt', () => {
+    const store = makeStore();
+    const registerExistingTerminal = jest.fn();
+
+    const result = runApiCreateMode0(
+      {
+        name: 'Recovered terminal',
+        profile: 'default',
+        processId: 'tm-recovered01',
+        rendererTerminalId: 'tm-recovered01',
+        sessionKey: 'tm-host-session01',
+      },
+      {
+        dispatch: store.dispatch,
+        generateId: (prefix: string) => `${prefix}-generated`,
+        defaultProfile: 'default',
+        registerExistingTerminal,
+        tabPanes: (window as any).tabPanes,
+        tabExists: () => false,
+        activateOnApiCreate: false,
+        tabCount: 1,
+        addTab,
+        addTabTree,
+        setActiveTab,
+        setActiveTabId,
+      },
+    );
+
+    // Registering the placeholder process id would bypass TerminalPane's normal
+    // createTerminal call, which performs the actual host-session claim.
+    expect(registerExistingTerminal).not.toHaveBeenCalled();
+    expect(result.paneTree.sessionKey).toBe('tm-host-session01');
+  });
+
   // AMENDED by design 014 — the contrast this case existed to draw is GONE, and
   // removing it is the point of the change.
   //

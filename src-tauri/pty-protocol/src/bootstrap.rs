@@ -48,6 +48,10 @@ pub const CAP_DRAIN: u32 = 1 << 0;
 /// confirming this bit via the discovery record — a legacy host would fail to
 /// decode the unknown variant and drop the connection.
 pub const CAP_ATTACH_ACK: u32 = 1 << 1;
+/// Host understands and advertises the structured lifecycle retention contract
+/// in its discovery record. The bit carries no policy value; consumers require
+/// the accompanying record field before treating a policy as known.
+pub const CAP_LIFECYCLE_CONTRACT: u32 = 1 << 2;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

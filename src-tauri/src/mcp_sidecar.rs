@@ -1,7 +1,23 @@
 use crate::app_config;
 use crate::state::{AppState, McpProcessHandle};
-use crate::shutdown_mcp_server;
+use crate::{shutdown_mcp_generation, shutdown_mcp_server};
 use tauri_plugin_shell::ShellExt;
+
+static SIDECAR_DIGEST_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Return a successful sidecar digest from cache. Failures are deliberately not
+/// retained: a later status poll must retry an unavailable artifact read.
+pub(crate) fn cached_tauri_sidecar_digest(name: &str) -> Option<String> {
+    if let Some(digest) = SIDECAR_DIGEST_CACHE.lock().ok()?.get(name).cloned() {
+        return Some(digest);
+    }
+    let digest = resolved_tauri_sidecar(name).ok().map(|(_, digest)| digest)?;
+    if let Ok(mut cache) = SIDECAR_DIGEST_CACHE.lock() {
+        cache.insert(name.to_string(), digest.clone());
+    }
+    Some(digest)
+}
 
 /// Poll the MCP server's `/health` until OUR sidecar answers.
 ///
@@ -10,11 +26,45 @@ use tauri_plugin_shell::ShellExt;
 /// a running server we do not own — and quietly route this instance's tool calls
 /// into the other app. The sidecar echoes `AUTO_TERMINAL_INSTANCE_ID`, so
 /// compare it (`classify_health_owner`, the same rule the Settings check uses).
-async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
+/// A health response can prove this exact build, prove only ownership, or prove
+/// that the listener is not ours.  `Unverified` is intentionally usable: old
+/// fabric and the legacy Node graph cannot self-identify a launch artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarAcceptance { Verified, Unverified, Rejected }
+
+pub(crate) fn classify_sidecar_report(
+    reported_owner: Option<&str>,
+    own_id: &str,
+    observed_build: Option<&str>,
+    expected_build: Option<&str>,
+) -> Option<SidecarAcceptance> {
+    let (owned, foreign) = crate::network_commands::classify_health_owner(reported_owner, own_id);
+    if owned {
+        return Some(match (observed_build, expected_build) {
+            (Some(actual), Some(expected)) if actual == expected => SidecarAcceptance::Verified,
+            (Some(_), Some(_)) => SidecarAcceptance::Rejected,
+            _ => SidecarAcceptance::Unverified,
+        });
+    }
+    foreign.then_some(SidecarAcceptance::Rejected)
+}
+
+async fn wait_for_mcp_health(port: u16, own_id: &str, expected_build: Option<&str>) -> SidecarAcceptance {
+    wait_for_mcp_health_within(port, own_id, expected_build, 10).await
+}
+
+/// Split out only so a test can exhaust the budget without waiting the real
+/// 10 × 500 ms; production always passes the full budget.
+async fn wait_for_mcp_health_within(
+    port: u16,
+    own_id: &str,
+    expected_build: Option<&str>,
+    attempts: u32,
+) -> SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
-    for attempt in 1..=10 {
+    for attempt in 1..=attempts {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let result = match &client {
@@ -26,21 +76,26 @@ async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
                 let body: serde_json::Value =
                     response.json().await.unwrap_or_else(|_| serde_json::json!({}));
                 let reported = body.get("instanceId").and_then(|v| v.as_str());
-                let (healthy, conflict) =
-                    crate::network_commands::classify_health_owner(reported, own_id);
-                if healthy {
-                    log::info!("[MCP] MCP Server healthy after {} attempt(s)", attempt);
-                    return true;
-                }
-                if conflict {
+                let observed_build = body.get("buildId").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+                match classify_sidecar_report(reported, own_id, observed_build, expected_build) {
+                    Some(SidecarAcceptance::Verified) => {
+                        log::info!("[MCP] MCP Server build-verified after {} attempt(s)", attempt);
+                        return SidecarAcceptance::Verified;
+                    }
+                    Some(SidecarAcceptance::Unverified) => {
+                        log::warn!("[MCP] MCP Server owner matched but build identity is unavailable; continuing unverified");
+                        return SidecarAcceptance::Unverified;
+                    }
+                    Some(SidecarAcceptance::Rejected) => {
                     log::error!(
                         "[MCP] port {port} is served by ANOTHER instance ({}) — this instance's \
                          MCP server is not running. Change the MCP port in Settings.",
                         reported.unwrap_or("unknown")
                     );
-                    return false;
+                        return SidecarAcceptance::Rejected;
+                    }
+                    None => log::debug!("[MCP] Health check attempt {attempt}: no instanceId yet"),
                 }
-                log::debug!("[MCP] Health check attempt {attempt}: no instanceId yet");
             }
             Ok(response) => {
                 log::debug!("[MCP] Health check attempt {} returned status: {}", attempt, response.status());
@@ -51,8 +106,27 @@ async fn wait_for_mcp_health(port: u16, own_id: &str) -> bool {
         }
     }
 
-    log::error!("[MCP] MCP Server health check failed after 10 attempts — MCP is NOT available");
-    false
+    // Silence is the ABSENCE of evidence, not evidence the listener is foreign
+    // or the wrong build. Rejected kills the child we just spawned, and before
+    // this gate existed the health result was discarded entirely — so treating a
+    // slow start as a rejection would newly kill a server that was merely late.
+    // The self-derived build id now hashes a multi-megabyte executable at
+    // startup, which pushes against this same budget.
+    log::error!("[MCP] MCP Server health check did not answer in {attempts} attempts — continuing unverified");
+    SidecarAcceptance::Unverified
+}
+
+/// Mirrors Tauri shell's sidecar resolver exactly: `current_exe().parent()` plus
+/// the platform executable suffix.  The resolved path is what we hash and what
+/// `ShellExt::sidecar` launches.  This remains a pre-exec label, not attestation:
+/// a symlink retarget or rewrite between hash and exec can still mislabel a child.
+pub(crate) fn resolved_tauri_sidecar(name: &str) -> std::io::Result<(std::path::PathBuf, String)> {
+    use sha2::{Digest, Sha256};
+    let mut path = std::env::current_exe()?.parent().ok_or_else(|| std::io::Error::other("current exe has no parent"))?.join(name);
+    #[cfg(windows)] if path.extension().is_none_or(|e| e != "exe") { path.as_mut_os_string().push(".exe"); }
+    #[cfg(not(windows))] if path.extension().is_some_and(|e| e == "exe") { path.set_extension(""); }
+    let bytes = std::fs::read(&path)?;
+    Ok((path, format!("{:x}", Sha256::digest(bytes))))
 }
 
 /// The environment the MCP server is launched with, derived from the current
@@ -93,9 +167,10 @@ async fn start_mcp_sidecar(
     app_handle: tauri::AppHandle,
     state: AppState,
     cfg: &app_config::NetworkConfig,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     log::info!("[MCP] Starting MCP Server sidecar...");
 
+    let (launch_path, build_id) = resolved_tauri_sidecar("termflow-mcp-server").map_err(|e| format!("MCP build identity unavailable: {e}"))?;
     let mut sidecar_command = app_handle
         .shell()
         .sidecar("termflow-mcp-server")
@@ -107,25 +182,81 @@ async fn start_mcp_sidecar(
     // can tell OUR sidecar from another instance's that happens to own the MCP port.
     sidecar_command = sidecar_command.env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id);
 
+    let generation = state
+        .mcp_process
+        .lock()
+        .map_err(|_| "MCP process slot lock poisoned".to_string())?
+        .claim_generation();
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[MCP] MCP sidecar spawned");
+    let (terminated_tx, terminated_rx) = std::sync::mpsc::channel();
 
-    if let Ok(mut guard) = state.mcp_process.lock() {
-        *guard = Some(McpProcessHandle::Sidecar(child));
+    let handle = McpProcessHandle::Sidecar {
+            child,
+            terminated: terminated_rx,
+        };
+    let installed = match state.mcp_process.lock() {
+        Ok(mut slot) => slot.install_if_current(generation, handle),
+        Err(_) => {
+            crate::shutdown_mcp_handle(handle);
+            return Err("MCP process slot lock poisoned after spawn; stopped uninstalled child".to_string());
+        }
+    };
+    match installed {
+        Ok(Some(displaced_child)) => crate::shutdown_mcp_handle(displaced_child),
+        Ok(None) => {}
+        Err(stale_child) => {
+            crate::shutdown_mcp_handle(stale_child);
+            return Ok(false);
+        }
     }
 
+    let drain_state = state.clone();
     tauri::async_runtime::spawn(async move {
-        while rx.recv().await.is_some() {}
+        use tauri_plugin_shell::process::CommandEvent;
+        while let Some(event) = rx.recv().await {
+            if let CommandEvent::Terminated(payload) = event {
+                let _ = terminated_tx.send(());
+                let cleared = match drain_state.mcp_process.lock() {
+                    Ok(mut slot) => slot.clear_if_current(generation),
+                    Err(_) => {
+                        log::error!("[MCP] process slot lock poisoned while recording termination for generation {generation}");
+                        break;
+                    }
+                };
+                if cleared {
+                    log::info!(
+                        "[MCP] sidecar terminated (code={:?}, signal={:?}); clearing process handle",
+                        payload.code,
+                        payload.signal
+                    );
+                } else {
+                    log::debug!(
+                        "[MCP] stale sidecar child (gen {generation}) terminated after respawn; keeping current handle"
+                    );
+                }
+                break;
+            }
+        }
     });
 
-    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
-    Ok(())
+    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, Some(&build_id)).await;
+    log::debug!("[MCP] bundled descriptor={} digest={build_id}", launch_path.display());
+    if acceptance == SidecarAcceptance::Rejected {
+        // This is the child handle we just spawned, not the listener discovered
+        // on the shared port.  Never act on that foreign listener.
+        shutdown_mcp_generation(&state, generation);
+    }
+    let still_current = state.mcp_process.lock()
+        .map_err(|_| "MCP process slot lock poisoned while checking spawn generation".to_string())?
+        .is_current(generation);
+    Ok(acceptance != SidecarAcceptance::Rejected && still_current)
 }
 
 async fn start_mcp_legacy(
     state: AppState,
     cfg: &app_config::NetworkConfig,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     log::info!("[MCP] Starting MCP Server via legacy node fallback...");
 
     let possible_paths = [
@@ -146,6 +277,9 @@ async fn start_mcp_legacy(
         .envs(mcp_env(cfg))
         // P0b: identity for owner-aware MCP health (see start_mcp_sidecar).
         .env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id)
+        // Private parent-to-child control protocol: exactly `TERMFLOW_SHUTDOWN\n`
+        // asks the sidecar to drain. This is deliberately stdin-only, never HTTP/MCP.
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     // CREATE_NO_WINDOW so the node fallback doesn't flash a console window.
@@ -155,17 +289,42 @@ async fn start_mcp_legacy(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    let generation = state
+        .mcp_process
+        .lock()
+        .map_err(|_| "MCP process slot lock poisoned".to_string())?
+        .claim_generation();
     let child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let pid = child.id();
     log::info!("[MCP] MCP Server spawned with PID: {}", pid);
 
-    if let Ok(mut guard) = state.mcp_process.lock() {
-        *guard = Some(McpProcessHandle::Legacy(child));
+    let handle = McpProcessHandle::Legacy(child);
+    let installed = match state.mcp_process.lock() {
+        Ok(mut slot) => slot.install_if_current(generation, handle),
+        Err(_) => {
+            crate::shutdown_mcp_handle(handle);
+            return Err("MCP process slot lock poisoned after spawn; stopped uninstalled child".to_string());
+        }
+    };
+    match installed {
+        Ok(Some(displaced_child)) => crate::shutdown_mcp_handle(displaced_child),
+        Ok(None) => {}
+        Err(stale_child) => {
+            crate::shutdown_mcp_handle(stale_child);
+            return Ok(false);
+        }
     }
 
-    let _ = wait_for_mcp_health(cfg.mcp_port, &state.instance_id).await;
-    Ok(())
+    // Node imports a graph of built modules.  There is no single launch artifact
+    // descriptor here, so build identity is explicitly unavailable and cannot
+    // make this path a successful acceptance/fallback/retry signal.
+    let acceptance = wait_for_mcp_health(cfg.mcp_port, &state.instance_id, None).await;
+    if acceptance == SidecarAcceptance::Rejected { shutdown_mcp_generation(&state, generation); }
+    let still_current = state.mcp_process.lock()
+        .map_err(|_| "MCP process slot lock poisoned while checking spawn generation".to_string())?
+        .is_current(generation);
+    Ok(acceptance != SidecarAcceptance::Rejected && still_current)
 }
 
 /// Kill any running MCP server, then (re)start it from the given config. Tries
@@ -212,11 +371,12 @@ pub async fn respawn_mcp(
     tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
 
     match start_mcp_sidecar(app_handle.clone(), state.clone(), cfg).await {
-        Ok(_) => return true,
+        Ok(true) => return true,
+        Ok(false) => return false,
         Err(e) => log::warn!("[MCP] Sidecar startup failed, falling back to legacy node path: {}", e),
     }
     match start_mcp_legacy(state, cfg).await {
-        Ok(_) => true,
+        Ok(accepted) => accepted,
         Err(e) => {
             log::error!("[MCP] Failed to start MCP server: {}", e);
             false
@@ -226,8 +386,36 @@ pub async fn respawn_mcp(
 
 #[cfg(test)]
 mod respawn_tests {
-    use super::mcp_respawn_needed;
+    use super::{
+        cached_tauri_sidecar_digest, classify_sidecar_report, mcp_respawn_needed, wait_for_mcp_health_within, SidecarAcceptance, SIDECAR_DIGEST_CACHE,
+    };
+
+    #[test]
+    fn successful_sidecar_digest_is_reused_without_a_second_file_read() {
+        let name = "__test_cached_sidecar_digest__";
+        SIDECAR_DIGEST_CACHE.lock().unwrap().insert(name.into(), "cached-digest".into());
+        assert_eq!(cached_tauri_sidecar_digest(name).as_deref(), Some("cached-digest"));
+        SIDECAR_DIGEST_CACHE.lock().unwrap().remove(name);
+    }
     use crate::app_config::NetworkConfig;
+
+    /// A port nothing is listening on, so every attempt is refused.
+    fn closed_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        l.local_addr().expect("read the bound port").port()
+    }
+
+    /// Silence is the ABSENCE of evidence, never evidence of a foreign or wrong
+    /// build. Only `Rejected` calls `shutdown_mcp_server`, and before this gate
+    /// existed the health result was discarded entirely — so returning Rejected
+    /// here would newly kill a server that was merely slow to answer.
+    #[tokio::test]
+    async fn a_health_check_that_never_answers_is_unverified_not_rejected() {
+        assert_eq!(
+            wait_for_mcp_health_within(closed_port(), "ours", Some("expected"), 1).await,
+            SidecarAcceptance::Unverified
+        );
+    }
 
     fn base() -> NetworkConfig {
         NetworkConfig {
@@ -286,6 +474,42 @@ mod respawn_tests {
         let mut new = base();
         new.expose_on_network = true;
         assert!(mcp_respawn_needed(&old, &new));
+    }
+
+    #[test]
+    fn echoed_expected_env_value_is_not_a_special_acceptance_path() {
+        // A report has no channel for a parent-supplied label: it is accepted
+        // only because its *observed* self-derived digest matches.  Swapping the
+        // executable while it echoes an arbitrary expected string must therefore
+        // be represented as a mismatch and rejected by this classifier.
+        assert_eq!(
+            classify_sidecar_report(Some("ours"), "ours", Some("old-self-hash"), Some("new-expected-hash")),
+            Some(SidecarAcceptance::Rejected)
+        );
+    }
+
+    #[test]
+    fn owner_matched_missing_build_is_usable_but_unverified() {
+        assert_eq!(
+            classify_sidecar_report(Some("ours"), "ours", None, Some("expected")),
+            Some(SidecarAcceptance::Unverified)
+        );
+    }
+
+    #[test]
+    fn foreign_owner_is_rejected_even_without_a_build_id() {
+        assert_eq!(
+            classify_sidecar_report(Some("foreign"), "ours", None, Some("expected")),
+            Some(SidecarAcceptance::Rejected)
+        );
+    }
+
+    #[test]
+    fn legacy_owner_with_a_reported_build_is_unverified_not_rejected() {
+        assert_eq!(
+            classify_sidecar_report(Some("ours"), "ours", Some("a-real-digest"), None),
+            Some(SidecarAcceptance::Unverified)
+        );
     }
 
     /// The geometry handler must decide a window is TRACKED before it asks whether it is

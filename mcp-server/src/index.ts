@@ -1,7 +1,8 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import cors from "cors";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 
 /** Constant-time string equality (guards the terminal-I/O auth surface). */
 function safeEqual(a: string, b: string): boolean {
@@ -16,6 +17,7 @@ import { createApiClient } from "./apiClient.js";
 import { createMcpServer } from "./server.js";
 import { readTerminalIdHeader } from "./identity.js";
 import { startSseHeartbeat } from "./heartbeat.js";
+import { closeHttpServer, isShutdownCommand, quiesce } from "./shutdown.js";
 
 // Configuration
 const MCP_PORT = parseInt(process.env.MCP_PORT || "42032", 10);
@@ -26,6 +28,19 @@ const API_BASE = (process.env.AUTO_TERMINAL_API_URL || "http://localhost:42031")
 // AUTO_TERMINAL_TOKEN is preferred; AUTO_TERMINAL_API_TOKEN kept for back-compat.
 const ACCESS_TOKEN = process.env.AUTO_TERMINAL_TOKEN || process.env.AUTO_TERMINAL_API_TOKEN || "";
 const API_TOKEN = ACCESS_TOKEN || undefined;
+// Bun's packaged sidecar is a single executable, so it can identify itself.
+// Node's legacy loader imports a graph; intentionally report no build id there.
+const SELF_BUILD_ID = (process.versions as Record<string, string>).bun
+    ? (() => {
+        try {
+            return createHash("sha256").update(readFileSync(process.execPath)).digest("hex");
+        } catch {
+            // Identity is additive: an unreadable executable must not prevent
+            // this sidecar from starting and serving requests.
+            return "";
+        }
+    })()
+    : "";
 
 // Axios instance with default auth if token is provided. A finite timeout
 // prevents a stalled backend from hanging the MCP request indefinitely.
@@ -35,6 +50,15 @@ const api = createApiClient({ baseURL: API_BASE, token: API_TOKEN });
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Once shutdown starts, no new MCP session may be initialized. Existing
+// streams are closed by gracefulExit below; this is intentionally before the
+// auth gate so every incoming request gets a deterministic draining response.
+let acceptingSessions = true;
+app.use((_req: Request, res: Response, next) => {
+    if (acceptingSessions) return next();
+    res.status(503).json({ error: "MCP server is shutting down" });
+});
 
 // Incoming-request auth gate. Enforced ONLY when ACCESS_TOKEN is set (networked
 // mode); in localhost mode it is empty and every request passes (back-compat).
@@ -80,6 +104,7 @@ app.get("/health", (_req: Request, res: Response) => {
         // Echo the launching app's identity (P0b) so its Settings health check can
         // distinguish OUR sidecar from another instance's that owns this MCP port.
         instanceId: process.env.AUTO_TERMINAL_INSTANCE_ID || "",
+        buildId: SELF_BUILD_ID,
     });
 });
 
@@ -226,9 +251,9 @@ app.delete("/mcp", async (req: Request, res: Response) => {
 let server: Server | undefined;
 
 /**
- * Close active transports (so each SSE/POST stream gets an orderly end instead
- * of a raw socket reset) and then exit. Bounded by a 1.5s race so a stuck stream
- * can't block exit. Do NOT try to keep running afterward.
+ * Stop admitting sessions, close active transports (so SSE/POST streams get an
+ * orderly end), then await HTTP completion. Each drain stage is bounded at
+ * 750 ms, keeping the parent-side 2 s exit wait safe. Do NOT keep running.
  */
 let exiting = false;
 async function gracefulExit(code: number): Promise<void> {
@@ -237,15 +262,11 @@ async function gracefulExit(code: number): Promise<void> {
     if (exiting) return;
     exiting = true;
     try {
-        await Promise.race([
-            Promise.all(Object.values(transports).map((t) => t.close().catch(() => {}))),
-            new Promise((resolve) => setTimeout(resolve, 1500)),
-        ]);
-    } catch {
-        /* ignore */
-    }
-    try {
-        server?.close();
+        await quiesce(
+            () => { acceptingSessions = false; },
+            () => Promise.all(Object.values(transports).map((t) => t.close().catch(() => {}))).then(() => {}),
+            () => closeHttpServer(server),
+        );
     } catch {
         /* ignore */
     }
@@ -290,6 +311,25 @@ if (!Number.isNaN(PARENT_PID) && PARENT_PID > 0) {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => void gracefulExit(0));
 }
+
+// `process.stdin` is the Node-compatible stdin stream exposed by both plain
+// Node (the dev fallback) and Bun's compiled executable. Buffer partial chunks
+// so pipe writes need not align with lines; only the exact private line works.
+let stdinBuffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk: string) => {
+    stdinBuffer += chunk;
+    let newline: number;
+    while ((newline = stdinBuffer.indexOf("\n")) >= 0) {
+        const line = stdinBuffer.slice(0, newline).replace(/\r$/, "");
+        stdinBuffer = stdinBuffer.slice(newline + 1);
+        if (isShutdownCommand(line)) {
+            console.log("[MCP] Parent requested stdin shutdown.");
+            void gracefulExit(0);
+        }
+    }
+});
+process.stdin.resume();
 
 // Start the HTTP server
 server = app.listen(MCP_PORT, MCP_HOST, () => {
