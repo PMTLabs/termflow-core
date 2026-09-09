@@ -455,12 +455,15 @@ describe('drag wiring', () => {
 
   it('drags a node by its ORIGINAL rect, never the overlay rect', () => {
     // An overlaid node's rect is a screen-filling box in world units; starting a drag from it
-    // would fling the node across the workspace. The handler is wrapped (plan/039, to freeze
-    // Dynamic Spacing for the press), so the two halves of the claim are pinned separately
-    // rather than as one contiguous string: still gated off while overlaid, and still starting
-    // the drag from `n.rect` — never `node.rect` (the overlay's inflated copy) — regardless.
-    expect(MODE).toContain('onHeaderPointerDown={isOverlaid ? undefined : (e) => {');
-    expect(MODE).toContain('drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)');
+    // would fling the node across the workspace. Both halves of the claim in ONE string: gated
+    // off while overlaid, and starting from `n.rect` — never `node.rect`, the overlay's inflated
+    // copy, nor `spacing.nodeRects[...]`, which is a render-time position that must never become
+    // stored geometry. (Pinned as two separate substrings while plan/039 wrapped this handler to
+    // freeze Dynamic Spacing for the press; that wrapper is gone — a drag now renders RAW for the
+    // whole gesture — so the stronger contiguous form is available again.)
+    expect(MODE).toContain(
+      'onHeaderPointerDown={isOverlaid ? undefined : drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)}',
+    );
   });
 
   it('highlights the frame under the drag', () => {

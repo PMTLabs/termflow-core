@@ -2,6 +2,8 @@ import path from 'path';
 import { readSource } from '../../../utils/readSource';
 
 const MODE = readSource(path.resolve(__dirname, '../CanvasMode.tsx'));
+const SIDEBAR = readSource(path.resolve(__dirname, '../CanvasSidebar.tsx'));
+const DRAG = readSource(path.resolve(__dirname, '../useCanvasDrag.ts'));
 const SLICE = readSource(path.resolve(__dirname, '../../../store/slices/canvasSlice.ts'));
 
 describe('Dynamic Spacing consumers (plan/039)', () => {
@@ -9,6 +11,8 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(MODE).toContain('for (const n of spacedNodes) rects[n.terminalId] = n.rect;');
     expect(MODE).toContain('visibleNodeIds(spacedNodes, vp, size.w, size.h)');
     expect(MODE).toContain('for (const n of spacedNodes) {');
+    expect(MODE).toContain('beaconLayout(spacedPaintedNodes, vp, size.w, size.h)');
+    expect(MODE).toContain('chipOffsets(spacedShownGroups, vp.z)');
   });
 
   it('renders every node and group at its spacing-adjusted rect, except the overlaid node', () => {
@@ -30,19 +34,21 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // DESTINATION zoom is well-defined and cannot feed back into itself.
     expect(MODE).toContain("targetRectAt(GROUP_CHIP_ZOOM, 'group', g.tabId, g.rect)");
     expect(MODE).toContain("targetRectAt(NODE_CHIP_ZOOM, 'node', n.terminalId, n.rect)");
-    expect(MODE).toContain("targetRectAt(z, 'node', terminalId, n.rect)");
+    expect(MODE).toContain("targetRectAt(z, 'node', terminalId, n.rect, postUnhideSpacingModel)");
     expect(MODE).toContain("targetRectAt(vp.z, 'node', next, n.rect)");
     // The helper must resolve spacing at the zoom it is handed, not at the current one.
-    expect(MODE).toContain('const s = applySpacing(spacingModel, destZ, true);');
+    expect(MODE).toContain('const s = applySpacing(targetModel, destZ, true);');
+    expect(MODE).toContain("targetRectAt(vp.z, 'node', plan.leafId, plan.rect, postSpawnSpacingModel)");
   });
 
-  it('frames RAW bounds for fit, and RAW world points for the minimap, on purpose', () => {
-    // Spacing only ever moves rects CLOSER, so raw bounds always contain the tightened layout —
-    // a fit computed on them cannot cut off anything it promised to show. The minimap draws the
-    // raw layout for the same reason it is not zoom-reactive, so a click on it and the map it
-    // was aimed at agree with each other.
+  it('keeps raw geometry for choosing fit zoom and minimap hit testing, then targets display space', () => {
+    // Global fit remains raw because its bounds contain every inward-spaced rect. A single-group
+    // fit chooses zoom from raw dimensions too, but centres on its display-space location.
     expect(MODE).toContain('boundsOf(shownGroups.map((g) => g.rect))');
-    expect(MODE).toContain('flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));');
+    expect(MODE).toContain("targetRectAt(fitted.z, 'group', g.tabId, g.rect)");
+    expect(MODE).toContain("targetRectAt(vp.z, 'group', g.tabId, g.rect)");
+    expect(MODE).toContain('w.x >= x.rect.x && w.x <= x.rect.x + x.rect.w');
+    expect(MODE).toContain('const target = g ? targetRectAt');
   });
 
   it('keeps the "frame everything" camera targets off the transform they would otherwise feed back into', () => {
@@ -55,16 +61,33 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(minimap).not.toContain('spacedShownGroups');
   });
 
-  it('FREEZES the spacing offset for a drag press rather than switching spacing off', () => {
-    // Switching it off does not freeze the transform, it removes it: the grabbed node jumps from
-    // its tightened position to its stored one the instant it is touched (~90 screen px on an
-    // ordinary four-tab canvas) and keeps that offset from the pointer for the whole gesture.
-    // Holding the offset constant lets the node track the pointer exactly instead.
-    expect(MODE).toContain('beginDragFreeze()');
-    expect(MODE).toContain('setFrozenOffsets(spacingOffsets(m, s))');
-    expect(MODE).toContain('frozenOffsets ? applyFrozenOffsets(spacingModel, frozenOffsets) : liveSpacing');
-    // The press must never be allowed to disable spacing outright again.
-    expect(MODE).not.toContain('dynamicSpacing && !dragActive');
+  it('uses raw geometry only for a real slop-crossed drag and compensates both transitions', () => {
+    expect(MODE).toContain('drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing');
+    expect(MODE).toContain("spacingTransitionPan(offset, source.z, 'toRaw')");
+    expect(MODE).toContain("spacingTransitionPan(offset, vp.z, 'toDisplay')");
+    expect(MODE).not.toContain('applyFrozenOffsets');
+    expect(MODE).not.toContain('beginDragFreeze');
+    expect(DRAG).toContain("onDragStart?.({ kind: 'node', id: nd.terminalId });");
+    expect(DRAG).toContain("onDragStart?.({ kind: 'group', id: gd.tabId });");
+    expect(DRAG).toContain('if (!nd.moved && Math.hypot');
+    expect(DRAG).toContain('if (!gd.moved && Math.hypot');
+    // Hit-test stays RAW while the real-drag render branch is also RAW.
+    expect(DRAG).toContain('m.groups.map((g) => ({ tabId: g.tabId, rect: g.rect }))');
+    expect(DRAG).not.toContain('applySpacing(');
+  });
+
+  it('keeps the whole real drag raw even if wheel zoom changes mid-gesture', () => {
+    // `dragActive` gates the identity result itself; no frozen offset can survive at z=1.
+    expect(MODE).toContain('drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing');
+    expect(MODE).not.toContain('frozenOffsets');
+  });
+
+  it('gives the sidebar no second camera implementation', () => {
+    expect(MODE).toContain('onFlyToNode={flyToNode}');
+    expect(SIDEBAR).toContain('onFlyToNode: (terminalId: string) => void;');
+    expect(SIDEBAR).toContain('onFlyToNode(r.terminalId)');
+    expect(SIDEBAR).not.toContain('const flyToNode = useCallback');
+    expect(SIDEBAR).not.toContain('centreOn(');
   });
 
   it('feeds spacing the SHOWN nodes, so a hidden member cannot pull its siblings', () => {

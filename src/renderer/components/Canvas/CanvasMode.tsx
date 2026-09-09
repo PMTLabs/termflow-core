@@ -26,7 +26,7 @@ import {
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
-import { useCanvasDrag } from './useCanvasDrag';
+import { DragTarget, useCanvasDrag } from './useCanvasDrag';
 import { useArrange } from './useArrange';
 import { PortClick, useWireDrag } from './useWireDrag';
 import { CanvasWires } from './CanvasWires';
@@ -39,7 +39,9 @@ import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
-import { applyFrozenOffsets, applySpacing, SpacingOffsets, spacingOffsets } from './canvasSpacing';
+import { applySpacing, spacingOffsets } from './canvasSpacing';
+import { spacingTransitionPan } from './canvasDragCompensation';
+import { fitGroupFrame } from './canvasLayout';
 import { ShellProfileLike } from '../../services/newTabActions';
 import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
@@ -171,21 +173,16 @@ export const CanvasMode: React.FC = () => {
   );
   const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
 
+  /** A screen-pixel pan, used by keys, the minimap, and the two real-drag transitions below. */
+  const panScreen = useCallback((dx: number, dy: number) => {
+    dispatch(panViewport({ dx, dy }));
+  }, [dispatch]);
+
   /**
    * Dynamic Spacing (plan/039) — the toolbar toggle that tightens node/group spacing above
-   * zoom 1.
-   *
-   * Fed the SHOWN nodes, not the whole model. A group frame is shrink-wrapped around its shown
-   * members only (`selectCanvasModel`'s `drawnFrame`), so letting a hidden member pull on its
-   * siblings tightens toward a rect the frame does not contain — enough to slide the one visible
-   * terminal clean outside its own frame.
-   *
-   * A press on a node header or group label FREEZES the transform for the gesture, by holding
-   * the offset it had at pointerdown (`spacingOffsets`) and re-applying it to the moving stored
-   * rect. It deliberately does not switch spacing off: that removes the transform rather than
-   * freezing it, so the grabbed node jumps to its stored position the instant it is touched.
-   * Drag origins stay on the RAW rect either way — a drag must write real geometry, never a
-   * compacted one. A plain click freezes for the same instant and is not worth telling apart.
+   * zoom 1. It is fed the SHOWN nodes, because a frame is shrink-wrapped around its shown
+   * members only. During a real drag the displayed space becomes RAW for the entire gesture:
+   * rendering, tiers, culling and wires then agree with the drag's RAW hit testing.
    */
   const dynamicSpacing = useSelector((s: RootState) => s.canvas.dynamicSpacing);
   const spacingModel = useMemo(
@@ -196,26 +193,43 @@ export const CanvasMode: React.FC = () => {
     () => applySpacing(spacingModel, vp.z, dynamicSpacing),
     [spacingModel, vp.z, dynamicSpacing],
   );
-  const [frozenOffsets, setFrozenOffsets] = useState<SpacingOffsets | null>(null);
-  const freezeSourceRef = useRef({ model: spacingModel, spacing: liveSpacing });
-  freezeSourceRef.current = { model: spacingModel, spacing: liveSpacing };
-  const beginDragFreeze = useCallback(() => {
-    const { model: m, spacing: s } = freezeSourceRef.current;
-    setFrozenOffsets(spacingOffsets(m, s));
-  }, []);
-  useEffect(() => {
-    const onUp = () => setFrozenOffsets(null);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', onUp);
-    return () => {
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onUp);
-    };
-  }, []);
+  const freezeSourceRef = useRef<{ model: typeof spacingModel; spacing: typeof liveSpacing; z: number } | null>(null);
+  freezeSourceRef.current = { model: spacingModel, spacing: liveSpacing, z: vp.z };
+  const draggedTargetRef = useRef<DragTarget | null>(null);
+  const beginRealDrag = useCallback((target: DragTarget) => {
+    // This is the last render the user saw, immediately before the raw geometry dispatch.
+    const source = freezeSourceRef.current;
+    if (!source) return;
+    const offsets = spacingOffsets(source.model, source.spacing);
+    const offset = target.kind === 'node' ? offsets.nodes[target.id] : offsets.groups[target.id];
+    if (offset) {
+      const pan = spacingTransitionPan(offset, source.z, 'toRaw');
+      panScreen(pan.dx, pan.dy);
+    }
+    draggedTargetRef.current = target;
+  }, [panScreen]);
+  const drag = useCanvasDrag(presentationModel, beginRealDrag);
   const spacing = useMemo(
-    () => (frozenOffsets ? applyFrozenOffsets(spacingModel, frozenOffsets) : liveSpacing),
-    [frozenOffsets, spacingModel, liveSpacing],
+    () => (drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing),
+    [drag.dragActive, spacingModel, vp.z, liveSpacing],
   );
+  const wasDraggingRef = useRef(drag.dragActive);
+  useLayoutEffect(() => {
+    if (wasDraggingRef.current && !drag.dragActive) {
+      // Runs after the drop's geometry/re-home dispatches, so this is the NEW live offset.
+      const target = draggedTargetRef.current;
+      if (target) {
+        const offsets = spacingOffsets(spacingModel, liveSpacing);
+        const offset = target.kind === 'node' ? offsets.nodes[target.id] : offsets.groups[target.id];
+        if (offset) {
+          const pan = spacingTransitionPan(offset, vp.z, 'toDisplay');
+          panScreen(pan.dx, pan.dy);
+        }
+      }
+      draggedTargetRef.current = null;
+    }
+    wasDraggingRef.current = drag.dragActive;
+  }, [drag.dragActive, spacingModel, liveSpacing, vp.z, panScreen]);
   /**
    * Where `id` will be DRAWN once the camera has arrived at `destZ` — the rect a fly-to must
    * aim at, not the stored one.
@@ -226,19 +240,28 @@ export const CanvasMode: React.FC = () => {
    * camera on empty canvas — by more than a screen width on a sparse layout.
    */
   const targetRectAt = useCallback(
-    (destZ: number, kind: 'node' | 'group', id: string, raw: Rect): Rect => {
+    (
+      destZ: number,
+      kind: 'node' | 'group',
+      id: string,
+      raw: Rect,
+      targetModel: typeof spacingModel = spacingModel,
+    ): Rect => {
       if (!dynamicSpacing) return raw;
-      const s = applySpacing(spacingModel, destZ, true);
+      const s = applySpacing(targetModel, destZ, true);
       return (kind === 'node' ? s.nodeRects[id] : s.groupRects[id]) ?? raw;
     },
     [dynamicSpacing, spacingModel],
   );
-  // Only the two consumers that read POSITION for something other than drag/spawn math ever see
-  // these: paint culling/tiers, wires, and the two render loops below. Drag origins, spawn
-  // placement and the node/group menus keep reading `model`/`presentationModel` directly.
+  // Display-space consumers are paint culling/tiers, wires, beacons, group chips, and the two
+  // render loops below. Drag origins, spawn placement and the node/group menus stay RAW.
   const spacedNodes = useMemo(
     () => model.nodes.map((n) => ({ ...n, rect: spacing.nodeRects[n.terminalId] ?? n.rect })),
     [model.nodes, spacing],
+  );
+  const spacedPaintedNodes = useMemo(
+    () => paintedNodes.map((n) => ({ ...n, rect: spacing.nodeRects[n.terminalId] ?? n.rect })),
+    [paintedNodes, spacing],
   );
   const spacedShownGroups = useMemo(
     () => shownGroups.map((g) => ({ ...g, rect: spacing.groupRects[g.tabId] ?? g.rect })),
@@ -381,8 +404,8 @@ export const CanvasMode: React.FC = () => {
    * collapsed, which is the only time a chip is rendered at all.
    */
   const chipNudge = useMemo(
-    () => (collapsed ? chipOffsets(shownGroups, vp.z) : {}),
-    [collapsed, shownGroups, vp.z],
+    () => (collapsed ? chipOffsets(spacedShownGroups, vp.z) : {}),
+    [collapsed, spacedShownGroups, vp.z],
   );
 
   /** USER-hidden alone — deliberately not `isHidden`, which is also true for a merely culled
@@ -482,9 +505,6 @@ export const CanvasMode: React.FC = () => {
   }, [overlayId, vp, size, hostBoxes]);
 
   useCanvasRenderPolicy(policyTiers, focusedId, recent, hiddenNodeIds);
-
-  // Node drag, group drag and cross-group re-homing (Tasks 11 + 12).
-  const drag = useCanvasDrag(presentationModel);
 
   // Auto-arrange (Task 13). A button, never automatic — design 010 D10: a canvas that
   // rearranges itself while you are looking away destroys the spatial memory the whole
@@ -700,15 +720,11 @@ export const CanvasMode: React.FC = () => {
   const fitGroup = useCallback(() => {
     const tabId = model.nodes.find((n) => n.terminalId === selectedId)?.tabId ?? nearestGroupId;
     const g = shownGroups.find((x) => x.tabId === tabId);
-    if (g) flyTo(fitViewport(g.rect, size.w, size.h, metrics.zMax));
-  }, [model.nodes, shownGroups, selectedId, nearestGroupId, flyTo, size, metrics]);
-
-  /** One arrow-key step, in screen pixels. Relative, so this callback never reads the viewport
-   *  and stays referentially stable — see `panViewport` for why that matters to the listener
-   *  below. */
-  const panScreen = useCallback((dx: number, dy: number) => {
-    dispatch(panViewport({ dx, dy }));
-  }, [dispatch]);
+    if (!g) return;
+    // Raw dimensions choose the zoom; only the centre must move to the display-space frame.
+    const fitted = fitViewport(g.rect, size.w, size.h, metrics.zMax);
+    flyTo(centreOn(targetRectAt(fitted.z, 'group', g.tabId, g.rect), size.w, size.h, fitted.z, metrics.zMax));
+  }, [model.nodes, shownGroups, selectedId, nearestGroupId, flyTo, size, metrics, targetRectAt]);
 
   /** One press of a zoom button, about the middle of the viewport — the point the user is
    *  looking at, and the only anchor a button has (the wheel has the cursor). */
@@ -867,8 +883,8 @@ export const CanvasMode: React.FC = () => {
    *  branch here would keep this list empty even if that gate were removed, hiding the fact
    *  that the gate is what does the work. */
   const beacons = useMemo(
-    () => beaconLayout(paintedNodes, vp, size.w, size.h),
-    [paintedNodes, vp, size],
+    () => beaconLayout(spacedPaintedNodes, vp, size.w, size.h),
+    [spacedPaintedNodes, vp, size],
   );
 
   /** A beacon click. The same destination a sidebar row click gets — it is the same gesture,
@@ -876,29 +892,42 @@ export const CanvasMode: React.FC = () => {
   const flyToNode = useCallback((terminalId: string) => {
     const n = model.nodes.find((x) => x.terminalId === terminalId);
     if (!n) return;
+    // The sidebar is the recovery path for a hidden terminal. Build precisely the model the
+    // unhide dispatch creates, rather than targeting against the pre-unhide shown set.
+    const postUnhideNodes = n.hidden && !revealHidden ? [...paintedNodes, n] : paintedNodes;
+    const postUnhideSpacingModel = n.hidden && !revealHidden
+      ? {
+        nodes: postUnhideNodes,
+        groups: model.groups
+          .filter((g) => !g.allHidden || g.tabId === n.tabId)
+          .map((g) => g.tabId !== n.tabId ? g : {
+            ...g,
+            // `drawnFrame` is fitted from the nodes now shown, not the old all-hidden frame.
+            rect: fitGroupFrame(postUnhideNodes.filter((x) => x.tabId === g.tabId).map((x) => x.rect)) ?? g.rect,
+            allHidden: false,
+          }),
+      }
+      : spacingModel;
+    if (n.hidden) dispatch(setNodeHidden({ id: terminalId, hidden: false }));
     dispatch(selectNode(terminalId));
     // The DESTINATION zoom, in both places: the drawn height is a function of the zoom the
     // camera arrives at, not the one it leaves from.
     const z = Math.max(vp.z, ROW_FLY_ZOOM);
-    flyTo(centreOn(aimedNodeRect(targetRectAt(z, 'node', terminalId, n.rect), z), size.w, size.h, z, metrics.zMax));
-  }, [model.nodes, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
+    flyTo(centreOn(
+      aimedNodeRect(targetRectAt(z, 'node', terminalId, n.rect, postUnhideSpacingModel), z),
+      size.w, size.h, z, metrics.zMax,
+    ));
+  }, [model.nodes, model.groups, paintedNodes, revealHidden, spacingModel, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
 
-  /**
-   * A minimap click: pan to that world point, keeping the zoom the user chose. A zero-size
-   * rect is a point as far as `centreOn` is concerned.
-   *
-   * Stays on RAW world coordinates, deliberately, because the minimap DRAWS the raw layout — a
-   * fixed-scale overview cannot show a transform that is a function of the main viewport's zoom
-   * without jittering every time you wheel. The click and the map it was aimed at therefore
-   * agree with each other, which is the property that matters; the rendered content sits within
-   * one spacing displacement of the point, never further, because spacing only ever moves rects
-   * closer together. The same reasoning covers `fitEverything`/`fitGroup` below: they frame RAW
-   * bounds, which always CONTAIN the tightened layout, so nothing they promise to show can end
-   * up outside the frame.
-   */
+  /** A minimap click is RAW map hit testing, but a group it identifies must be centred where it
+   * is DISPLAYED in the main viewport. Empty map space remains a raw point destination. */
   const flyToWorld = useCallback((w: { x: number; y: number }) => {
-    flyTo(centreOn({ x: w.x, y: w.y, w: 0, h: 0 }, size.w, size.h, vp.z, metrics.zMax));
-  }, [flyTo, size, vp.z, metrics]);
+    const g = shownGroups.find((x) =>
+      w.x >= x.rect.x && w.x <= x.rect.x + x.rect.w && w.y >= x.rect.y && w.y <= x.rect.y + x.rect.h,
+    );
+    const target = g ? targetRectAt(vp.z, 'group', g.tabId, g.rect) : { x: w.x, y: w.y, w: 0, h: 0 };
+    flyTo(centreOn(target, size.w, size.h, vp.z, metrics.zMax));
+  }, [shownGroups, targetRectAt, flyTo, size, vp.z, metrics]);
 
   /**
    * Close a node's terminal by handing the request to the surface that owns it — see
@@ -965,6 +994,24 @@ export const CanvasMode: React.FC = () => {
       : spawnRectAt(menu.at!);
 
     const plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
+    // The selector has not re-rendered the three insert dispatches below yet. Camera targeting
+    // therefore builds that post-insert shown model explicitly; placement above remains RAW.
+    const spawnedNode: CanvasNodeModel = {
+      terminalId: plan.leafId, tabId: plan.tab.id, paneId: plan.tree.id,
+      title: plan.tab.title, groupTitle: plan.tab.title, shellType: plan.tab.shellType,
+      rect: plan.rect, isRunning: false, hasUnseenOutput: false, exited: false, hidden: false,
+    };
+    const postSpawnSpacingModel = {
+      nodes: [...paintedNodes, spawnedNode],
+      groups: [
+        ...shownGroups,
+        {
+          tabId: plan.tab.id, title: plan.tab.title,
+          rect: fitGroupFrame([plan.rect]) ?? plan.rect,
+          nodeIds: [plan.leafId], anyRunning: false, allHidden: false,
+        },
+      ],
+    };
     dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
     dispatch(addTab(plan.tab));
     dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));
@@ -980,8 +1027,11 @@ export const CanvasMode: React.FC = () => {
     // cursor — flying to a node the user just placed where they were looking would yank the
     // viewport for nothing.
     dispatch(selectNode(plan.leafId));
-    if (!isFullyVisible(vp, aimedNodeRect(plan.rect, vp.z), size.w, size.h, FRAME_INSET)) {
-      flyTo(centreOn(aimedNodeRect(plan.rect, vp.z), size.w, size.h, vp.z, metrics.zMax));
+    const spawnAim = aimedNodeRect(
+      targetRectAt(vp.z, 'node', plan.leafId, plan.rect, postSpawnSpacingModel), vp.z,
+    );
+    if (!isFullyVisible(vp, spawnAim, size.w, size.h, FRAME_INSET)) {
+      flyTo(centreOn(spawnAim, size.w, size.h, vp.z, metrics.zMax));
     }
 
     // Open it as the overlay right away — a spawned shell is exactly the terminal the user is
@@ -1014,7 +1064,7 @@ export const CanvasMode: React.FC = () => {
         if (edge) dispatch(addEdge(edge));
       });
     }
-  }, [spawnMenu, model.nodes, edges, tabs, dispatch, vp, size, flyTo, metrics]);
+  }, [spawnMenu, model.nodes, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt]);
 
   /**
    * Keys that get you OUT of a terminal — the mirror of the listener above, and gated on the
@@ -1092,7 +1142,7 @@ export const CanvasMode: React.FC = () => {
       {/* Before the viewport, so it takes the left edge — Task 15's resize handle goes between
           them. `size` is measured from `.canvas-viewport` itself, so the fly-to targets the
           space the canvas actually has rather than the whole window. */}
-      {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} />}
+      {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} onFlyToNode={flyToNode} />}
       <CanvasViewport
         onSize={onSize}
         onBackgroundPointerDown={clearSelection}
@@ -1165,8 +1215,8 @@ export const CanvasMode: React.FC = () => {
             chipOffset={chipNudge[g.tabId]}
             dropTarget={drag.dropTabId === g.tabId}
             moving={drag.movingTabId === g.tabId}
-            // Freezes Dynamic Spacing for the press — see the note beside `dynamicSpacing`.
-            onLabelPointerDown={(e) => { beginDragFreeze(); drag.onGroupLabelPointerDown(g.tabId)(e); }}
+            // The RAW render phase starts only after the drag crosses its slop threshold.
+            onLabelPointerDown={drag.onGroupLabelPointerDown(g.tabId)}
             onChipClick={() => flyTo(centreOn(
               targetRectAt(GROUP_CHIP_ZOOM, 'group', g.tabId, g.rect), size.w, size.h, GROUP_CHIP_ZOOM, metrics.zMax,
             ))}
@@ -1222,15 +1272,9 @@ export const CanvasMode: React.FC = () => {
               overlaid={isOverlaid}
               hostBox={hostBoxes[n.terminalId]}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
-              // The ORIGINAL rect, never the overlay's: dragging an overlaid node would
-              // otherwise start from a screen-filling box and fling it across the world.
-              // Freezes Dynamic Spacing for the press — see the note beside `dynamicSpacing`.
-              // The ORIGINAL rect, still, never `node.rect`/the spaced one — same reason the
-              // comment above already gives for why an overlaid node passes `n.rect`.
-              onHeaderPointerDown={isOverlaid ? undefined : (e) => {
-                beginDragFreeze();
-                drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)(e);
-              }}
+              // The ORIGINAL rect, never the overlay's or display rect: a drag writes RAW
+              // geometry and `useCanvasDrag` starts its raw render phase only after slop.
+              onHeaderPointerDown={isOverlaid ? undefined : drag.onNodeHeaderPointerDown(n.terminalId, n.tabId, n.rect)}
               onDoubleClick={focusTerminal(n.terminalId)}
               onChipClick={() => flyTo(centreOn(
                 aimedNodeRect(targetRectAt(NODE_CHIP_ZOOM, 'node', n.terminalId, n.rect), NODE_CHIP_ZOOM),

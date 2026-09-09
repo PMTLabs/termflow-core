@@ -33,9 +33,15 @@ import { CanvasModel } from './canvasSelectors';
  * unit of floor gap costs `z` more screen pixels the further in you go. `targetGap` instead
  * blends the desired gap in SCREEN space, from the pair's own on-screen gap at `SPACING_Z_BASE`
  * (untouched) down toward `MIN_GAP_SCREEN_PX` as `z → ∞`, then converts back to world units for
- * `sweepAxis` to apply. For a pair whose gap `targetGap` actually shrinks — i.e. one already
- * wider than `MIN_GAP_SCREEN_PX` on screen at `zBase` — the resulting screen gap decreases
- * monotonically in `z` toward `MIN_GAP_SCREEN_PX` and never exceeds its `zBase` value. A pair
+ * `sweepAxis` to apply. **For a FIXED `originalGap` argument** wider than `MIN_GAP_SCREEN_PX` on
+ * screen at `zBase`, the resulting screen gap decreases monotonically in `z` toward
+ * `MIN_GAP_SCREEN_PX` and never exceeds its `zBase` value. That is a property of `targetGap`
+ * alone, and it does NOT carry over to a fixed pair of STORED rects: callers derive the argument
+ * from geometry PAINTED at the current zoom, which is itself a function of `z`. Two stacked
+ * sibling nodes stored `GAP_Y` (28) apart feed in `28 + HEAD_H*(1 - 1/z)`, so the screen gap they
+ * actually get is `6 + 51/z - 29/z²` — 28px at z=1, ~28.4px at z=1.1, before it turns over and
+ * falls. A small early rise like that is expected; what the feature guarantees is the fall that
+ * dominates from there on, not monotonicity from z=1. A pair
  * that starts TIGHTER than that floor is returned untouched, so its own screen gap still grows
  * with zoom like any other world distance; spacing declines to push two rects apart to reach a
  * minimum, which would be a stranger result than leaving them alone.
@@ -95,6 +101,50 @@ function rectsOverlap(a: Rect, b: Rect): boolean {
   return spansOverlap(a.x, a.w, b.x, b.w) && spansOverlap(a.y, a.h, b.y, b.h);
 }
 
+interface OverlappingFrameComponent {
+  frameIndexes: number[];
+  bounds: Rect;
+}
+
+/**
+ * Fixed-point components of overlapping DRAWN-frame bounds. Every frame in a component must
+ * translate by one delta: `sweepAxis` deliberately leaves an already-overlapping pair alone,
+ * but another frame can otherwise give each member of that pair a different constraint and pull
+ * it apart. Initial frame overlap is not enough: the union bounds of two components can overlap
+ * even when none of their individual frames do, so merge bounds repeatedly until that is no
+ * longer true.
+ *
+ * The resulting bounds are pairwise non-overlapping, so no pair passed to `tighten` can hit its
+ * negative-gap skip. The original frames remain the geometry that is rendered and translated
+ * afterwards.
+ */
+function overlappingFrameComponents(frames: Rect[]): OverlappingFrameComponent[] {
+  const components = frames.map((bounds, frameIndex) => ({ frameIndexes: [frameIndex], bounds }));
+
+  // Every merge strictly reduces `components.length`, so this reaches a fixed point.
+  for (let merged = true; merged;) {
+    merged = false;
+    for (let i = 0; i < components.length && !merged; i++) {
+      for (let j = i + 1; j < components.length; j++) {
+        const a = components[i];
+        const b = components[j];
+        if (!rectsOverlap(a.bounds, b.bounds)) continue;
+        const left = Math.min(a.bounds.x, b.bounds.x);
+        const top = Math.min(a.bounds.y, b.bounds.y);
+        const right = Math.max(a.bounds.x + a.bounds.w, b.bounds.x + b.bounds.w);
+        const bottom = Math.max(a.bounds.y + a.bounds.h, b.bounds.y + b.bounds.h);
+        a.frameIndexes.push(...b.frameIndexes);
+        a.bounds = { x: left, y: top, w: right - left, h: bottom - top };
+        components.splice(j, 1);
+        merged = true;
+        break;
+      }
+    }
+  }
+
+  return components;
+}
+
 /**
  * Shrinks the gap between rects that are adjacent along `axis` AND share a lane on the other
  * axis (their extents there overlap — e.g. two frames in the same row, for `axis: 'x'`) toward
@@ -112,11 +162,13 @@ function rectsOverlap(a: Rect, b: Rect): boolean {
  * a test suite reaches for first. Comparing against all placed lane-mates makes each row compact
  * along its own chain, which is what a grid needs.
  *
- * Safe by construction: a lane-mate `j` placed earlier contributes the lower bound
+ * Safe by construction for the rects passed to this function: a lane-mate `j` placed earlier contributes the lower bound
  * `end(out[j]) + targetGap(originalGap)`, and since `out[j]` only ever moved earlier and
  * `targetGap` never exceeds the gap it was given, that bound never pushes a rect LATER than
- * where it started. So every rect only moves earlier, and no pair that was clear before can end
- * up overlapping.
+ * where it started. So every rect only moves earlier, and no pair of those rects that was clear
+ * before can end up overlapping. For group frames, `applySpacing` passes fixed-point merged
+ * union bounds, which are pairwise non-overlapping, then translates every frame in a component
+ * by that component's one resulting delta.
  */
 function sweepAxis(rects: Rect[], axis: 'x' | 'y', z: number, zBase: number, minGapScreenPx: number): Rect[] {
   const startOf = (r: Rect) => (axis === 'x' ? r.x : r.y);
@@ -181,13 +233,15 @@ export interface SpacingResult {
  * the layout rect by `d` translates the painted one by exactly `d`.
  *
  * Hierarchical, matching the approved design (plan/039 §4): group frames tighten toward each
- * other first, TRANSLATING every member node by the same delta as its frame — a group frame's
- * own centre is not its members' centre (`fitGroupFrame` pads the top and bottom differently, for
- * the label — see `canvasLayout.ts`), so pulling a node independently toward its frame's new
- * position would drift it even in a single-node group. Translating instead keeps every node
- * rigidly attached to its moving frame, exactly like a manual group drag (`moveGroupBy`) already
- * does. Each group's own nodes then get a second, independent tighten toward their siblings, on
- * top of whatever step 1 already moved them by.
+ * other first. Frames whose DRAWN rects overlap form a rigid component, and those components
+ * keep merging while their union bounds overlap. The resulting pairwise non-overlapping bounds
+ * tighten as one rect, and every frame and member node in a component receives the same delta.
+ * A group frame's own centre is not its members' centre (`fitGroupFrame` pads the top and bottom
+ * differently, for the label — see `canvasLayout.ts`), so pulling a node independently toward
+ * its frame's new position would drift it even in a single-node group. Translating instead keeps
+ * every node rigidly attached to its moving frame, exactly like a manual group drag
+ * (`moveGroupBy`) already does. Each group's own nodes then get a second, independent tighten
+ * toward their siblings, on top of whatever step 1 already moved them by.
  *
  * Returns the ORIGINAL rects, unchanged, when `enabled` is false or `z` is at or below
  * `SPACING_Z_BASE` — the identity fast path that makes toggling off (or zooming back down) an
@@ -204,15 +258,19 @@ export function applySpacing(model: CanvasModel, z: number, enabled: boolean): S
   if (model.groups.length > 1) {
     const layout = model.groups.map((g) => g.rect);
     const drawn = layout.map((r) => drawnFrameRect(r, z));
-    const tightened = tighten(drawn, z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
-    model.groups.forEach((g, i) => {
-      const dx = tightened[i].x - drawn[i].x;
-      const dy = tightened[i].y - drawn[i].y;
-      groupRects[g.tabId] = { ...layout[i], x: layout[i].x + dx, y: layout[i].y + dy };
-      if (dx === 0 && dy === 0) return;
-      for (const id of g.nodeIds) {
-        const r = nodeRects[id];
-        if (r) nodeRects[id] = { ...r, x: r.x + dx, y: r.y + dy };
+    const components = overlappingFrameComponents(drawn);
+    const tightened = tighten(components.map((component) => component.bounds), z, SPACING_Z_BASE, MIN_GAP_SCREEN_PX);
+    components.forEach((component, componentIndex) => {
+      const dx = tightened[componentIndex].x - component.bounds.x;
+      const dy = tightened[componentIndex].y - component.bounds.y;
+      for (const i of component.frameIndexes) {
+        const g = model.groups[i];
+        groupRects[g.tabId] = { ...layout[i], x: layout[i].x + dx, y: layout[i].y + dy };
+        if (dx === 0 && dy === 0) continue;
+        for (const id of g.nodeIds) {
+          const r = nodeRects[id];
+          if (r) nodeRects[id] = { ...r, x: r.x + dx, y: r.y + dy };
+        }
       }
     });
   }
@@ -253,8 +311,12 @@ export interface SpacingOffsets {
 /**
  * The offset `spacing` represents relative to `model`'s stored rects.
  *
- * Captured when a drag begins, so the gesture can keep applying the SAME translation while the
- * underlying stored rect moves with the pointer — see `applyFrozenOffsets`.
+ * A drag renders RAW geometry for the whole gesture — it writes real positions, so it shows real
+ * positions — which means the transform is removed the moment a drag really starts and restored
+ * when it ends. On its own that would slide the grabbed thing out from under the pointer by
+ * exactly this offset. `CanvasMode` reads it at both transitions and pans the camera by the
+ * negation (`spacingTransitionPan`), so the grabbed thing holds still on screen and the canvas
+ * around it relaxes and re-tightens instead.
  */
 export function spacingOffsets(model: CanvasModel, spacing: SpacingResult): SpacingOffsets {
   const nodes: SpacingOffsets['nodes'] = {};
@@ -270,26 +332,3 @@ export function spacingOffsets(model: CanvasModel, spacing: SpacingResult): Spac
   return { nodes, groups };
 }
 
-/**
- * `model`'s CURRENT rects, each shifted by the offset it had when `offsets` was captured.
- *
- * This is what a drag renders with, and it is not the same thing as switching spacing off. A
- * press used to do the latter, which does not freeze the transform — it REMOVES it, so the
- * grabbed node jumped from its tightened position to its stored one the instant it was touched
- * (~90 screen px on an ordinary four-tab canvas) and kept that offset from the pointer for the
- * whole gesture. Holding the offset constant instead lets the node track the pointer exactly
- * while the drag still writes real, untightened geometry underneath.
- */
-export function applyFrozenOffsets(model: CanvasModel, offsets: SpacingOffsets): SpacingResult {
-  const nodeRects: Record<string, Rect> = {};
-  const groupRects: Record<string, Rect> = {};
-  for (const n of model.nodes) {
-    const d = offsets.nodes[n.terminalId];
-    nodeRects[n.terminalId] = d ? { ...n.rect, x: n.rect.x + d.dx, y: n.rect.y + d.dy } : n.rect;
-  }
-  for (const g of model.groups) {
-    const d = offsets.groups[g.tabId];
-    groupRects[g.tabId] = d ? { ...g.rect, x: g.rect.x + d.dx, y: g.rect.y + d.dy } : g.rect;
-  }
-  return { nodeRects, groupRects };
-}

@@ -71,10 +71,24 @@ describe('creating a terminal from the canvas', () => {
    */
   it('addresses the new node by its leaf id, never by the tab id', () => {
     expect(spawnBody).toContain('dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));');
-    const tabIdUses = spawnBody.match(/plan\.tab\.id/g) ?? [];
-    // Exactly one: the `addTabTree` that installs the tree under its tab.
-    expect(tabIdUses).toHaveLength(1);
-    expect(spawnBody).toContain('dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));');
+    // An ALLOW-LIST, not a count. The ban has to survive legitimate new tab-scoped uses (the
+    // post-insert spacing model added two) without going vacuous: strike the known-good ones and
+    // require that nothing is left, so a fourth reference that addresses a NODE by the tab id
+    // still fails here rather than being absorbed into a bumped number.
+    const legitimate = [
+      // Installs the tree under its tab — tab-scoped by definition.
+      'dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));',
+      // The spawned node's OWNING tab. Its own identity on the line is `terminalId: plan.leafId`.
+      'terminalId: plan.leafId, tabId: plan.tab.id, paneId: plan.tree.id,',
+      // The group the node lands in. A group IS keyed by tab id; that is the group id space.
+      'tabId: plan.tab.id, title: plan.tab.title,',
+    ];
+    let remaining = spawnBody;
+    for (const use of legitimate) {
+      expect(remaining).toContain(use);
+      remaining = remaining.replace(use, '');
+    }
+    expect(remaining.match(/plan\.tab\.id/g) ?? []).toHaveLength(0);
   });
 
   /**
@@ -148,9 +162,27 @@ describe('framing what was just created', () => {
    */
   it('flies only when the node is not already framed, and uses the containment test', () => {
     expect(spawnBody).toContain(
-      'if (!isFullyVisible(vp, aimedNodeRect(plan.rect, vp.z), size.w, size.h, FRAME_INSET))');
+      'if (!isFullyVisible(vp, spawnAim, size.w, size.h, FRAME_INSET))');
     expect(spawnBody).toContain(
-      'flyTo(centreOn(aimedNodeRect(plan.rect, vp.z), size.w, size.h, vp.z, metrics.zMax))');
+      'flyTo(centreOn(spawnAim, size.w, size.h, vp.z, metrics.zMax))');
+  });
+
+  /**
+   * Both the containment test and the flight must aim at where the node will be DRAWN, which
+   * with Dynamic Spacing on is not `plan.rect`. The transform is a function of the whole model,
+   * and the three insert dispatches above have not re-rendered the selector yet — so the target
+   * has to be resolved against a model that explicitly INCLUDES the node being created. Reusing
+   * the pre-insert model would silently return `plan.rect` unchanged (a miss on an id it does
+   * not contain), which looks exactly like a correct answer and is the failure the overlay hides
+   * until it closes.
+   */
+  it('resolves the camera target against the POST-insert model, not the pre-insert one', () => {
+    expect(spawnBody).toContain(
+      "targetRectAt(vp.z, 'node', plan.leafId, plan.rect, postSpawnSpacingModel)");
+    expect(spawnBody).toContain('nodes: [...paintedNodes, spawnedNode],');
+    // The new group must be in it too, or step 1 of the transform sees a group count that does
+    // not match reality and tightens the wrong set.
+    expect(spawnBody).toContain('...shownGroups,');
   });
 
   /** ...and it frames the box the node DRAWS, not the slot layout reserved for it. Same rule

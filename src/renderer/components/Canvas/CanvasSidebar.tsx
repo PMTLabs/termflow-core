@@ -1,14 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
-import { selectNode, setNodeHidden, setSidebarZoom } from '../../store/slices/canvasSlice';
+import { setSidebarZoom } from '../../store/slices/canvasSlice';
 import { renamePanes } from '../../store/slices/panesSlice';
 import { renameTab } from '../../services/renameTab';
 import { getAllCwdSnapshots } from '../../services/cwdSnapshot';
-import { useFlyTo } from './CanvasViewport';
-import { centreOn } from './viewportStyles';
-import { aimedNodeRect } from './canvasGeometry';
-import { useCanvasMetrics } from './canvasMetricsContext';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
 import { useSidebarDrag } from './useSidebarDrag';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
@@ -134,14 +130,17 @@ const Row: React.FC<RowProps> = ({
   );
 };
 
-export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: number }> = ({ model, vw, vh }) => {
+export const CanvasSidebar: React.FC<{
+  model: CanvasModel;
+  vw: number;
+  vh: number;
+  /** CanvasMode owns the one identity-aware camera rule for rows and beacons. */
+  onFlyToNode: (terminalId: string) => void;
+}> = ({ model, onFlyToNode }) => {
   const dispatch = useDispatch();
   const width = useSelector((s: RootState) => s.canvas.sidebarWidth);
   const selectedId = useSelector((s: RootState) => s.canvas.selectedId);
-  const zoom = useSelector((s: RootState) => s.canvas.viewport.z);
   const sidebarZoom = useSelector((s: RootState) => s.canvas.sidebarZoom);
-  const metrics = useCanvasMetrics();
-  const flyTo = useFlyTo();
 
   const [query, setQuery] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -194,19 +193,6 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
     () => buildSidebarTree(model.nodes, model.groups, query, getAllCwdSnapshots()),
     [model, query],
   );
-
-  const flyToNode = useCallback((terminalId: string) => {
-    const n = model.nodes.find((x) => x.terminalId === terminalId);
-    if (!n) return;
-    // A sidebar row is a recovery path. Do not select and fly to a rect that remains invisible.
-    if (n.hidden) dispatch(setNodeHidden({ id: terminalId, hidden: false }));
-    dispatch(selectNode(terminalId));
-    // The node's DRAWN box at the zoom we are flying to — see `aimedNodeRect`. Centring the
-    // reserved rect leaves the node sitting high by half its title-bar slack, and this row
-    // click is the gesture whose whole promise is "put that terminal in front of me".
-    const z = Math.max(zoom, ROW_FLY_ZOOM);
-    flyTo(centreOn(aimedNodeRect(n.rect, z), vw, vh, z, metrics.zMax));
-  }, [model, dispatch, flyTo, vw, vh, zoom, metrics]);
 
   /**
    * `tabId` is REQUIRED here, and that is the whole point of Task 1.
@@ -311,7 +297,7 @@ export const CanvasSidebar: React.FC<{ model: CanvasModel; vw: number; vh: numbe
                     onPointerDown={drag.onRowPointerDown(r.terminalId, g.tabId, r.title)}
                     // `click` fires after `pointerup`, so a completed drag would otherwise also
                     // fly the viewport to the node that just changed groups.
-                    onClick={() => { if (!drag.consumeClick()) flyToNode(r.terminalId); }}
+                    onClick={() => { if (!drag.consumeClick()) onFlyToNode(r.terminalId); }}
                     onDoubleClick={() => setEditingId(r.terminalId)}
                     onCommit={(name) => commitRename(r.terminalId, name)}
                     onCancel={() => setEditingId(null)}

@@ -58,15 +58,23 @@ export interface CanvasDrag {
   dropTabId: string | null;
   /** Frame currently being dragged as a whole. */
   movingTabId: string | null;
+  /** True only after the pointer has crossed `DRAG_SLOP`; a press is not a drag. */
+  dragActive: boolean;
 }
 
-export function useCanvasDrag(model: CanvasModel): CanvasDrag {
+export type DragTarget = { kind: 'node' | 'group'; id: string };
+
+export function useCanvasDrag(
+  model: CanvasModel,
+  onDragStart?: (target: DragTarget) => void,
+): CanvasDrag {
   const dispatch = useDispatch();
   const zoom = useSelector((s: RootState) => s.canvas.viewport.z);
   const trees = useSelector((s: RootState) => s.panes.treesByTabId);
 
   const [dropTabId, setDropTabId] = useState<string | null>(null);
   const [movingTabId, setMovingTabId] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
 
   const nodeDrag = useRef<NodeDrag | null>(null);
   const groupDrag = useRef<GroupDrag | null>(null);
@@ -106,7 +114,6 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
         ids: group.nodeIds,
         moved: false,
       };
-      setMovingTabId(tabId);
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     },
     [],
@@ -120,7 +127,11 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
       if (nd) {
         const { dx, dy } = worldDelta(e.clientX - nd.startX, e.clientY - nd.startY, z);
         if (!nd.moved && Math.hypot(e.clientX - nd.startX, e.clientY - nd.startY) < DRAG_SLOP) return;
-        nd.moved = true;
+        if (!nd.moved) {
+          nd.moved = true;
+          onDragStart?.({ kind: 'node', id: nd.terminalId });
+          setDragActive(true);
+        }
         const rect = { ...nd.origin, x: nd.origin.x + dx, y: nd.origin.y + dy };
         dispatch(setNodeGeom({ id: nd.terminalId, rect }));
         setDropTabId(dropTargetTabId(
@@ -135,7 +146,12 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
       const gd = groupDrag.current;
       if (gd) {
         if (!gd.moved && Math.hypot(e.clientX - gd.startX, e.clientY - gd.startY) < DRAG_SLOP) return;
-        gd.moved = true;
+        if (!gd.moved) {
+          gd.moved = true;
+          onDragStart?.({ kind: 'group', id: gd.tabId });
+          setMovingTabId(gd.tabId);
+          setDragActive(true);
+        }
         const { dx, dy } = worldDelta(e.clientX - gd.startX, e.clientY - gd.startY, z);
         const moved = moveGroupBy(gd.frame, gd.nodes, gd.ids, dx, dy);
         // ONE transition for the frame and every member. Hidden members deliberately move with
@@ -157,6 +173,7 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
       nodeDrag.current = null;
       groupDrag.current = null;
       setMovingTabId(null);
+      if (nd?.moved || gd?.moved) setDragActive(false);
       const target = dropTabId;
       setDropTabId(null);
 
@@ -212,7 +229,7 @@ export function useCanvasDrag(model: CanvasModel): CanvasDrag {
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [dispatch, dropTabId]);
+  }, [dispatch, dropTabId, onDragStart]);
 
-  return { onNodeHeaderPointerDown, onGroupLabelPointerDown, dropTabId, movingTabId };
+  return { onNodeHeaderPointerDown, onGroupLabelPointerDown, dropTabId, movingTabId, dragActive };
 }

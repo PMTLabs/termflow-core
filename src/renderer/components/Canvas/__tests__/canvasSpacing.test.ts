@@ -2,7 +2,7 @@ import { NODE_H, NODE_W, paintedNodeRect, Rect } from '../canvasGeometry';
 import { drawnFrameRect, GAP_X, GROUP_GAP, PAD, PAD_SCREEN_MAX, PAD_TOP } from '../canvasLayout';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
 import {
-  applyFrozenOffsets, applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, spacingOffsets, SPACING_Z_BASE,
+  applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, spacingOffsets, SPACING_Z_BASE,
 } from '../canvasSpacing';
 
 const node = (id: string, tabId: string, rect: Rect): CanvasNodeModel => ({
@@ -389,39 +389,116 @@ describe('applySpacing', () => {
         expect(noOverlap(rects)).toBe(true);
       }
     });
+
+    it('translates overlapping frames as one component, so another frame cannot pull their clear terminals together', () => {
+      // A and B's drawn frames overlap at z=3, but their terminals do not. C is clear of both.
+      // Tightening A and B independently lets C impose a different leftward bound on each, which
+      // used to drag a1 and b1 into each other. Their connected frame component must get one dx.
+      const c1 = node('c1', 'tb-c', { x: -1000, y: 0, w: NODE_W, h: NODE_H });
+      const a1 = node('a1', 'tb-a', { x: 0, y: 0, w: NODE_W, h: NODE_H });
+      const a2 = node('a2', 'tb-a', { x: 1000, y: 0, w: NODE_W, h: NODE_H });
+      const b1 = node('b1', 'tb-b', { x: 400, y: 0, w: NODE_W, h: NODE_H });
+      const frameH = PAD_TOP + PAD + NODE_H;
+      const model: CanvasModel = {
+        nodes: [c1, a1, a2, b1],
+        groups: [
+          group('tb-c', { x: -1000 - PAD, y: -PAD_TOP, w: PAD * 2 + NODE_W, h: frameH }, ['c1']),
+          group('tb-a', { x: -PAD, y: -PAD_TOP, w: PAD * 2 + 1000 + NODE_W, h: frameH }, ['a1', 'a2']),
+          group('tb-b', { x: 400 - PAD, y: -PAD_TOP, w: PAD * 2 + NODE_W, h: frameH }, ['b1']),
+        ],
+      };
+      const z = 3;
+      expect(noOverlap([c1.rect, a1.rect, a2.rect, b1.rect])).toBe(true);
+      expect(gapBetween(drawnFrameRect(model.groups[1].rect, z), drawnFrameRect(model.groups[2].rect, z))).toBe(-Infinity);
+
+      const out = applySpacing(model, z, true);
+
+      expect(noOverlap([out.nodeRects.a1, out.nodeRects.b1])).toBe(true);
+      expect(out.groupRects['tb-a'].x - model.groups[1].rect.x)
+        .toBeCloseTo(out.groupRects['tb-b'].x - model.groups[2].rect.x, 9);
+    });
+
+    it('keeps merging components whose bounds overlap, so a frame inside another component\'s bounds cannot be pulled into it', () => {
+      // In drawn coordinates, A=(0,0,1200,1200) overlaps B=(600,600,1200,1200), whose union
+      // contains C=(1320,0,360,360). C touches neither A nor B. D=(-1200,0,360,360) is clear
+      // of all three but gives AB and C different X constraints. Stopping after initial frame
+      // connectivity makes C move much farther left than A and collide with a1.
+      const z = 3;
+      const drawnOffset = drawnFrameRect({ x: 0, y: 0, w: 0, h: 0 }, z);
+      const layoutForDrawn = (r: Rect): Rect => ({
+        x: r.x - drawnOffset.x,
+        y: r.y - drawnOffset.y,
+        w: r.w - drawnOffset.w,
+        h: r.h - drawnOffset.h,
+      });
+      const drawn = {
+        d: { x: -1200, y: 0, w: 360, h: 360 },
+        a: { x: 0, y: 0, w: 1200, h: 1200 },
+        b: { x: 600, y: 600, w: 1200, h: 1200 },
+        c: { x: 1320, y: 0, w: 360, h: 360 },
+      };
+      const d1 = node('d1', 'tb-d', { x: -1200, y: 0, w: NODE_W, h: NODE_H });
+      const a1 = node('a1', 'tb-a', { x: 0, y: 0, w: NODE_W, h: NODE_H });
+      const b1 = node('b1', 'tb-b', { x: 600, y: 600, w: NODE_W, h: NODE_H });
+      const c1 = node('c1', 'tb-c', { x: 1320, y: 0, w: NODE_W, h: NODE_H });
+      const model: CanvasModel = {
+        nodes: [d1, a1, b1, c1],
+        groups: [
+          group('tb-d', layoutForDrawn(drawn.d), ['d1']),
+          group('tb-a', layoutForDrawn(drawn.a), ['a1']),
+          group('tb-b', layoutForDrawn(drawn.b), ['b1']),
+          group('tb-c', layoutForDrawn(drawn.c), ['c1']),
+        ],
+      };
+      expect(noOverlap([d1.rect, a1.rect, b1.rect, c1.rect])).toBe(true);
+      expect(gapBetween(drawn.a, drawn.b)).toBe(-Infinity);
+      expect(gapBetween(drawn.a, drawn.c)).toBe(120);
+      expect(gapBetween(drawn.b, drawn.c)).toBe(240);
+
+      const out = applySpacing(model, z, true);
+
+      expect(noOverlap([out.nodeRects.a1, out.nodeRects.c1])).toBe(true);
+      expect(out.groupRects['tb-a'].x - model.groups[1].rect.x)
+        .toBeCloseTo(out.groupRects['tb-c'].x - model.groups[3].rect.x, 9);
+    });
   });
 
-  describe('drag freeze', () => {
-    it('holds the offset constant while the stored rect moves, so a drag never jumps', () => {
+  describe('spacingOffsets — the displacement the drag camera compensates for', () => {
+    /**
+     * A drag removes the transform for the whole gesture, which would slide the grabbed thing out
+     * from under the pointer by exactly this offset; `CanvasMode` pans by its negation instead.
+     * So the compensation is only ever as right as this is: an offset reported with the wrong
+     * sign, against the wrong id, or as a flat zero disables the pan SILENTLY — the canvas still
+     * renders, nothing throws, and the grabbed node simply jumps. That is why this is asserted
+     * against `applySpacing`'s own output rather than a hand-written number.
+     */
+    it('reports each rect displacement from stored to spaced, for nodes and groups alike', () => {
       const model = adjacentGroupsModel();
       const z = 3;
       const live = applySpacing(model, z, true);
-      const frozen = spacingOffsets(model, live);
+      const offsets = spacingOffsets(model, live);
 
-      // At the instant of the press, the frozen transform must reproduce the live one exactly —
-      // that is what makes grabbing a node not move it.
-      const atPress = applyFrozenOffsets(model, frozen);
-      expect(atPress.nodeRects['tb-b-n']).toEqual(live.nodeRects['tb-b-n']);
-      expect(atPress.groupRects['tb-b']).toEqual(live.groupRects['tb-b']);
+      // Non-vacuous: this fixture must actually be displaced at this zoom, or every assertion
+      // below would pass just as well against a function that returned zeroes.
+      expect(offsets.groups['tb-b'].dx).not.toBeCloseTo(0, 6);
 
-      // Now the drag writes real geometry: the stored rect moves by the pointer delta. The
-      // rendered node must move by exactly that delta too, so it tracks the pointer 1:1.
-      const dragged: CanvasModel = {
-        ...model,
-        nodes: model.nodes.map((n) => (n.terminalId === 'tb-b-n'
-          ? { ...n, rect: { ...n.rect, x: n.rect.x + 137, y: n.rect.y - 42 } } : n)),
-      };
-      const during = applyFrozenOffsets(dragged, frozen);
-      expect(during.nodeRects['tb-b-n'].x - atPress.nodeRects['tb-b-n'].x).toBeCloseTo(137, 9);
-      expect(during.nodeRects['tb-b-n'].y - atPress.nodeRects['tb-b-n'].y).toBeCloseTo(-42, 9);
+      for (const n of model.nodes) {
+        const d = offsets.nodes[n.terminalId];
+        expect(n.rect.x + d.dx).toBeCloseTo(live.nodeRects[n.terminalId].x, 9);
+        expect(n.rect.y + d.dy).toBeCloseTo(live.nodeRects[n.terminalId].y, 9);
+      }
+      for (const g of model.groups) {
+        const d = offsets.groups[g.tabId];
+        expect(g.rect.x + d.dx).toBeCloseTo(live.groupRects[g.tabId].x, 9);
+        expect(g.rect.y + d.dy).toBeCloseTo(live.groupRects[g.tabId].y, 9);
+      }
     });
 
-    it('is the identity when spacing was not applying at the moment of the press', () => {
+    it('is all zeroes when spacing is not applying, so a drag at zoom 1 pans nothing', () => {
       const model = adjacentGroupsModel();
-      const frozen = spacingOffsets(model, applySpacing(model, 3, false));
-      const out = applyFrozenOffsets(model, frozen);
-      for (const n of model.nodes) expect(out.nodeRects[n.terminalId]).toEqual(n.rect);
-      for (const g of model.groups) expect(out.groupRects[g.tabId]).toEqual(g.rect);
+      const offsets = spacingOffsets(model, applySpacing(model, 3, false));
+      for (const n of model.nodes) expect(offsets.nodes[n.terminalId]).toEqual({ dx: 0, dy: 0 });
+      for (const g of model.groups) expect(offsets.groups[g.tabId]).toEqual({ dx: 0, dy: 0 });
     });
   });
 });
