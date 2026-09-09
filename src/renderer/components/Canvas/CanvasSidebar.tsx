@@ -12,6 +12,7 @@ import { useCanvasMetrics } from './canvasMetricsContext';
 import { buildSidebarTree, SidebarRow } from './sidebarModel';
 import { useSidebarDrag } from './useSidebarDrag';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
+import { EyeIcon } from './EyeIcon';
 import type { CanvasModel } from './canvasSelectors';
 
 /**
@@ -113,6 +114,7 @@ const Row: React.FC<RowProps> = ({
         'canvas-srow',
         selected ? 'selected' : '',
         row.isRunning ? 'running' : '',
+        row.hidden ? 'hidden' : '',
         lifting ? 'lifting' : '',
       ].filter(Boolean).join(' ')}
       onPointerDown={onPointerDown}
@@ -125,6 +127,7 @@ const Row: React.FC<RowProps> = ({
       <ShellProfileIcon shellType={row.shellType} />
       <span className="canvas-srow-title"><Title row={row} /></span>
       {row.disambiguator && <span className="canvas-srow-dis">{row.disambiguator}</span>}
+      {row.hidden && <span className="canvas-srow-hidden" title="Hidden from the canvas"><EyeIcon slashed size={13} /></span>}
       {/* The tab strip's own indicator, reused rather than restyled (design 010 §9). */}
       {row.hasUnseenOutput && <span className="tab-unseen-bell" title="New output you haven't seen yet">🔔</span>}
     </li>

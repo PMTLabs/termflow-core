@@ -19,6 +19,8 @@ export interface CanvasPersisted {
   sidebarOpen: boolean;
   sidebarWidth: number;
   sidebarZoom: number;
+  /** Terminals the user has hidden from the canvas. A present key means hidden. */
+  hidden: Record<string, true>;
 }
 
 /**
@@ -31,6 +33,8 @@ export interface CanvasPersisted {
  * Ctrl+Tab, closing the tab, session restore) would be a path that could desync them.
  */
 export interface CanvasState extends CanvasPersisted {
+  /** Temporary reveal mode for hidden nodes; deliberately not persisted. */
+  revealHidden: boolean;
   /** Mirror of the backend edge table; never persisted renderer-side. */
   edges: CanvasEdge[];
   selectedId: string | null;
@@ -95,6 +99,8 @@ const initialState: CanvasState = {
   sidebarOpen: true,
   sidebarWidth: 250,
   sidebarZoom: 1,
+  hidden: {},
+  revealHidden: false,
   selectedId: null,
   selectedEdgeId: null,
   focusedId: null,
@@ -263,6 +269,18 @@ const canvasSlice = createSlice({
     setSidebarZoom: (state, action: PayloadAction<number>) => {
       state.sidebarZoom = clampZoom(action.payload);
     },
+    /** Keep focus, selection and the overlay from naming a node that no longer paints. */
+    setNodeHidden: (state, action: PayloadAction<{ id: string; hidden: boolean }>) => {
+      const { id, hidden } = action.payload;
+      if (hidden) {
+        state.hidden[id] = true;
+        if (state.selectedId === id) state.selectedId = null;
+        if (state.focusedId === id) state.focusedId = null;
+        if (state.overlayId === id) state.overlayId = null;
+      } else delete state.hidden[id];
+    },
+    unhideAll: (state) => { state.hidden = {}; },
+    setRevealHidden: (state, action: PayloadAction<boolean>) => { state.revealHidden = action.payload; },
     pruneCanvasGeometry: (
       state,
       action: PayloadAction<{ terminalIds: string[]; tabIds: string[] }>
@@ -270,6 +288,7 @@ const canvasSlice = createSlice({
       const liveNodes = new Set(action.payload.terminalIds);
       const liveGroups = new Set(action.payload.tabIds);
       for (const id of Object.keys(state.nodes)) if (!liveNodes.has(id)) delete state.nodes[id];
+      for (const id of Object.keys(state.hidden)) if (!liveNodes.has(id)) delete state.hidden[id];
       for (const id of Object.keys(state.groups)) if (!liveGroups.has(id)) delete state.groups[id];
       // Assigned only when it actually shrank. `filter` always returns a NEW array, and
       // Immer treats that assignment as a change — which would hand every subscriber a new
@@ -298,6 +317,9 @@ const canvasSlice = createSlice({
       if (typeof p.sidebarOpen === 'boolean') state.sidebarOpen = p.sidebarOpen;
       if (typeof p.sidebarWidth === 'number') state.sidebarWidth = clampWidth(p.sidebarWidth);
       if (typeof p.sidebarZoom === 'number') state.sidebarZoom = clampZoom(p.sidebarZoom);
+      if (p.hidden && typeof p.hidden === 'object' && !Array.isArray(p.hidden)) {
+        state.hidden = Object.fromEntries(Object.entries(p.hidden).filter(([, value]) => value === true)) as Record<string, true>;
+      }
     },
   },
 });
@@ -306,7 +328,8 @@ export const {
   setViewport, panViewport, setNodeGeom, setGroupGeom, moveGroupGeom,
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
-  setSidebarOpen, setSidebarWidth, setSidebarZoom, pruneCanvasGeometry, hydrateCanvas,
+  setSidebarOpen, setSidebarWidth, setSidebarZoom, setNodeHidden, unhideAll, setRevealHidden,
+  pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 
 export default canvasSlice.reducer;

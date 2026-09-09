@@ -1,6 +1,7 @@
 import React from 'react';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
+import { EyeIcon } from './EyeIcon';
 
 /**
  * Right-click menu for a terminal node (Tam, 2026-08-21).
@@ -46,6 +47,8 @@ export const CanvasNodeMenu: React.FC<{
    * toggle the overlay shut under a label that promised the opposite.
    */
   overlaid: boolean;
+  hidden: boolean;
+  onToggleHide: () => void;
   /** Enlarge, or shrink back — one handler, because it is one toggle (see `CanvasNode`). */
   onToggleOverlay: () => void;
   /** Leave the canvas for this terminal's own tab. */
@@ -54,7 +57,7 @@ export const CanvasNodeMenu: React.FC<{
   onCloseTerminal: () => void;
   /** Dismiss the menu without doing anything. */
   onDismiss: () => void;
-}> = ({ x, y, title, terminalId, overlaid, onToggleOverlay, onOpenAsTab, onCloseTerminal, onDismiss }) => (
+}> = ({ x, y, title, terminalId, overlaid, hidden, onToggleHide, onToggleOverlay, onOpenAsTab, onCloseTerminal, onDismiss }) => (
   <CanvasMenu x={x} y={y} onClose={onDismiss}>
     <div className="context-menu-header">{title}</div>
     <div className="context-menu-divider" />
@@ -65,6 +68,9 @@ export const CanvasNodeMenu: React.FC<{
       onClick={() => { onDismiss(); onToggleOverlay(); }}
     >
       {overlaid ? 'Shrink back to the canvas' : 'Enlarge on the canvas'}
+    </CanvasMenuItem>
+    <CanvasMenuItem icon={<EyeIcon slashed={!hidden} />} onClick={() => { onDismiss(); onToggleHide(); }}>
+      {hidden ? 'Show on the canvas' : 'Hide from the canvas'}
     </CanvasMenuItem>
     <CanvasMenuItem
       icon="⧉"

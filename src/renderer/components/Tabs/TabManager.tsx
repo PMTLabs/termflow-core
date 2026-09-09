@@ -19,6 +19,7 @@ import {
 import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
+import { CanvasHiddenForTerminals } from '../Canvas/CanvasHiddenBadge';
 import { resolveTabProcessIds } from '../../services/tabProcessIds';
 import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
@@ -419,6 +420,7 @@ const TabItem: React.FC<TabItemProps> = ({
             holds whether or not anything has happened, so it sits with the other standing states
             rather than among the event receipts. */}
         <AutomationArmedForTerminals terminalIds={tabTerminalIds} />
+        <CanvasHiddenForTerminals terminalIds={tabTerminalIds} />
         {tab.notifyMuted && (
           <span className="tab-muted-icon" title="Notifications muted for this tab">
             <BellIcon muted />

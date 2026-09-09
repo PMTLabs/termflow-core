@@ -45,6 +45,7 @@ export interface CanvasNodeModel {
    * canvas node IS a pane.
    */
   exited: boolean;
+  hidden: boolean;
 }
 
 export interface CanvasGroupModel {
@@ -53,6 +54,7 @@ export interface CanvasGroupModel {
   rect: Rect;
   nodeIds: string[];
   anyRunning: boolean;
+  allHidden: boolean;
 }
 
 export interface CanvasModel {
@@ -178,6 +180,7 @@ function buildModel(
   trees: Record<string, PaneNode | null>,
   stored: Record<string, Rect>,
   storedGroups: Record<string, Rect>,
+  hidden: Record<string, true> = {},
   runningTerminalIds: string[] = [],
   sessionExit: Record<string, { exitCode: number | null }> = {},
 ): CanvasModel {
@@ -234,7 +237,7 @@ function buildModel(
     if (!paneLeaves.length) {
       const kept = storedGroups[tab.id];
       if (kept) {
-        groups.push({ tabId: tab.id, title: tab.title, rect: kept, nodeIds: [], anyRunning: false });
+        groups.push({ tabId: tab.id, title: tab.title, rect: kept, nodeIds: [], anyRunning: false, allHidden: false });
       }
       continue;
     }
@@ -303,6 +306,7 @@ function buildModel(
         // instance"): per-pane clearing semantics ("viewing which pane clears it?") are
         // undefined, so every node in a tab still shares the tab's unseen flag.
         hasUnseenOutput: !!tab.hasUnseenOutput,
+        hidden: !!hidden[id],
       });
     });
 
@@ -312,7 +316,8 @@ function buildModel(
     // it agrees with `arrange`, whose group rects are exactly this shrink-wrap. The
     // consequence for Task 12: dragging a group must move its NODES; writing only
     // the group rect through `setGroupGeom` would be silently discarded here.
-    const drawnFrame = fitGroupFrame(placed) ?? frame;
+    // Hidden nodes keep their hosts and geometry, but frames describe what is visible.
+    const drawnFrame = fitGroupFrame(rects.filter((_, i) => !hidden[paneLeaves[i].terminalId!])) ?? frame;
     groups.push({
       tabId: tab.id,
       title: tab.title,
@@ -321,6 +326,7 @@ function buildModel(
       // Any MEMBER terminal running (Req 8) — strictly more accurate than the old
       // tab.isRunning proxy, and still the same field/meaning to a reader.
       anyRunning: nodeIds.some((nid) => running.has(nid)),
+      allHidden: nodeIds.length > 0 && nodeIds.every((nid) => !!hidden[nid]),
     });
 
     // Advance the seeding cursor on the frame that will actually be DRAWN, not on the box it
@@ -404,6 +410,7 @@ export const selectCanvasModel = createSelector(
     (s: RootState) => s.panes.treesByTabId,
     (s: RootState) => s.canvas.nodes,
     (s: RootState) => s.canvas.groups,
+    (s: RootState) => s.canvas.hidden,
     (s: RootState) => s.tabs.runningTerminalIds,
     (s: RootState) => s.sessionExit.byTerminalId,
   ],
@@ -416,6 +423,7 @@ export function buildCanvasModel(state: RootState): CanvasModel {
     state.panes.treesByTabId,
     state.canvas.nodes,
     state.canvas.groups,
+    state.canvas.hidden,
     state.tabs.runningTerminalIds,
     state.sessionExit?.byTerminalId,
   );
@@ -491,9 +499,10 @@ export function allCollapsed(
   tiers: Record<string, LodTier>,
   z: number,
 ): boolean {
-  if (nodes.length === 0) return false;
+  const shown = nodes.filter((n) => !n.hidden);
+  if (shown.length === 0) return false;
   const nodeLabelsLegible = chipLabelScreenPx(z) >= MIN_TITLE_PX;
-  return nodes.every((n) => {
+  return shown.every((n) => {
     const tier = tiers[n.terminalId];
     return tier === 'group' || (tier === 'chip' && !nodeLabelsLegible);
   });
@@ -528,6 +537,7 @@ export function snapshotNodeIds(
   // Nothing is showing a screen when the whole workspace is group chips.
   if (collapsed) return out;
   for (const n of nodes) {
+    if (n.hidden) continue;
     if (tiers[n.terminalId] === 'snapshot' && visible.has(n.terminalId)) out.add(n.terminalId);
   }
   return out;

@@ -50,7 +50,18 @@ export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = [
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = null;
 
-    const to = arrangeTarget(latest.current, latestEdges.current);
+    // Hiding is a view decision, but Arrange is destructive to spatial memory: moving an
+    // invisible node would make it reappear somewhere the user did not put it. Hidden nodes
+    // therefore stay out of this pass; after unhiding, press Arrange again to include them.
+    const visibleNodes = latest.current.nodes.filter((n) => !n.hidden);
+    const visibleIds = new Set(visibleNodes.map((n) => n.terminalId));
+    const visibleGroups = latest.current.groups
+      .map((g) => ({ ...g, nodeIds: g.nodeIds.filter((id) => visibleIds.has(id)) }))
+      .filter((g) => g.nodeIds.length > 0);
+    const visibleModel = { nodes: visibleNodes, groups: visibleGroups };
+    const to = arrangeTarget(visibleModel, latestEdges.current.filter(
+      (e) => visibleIds.has(e.from) && visibleIds.has(e.to),
+    ));
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(applyArrange(to));
       return;

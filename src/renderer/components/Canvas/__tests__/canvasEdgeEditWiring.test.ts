@@ -47,7 +47,7 @@ describe('found the source it is reading', () => {
   /** Or every assertion below passes vacuously against an empty string. */
   it('sliced the element and the callbacks it asserts about', () => {
     expect(WIRES_PROPS.startsWith('<CanvasWires')).toBe(true);
-    expect(WIRES_PROPS).toContain('edges={edges}');
+    expect(WIRES_PROPS).toContain('edges={edges.filter((e) => !userHidden(e.from) && !userHidden(e.to))}');
     expect(callback(MODE, 'dropEdge')).toContain('deleteEdge');
     expect(callback(DRAG, 'onPointerDownCapture')).toContain('startFrom');
   });

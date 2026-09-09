@@ -197,6 +197,10 @@
 .canvas-node.selected { outline-color: var(--accent-color, #007acc); }
 .canvas-node.focused { outline-color: var(--tab-running-accent, #3aa6ff); z-index: 7; }
 .canvas-node.dimmed { opacity: .26; }
+/* Reveal mode keeps the live node mounted and interactive, but makes its exceptional status clear. */
+.canvas-node.ghost { opacity: .38; outline-style: dashed; }
+.canvas-srow.hidden { opacity: .55; }
+.canvas-srow-hidden { display: inline-flex; flex: none; }
 /* The header is TWO elements on purpose. The outer one is the layout box, and its height is
    set per node from `headScale(zoom)` so the bar stops growing once it has reached its natural
    size. The inner one holds the contents at their natural size and is scaled as a single

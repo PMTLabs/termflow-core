@@ -41,7 +41,8 @@ export const CanvasMinimap: React.FC<{
    *  two. The SIZE of the step is this component's to decide, because only it holds the
    *  projection the step is measured against. */
   onPan?: (dxScreen: number, dyScreen: number) => void;
-}> = ({ model, vp, vw, vh, onPick, onPan }) => {
+  revealHidden?: boolean;
+}> = ({ model, vp, vw, vh, onPick, onPan, revealHidden = false }) => {
   // The viewport's own world rect. Derived through `screenToWorld` rather than by inverting the
   // transform by hand, so it cannot disagree with the pan/zoom maths everything else uses.
   const view: Rect = useMemo(() => {
@@ -182,7 +183,7 @@ export const CanvasMinimap: React.FC<{
       {model.groups.map((g) => (
         <div key={g.tabId} className="canvas-minigroup" style={box(g.rect)} />
       ))}
-      {model.nodes.map((n) => (
+      {model.nodes.filter((n) => revealHidden || !n.hidden).map((n) => (
         <div
           key={n.terminalId}
           className={`canvas-mininode${n.isRunning ? ' running' : ''}`}

@@ -99,7 +99,7 @@ const COMBOS = {
   openTabFromOverlay: 'Ctrl+Alt+G',
 };
 
-function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
+function render(tier: LodTier, handlers: Handlers = {}, overlaid = false, nodeHidden = false) {
   act(() => {
     root.render(withMetrics(
       <CanvasNode
@@ -110,6 +110,7 @@ function render(tier: LodTier, handlers: Handlers = {}, overlaid = false) {
         focused={false}
         dimmed={false}
         hidden={false}
+        nodeHidden={nodeHidden}
         busyCue="sweep"
         overlaid={overlaid}
         combos={COMBOS}
@@ -133,6 +134,18 @@ const fire = (el: Element, type: string) =>
   act(() => { el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true })); });
 
 describe('open-in-its-tab button', () => {
+  it('uses the shared hide faces, names the terminal, and disappears at chip tier', () => {
+    const onToggleHide = jest.fn();
+    render('gpu', { onToggleHide } as Handlers);
+    const hide = byLabel('Hide server from the canvas')!;
+    expect(hide.title).toBe('Hide from the canvas');
+    fire(hide, 'click');
+    expect(onToggleHide).toHaveBeenCalledTimes(1);
+    render('gpu', { onToggleHide } as Handlers, false, true);
+    expect(byLabel('Show server on the canvas')!.title).toBe('Show on the canvas');
+    render('chip', { onToggleHide } as Handlers, false, true);
+    expect(byLabel('canvas')).toBeNull();
+  });
   it('appears on an interactive node and calls back when clicked', () => {
     const onOpenAsTab = jest.fn();
     render('gpu', { onOpenAsTab });

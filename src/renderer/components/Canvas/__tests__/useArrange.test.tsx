@@ -325,7 +325,7 @@ describe('Arrange button wiring', () => {
   it('hides while a node is overlaid', () => {
     // The overlay backdrop is in world space and this is not, so the button paints over it —
     // becoming the one place a click fails to dismiss the overlay.
-    expect(MODE).toContain('{!overlayId && model.groups.length > 0 && (');
+    expect(MODE).toContain('{!overlayId && (model.groups.length > 0 || hiddenCount > 0) && (');
   });
 
   it('calls the hook, rather than a second copy of the animation', () => {
@@ -346,7 +346,8 @@ describe('Arrange button wiring', () => {
    */
   it('forwards those edges into the layout target', () => {
     const HOOK = readSource(path.resolve(__dirname, '../useArrange.ts'));
-    expect(HOOK).toContain('arrangeTarget(latest.current, latestEdges.current)');
+    expect(HOOK).toContain('const visibleNodes = latest.current.nodes.filter((n) => !n.hidden);');
+    expect(HOOK).toContain('arrangeTarget(visibleModel, latestEdges.current.filter(');
     // Through a ref like the model, so the callback keeps the stable identity the toolbar needs.
     expect(HOOK).toContain('latestEdges.current = edges;');
   });

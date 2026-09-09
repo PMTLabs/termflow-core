@@ -25,6 +25,7 @@ import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
+import { CanvasHiddenForTerminal } from '../Canvas/CanvasHiddenBadge';
 import './TerminalPane.css';
 
 // Global map to track terminal initialization state
@@ -703,6 +704,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 name is printed because a pane has room for one; the `+N` is how the rest are
                 offered, and the context menu is where they are read. */}
             <AutomationArmedForTerminal terminalId={terminalId ?? null} compact={false} />
+            <CanvasHiddenForTerminal terminalId={terminalId ?? null} />
           </div>
           <div className="terminal-pane-controls">
             <button

@@ -92,11 +92,15 @@ export function sanitizeCanvasState(
   const liveTabs = new Set(tabIds);
   const nodes: Record<string, any> = {};
   const groups: Record<string, any> = {};
+  const hidden: Record<string, true> = {};
   for (const [id, r] of Object.entries(c.nodes ?? {})) {
     if (liveNodes.has(id) && isRect(r)) nodes[id] = r;
   }
   for (const [id, r] of Object.entries(c.groups ?? {})) {
     if (liveTabs.has(id) && isRect(r)) groups[id] = r;
+  }
+  if (c.hidden && typeof c.hidden === 'object' && !Array.isArray(c.hidden)) {
+    for (const [id, value] of Object.entries(c.hidden)) if (liveNodes.has(id) && value === true) hidden[id] = true;
   }
 
   return {
@@ -108,6 +112,7 @@ export function sanitizeCanvasState(
     // `finite` first, then the clamp — see `clampZoom` in `canvasSlice`: NaN survives a bare
     // Math.max/Math.min pair, and a NaN here reaches the stylesheet as an invalid calc().
     sidebarZoom: Math.max(SIDEBAR_ZOOM_MIN, Math.min(SIDEBAR_ZOOM_MAX, finite(c.sidebarZoom, 1))),
+    hidden,
   };
 }
 
@@ -332,6 +337,7 @@ class StateManagerClass {
           sidebarOpen: state.canvas.sidebarOpen,
           sidebarWidth: state.canvas.sidebarWidth,
           sidebarZoom: state.canvas.sidebarZoom,
+          hidden: state.canvas.hidden,
         },
       };
 

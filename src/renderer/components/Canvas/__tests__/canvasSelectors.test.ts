@@ -40,6 +40,28 @@ const stateWith = (overrides: any = {}) => ({
 }) as any;
 
 describe('buildCanvasModel', () => {
+  it('stamps hidden nodes, marks an all-hidden group, and shrink-wraps only visible rects in a mixed stored/seeded tab', () => {
+    const s = stateWith({
+      nodes: { 'tm-b': { x: 1000, y: 500, w: NODE_W, h: NODE_H } },
+      hidden: { 'tm-a': true },
+    });
+    s.tabs.tabs = [{ id: 'tb-a', title: 'mixed', shellType: 'zsh', isActive: true }];
+    s.panes.treesByTabId = {
+      'tb-a': { id: 'pn-root', type: 'split', direction: 'horizontal', children: [
+        { id: 'pn-a', type: 'terminal', terminalId: 'tm-a', name: 'A', shellType: 'zsh' },
+        { id: 'pn-b', type: 'terminal', terminalId: 'tm-b', name: 'B', shellType: 'zsh' },
+        { id: 'pn-c', type: 'terminal', terminalId: 'tm-c', name: 'C', shellType: 'zsh' },
+      ] },
+    };
+    const m = buildCanvasModel(s);
+    expect(m.nodes.find((n) => n.terminalId === 'tm-a')!.hidden).toBe(true);
+    expect(m.groups[0].allHidden).toBe(false);
+    // A is seeded while B is stored, so `placed` is [B, A, C]. This exact bound proves the
+    // frame used index-aligned `rects`: filtering `placed` by leaf index drops B instead.
+    expect(m.groups[0].rect).toEqual({ x: 410, y: 60, w: 946, h: 666 });
+    const all = buildCanvasModel({ ...s, canvas: { ...s.canvas, hidden: { 'tm-a': true, 'tm-b': true, 'tm-c': true } } });
+    expect(all.groups[0].allHidden).toBe(true);
+  });
   it('produces one node per terminal across every tab', () => {
     const m = buildCanvasModel(stateWith());
     expect(m.nodes.map((n) => n.terminalId).sort()).toEqual(['tb-a', 'tb-b', 'tm-2']);
@@ -490,6 +512,12 @@ describe('snapshotNodeIds', () => {
     const visible = new Set(['a']);
     const got = snapshotNodeIds(nodes, { a: 'snapshot', b: 'snapshot', c: 'snapshot' }, visible, false);
     expect([...got]).toEqual(['a']);
+  });
+
+  it('excludes a USER-hidden node that otherwise qualifies for snapshot polling', () => {
+    const hidden = { ...n('hidden'), hidden: true };
+    const got = snapshotNodeIds([hidden], { hidden: 'snapshot' }, new Set(['hidden']), false);
+    expect(got.size).toBe(0);
   });
 
   it('returns nothing when the whole workspace has collapsed to chips', () => {
