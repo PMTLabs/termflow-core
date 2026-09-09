@@ -11,8 +11,11 @@ describe('spacingTransitionPan', () => {
     expect(spacingTransitionPan({ dx: 30, dy: -12 }, 3, 'toDisplay')).toEqual({ dx: 90, dy: -36 });
   });
 
-  it('keeps the zoom-1 identity transition inert', () => {
-    expect(spacingTransitionPan({ dx: 0, dy: 0 }, 1, 'toRaw')).toEqual({ dx: 0, dy: 0 });
-    expect(spacingTransitionPan({ dx: 0, dy: 0 }, 1, 'toDisplay')).toEqual({ dx: 0, dy: 0 });
+  it('uses the supplied zoom for nonzero offsets across the real zoom range', () => {
+    // A hard-coded `* 3` passes the fixtures above but fails both ends of the real range.
+    expect(spacingTransitionPan({ dx: 7, dy: -4 }, 1, 'toRaw')).toEqual({ dx: -7, dy: 4 });
+    const high = spacingTransitionPan({ dx: -4, dy: 7 }, 6.35, 'toDisplay');
+    expect(high.dx).toBeCloseTo(-25.4);
+    expect(high.dy).toBeCloseTo(44.45);
   });
 });

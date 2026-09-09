@@ -1,15 +1,40 @@
 import path from 'path';
 import { readSource } from '../../../utils/readSource';
 
-const MODE = readSource(path.resolve(__dirname, '../CanvasMode.tsx'));
-const SIDEBAR = readSource(path.resolve(__dirname, '../CanvasSidebar.tsx'));
-const DRAG = readSource(path.resolve(__dirname, '../useCanvasDrag.ts'));
-const VIEWPORT = readSource(path.resolve(__dirname, '../CanvasViewport.tsx'));
-const SLICE = readSource(path.resolve(__dirname, '../../../store/slices/canvasSlice.ts'));
+/** Source pins must not be satisfied by the comments explaining the regression. */
+function code(file: string): string {
+  return readSource(file)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/(^|[^:])\/\/.*$/gm, '$1');
+}
+
+const MODE = code(path.resolve(__dirname, '../CanvasMode.tsx'));
+const SIDEBAR = code(path.resolve(__dirname, '../CanvasSidebar.tsx'));
+const DRAG = code(path.resolve(__dirname, '../useCanvasDrag.ts'));
+const SIDEBAR_DRAG = code(path.resolve(__dirname, '../useSidebarDrag.ts'));
+const ARRANGE = code(path.resolve(__dirname, '../useArrange.ts'));
+const VIEWPORT = code(path.resolve(__dirname, '../CanvasViewport.tsx'));
+const SLICE = code(path.resolve(__dirname, '../../../store/slices/canvasSlice.ts'));
 const FLY_TO_WORLD = (() => {
   const start = MODE.indexOf('const flyToWorld = useCallback(');
   return start < 0 ? '' : MODE.slice(start, MODE.indexOf('\n  }, [', start));
 })();
+const TARGET_RECT_AT = (() => {
+  const start = MODE.indexOf('const targetRectAt = useCallback(');
+  return start < 0 ? '' : MODE.slice(start, MODE.indexOf('\n  const busyCue', start));
+})();
+const NODE_DRAG = (() => {
+  const start = DRAG.indexOf('const nd = nodeDrag.current;');
+  const end = DRAG.indexOf('const gd = groupDrag.current;', start);
+  return start < 0 || end < 0 ? '' : DRAG.slice(start, end);
+})();
+const GROUP_DRAG = (() => {
+  const start = DRAG.indexOf('const gd = groupDrag.current;');
+  const end = DRAG.indexOf('const onUp = () => {', start);
+  return start < 0 || end < 0 ? '' : DRAG.slice(start, end);
+})();
+const GEOMETRY_DISPATCHES = [MODE, DRAG, SIDEBAR_DRAG, ARRANGE]
+  .flatMap((source) => source.match(/dispatch\((?:setNodeGeom|setGroupGeom|moveGroupGeom|applyArrange)\([\s\S]*?\)\);/g) ?? []);
 
 describe('Dynamic Spacing consumers (plan/039)', () => {
   it('feeds the spacing-adjusted rects to tiers, culling and wire geometry, not the raw model', () => {
@@ -18,6 +43,8 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(MODE).toContain('for (const n of spacedNodes) {');
     expect(MODE).toContain('beaconLayout(spacedPaintedNodes, vp, size.w, size.h)');
     expect(MODE).toContain('chipOffsets(spacedShownGroups, vp.z)');
+    // The rect handed to the painter is the rect from this display-space loop, not a raw lookup.
+    expect(MODE).toContain("const box = paintedNodeRect(n.rect, vp.z, tiers[n.terminalId] === 'chip');");
   });
 
   it('renders every node and group at its spacing-adjusted rect, except the overlaid node', () => {
@@ -43,6 +70,7 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(MODE).toContain("targetRectAt(vp.z, 'node', next, n.rect)");
     // The helper must resolve spacing at the zoom it is handed, not at the current one.
     expect(MODE).toContain('const s = applySpacing(targetModel, destZ, true);');
+    expect(TARGET_RECT_AT).toContain("return (kind === 'node' ? s.nodeRects[id] : s.groupRects[id]) ?? raw;");
     expect(MODE).toContain("targetRectAt(vp.z, 'node', plan.leafId, plan.rect, postSpawnSpacingModel)");
   });
 
@@ -87,6 +115,16 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // Hit-test stays RAW while the real-drag render branch is also RAW.
     expect(DRAG).toContain('m.groups.map((g) => ({ tabId: g.tabId, rect: g.rect }))');
     expect(DRAG).not.toContain('applySpacing(');
+    // The notification cannot happen until the slop guard has returned for sub-threshold motion.
+    expect(NODE_DRAG.indexOf('if (!nd.moved && Math.hypot')).toBeLessThan(NODE_DRAG.indexOf('onDragStart?.('));
+    expect(GROUP_DRAG.indexOf('if (!gd.moved && Math.hypot')).toBeLessThan(GROUP_DRAG.indexOf('onDragStart?.('));
+    expect(NODE_DRAG.indexOf('onDragStart?.(')).toBeGreaterThan(-1);
+    expect(GROUP_DRAG.indexOf('onDragStart?.(')).toBeGreaterThan(-1);
+  });
+
+  it('applies each computed transition pan, rather than merely calculating it', () => {
+    expect(MODE).toMatch(/const pan = spacingTransitionPan\(offset, source\.z, 'toRaw'\);\s+panScreen\(pan\.dx, pan\.dy\);/);
+    expect(MODE).toMatch(/const pan = spacingTransitionPan\(offset, vp\.z, 'toDisplay'\);\s+panScreen\(pan\.dx, pan\.dy\);/);
   });
 
   it('keeps the whole real drag raw even if wheel zoom changes mid-gesture', () => {
@@ -119,5 +157,12 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(SLICE).not.toContain("from './canvasSpacing'");
     expect(SLICE).not.toContain('canvasSpacing.applySpacing(');
     expect(SLICE).not.toContain('applySpacing(state');
+    // The reducer cannot distinguish a bad payload. Every production geometry writer must feed
+    // it raw layout expressions; this is a complete, counted census across spawn, canvas drag,
+    // sidebar regroup, and arrange.
+    expect(GEOMETRY_DISPATCHES).toHaveLength(11);
+    for (const dispatch of GEOMETRY_DISPATCHES) {
+      expect(dispatch).not.toMatch(/\b(?:spacing|spaced)\w*/i);
+    }
   });
 });

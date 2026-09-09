@@ -563,8 +563,9 @@ describe('CanvasSidebar — drag and resize', () => {
     render();
     dragRowTo(1, 'tb-b');
     act(() => { rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    expect(canvas().selectedId).toBeNull();
+    expect(onFlyToNode).not.toHaveBeenCalled();
     act(() => { rows()[0].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    expect(onFlyToNode).toHaveBeenCalledTimes(1);
     expect(onFlyToNode).toHaveBeenCalledWith('tm-1');
   });
 
