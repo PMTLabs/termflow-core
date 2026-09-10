@@ -18,6 +18,7 @@ import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
 import { nextSnippetSortMode } from '../../services/snippetSearch';
 import { openSettingsTab } from '../../services/openSettings';
+import { requestAutomationList } from '../../services/automationEditorHost';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
@@ -990,7 +991,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       //
       // Keyed on `terminalId`, not `paneId`, and ungated for the same reason Mute above is: the
       // rules are pinned to the terminal, so they are right wherever its surface is drawn.
-      ...automationMenuItems(terminalId),
+      ...automationMenuItems(terminalId, {
+        onOpenSettings: () => {
+          closeContextMenu();
+          requestAutomationList();
+          openSettingsTab('automations');
+        },
+      }),
       // plan/029 §6. Command History ABOVE Snippets (stated acceptance criterion).
       // Both ungated — they must work while a TUI/CLI is running (P1), same class
       // as Copy/Paste/Clear/Mute above: they act on the terminal's own PTY write

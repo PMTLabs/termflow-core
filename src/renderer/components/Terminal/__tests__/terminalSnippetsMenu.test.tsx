@@ -562,7 +562,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
    */
   it('placement: separator, then Automation, Command History, Snippets, then a NEW separator, then Clear', () => {
     const muteAt = DISPLAY.indexOf("'Mute Pane Notifications',");
-    const automationAt = DISPLAY.indexOf('...automationMenuItems(terminalId),');
+    const automationAt = DISPLAY.indexOf('...automationMenuItems(terminalId');
     const historyAt = DISPLAY.indexOf('buildCommandHistoryMenuItem(');
     // The ITEM in the menu array, not the builder call — the builder is now hoisted into
     // its own helper (shared with the keyboard-opened menu) and sits ABOVE this array, so
