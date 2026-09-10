@@ -331,7 +331,7 @@ export type FlyTo = ((
   /** Where the camera belongs at an interpolated zoom, for a flight that must hold an anchor
    *  throughout rather than only on arrival. See `anchoredCamera`. */
   cameraAt?: (z: number) => Viewport,
-) => void) & { cancel: () => void; active: () => boolean };
+) => void) & { cancel: () => void; requests: React.MutableRefObject<number> };
 
 export function useFlyTo(): FlyTo {
   const dispatch = useDispatch();
@@ -357,14 +357,23 @@ export function useFlyTo(): FlyTo {
   }, []);
 
   /**
-   * Is a flight airborne? Asked by camera corrections that must DEFER to one rather than fight
-   * it: a flight already owns the camera and is aimed at a destination computed from the state
-   * that requested it, so cancelling it silently drops a navigation the user asked for.
+   * How many flights have been REQUESTED, ever.
+   *
+   * A camera correction has to know whether a navigation was asked for as part of the very change
+   * it is about to compensate — `flyToNode` unhides a terminal and flies to where it will be
+   * drawn afterwards, in one action, and paying an offset on top of that arrival moves the camera
+   * a second time. "Is a flight airborne?" cannot answer that: it is equally true of a flight
+   * requested long before the change, aimed at geometry that is no longer painted. A monotonic
+   * count can, by being compared against the count at the last painted frame.
    */
-  const active = useCallback(() => raf.current !== null, []);
+  const requests = useRef(0);
 
   const flyTo = useCallback((to: Viewport, onDone?: () => void, cameraAt?: (z: number) => Viewport) => {
+    requests.current += 1;
+    // Nulled, not merely cancelled: a stale handle left behind here would outlive the flight it
+    // belonged to, and anything reading this ref would believe a cancelled animation was running.
     if (raf.current) cancelAnimationFrame(raf.current);
+    raf.current = null;
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(setViewport(to));
       onDone?.();
@@ -392,7 +401,7 @@ export function useFlyTo(): FlyTo {
     raf.current = requestAnimationFrame(step);
   }, [dispatch]);
 
-  return useMemo(() => Object.assign(flyTo, { cancel, active }), [flyTo, cancel, active]);
+  return useMemo(() => Object.assign(flyTo, { cancel, requests }), [flyTo, cancel]);
 }
 
 export default CanvasViewport;

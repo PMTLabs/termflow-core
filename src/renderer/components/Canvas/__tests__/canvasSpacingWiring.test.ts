@@ -132,30 +132,35 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // drops the navigation outright, with the transform switched off as much as on.
     for (const [name, body] of Object.entries(SITES)) {
       const cancel = body.indexOf('flyTo.cancel();');
-      const defers = body.indexOf('if (flyTo.active()) return;');
-      expect({ name, seizesOrDefers: (cancel >= 0) !== (defers >= 0) })
-        .toEqual({ name, seizesOrDefers: true });
+      const defers = body.indexOf('if (flyTo.requests.current !== was.flights) return;');
+      expect({ name, decides: cancel >= 0 || defers >= 0 }).toEqual({ name, decides: true });
       const pan = name === 'zoom' ? body.indexOf('return zoomAnchoredAt(') : body.indexOf('panScreen(');
       expect({ name, acts: pan >= 0 }).toEqual({ name, acts: true });
       // Whichever it does, it must do it BEFORE it moves the camera. A cancel that runs after
       // its own pan — or after the zoom's `return` — is not a cancel at all.
-      expect({ name, decidesFirst: Math.max(cancel, defers) < pan })
+      expect({ name, decidesFirst: (defers >= 0 ? defers : cancel) < pan })
         .toEqual({ name, decidesFirst: true });
     }
-    expect(SITES.transform).not.toContain('flyTo.cancel();');
+    // The transform site does BOTH, and the order is the whole point: it defers to a navigation
+    // requested for this change, and otherwise cancels the stale flight it is about to overrule.
+    expect(SITES.transform.indexOf('if (flyTo.requests.current !== was.flights) return;'))
+      .toBeLessThan(SITES.transform.indexOf('flyTo.cancel();'));
 
-    // Completeness: no camera correction may live OUTSIDE the four sites above. Without this the
-    // per-site checks pass happily while a fifth, unprotected one is added next to them.
-    const total = (MODE.match(/panScreen\(/g) ?? []).length;
-    const accounted = Object.entries(SITES)
+    // Completeness: no camera correction may live OUTSIDE the four sites above. The allowance is
+    // an ENUMERATION, not a count — a spare slot ("at most two others") is a free pass for the
+    // very thing this is meant to catch, since one of the calls it was budgeting for is not a
+    // call at all (the minimap receives `onPan={panScreen}`).
+    const DELIBERATE = ["case 'pan': panScreen(action.dx, action.dy); break;"];
+    const compensating = Object.entries(SITES)
       .reduce((n, [, body]) => n + (body.match(/panScreen\(/g) ?? []).length, 0);
-    // `panScreen` also reaches the keyboard pan and the minimap, which move the camera on
-    // purpose and correct nothing — hence a floor rather than an equality.
-    expect({ compensations: accounted, strayCompensations: total - accounted <= 2 })
-      .toEqual({ compensations: 3, strayCompensations: true });
+    const everywhere = (MODE.match(/[^.\w]panScreen\([^)]*\)/g) ?? []).map((m) => m.trim());
+    const unaccounted = everywhere.filter((call) =>
+      !Object.values(SITES).some((body) => body.includes(call))
+      && !DELIBERATE.some((allowed) => allowed.includes(call)));
+    expect({ compensating, unaccounted }).toEqual({ compensating: 3, unaccounted: [] });
 
     expect(VIEWPORT).toContain('const cancel = useCallback(() => {');
-    expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel, active }), [flyTo, cancel, active]);');
+    expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel, requests }), [flyTo, cancel]);');
   });
 
   /**
@@ -178,14 +183,21 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // scheduled — but the drag-exit effect has already paid that same raw-to-display transition,
     // and both firing pays it twice, throwing the dropped node hundreds of pixels off.
     expect(effect).toContain('if (drag.dragActive || was.dragging) return;');
-    expect(MODE).toContain('paintedRef.current = { model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive };');
+    expect(MODE).toContain('model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, flights: flyTo.requests.current,');
     // Same-zoom only: `was` was swept at the old zoom, so across a zoom the difference is not
     // the transform's alone — and the zoom already anchored itself.
     expect(effect).toContain('if (was.z !== vpRef.current.z) return;');
+    // Ownership is decided by comparing the flight COUNT against the last painted frame's, and
+    // that exact comparison is the finding: "is a flight airborne" is true of a stale flight
+    // aimed at geometry no longer drawn (whose compensation is then lost with no retry) and
+    // false for a fresh navigation under reduced motion (which arrives with no frame requested).
+    // Both are backwards, so the weaker predicate has to be excluded by name, not just by shape.
+    expect(effect).toContain('if (flyTo.requests.current !== was.flights) return;');
+    expect(effect).not.toMatch(/flyTo\.active\(\)|raf\.current !== null/);
     // The recorder must be declared AFTER the comparer, or it overwrites the previous transform
     // before the comparer ever sees it and every compensation silently becomes a no-op.
     expect(MODE.indexOf('const was = paintedRef.current;'))
-      .toBeLessThan(MODE.indexOf('paintedRef.current = { model: spacingModel, spacing, z: vp.z, dragging'));
+      .toBeLessThan(MODE.indexOf('paintedRef.current = {'));
   });
 
   it('uses raw geometry only for a real slop-crossed drag and compensates both transitions', () => {
@@ -306,8 +318,9 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
         callsZoomAt: /\bzoomAt\s*\(/.test(src),
         importsZoomAt: /\bimport\s*\{[^}]*\bzoomAt\b[^}]*\}\s*from/.test(src),
         // `import * as geometry` and then `const { zoomAt: rawZoom } = geometry` reaches the same
-        // function with neither of the spellings above appearing anywhere in the file.
-        namespacesGeometry: /\bimport\s+\*\s+as\s+\w+\s+from\s+'\.\/canvasGeometry'/.test(src),
+        // function with neither of the spellings above appearing anywhere in the file. Either
+        // quote style, and any relative depth — a nested file reaches it as `../canvasGeometry`.
+        namespacesGeometry: /\bimport\s+\*\s+as\s+\w+\s+from\s+['"][./]*canvasGeometry['"]/.test(src),
       }).toEqual({
         file: path.relative(dir, file),
         callsZoomAt: false,

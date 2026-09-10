@@ -413,7 +413,7 @@ export const CanvasMode: React.FC = () => {
     [paintedNodes, shownGroups],
   );
   const paintedRef = useRef<
-    { model: typeof spacingModel; spacing: SpacingResult; z: number; dragging: boolean } | null
+    { model: typeof spacingModel; spacing: SpacingResult; z: number; dragging: boolean; flights: number } | null
   >(null);
   useLayoutEffect(() => {
     const was = paintedRef.current;
@@ -427,14 +427,24 @@ export const CanvasMode: React.FC = () => {
     // A zoom in the same commit already anchored itself, and `was` was swept at the old zoom, so
     // the difference here would not be the transform's alone.
     if (was.z !== vpRef.current.z) return;
-    // A flight already OWNS the camera, and it is aimed at a destination computed from the state
-    // that asked for it — `flyToNode` unhides a terminal and flies to where it will be drawn
-    // AFTER the unhide, in one gesture. Cancelling that (or panning under it) silently drops a
-    // navigation the user requested, which happens even with the transform switched off.
-    if (flyTo.active()) return;
+    // A navigation requested SINCE the last painted frame already placed the camera for this
+    // change: `flyToNode` unhides a terminal and flies to where it will be drawn afterwards, in
+    // one action. Paying an offset on top of that moves the camera a second time.
+    //
+    // The count, not "is a flight airborne". That question is equally true of a flight requested
+    // long before this change and aimed at geometry that is no longer painted — deferring to one
+    // of those loses the compensation permanently, since nothing schedules a retry. It is also
+    // false for a fresh navigation under reduced motion, which arrives synchronously and never
+    // requests a frame at all. Both cases are exactly backwards from what a RAF flag reports.
+    if (flyTo.requests.current !== was.flights) return;
     const centre = screenToWorld(vpRef.current, size.w / 2, size.h / 2);
     const pan = spacingAnchorPan(was, { model: spacingModel, spacing }, centre, vpRef.current.z);
-    if (pan.dx !== 0 || pan.dy !== 0) panScreen(pan.dx, pan.dy);
+    if (pan.dx === 0 && pan.dy === 0) return;
+    // Reaching here means nothing placed the camera for this transform, so any flight still in
+    // the air was computed against the OLD one and would overwrite this pan with cameras for
+    // geometry that is no longer drawn.
+    flyTo.cancel();
+    panScreen(pan.dx, pan.dy);
     // Deliberately keyed on what can replace the transform, and NOT on `vp` or `spacing`: those
     // change on every pan and every zoom, which have their own anchoring and must not re-pan.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -444,7 +454,9 @@ export const CanvasMode: React.FC = () => {
   // it on purpose: React runs layout effects in declaration order, so this still holds the
   // PREVIOUS commit's transform while that one is deciding what changed.
   useLayoutEffect(() => {
-    paintedRef.current = { model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive };
+    paintedRef.current = {
+      model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, flights: flyTo.requests.current,
+    };
   });
 
   /**

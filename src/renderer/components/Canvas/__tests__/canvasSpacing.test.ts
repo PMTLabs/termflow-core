@@ -1010,15 +1010,46 @@ describe('zoom anchoring', () => {
       expect(back.dx).toBeCloseTo(-pan.dx, 6);
     });
 
+    it('pays the VERTICAL offset too, not only the horizontal one', () => {
+      // Three frames stacked instead of in a row. Without this the whole helper could return a
+      // correct dx and a flat zero dy — every other fixture here displaces along x alone.
+      const stacked = [0, 1, 2].map((i) => singleNodeGroup(`v${i}`, 0, i * (FRAME_H + GROUP_GAP)));
+      const tall: CanvasModel = { nodes: stacked.map((b) => b.node), groups: stacked.map((b) => b.group) };
+      const lowest = stacked[2].node.terminalId;
+      const spacedTall = applySpacing(tall, z, true);
+      const r = spacedTall.nodeRects[lowest];
+      // Resolved against the BEFORE frame, so the point has to be where that terminal is in the
+      // untransformed layout — its spaced position sits hundreds of units away, on something else.
+      const raw = stacked[2].node.rect;
+      const pan = spacingAnchorPan(
+        { model: tall, spacing: applySpacing(tall, z, false) },
+        { model: tall, spacing: spacedTall },
+        { x: raw.x + raw.w / 2, y: raw.y + raw.h / 2 },
+        z,
+      );
+      expect(pan.dy).toBeCloseTo((r.y - raw.y) * z, 6);
+      expect(pan.dy).not.toBeCloseTo(0, 1);
+    });
+
     it('is zero for a refit that leaves the offsets alone — that motion is not this feature', () => {
-      // The same nodes, but every stored group rect moved: with the transform off both sides,
-      // the offsets are zero and nothing here is owed, however far the frames travelled.
+      // The anchor has to be a GROUP whose own stored rect moves, or the test never exercises the
+      // distinction it is named for: an implementation differencing DRAWN rects instead of
+      // offsets gives the same answer as the right one whenever the anchor's raw rect is fixed,
+      // which is true of every node here.
+      const gap = { x: model.groups[0].rect.x + 4, y: model.groups[0].rect.y + 4 };
+      const anchor = spacingAnchorAt(model, off.spacing, gap.x, gap.y, z);
+      expect(anchor).toEqual({ kind: 'group', id: model.groups[0].tabId });
+
       const shifted: CanvasModel = {
         nodes: model.nodes,
-        groups: model.groups.map((g) => ({ ...g, rect: { ...g.rect, y: g.rect.y + 500 } })),
+        groups: model.groups.map((g) => ({ ...g, rect: { ...g.rect, x: g.rect.x - 300, y: g.rect.y + 500 } })),
       };
-      const pan = spacingAnchorPan(off, { model: shifted, spacing: applySpacing(shifted, z, false) }, centre, z);
-      expect(pan).toEqual({ dx: 0, dy: 0 });
+      const after = { model: shifted, spacing: applySpacing(shifted, z, false) };
+      // The drawn rect really did move, by a lot — so a drawn-rect difference would not be zero.
+      expect(after.spacing.groupRects[model.groups[0].tabId].y - off.spacing.groupRects[model.groups[0].tabId].y)
+        .toBe(500);
+      // The OFFSET did not, so nothing is owed: frames moving is not Dynamic Spacing's doing.
+      expect(spacingAnchorPan(off, after, gap, z)).toEqual({ dx: 0, dy: 0 });
     });
 
     it('holds the camera still when the anchor itself has gone', () => {
