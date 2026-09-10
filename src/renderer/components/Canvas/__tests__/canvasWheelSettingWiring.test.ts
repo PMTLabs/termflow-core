@@ -78,7 +78,11 @@ describe('the modes the rule accepts', () => {
     expect(VIEWPORT).toMatch(/if \(action === 'pan'\) \{/);
     expect(VIEWPORT).toContain('dispatch(panViewport({ dx, dy }))');
     const afterPan = VIEWPORT.slice(VIEWPORT.indexOf("if (action === 'pan')"));
-    expect(afterPan).toMatch(/dispatch\(setViewport\(\s*\n?\s*zoomAt\(/);
+    expect(afterPan).toMatch(/dispatch\(setViewport\(\s*\n?\s*zoomRef\.current\(/);
+    // `zoomRef` is only a zoom because it holds the INJECTED prop. Pinning the call alone would
+    // pass against a ref pointing at anything, including a stale local copy of plain `zoomAt`.
+    expect(VIEWPORT).toContain('const zoomRef = useRef(zoomAtAnchor);');
+    expect(VIEWPORT).toContain('zoomRef.current = zoomAtAnchor;');
   });
 });
 

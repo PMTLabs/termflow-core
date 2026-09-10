@@ -22,7 +22,7 @@ import { snapshotCache } from './snapshotCache';
 import {
   Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale, isFullyVisible,
   aimedNodeRect,
-  paintedNodeRect, zoomAt, NODE_W, NODE_H, HEAD_H, Z_MIN,
+  paintedNodeRect, screenToWorld, Viewport, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
@@ -39,7 +39,9 @@ import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
-import { applySpacing, spacingOffsets } from './canvasSpacing';
+import {
+  anchoredCamera, applySpacing, spacingAnchorPan, spacingOffsets, SpacingResult, zoomAnchoredAt,
+} from './canvasSpacing';
 import { spacingTransitionPan } from './canvasDragCompensation';
 import { fitGroupFrame } from './canvasLayout';
 import { ShellProfileLike } from '../../services/newTabActions';
@@ -174,10 +176,16 @@ export const CanvasMode: React.FC = () => {
   const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
   const flyTo = useFlyTo();
 
-  /** A screen-pixel pan, used by keys, the minimap, and the two real-drag transitions below. */
+  /** A screen-pixel pan, used by keys, the minimap, and every compensation transition below. */
   const panScreen = useCallback((dx: number, dy: number) => {
     dispatch(panViewport({ dx, dy }));
   }, [dispatch]);
+
+  // The live camera, for the transition effect below — which must react to the transform being
+  // replaced, and must NOT re-run when the camera itself moves. Listing `vp` in its deps would
+  // do exactly that, so it reads the current value through a ref instead.
+  const vpRef = useRef(vp);
+  vpRef.current = vp;
 
   /**
    * Dynamic Spacing (plan/039) — the toolbar toggle that tightens node/group spacing above
@@ -212,9 +220,16 @@ export const CanvasMode: React.FC = () => {
     draggedTargetRef.current = target;
   }, [flyTo, panScreen]);
   const drag = useCanvasDrag(presentationModel, beginRealDrag);
+  /**
+   * Is the transform actually being PAINTED right now? A real drag renders raw for the whole
+   * gesture, so the setting alone is not the answer — and everything that has to agree with what
+   * is on screen (the render, the zoom anchor, the transition compensation) reads this one
+   * expression instead of re-deriving it and risking a different answer.
+   */
+  const spacingRendered = dynamicSpacing && !drag.dragActive;
   const spacing = useMemo(
-    () => (drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing),
-    [drag.dragActive, spacingModel, vp.z, liveSpacing],
+    () => applySpacing(spacingModel, vp.z, spacingRendered),
+    [spacingModel, vp.z, spacingRendered],
   );
   const wasDraggingRef = useRef(drag.dragActive);
   useLayoutEffect(() => {
@@ -355,6 +370,103 @@ export const CanvasMode: React.FC = () => {
     typeof window === 'undefined' ? 1920 : window.innerWidth,
     typeof window === 'undefined' ? 1040 : window.innerHeight,
   ));
+  /**
+   * The canvas's ONE point-anchored zoom. Every gesture that zooms about a POINT goes through
+   * it — the wheel (handed it as a prop, since `CanvasViewport` owns the gesture but not where
+   * the world is drawn), the toolbar buttons and the keyboard steps.
+   *
+   * It exists because the camera has to be corrected whenever the spacing FIELD moves under it.
+   * Four things move it, and all four are handled: a zoom (here), a drag (which swaps the
+   * transform out for the whole gesture, `spacingTransitionPan`), the toolbar toggle, and a
+   * change in which nodes PARTICIPATE — the last two by `spacingTransition` below. A change to a
+   * STORED rect is deliberately not one of them: content genuinely moved, and every fly-to
+   * already aims in display space via `targetRectAt`.
+   *
+   * Cancelling first is part of the gesture, not tidying up. An outstanding flight writes an
+   * absolute viewport on its next frame, which would throw away this zoom and its anchoring
+   * together — the same defect arriving by a different route.
+   */
+  const zoomAtAnchor = useCallback(
+    (v: Viewport, factor: number, cx: number, cy: number) => {
+      flyTo.cancel();
+      return zoomAnchoredAt(v, factor, cx, cy, metrics.zMax, spacingModel, spacingRendered);
+    },
+    [flyTo, metrics, spacingModel, spacingRendered],
+  );
+
+  /**
+   * Everything OTHER than a zoom that replaces the transform under a camera that has not moved:
+   * the toolbar toggle, and a change in which nodes participate — hide, unhide, reveal-hidden.
+   * A frame is shrink-wrapped around its SHOWN members, so hiding one terminal re-sweeps the
+   * whole canvas without a single stored rect changing. Uncompensated, the view jumps by the
+   * full offset difference, which at the top of the zoom range is most of a screen width.
+   *
+   * It compensates the OFFSET difference rather than the difference in drawn rects, so it pays
+   * for what Dynamic Spacing did and not for the refit — a frame closing around fewer members is
+   * hiding's own motion, and it happens with the toggle off too.
+   *
+   * Anchored on the viewport centre, the only anchor a toolbar button has, exactly like
+   * `zoomStep`. A layout effect, so the pan lands in the same paint as the new transform.
+   */
+  const membershipKey = useMemo(
+    () => `${paintedNodes.map((n) => n.terminalId).join(',')}|${shownGroups.map((g) => g.tabId).join(',')}`,
+    [paintedNodes, shownGroups],
+  );
+  const paintedRef = useRef<
+    { model: typeof spacingModel; spacing: SpacingResult; z: number; dragging: boolean; flights: number; rendered: boolean } | null
+  >(null);
+  useLayoutEffect(() => {
+    const was = paintedRef.current;
+    if (!was || !size.w || !size.h) return;
+    // EITHER SIDE of a drag boundary belongs to the drag, not here. During one, both sides are
+    // raw and nothing moved; on the drop commit `spacingRendered` flips back to true and this
+    // effect is scheduled — but the drag-exit effect above has already paid that exact raw-to-
+    // display transition for the grabbed node. Both firing pays it twice and throws the dropped
+    // node hundreds of pixels off. One transition, one owner.
+    if (drag.dragActive || was.dragging) return;
+    // A zoom in the same commit already anchored itself, and `was` was swept at the old zoom, so
+    // the difference here would not be the transform's alone.
+    if (was.z !== vpRef.current.z) return;
+    // A navigation requested SINCE the last painted frame already placed the camera for this
+    // change: `flyToNode` unhides a terminal and flies to where it will be drawn afterwards, in
+    // one action. Paying an offset on top of that moves the camera a second time.
+    //
+    // The count, not "is a flight airborne". That question is equally true of a flight requested
+    // long before this change and aimed at geometry that is no longer painted — deferring to one
+    // of those loses the compensation permanently, since nothing schedules a retry. It is also
+    // false for a fresh navigation under reduced motion, which arrives synchronously and never
+    // requests a frame at all. Both cases are exactly backwards from what a RAF flag reports.
+    // The transform was the identity on BOTH sides — spacing off throughout — so nothing was
+    // replaced and there is nothing to invalidate. A frame refitting around a hidden terminal is
+    // not this feature's doing, and cancelling a flight over it would be a regression for users
+    // who never turned Dynamic Spacing on.
+    if (!was.rendered && !spacingRendered) return;
+    if (flyTo.requests.current !== was.flights) return;
+    // Reaching here means nothing placed the camera for this transform, so any flight still in
+    // the air was computed against the OLD one — its destination is somewhere nothing is drawn
+    // any more. Invalidating it comes BEFORE, and is independent of, whether the centre owes a
+    // pan: an empty viewport centre owes nothing and says nothing about whether a flight aimed
+    // elsewhere is still valid. Cancelling only when a pan happened to be due left exactly that
+    // flight to land ~444px off on the fixture layout, with nothing scheduled to notice.
+    flyTo.cancel();
+    const centre = screenToWorld(vpRef.current, size.w / 2, size.h / 2);
+    const pan = spacingAnchorPan(was, { model: spacingModel, spacing }, centre, vpRef.current.z);
+    if (pan.dx !== 0 || pan.dy !== 0) panScreen(pan.dx, pan.dy);
+    // Deliberately keyed on what can replace the transform, and NOT on `vp` or `spacing`: those
+    // change on every pan and every zoom, which have their own anchoring and must not re-pan.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [membershipKey, spacingRendered]);
+
+  // Records what was actually painted, for the effect above to compare against. Declared AFTER
+  // it on purpose: React runs layout effects in declaration order, so this still holds the
+  // PREVIOUS commit's transform while that one is deciding what changed.
+  useLayoutEffect(() => {
+    paintedRef.current = {
+      model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, rendered: spacingRendered,
+      flights: flyTo.requests.current,
+    };
+  });
+
   /**
    * Is this canvas still on screen?
    *
@@ -731,8 +843,15 @@ export const CanvasMode: React.FC = () => {
   /** One press of a zoom button, about the middle of the viewport — the point the user is
    *  looking at, and the only anchor a button has (the wheel has the cursor). */
   const zoomStep = useCallback((factor: number) => {
-    flyTo(zoomAt(vp, factor, size.w / 2, size.h / 2, metrics.zMax));
-  }, [flyTo, vp, size, metrics]);
+    // The flight is handed the whole camera PATH, not just its endpoint. Correcting only the
+    // destination leaves every frame in between wrong, because the spacing offset is not affine
+    // in `z` — a reset from the top of the range would swing ~150px off the anchor and back.
+    flyTo(
+      zoomAtAnchor(vp, factor, size.w / 2, size.h / 2),
+      undefined,
+      anchoredCamera(vp, size.w / 2, size.h / 2, spacingModel, spacingRendered),
+    );
+  }, [flyTo, vp, size, zoomAtAnchor, spacingModel, spacingRendered]);
 
   /**
    * Ctrl/Cmd + `+`/`−`/`0` — the same three steps as the buttons, so a user who learns one
@@ -1143,6 +1262,7 @@ export const CanvasMode: React.FC = () => {
       {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} onFlyToNode={flyToNode} />}
       <CanvasViewport
         onSize={onSize}
+        zoomAtAnchor={zoomAtAnchor}
         onBackgroundPointerDown={clearSelection}
         // Item 3. The world point is resolved HERE rather than inside the viewport because the
         // conversion needs the current `vp`, and `e.currentTarget` is `.canvas-viewport` itself

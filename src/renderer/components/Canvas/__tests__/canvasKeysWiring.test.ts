@@ -615,7 +615,10 @@ describe('the viewport toolbar', () => {
    *  has the cursor. Zooming about the world origin instead would throw the workspace off screen
    *  at any pan. */
   it('zooms about the middle of the viewport', () => {
-    expect(MODE).toContain('zoomAt(vp, factor, size.w / 2, size.h / 2, metrics.zMax)');
+    expect(MODE).toContain('zoomAtAnchor(vp, factor, size.w / 2, size.h / 2)');
+    // The ceiling did not vanish with the argument — it moved inside the one zoom every gesture
+    // now shares, which is also what keeps a button press anchored the way the wheel is.
+    expect(MODE).toContain('zoomAnchoredAt(v, factor, cx, cy, metrics.zMax, spacingModel, spacingRendered)');
   });
 });
 

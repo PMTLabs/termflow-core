@@ -1,4 +1,4 @@
-import { paintedNodeRect, Rect } from './canvasGeometry';
+import { paintedNodeRect, Rect, screenToWorld, Viewport, zoomAt } from './canvasGeometry';
 import { drawnFrameRect } from './canvasLayout';
 import { CanvasModel } from './canvasSelectors';
 
@@ -389,4 +389,183 @@ export function spacingOffsets(model: CanvasModel, spacing: SpacingResult): Spac
     groups[g.tabId] = s ? { dx: s.x - g.rect.x, dy: s.y - g.rect.y } : { dx: 0, dy: 0 };
   }
   return { nodes, groups };
+}
+
+
+/** What the camera should hold still: the topmost thing PAINTED under a world point. */
+export interface SpacingAnchor {
+  kind: 'node' | 'group';
+  id: string;
+}
+
+/** One side of a transform change: the rects a model was drawn with. */
+export interface SpacingFrame {
+  model: CanvasModel;
+  spacing: SpacingResult;
+}
+
+const covers = (r: Rect | undefined, wx: number, wy: number): boolean =>
+  !!r && wx >= r.x && wx <= r.x + r.w && wy >= r.y && wy <= r.y + r.h;
+
+/**
+ * The topmost node — else frame — drawn over `wx, wy`, or null for empty canvas.
+ *
+ * **Painted bodies before layout slack, and that order is load-bearing.** A node paints
+ * `paintedNodeRect`, which is shorter than its layout rect by a head slack that GROWS with zoom.
+ * Asking layout rects alone lets a node's invisible slack out-rank a different node's visible
+ * body wherever the two are close: the later node in reading order wins a point it paints
+ * nothing on, and the camera then holds the wrong terminal's offset. Two siblings tightened by
+ * step 2 have DIFFERENT offsets, so that is not a rounding difference — it is ~19 screen px of
+ * drift per zoom step in the case that found it.
+ *
+ * Layout rects are still consulted, second: the slack band is the right thing to resolve to the
+ * terminal it belongs to rather than falling through to its frame. A point on neither resolves
+ * to the frame — which is what the padding around a node inside its frame does — and a point on
+ * no frame is null, because empty canvas has nothing that must stay still.
+ */
+export function spacingAnchorAt(
+  model: CanvasModel,
+  spacing: SpacingResult,
+  wx: number,
+  wy: number,
+  z: number,
+): SpacingAnchor | null {
+  for (let i = model.nodes.length - 1; i >= 0; i--) {
+    const r = spacing.nodeRects[model.nodes[i].terminalId];
+    if (r && covers(paintedNodeRect(r, z, false), wx, wy)) {
+      return { kind: 'node', id: model.nodes[i].terminalId };
+    }
+  }
+  for (let i = model.nodes.length - 1; i >= 0; i--) {
+    if (covers(spacing.nodeRects[model.nodes[i].terminalId], wx, wy)) {
+      return { kind: 'node', id: model.nodes[i].terminalId };
+    }
+  }
+  for (let i = model.groups.length - 1; i >= 0; i--) {
+    if (covers(spacing.groupRects[model.groups[i].tabId], wx, wy)) {
+      return { kind: 'group', id: model.groups[i].tabId };
+    }
+  }
+  return null;
+}
+
+/** What Dynamic Spacing is displacing `anchor` by, in world units — its stored rect subtracted
+ *  from the rect it is drawn on. Undefined once the anchor has left the model. */
+function anchorOffset(
+  frame: SpacingFrame,
+  anchor: SpacingAnchor,
+): { dx: number; dy: number } | undefined {
+  if (anchor.kind === 'node') {
+    const n = frame.model.nodes.find((node) => node.terminalId === anchor.id);
+    const r = frame.spacing.nodeRects[anchor.id];
+    return n && r ? { dx: r.x - n.rect.x, dy: r.y - n.rect.y } : undefined;
+  }
+  const g = frame.model.groups.find((group) => group.tabId === anchor.id);
+  const r = frame.spacing.groupRects[anchor.id];
+  return g && r ? { dx: r.x - g.rect.x, dy: r.y - g.rect.y } : undefined;
+}
+
+/**
+ * The screen-pixel pan that keeps whatever was drawn at world point `p` in `before` sitting
+ * where it was, once `after` is painted in its place at zoom `z`.
+ *
+ * **The OFFSET changes, not the drawn rect.** The two differ the moment the frames themselves
+ * are refitted — hiding a terminal shrink-wraps its group around the members that are left, and
+ * that motion belongs to hiding, not to this feature. Differencing offsets compensates only what
+ * Dynamic Spacing is responsible for and leaves the rest of the canvas behaving exactly as it
+ * does with the toggle off. Where the model is the same on both sides — a zoom — the stored rect
+ * cancels and the two formulations coincide.
+ */
+export function spacingAnchorPan(
+  before: SpacingFrame,
+  after: SpacingFrame,
+  p: { x: number; y: number },
+  z: number,
+): { dx: number; dy: number } {
+  const anchor = spacingAnchorAt(before.model, before.spacing, p.x, p.y, z);
+  if (!anchor) return { dx: 0, dy: 0 };
+  const o0 = anchorOffset(before, anchor);
+  const o1 = anchorOffset(after, anchor);
+  // An anchor that has left the model — its terminal was just hidden — has no "where it was" to
+  // hold on to. Nothing on screen is that thing any more, so the camera stays put.
+  if (!o0 || !o1) return { dx: 0, dy: 0 };
+  return { dx: (o1.dx - o0.dx) * z, dy: (o1.dy - o0.dy) * z };
+}
+
+/**
+ * The camera positions, across the zoom range, that hold whatever is drawn under `cx, cy`
+ * exactly there.
+ *
+ * **Why a path and not just a destination.** `offset(z)` is not affine in `z` — `targetGap` is
+ * reciprocal in it and the sweep's relationships change at thresholds — so interpolating between
+ * two CORRECT cameras does not give a correct one in between. A zoom that fixes only its
+ * endpoint is still wrong at every frame of its animation: a 300ms flight from the top of the
+ * range back to 1:1 swings ~150px off the anchor and returns. An animation samples this instead,
+ * so the anchor is exact on every frame it paints.
+ *
+ * The anchor is resolved ONCE, against what the user was looking at when the gesture began.
+ * Re-resolving per frame would let the held thing change identity mid-flight.
+ */
+export function anchoredCamera(
+  vp: Viewport,
+  cx: number,
+  cy: number,
+  model: CanvasModel,
+  enabled: boolean,
+): (z: number) => Viewport {
+  // Spelled with `zoomAt`'s own expression rather than an algebraically equal one, so the
+  // uncorrected path is bit-identical to plain `zoomAt` instead of merely close to it. The
+  // anchored path below is then visibly "that camera, minus the correction".
+  const raw = (z: number): Viewport => {
+    const k = z / vp.z;
+    return { z, x: cx - (cx - vp.x) * k, y: cy - (cy - vp.y) * k };
+  };
+  if (!enabled) return raw;
+
+  // The display-space point under the anchor: what the user is actually looking at.
+  const p = screenToWorld(vp, cx, cy);
+  const spacing = applySpacing(model, vp.z, true);
+  const anchor = spacingAnchorAt(model, spacing, p.x, p.y, vp.z);
+  const base = anchor && anchorOffset({ model, spacing }, anchor);
+  // Empty canvas holds nothing still, and neither does a canvas the transform is not moving.
+  if (!anchor || !base) return raw;
+
+  return (z: number) => {
+    const at = anchorOffset({ model, spacing: applySpacing(model, z, true) }, anchor) ?? base;
+    const from = raw(z);
+    return { z, x: from.x - (at.dx - base.dx) * z, y: from.y - (at.dy - base.dy) * z };
+  };
+}
+
+/**
+ * `zoomAt`, corrected so the thing the user is pointing at holds still — one sample of
+ * `anchoredCamera`, so a stepped zoom and an animated one cannot disagree about where to land.
+ *
+ * **Why plain `zoomAt` is wrong under this feature, and only under it.** `zoomAt` pins the RAW
+ * world point under the anchor. That is exactly right while the world is drawn at its stored
+ * coordinates — and Dynamic Spacing draws it at `raw + offset(z)` instead, with an offset that
+ * moves on every zoom step. The camera then holds a point that nothing is painted on any more,
+ * and the terminal the user aimed at slides away from the cursor. Measured on three single-node
+ * groups in a row, starting at z=1 and centred on the third: ~227 screen px of uncompensated
+ * drift by z=3 and ~444px by z=4.75, and it accumulates with every group further out. The felt
+ * symptom is not a misplaced node, it is a canvas that refuses to zoom in — you chase the
+ * terminal instead of reaching it.
+ *
+ * Every zoom ANCHORED ON A POINT comes through here, which is what `canvasSpacingWiring` pins.
+ * Flights to a destination (`fitAll`, `fitGroup`, a beacon, a chip) deliberately do not: they
+ * are asking the camera to go somewhere else, and they already aim at display-space targets.
+ */
+export function zoomAnchoredAt(
+  vp: Viewport,
+  factor: number,
+  cx: number,
+  cy: number,
+  zMax: number,
+  model: CanvasModel,
+  enabled: boolean,
+): Viewport {
+  const next = zoomAt(vp, factor, cx, cy, zMax);
+  // Nothing to correct when the ceiling or the floor swallowed the step: same z, same transform.
+  if (next.z === vp.z) return next;
+  return anchoredCamera(vp, cx, cy, model, enabled)(next.z);
 }

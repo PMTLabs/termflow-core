@@ -1,8 +1,11 @@
-import { NODE_H, NODE_W, paintedNodeRect, Rect } from '../canvasGeometry';
+import { NODE_H, NODE_W, paintedNodeRect, Rect, worldToScreen, Z_MIN, zoomAt } from '../canvasGeometry';
 import { drawnFrameRect, fitGroupFrame, GAP_X, GROUP_GAP, PAD, PAD_SCREEN_MAX, PAD_TOP } from '../canvasLayout';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
 import {
-  applySpacing, MIN_GAP_SCREEN_PX, spacingFactor, spacingOffsets, SPACING_Z_BASE,
+  anchoredCamera, applySpacing, MIN_GAP_SCREEN_PX, spacingAnchorAt, spacingAnchorPan, spacingFactor,
+  spacingOffsets,
+  SPACING_Z_BASE,
+  zoomAnchoredAt,
 } from '../canvasSpacing';
 
 const node = (id: string, tabId: string, rect: Rect): CanvasNodeModel => ({
@@ -570,6 +573,9 @@ describe('applySpacing', () => {
   describe('randomized spacing properties', () => {
     const PROPERTY_CASES = 256;
     const PROPERTY_SEED = 0x5EED_A5;
+    /** The widest ceiling `canvasMetrics` can hand out (see its own note) — the top of the range
+     *  a user can actually reach, so the top of the range these properties sample. */
+    const PROPERTY_Z_MAX = 6.35;
     // Two non-overlapping deterministic stretches give a broad sample without making the
     // focused suite slow; together they cover 512 generated models.
     const PROPERTY_BATCH_STARTS = [0, 4000];
@@ -685,7 +691,7 @@ describe('applySpacing', () => {
         for (let caseIndex = 0; caseIndex < PROPERTY_CASES; caseIndex++) {
           const seed = Math.floor(seeds() * 0x100000000) >>> 0;
         const zoomRandom = mulberry32(seed ^ 0xA5A5_A5A5);
-        const z = SPACING_Z_BASE + zoomRandom() * (6.35 - SPACING_Z_BASE);
+        const z = SPACING_Z_BASE + zoomRandom() * (PROPERTY_Z_MAX - SPACING_Z_BASE);
         const model = generatedModel(seed);
         // Snapshot the stored geometry BEFORE any call, by value. Every "unchanged" assertion
         // below otherwise compares the result against the very object the transform was handed,
@@ -764,6 +770,356 @@ describe('applySpacing', () => {
         }
       }
       expect(livenessEligible).toBeGreaterThan(256);
+    });
+
+    /**
+     * Every property above holds at ONE zoom, and a moving transform is only visible between
+     * two. That blind spot is where the shipped feature was actually broken: the camera
+     * anchored a RAW world point while the content over it was drawn at `raw + offset(z)`, so
+     * each wheel step slid the target out from under the cursor — cumulatively by most of a
+     * screen width by the top of the zoom range, which reads to a user as "the canvas will not
+     * zoom in any further". No fixed-z oracle can see it, however many properties it asserts.
+     */
+    it('holds the content under the zoom anchor still across a zoom step', () => {
+      const ANCHOR_X = 640, ANCHOR_Y = 360;
+      let eligible = 0;
+      const seeds = mulberry32(PROPERTY_SEED ^ 0x2C0F_FEE);
+      for (let caseIndex = 0; caseIndex < PROPERTY_CASES; caseIndex++) {
+        const seed = Math.floor(seeds() * 0x100000000) >>> 0;
+        const random = mulberry32(seed ^ 0x51DE_51DE);
+        const model = generatedModel(seed);
+        // Kept off both stops so the step usually lands somewhere real: a case clamped at the
+        // ceiling asserts only that a no-op is anchored, which is true but says nothing.
+        const z0 = SPACING_Z_BASE + random() * (PROPERTY_Z_MAX * 0.7 - SPACING_Z_BASE);
+        // Both directions: zooming out has exactly the same anchoring obligation as zooming in.
+        const factor = 0.6 + random() * 1.2;
+
+        const before = applySpacing(model, z0, true);
+        // Aim at a node the transform actually displaces where one exists. Every node is a legal
+        // anchor and any of them may be selected, but the sweep's own anchor node never
+        // moves, so picking uniformly spends half the corpus on cases that would pass against a
+        // `zoomAnchoredAt` that did nothing at all.
+        const movable = model.nodes.filter((n) => {
+          const r = before.nodeRects[n.terminalId];
+          return r.x !== n.rect.x || r.y !== n.rect.y;
+        });
+        const pool = movable.length > 0 ? movable : model.nodes;
+        const target = pool[Math.floor(random() * pool.length)];
+        const rect0 = before.nodeRects[target.terminalId];
+        // A random point on the terminal's PAINTED body, never its centre. Holding the centre is
+        // a strictly weaker property: an implementation that resolves the right node and then
+        // snaps that node's centre under the cursor satisfies a centre-only oracle completely,
+        // while jerking every off-centre click to the middle of the terminal.
+        const painted0 = paintedNodeRect(rect0, z0, false);
+        const anchorWorld = {
+          x: painted0.x + (0.1 + random() * 0.8) * painted0.w,
+          y: painted0.y + (0.1 + random() * 0.8) * painted0.h,
+        };
+        const vp0 = {
+          z: z0,
+          x: ANCHOR_X - anchorWorld.x * z0,
+          y: ANCHOR_Y - anchorWorld.y * z0,
+        };
+
+        const vp1 = zoomAnchoredAt(vp0, factor, ANCHOR_X, ANCHOR_Y, PROPERTY_Z_MAX, model, true);
+        // The zoom itself is asserted independently, not read back from the subject — otherwise
+        // an implementation free to choose its own zoom could satisfy the anchoring trivially.
+        const expectedZ = Math.max(Z_MIN, Math.min(PROPERTY_Z_MAX, z0 * factor));
+        if (vp1.z !== expectedZ) propertyFailure(seed, z0, model, `zoom landed at ${vp1.z}, expected ${expectedZ}`);
+        const after = applySpacing(model, vp1.z, true);
+        const rect1 = after.nodeRects[target.terminalId];
+        // The held point travels with its terminal, so it is the anchor plus that terminal's own
+        // displacement — not the node's centre, and not the raw world point either.
+        const screen = worldToScreen(
+          vp1,
+          anchorWorld.x + (rect1.x - rect0.x),
+          anchorWorld.y + (rect1.y - rect0.y),
+        );
+
+        // Non-vacuity: the zoom actually moved AND the transform actually moved this node.
+        if (vp1.z !== z0 && (rect1.x !== rect0.x || rect1.y !== rect0.y)) eligible++;
+
+        const drift = Math.max(Math.abs(screen.x - ANCHOR_X), Math.abs(screen.y - ANCHOR_Y));
+        if (drift > 1e-6) {
+          propertyFailure(
+            seed, z0, model,
+            `anchored content drifted ${drift.toFixed(2)}px (z ${z0} -> ${vp1.z}, node ${target.terminalId})`,
+          );
+        }
+      }
+      expect(eligible).toBeGreaterThan(PROPERTY_CASES / 2);
+    });
+  });
+});
+
+/**
+ * The camera has to be corrected every time the spacing FIELD changes underneath it, and zoom is
+ * one of the four things that change it. The others are a drag (which swaps the whole transform
+ * out for the gesture, `spacingTransitionPan`), the toolbar toggle, and a change in which nodes
+ * PARTICIPATE — hiding a terminal re-shrink-wraps its frame and re-sweeps the canvas without a
+ * single stored rect moving. A change to a STORED rect is deliberately not on that list: content
+ * genuinely moved, and the fly-to targets already aim in display space (`targetRectAt`).
+ */
+describe('zoom anchoring', () => {
+  const PROPERTY_Z_MAX_LOCAL = 6.35;
+  // Three shrink-wrapped frames in a row, the layout `arrange()` actually produces.
+  const built = [0, 1, 2].map((i) => singleNodeGroup(`t${i}`, i * (FRAME_W + GROUP_GAP), 0));
+  const model: CanvasModel = {
+    nodes: built.map((b) => b.node),
+    groups: built.map((b) => b.group),
+  };
+  const FAR = built[2].node.terminalId;
+
+  /** The camera that puts `rect`'s centre under (cx, cy) at zoom `z`. */
+  const cameraOn = (rect: Rect, z: number, cx: number, cy: number) => ({
+    z, x: cx - (rect.x + rect.w / 2) * z, y: cy - (rect.y + rect.h / 2) * z,
+  });
+
+  const screenCentreOf = (vp: { x: number; y: number; z: number }, rect: Rect) =>
+    worldToScreen(vp, rect.x + rect.w / 2, rect.y + rect.h / 2);
+
+  it('is exactly plain zoomAt when Dynamic Spacing is off', () => {
+    const vp = { x: -100, y: -50, z: 2 };
+    for (const factor of [0.5, 1.2, 3]) {
+      expect(zoomAnchoredAt(vp, factor, 640, 360, PROPERTY_Z_MAX_LOCAL, model, false))
+        .toEqual(zoomAt(vp, factor, 640, 360, PROPERTY_Z_MAX_LOCAL));
+    }
+  });
+
+  it('is exactly plain zoomAt at and below the base zoom, where the transform is the identity', () => {
+    const vp = { x: -100, y: -50, z: SPACING_Z_BASE };
+    expect(zoomAnchoredAt(vp, 1.0001, 640, 360, PROPERTY_Z_MAX_LOCAL, model, true))
+      .toEqual(zoomAt(vp, 1.0001, 640, 360, PROPERTY_Z_MAX_LOCAL));
+  });
+
+  it('is exactly plain zoomAt over empty canvas — nothing there to hold still', () => {
+    const vp = { x: 0, y: 0, z: 3 };
+    // A point far below every frame, so the anchor resolver finds neither node nor group.
+    const cy = worldToScreen(vp, 0, 100_000).y;
+    expect(zoomAnchoredAt(vp, 1.3, 640, cy, PROPERTY_Z_MAX_LOCAL, model, true))
+      .toEqual(zoomAt(vp, 1.3, 640, cy, PROPERTY_Z_MAX_LOCAL));
+  });
+
+  it('holds the terminal under the cursor still, where plain zoomAt loses it off screen', () => {
+    const z0 = 3;
+    const spacedBefore = applySpacing(model, z0, true);
+    const rect0 = spacedBefore.nodeRects[FAR];
+    const vp0 = cameraOn(rect0, z0, 640, 360);
+
+    const anchored = zoomAnchoredAt(vp0, 1.55, 640, 360, PROPERTY_Z_MAX_LOCAL, model, true);
+    const rectAfter = applySpacing(model, anchored.z, true).nodeRects[FAR];
+    const held = screenCentreOf(anchored, rectAfter);
+    expect(held.x).toBeCloseTo(640, 6);
+    expect(held.y).toBeCloseTo(360, 6);
+
+    // NEGATIVE CONTROL — the same step through the shipped `zoomAt` misses by enough to matter.
+    // Without this the assertion above could pass on a scenario where the transform never moved.
+    const plain = zoomAt(vp0, 1.55, 640, 360, PROPERTY_Z_MAX_LOCAL);
+    const lost = screenCentreOf(plain, applySpacing(model, plain.z, true).nodeRects[FAR]);
+    expect(Math.abs(lost.x - 640)).toBeGreaterThan(30);
+  });
+
+  it('accumulates no drift over a wheel gesture of many small steps', () => {
+    let vp = { z: 1, x: 0, y: 0 };
+    const start = applySpacing(model, vp.z, true).nodeRects[FAR];
+    vp = cameraOn(start, vp.z, 640, 360);
+    // Enough steps to run into the ceiling, so the tail of the gesture also exercises the
+    // clamped no-op path — a wheel gesture does not stop when the zoom does.
+    for (let step = 0; step < 70; step++) {
+      vp = zoomAnchoredAt(vp, 1.03, 640, 360, PROPERTY_Z_MAX_LOCAL, model, true);
+    }
+    expect(vp.z).toBe(PROPERTY_Z_MAX_LOCAL);
+    const end = screenCentreOf(vp, applySpacing(model, vp.z, true).nodeRects[FAR]);
+    expect(end.x).toBeCloseTo(640, 6);
+    expect(end.y).toBeCloseTo(360, 6);
+  });
+
+  describe('spacingAnchorAt', () => {
+    const spaced = applySpacing(model, 3, true);
+
+    it('picks the node under the point, not the frame that contains it', () => {
+      const r = spaced.nodeRects[FAR];
+      expect(spacingAnchorAt(model, spaced, r.x + r.w / 2, r.y + r.h / 2, 3))
+        .toEqual({ kind: 'node', id: FAR });
+    });
+
+    it('falls back to the frame for a point inside it but on no node', () => {
+      const g = spaced.groupRects.t2;
+      expect(spacingAnchorAt(model, spaced, g.x + 1, g.y + 1, 3)).toEqual({ kind: 'group', id: 't2' });
+    });
+
+    it('is null over empty canvas', () => {
+      expect(spacingAnchorAt(model, spaced, 0, 100_000, 3)).toBeNull();
+    });
+
+    /**
+     * A node paints `paintedNodeRect`, which is SHORTER than its layout rect by a head slack that
+     * grows with zoom. Resolving by layout rect alone lets a later node's invisible slack out-rank
+     * an earlier node's visible body — and two siblings tightened by step 2 carry different
+     * offsets, so the camera then compensates by the wrong one.
+     */
+    it('prefers a painted body over a different node that only reserves layout slack there', () => {
+      const z = 3;
+      const rects = [
+        { x: -1000, y: 0, w: NODE_W, h: NODE_H },
+        { x: 0, y: 100, w: NODE_W, h: NODE_H },
+        { x: 100, y: 0, w: NODE_W, h: NODE_H },
+      ];
+      const nodes = rects.map((r, i) => node(`s${i}`, 'tb-s', r));
+      const frame = fitGroupFrame(rects)!;
+      const stacked: CanvasModel = { nodes, groups: [group('tb-s', frame, nodes.map((n) => n.terminalId))] };
+      const out = applySpacing(stacked, z, true);
+
+      const a = out.nodeRects['s1'];
+      const b = out.nodeRects['s2'];
+      const paintedB = paintedNodeRect(b, z, false);
+      // A point on s1's painted body, below where s2 still paints but inside s2's layout rect.
+      const px = Math.max(a.x, b.x) + 5;
+      const py = paintedB.y + paintedB.h + 1;
+      expect(py).toBeLessThanOrEqual(b.y + b.h);
+      expect(py).toBeGreaterThan(paintedB.y + paintedB.h);
+      expect(paintedNodeRect(a, z, false).y + paintedNodeRect(a, z, false).h).toBeGreaterThan(py);
+
+      expect(spacingAnchorAt(stacked, out, px, py, z)).toEqual({ kind: 'node', id: 's1' });
+      // The two really do carry different offsets, so picking the wrong one is not free.
+      expect(a.x - stacked.nodes[1].rect.x).not.toBeCloseTo(b.x - stacked.nodes[2].rect.x, 6);
+    });
+  });
+
+  /**
+   * The delta every non-zoom transition pays. Tested directly because the wiring around it is a
+   * React layout effect that this suite cannot mount — which means a `spacingAnchorPan` returning
+   * a flat zero would disable all toggle and visibility compensation while every source pin and
+   * every zoom property in this file still passed. The camera properties above prove the ZOOM
+   * path only; `anchoredCamera` computes its own correction and never calls this.
+   */
+  describe('spacingAnchorPan', () => {
+    const z = 4;
+    const on = { model, spacing: applySpacing(model, z, true) };
+    const off = { model, spacing: applySpacing(model, z, false) };
+    const far = on.spacing.nodeRects[FAR];
+    const centre = { x: far.x + far.w / 2, y: far.y + far.h / 2 };
+
+    it('pays the anchor offset, in screen pixels, when the transform is switched on', () => {
+      const pan = spacingAnchorPan(off, on, centre, z);
+      const raw = model.nodes.find((n) => n.terminalId === FAR)!.rect;
+      expect(pan.dx).toBeCloseTo((far.x - raw.x) * z, 6);
+      expect(pan.dx).not.toBeCloseTo(0, 1);
+      // And exactly reverses when switched back off, so a toggle round trip is a no-op.
+      const back = spacingAnchorPan(on, off, centre, z);
+      expect(back.dx).toBeCloseTo(-pan.dx, 6);
+    });
+
+    it('pays the VERTICAL offset too, not only the horizontal one', () => {
+      // Three frames stacked instead of in a row. Without this the whole helper could return a
+      // correct dx and a flat zero dy — every other fixture here displaces along x alone.
+      const stacked = [0, 1, 2].map((i) => singleNodeGroup(`v${i}`, 0, i * (FRAME_H + GROUP_GAP)));
+      const tall: CanvasModel = { nodes: stacked.map((b) => b.node), groups: stacked.map((b) => b.group) };
+      const lowest = stacked[2].node.terminalId;
+      const spacedTall = applySpacing(tall, z, true);
+      const r = spacedTall.nodeRects[lowest];
+      // Resolved against the BEFORE frame, so the point has to be where that terminal is in the
+      // untransformed layout — its spaced position sits hundreds of units away, on something else.
+      const raw = stacked[2].node.rect;
+      const pan = spacingAnchorPan(
+        { model: tall, spacing: applySpacing(tall, z, false) },
+        { model: tall, spacing: spacedTall },
+        { x: raw.x + raw.w / 2, y: raw.y + raw.h / 2 },
+        z,
+      );
+      expect(pan.dy).toBeCloseTo((r.y - raw.y) * z, 6);
+      expect(pan.dy).not.toBeCloseTo(0, 1);
+    });
+
+    it('is zero for a refit that leaves the offsets alone — that motion is not this feature', () => {
+      // The anchor has to be a GROUP whose own stored rect moves, or the test never exercises the
+      // distinction it is named for: an implementation differencing DRAWN rects instead of
+      // offsets gives the same answer as the right one whenever the anchor's raw rect is fixed,
+      // which is true of every node here.
+      const gap = { x: model.groups[0].rect.x + 4, y: model.groups[0].rect.y + 4 };
+      const anchor = spacingAnchorAt(model, off.spacing, gap.x, gap.y, z);
+      expect(anchor).toEqual({ kind: 'group', id: model.groups[0].tabId });
+
+      const shifted: CanvasModel = {
+        nodes: model.nodes,
+        groups: model.groups.map((g) => ({ ...g, rect: { ...g.rect, x: g.rect.x - 300, y: g.rect.y + 500 } })),
+      };
+      const after = { model: shifted, spacing: applySpacing(shifted, z, false) };
+      // The drawn rect really did move, by a lot — so a drawn-rect difference would not be zero.
+      expect(after.spacing.groupRects[model.groups[0].tabId].y - off.spacing.groupRects[model.groups[0].tabId].y)
+        .toBe(500);
+      // The OFFSET did not, so nothing is owed: frames moving is not Dynamic Spacing's doing.
+      expect(spacingAnchorPan(off, after, gap, z)).toEqual({ dx: 0, dy: 0 });
+    });
+
+    it('holds the camera still when the anchor itself has gone', () => {
+      const without: CanvasModel = {
+        nodes: model.nodes.filter((n) => n.terminalId !== FAR),
+        groups: model.groups.filter((g) => g.tabId !== 't2'),
+      };
+      const pan = spacingAnchorPan(on, { model: without, spacing: applySpacing(without, z, true) }, centre, z);
+      expect(pan).toEqual({ dx: 0, dy: 0 });
+    });
+
+    it('is zero over empty canvas', () => {
+      expect(spacingAnchorPan(off, on, { x: 0, y: 100_000 }, z)).toEqual({ dx: 0, dy: 0 });
+    });
+  });
+
+  /**
+   * A zoom that corrects only its DESTINATION is still wrong at every frame of an animation:
+   * `offset(z)` is not affine in `z`, so interpolating two correct cameras does not give a
+   * correct one in between. The toolbar and keyboard zooms animate, so they need the whole path.
+   */
+  describe('anchoredCamera', () => {
+    const z0 = 4.75;
+    const spacedStart = applySpacing(model, z0, true);
+    const rect0 = spacedStart.nodeRects[FAR];
+    const hold = { x: rect0.x + 40, y: rect0.y + 30 };
+    const vp0 = { z: z0, x: 640 - hold.x * z0, y: 360 - hold.y * z0 };
+    const path = anchoredCamera(vp0, 640, 360, model, true);
+
+    it('holds the anchor at every zoom along the way, not only at the ends', () => {
+      for (let z = z0; z >= 1; z -= 0.25) {
+        const vp = path(z);
+        const at = applySpacing(model, z, true).nodeRects[FAR];
+        const screen = worldToScreen(vp, hold.x + (at.x - rect0.x), hold.y + (at.y - rect0.y));
+        expect({ z, x: Math.round(screen.x), y: Math.round(screen.y) })
+          .toEqual({ z, x: 640, y: 360 });
+      }
+    });
+
+    /**
+     * The negative control for the test above, and the reason the flight is handed a path at all:
+     * interpolating between the two CORRECT endpoint cameras — which is what a plain `flyTo` did —
+     * does not hold the anchor in between. On these three adjacent frames it is ~11px off at the
+     * midpoint; the gap grows with the layout, since the offset it fails to track is the one that
+     * reaches most of a screen at the extremes.
+     */
+    it('is not what interpolating its two endpoints would give — which is why it exists', () => {
+      const end = path(1);
+      const midZ = (z0 + 1) / 2;
+      const at = applySpacing(model, midZ, true).nodeRects[FAR];
+      const held = { x: hold.x + (at.x - rect0.x), y: hold.y + (at.y - rect0.y) };
+
+      const lerped = { z: midZ, x: (vp0.x + end.x) / 2, y: (vp0.y + end.y) / 2 };
+      expect(Math.abs(worldToScreen(lerped, held.x, held.y).x - 640)).toBeGreaterThan(5);
+      expect(Math.abs(worldToScreen(path(midZ), held.x, held.y).x - 640)).toBeLessThan(1e-6);
+    });
+
+    it('agrees exactly with the single-step zoom at the destination', () => {
+      const stepped = zoomAnchoredAt(vp0, 1 / z0, 640, 360, PROPERTY_Z_MAX_LOCAL, model, true);
+      expect(path(stepped.z)).toEqual(stepped);
+    });
+
+    it('is bit-identical to plain zoomAt when the transform is off', () => {
+      const off = anchoredCamera(vp0, 640, 360, model, false);
+      for (const factor of [0.3, 0.8, 1.4]) {
+        // The helper is handed a zoom, `zoomAt` a factor, so the clamp has to be applied here or
+        // the two are being asked for different zooms rather than compared at the same one.
+        const z = Math.max(Z_MIN, Math.min(PROPERTY_Z_MAX_LOCAL, z0 * factor));
+        expect(off(z)).toEqual(zoomAt(vp0, factor, 640, 360, PROPERTY_Z_MAX_LOCAL));
+      }
     });
   });
 });
