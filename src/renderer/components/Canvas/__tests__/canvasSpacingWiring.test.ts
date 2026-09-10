@@ -183,7 +183,8 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // scheduled — but the drag-exit effect has already paid that same raw-to-display transition,
     // and both firing pays it twice, throwing the dropped node hundreds of pixels off.
     expect(effect).toContain('if (drag.dragActive || was.dragging) return;');
-    expect(MODE).toContain('model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, flights: flyTo.requests.current,');
+    expect(MODE).toContain('model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, rendered: spacingRendered,');
+    expect(MODE).toContain('flights: flyTo.requests.current,');
     // Same-zoom only: `was` was swept at the old zoom, so across a zoom the difference is not
     // the transform's alone — and the zoom already anchored itself.
     expect(effect).toContain('if (was.z !== vpRef.current.z) return;');
@@ -193,6 +194,14 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // false for a fresh navigation under reduced motion (which arrives with no frame requested).
     // Both are backwards, so the weaker predicate has to be excluded by name, not just by shape.
     expect(effect).toContain('if (flyTo.requests.current !== was.flights) return;');
+    // Off on both sides means the transform is the identity either way: nothing replaced it, so
+    // no flight is invalidated. Without this, hiding a terminal mid-flight would cancel that
+    // flight for users who never enabled Dynamic Spacing at all.
+    expect(effect).toContain('if (!was.rendered && !spacingRendered) return;');
+    // Invalidating a stale flight must come BEFORE the pan is even computed. Gating it on a
+    // nonzero pan let a flight whose destination had gone stale survive whenever the viewport
+    // centre happened to owe nothing — an empty centre says nothing about a target elsewhere.
+    expect(effect.indexOf('flyTo.cancel();')).toBeLessThan(effect.indexOf('spacingAnchorPan('));
     expect(effect).not.toMatch(/flyTo\.active\(\)|raf\.current !== null/);
     // The recorder must be declared AFTER the comparer, or it overwrites the previous transform
     // before the comparer ever sees it and every compensation silently becomes a no-op.

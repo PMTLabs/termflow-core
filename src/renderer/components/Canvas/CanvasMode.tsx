@@ -413,7 +413,7 @@ export const CanvasMode: React.FC = () => {
     [paintedNodes, shownGroups],
   );
   const paintedRef = useRef<
-    { model: typeof spacingModel; spacing: SpacingResult; z: number; dragging: boolean; flights: number } | null
+    { model: typeof spacingModel; spacing: SpacingResult; z: number; dragging: boolean; flights: number; rendered: boolean } | null
   >(null);
   useLayoutEffect(() => {
     const was = paintedRef.current;
@@ -436,15 +436,22 @@ export const CanvasMode: React.FC = () => {
     // of those loses the compensation permanently, since nothing schedules a retry. It is also
     // false for a fresh navigation under reduced motion, which arrives synchronously and never
     // requests a frame at all. Both cases are exactly backwards from what a RAF flag reports.
+    // The transform was the identity on BOTH sides — spacing off throughout — so nothing was
+    // replaced and there is nothing to invalidate. A frame refitting around a hidden terminal is
+    // not this feature's doing, and cancelling a flight over it would be a regression for users
+    // who never turned Dynamic Spacing on.
+    if (!was.rendered && !spacingRendered) return;
     if (flyTo.requests.current !== was.flights) return;
+    // Reaching here means nothing placed the camera for this transform, so any flight still in
+    // the air was computed against the OLD one — its destination is somewhere nothing is drawn
+    // any more. Invalidating it comes BEFORE, and is independent of, whether the centre owes a
+    // pan: an empty viewport centre owes nothing and says nothing about whether a flight aimed
+    // elsewhere is still valid. Cancelling only when a pan happened to be due left exactly that
+    // flight to land ~444px off on the fixture layout, with nothing scheduled to notice.
+    flyTo.cancel();
     const centre = screenToWorld(vpRef.current, size.w / 2, size.h / 2);
     const pan = spacingAnchorPan(was, { model: spacingModel, spacing }, centre, vpRef.current.z);
-    if (pan.dx === 0 && pan.dy === 0) return;
-    // Reaching here means nothing placed the camera for this transform, so any flight still in
-    // the air was computed against the OLD one and would overwrite this pan with cameras for
-    // geometry that is no longer drawn.
-    flyTo.cancel();
-    panScreen(pan.dx, pan.dy);
+    if (pan.dx !== 0 || pan.dy !== 0) panScreen(pan.dx, pan.dy);
     // Deliberately keyed on what can replace the transform, and NOT on `vp` or `spacing`: those
     // change on every pan and every zoom, which have their own anchoring and must not re-pan.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -455,7 +462,8 @@ export const CanvasMode: React.FC = () => {
   // PREVIOUS commit's transform while that one is deciding what changed.
   useLayoutEffect(() => {
     paintedRef.current = {
-      model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, flights: flyTo.requests.current,
+      model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive, rendered: spacingRendered,
+      flights: flyTo.requests.current,
     };
   });
 
