@@ -1022,6 +1022,7 @@ mod scrollback_restore_tests {
                 last_input_at: None,
                 prompt_hook: false,
                 display_label: None,
+                title_color: None,
             },
         );
     }
