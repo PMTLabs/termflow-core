@@ -33,6 +33,9 @@ interface RowDrag {
   terminalId: string;
   tabId: string;
   title: string;
+  /** The owning tab's colour, carried beside `title` so the drag ghost — which is this row's
+   *  title, following the cursor — stays the colour the row was. */
+  titleColor?: string;
   startX: number;
   startY: number;
   moved: boolean;
@@ -41,14 +44,14 @@ interface RowDrag {
 interface ResizeDrag { startX: number; startW: number }
 
 export interface SidebarDrag {
-  onRowPointerDown: (terminalId: string, tabId: string, title: string) => (e: React.PointerEvent) => void;
+  onRowPointerDown: (terminalId: string, tabId: string, title: string, titleColor?: string) => (e: React.PointerEvent) => void;
   onResizePointerDown: (e: React.PointerEvent) => void;
   /** The row being dragged, so it can render as lifted. */
   draggingId: string | null;
   /** The group the pointer is over and would drop into, or null. */
   dropTabId: string | null;
   /** Where to draw the floating label, in client coordinates. */
-  ghost: { x: number; y: number; label: string } | null;
+  ghost: { x: number; y: number; label: string; titleColor?: string } | null;
   resizing: boolean;
   /**
    * True once, immediately after a drag that actually moved.
@@ -66,7 +69,7 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
 
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [dropTabId, setDropTabId] = useState<string | null>(null);
-  const [ghost, setGhost] = useState<{ x: number; y: number; label: string } | null>(null);
+  const [ghost, setGhost] = useState<{ x: number; y: number; label: string; titleColor?: string } | null>(null);
   const [resizing, setResizing] = useState(false);
 
   const rowDrag = useRef<RowDrag | null>(null);
@@ -79,10 +82,10 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
   latest.current = { model, trees, width };
 
   const onRowPointerDown = useCallback(
-    (terminalId: string, tabId: string, title: string) => (e: React.PointerEvent) => {
+    (terminalId: string, tabId: string, title: string, titleColor?: string) => (e: React.PointerEvent) => {
       // Not `preventDefault`: the row's own click and double-click must still happen when this
       // turns out to be a press rather than a drag.
-      rowDrag.current = { terminalId, tabId, title, startX: e.clientX, startY: e.clientY, moved: false };
+      rowDrag.current = { terminalId, tabId, title, titleColor, startX: e.clientX, startY: e.clientY, moved: false };
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     },
     [],
@@ -125,7 +128,7 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
       if (!rd.moved && Math.hypot(e.clientX - rd.startX, e.clientY - rd.startY) < ROW_SLOP) return;
       rd.moved = true;
       setDraggingId(rd.terminalId);
-      setGhost({ x: e.clientX, y: e.clientY, label: rd.title });
+      setGhost({ x: e.clientX, y: e.clientY, label: rd.title, titleColor: rd.titleColor });
       const over = groupUnder(e.clientX, e.clientY);
       // Its own group is not a target: re-homing a terminal to where it already lives is a
       // no-op, and highlighting it would promise a change that is not going to happen.

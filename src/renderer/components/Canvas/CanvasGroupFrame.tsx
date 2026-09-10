@@ -5,6 +5,7 @@ import {
 import { drawnFrameRect } from './canvasLayout';
 import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
 import { useCanvasMetrics } from './canvasMetricsContext';
+import { titleColorStyle } from '../../store/titleColor';
 
 /**
  * A tab, drawn as a frame around its terminals — or, once the whole workspace has
@@ -62,7 +63,12 @@ export const CanvasGroupFrame: React.FC<{
         onContextMenu={onContextMenu}
         title={`Zoom in to ${group.title}`}
       >
-        <span className="canvas-gchip-title">{group.title}</span>
+        <span
+          className="canvas-gchip-title"
+          style={titleColorStyle(group.titleColor)}
+        >
+          {group.title}
+        </span>
         {/* The tab-level armed count (`plan/028` item D), on the CHIP only.
             A collapsed chip is the whole tab standing in for its terminals, so it is the one place
             on the canvas where the per-node badges are not on screen to say it. The frame's label
@@ -106,6 +112,10 @@ export const CanvasGroupFrame: React.FC<{
               left: LABEL_LEFT * k,
               transform: `scale(${k})`,
               maxWidth: labelMaxWidth(box.w, k),
+              // The tab's own colour. Spread conditionally rather than set to `undefined`,
+              // so an uncoloured tab emits no `color` at all and `.canvas-glabel`'s
+              // `--text-secondary` keeps deciding.
+              ...titleColorStyle(group.titleColor),
             }}
             onPointerDown={onLabelPointerDown}
             onContextMenu={onContextMenu}

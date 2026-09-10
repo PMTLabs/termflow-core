@@ -15,6 +15,7 @@ import { usePaneMuteState } from './usePaneMuteState';
 import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surfaceChrome';
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 import { useTooltipDwell } from '../../hooks/useTooltipDwell';
+import { useTerminalTitleColor, titleColorStyle } from '../../store/titleColor';
 import './PaneContextMenu.css';
 
 interface PaneContextMenuProps {
@@ -55,6 +56,8 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // flag; the icon shows the effective (tab-or-pane) muted state so it
   // matches the header bell.
   const { paneMuted, tabMuted, toggle: toggleMute } = usePaneMuteState(paneId, terminalId);
+  // The owning tab's colour, for the header that names this pane.
+  const paneTitleColor = useTerminalTitleColor(terminalId);
   // Whether this pane's terminal can be searched RIGHT NOW — see the Find item below for why
   // this is a live subscription and why it is a boolean.
   const searchable = useSurfaceChromeAvailable(terminalId ?? null);
@@ -177,7 +180,9 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       }}
     >
       <div className="context-menu-header">
-        <strong>{paneName}</strong>
+        {/* Names this pane's terminal, so it wears the owning tab's colour like the pane header
+            it was opened from. */}
+        <strong style={titleColorStyle(paneTitleColor)}>{paneName}</strong>
       </div>
       <div className="context-menu-info">
         <CopyableInfoRow label="Pane ID:" value={paneId} />

@@ -18,11 +18,16 @@ export interface SidebarRow {
   /** Still TAB-level (plan/020 §0 D2, §6) — a known remaining instance, not an oversight. */
   hasUnseenOutput: boolean;
   hidden: boolean;
+  /** The owning tab's colour (`CanvasNodeModel.titleColor`). The list is a list OF the nodes, so
+   *  it has to make the same hop they do or it disagrees with the canvas beside it. */
+  titleColor?: string;
 }
 
 export interface SidebarGroup {
   tabId: string;
   title: string;
+  /** The tab's own colour — see `SidebarRow.titleColor`. */
+  titleColor?: string;
   rows: SidebarRow[];
 }
 
@@ -122,6 +127,7 @@ export function buildSidebarTree(
         isRunning: n.isRunning,
         hasUnseenOutput: n.hasUnseenOutput,
         hidden: n.hidden,
+        titleColor: n.titleColor,
       });
     }
 
@@ -132,7 +138,7 @@ export function buildSidebarTree(
     // header, which needs a header to aim at. Hiding it here would be the same bug one layer
     // up: a group still visible on the canvas that the list can no longer reach.
     if (rows.length || (!q && !g.nodeIds.length)) {
-      out.push({ tabId: g.tabId, title: g.title, rows });
+      out.push({ tabId: g.tabId, title: g.title, titleColor: g.titleColor, rows });
     }
   }
 

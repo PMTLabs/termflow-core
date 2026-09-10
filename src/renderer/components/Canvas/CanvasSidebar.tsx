@@ -10,6 +10,7 @@ import { useSidebarDrag } from './useSidebarDrag';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
 import { EyeIcon } from './EyeIcon';
 import type { CanvasModel } from './canvasSelectors';
+import { titleColorStyle } from '../../store/titleColor';
 
 /**
  * Group → Terminal tree with search and rename — `plan/013` Task 14, design 010 §5/§11.
@@ -75,11 +76,15 @@ const RenameInput: React.FC<{
   initial: string;
   onCommit: (name: string) => void;
   onCancel: () => void;
-}> = ({ initial, onCommit, onCancel }) => {
+  /** The owning tab's colour. The box REPLACES a coloured title, and `.canvas-srename` sets its
+   *  own colour, so without this an edit reads as the colour having been lost. */
+  titleColor?: string;
+}> = ({ initial, onCommit, onCancel, titleColor }) => {
   const [draft, setDraft] = useState(initial);
   return (
     <input
       className="canvas-srename"
+      style={titleColorStyle(titleColor)}
       autoFocus
       value={draft}
       onChange={(e) => setDraft(e.target.value)}
@@ -99,7 +104,7 @@ const Row: React.FC<RowProps> = ({
   if (editing) {
     return (
       <li className="canvas-srow editing">
-        <RenameInput initial={row.title} onCommit={onCommit} onCancel={onCancel} />
+        <RenameInput initial={row.title} onCommit={onCommit} onCancel={onCancel} titleColor={row.titleColor} />
       </li>
     );
   }
@@ -121,7 +126,12 @@ const Row: React.FC<RowProps> = ({
       {/* The tab strip's own icon, reused (Req 6, `plan/020` §3) — `.canvas-srow.running`
           above is what makes it blink; the icon itself is unconditional, same as a tab's. */}
       <ShellProfileIcon shellType={row.shellType} />
-      <span className="canvas-srow-title"><Title row={row} /></span>
+      <span
+        className="canvas-srow-title"
+        style={titleColorStyle(row.titleColor)}
+      >
+        <Title row={row} />
+      </span>
       {row.disambiguator && <span className="canvas-srow-dis">{row.disambiguator}</span>}
       {row.hidden && <span className="canvas-srow-hidden" title="Hidden from the canvas"><EyeIcon slashed size={13} /></span>}
       {/* The tab strip's own indicator, reused rather than restyled (design 010 §9). */}
@@ -275,6 +285,7 @@ export const CanvasSidebar: React.FC<{
             >
               <h3
                 className={`canvas-sghead${editingTabId === g.tabId ? ' editing' : ''}`}
+                style={titleColorStyle(g.titleColor)}
                 onDoubleClick={() => setEditingTabId(g.tabId)}
                 title={editingTabId === g.tabId ? undefined : `${g.title} — double-click to rename`}
               >
@@ -283,6 +294,7 @@ export const CanvasSidebar: React.FC<{
                     initial={g.title}
                     onCommit={(name) => commitGroupRename(g.tabId, name)}
                     onCancel={() => setEditingTabId(null)}
+                    titleColor={g.titleColor}
                   />
                 ) : g.title}
               </h3>
@@ -294,7 +306,7 @@ export const CanvasSidebar: React.FC<{
                     selected={selectedId === r.terminalId}
                     editing={editingId === r.terminalId}
                     lifting={drag.draggingId === r.terminalId}
-                    onPointerDown={drag.onRowPointerDown(r.terminalId, g.tabId, r.title)}
+                    onPointerDown={drag.onRowPointerDown(r.terminalId, g.tabId, r.title, r.titleColor)}
                     // `click` fires after `pointerup`, so a completed drag would otherwise also
                     // fly the viewport to the node that just changed groups.
                     onClick={() => { if (!drag.consumeClick()) onFlyToNode(r.terminalId); }}
@@ -322,7 +334,10 @@ export const CanvasSidebar: React.FC<{
       // `position: fixed` in CLIENT coordinates, so it follows the cursor over the canvas as
       // well as over the list — a ghost clipped to the sidebar would disappear exactly when the
       // drag left it.
-      <div className="canvas-sghost" style={{ left: drag.ghost.x + 12, top: drag.ghost.y + 12 }}>
+      <div
+        className="canvas-sghost"
+        style={{ left: drag.ghost.x + 12, top: drag.ghost.y + 12, ...titleColorStyle(drag.ghost.titleColor) }}
+      >
         {drag.ghost.label}
       </div>
     )}

@@ -7,6 +7,9 @@ import {
   NODE_W, NODE_H, CHIP_H, Z_MIN, T_CHIP, MIN_TITLE_PX, LodTier, Viewport, DEFAULT_METRICS,
   baseTier, clampZoom,
 } from '../canvasGeometry';
+// The real reducer the API/MCP "open a terminal in this tab" path dispatches — see the
+// `splitPaneInTab` case below.
+import panesReducer, { splitPaneInTab } from '../../../store/slices/panesSlice';
 
 import { PAD, PAD_TOP, GROUP_GAP, FRAME_ROW_MAX_W } from '../canvasLayout';
 
@@ -106,6 +109,67 @@ describe('buildCanvasModel', () => {
     expect(n.groupTitle).not.toBe(n.title);
     // A second tab, so the field cannot be one constant that happens to match the first.
     expect(m.nodes.find((x) => x.tabId === 'tb-b')!.groupTitle).toBe('web');
+  });
+
+  /**
+   * The tab's colour is the ONE source for every title that names this terminal (the tab title,
+   * its pane titles, its canvas nodes). It rides on the node model rather than being looked up
+   * per-consumer for the same reason `groupTitle` does: the owning `Tab` is already in scope
+   * here, and every canvas consumer already holds a node or a group.
+   *
+   * Deliberately NOT a per-terminal field of its own — a second home for the colour is a second
+   * thing to keep in step, and the tab is the only thing the user actually sets.
+   */
+  it('stamps the owning tab titleColor onto that tab\'s nodes and group, and only that tab\'s', () => {
+    const s = stateWith();
+    s.tabs.tabs = [
+      { id: 'tb-a', title: 'api', shellType: 'zsh', isActive: true, titleColor: '#ff5f56' },
+      // A DIFFERENT colour, not merely an absent one: a field wired to "the first tab's colour"
+      // passes an uncoloured negative control but fails here.
+      { id: 'tb-b', title: 'web', shellType: 'zsh', isActive: false, titleColor: '#27c93f' },
+    ];
+    const m = buildCanvasModel(s);
+    expect(m.nodes.find((n) => n.terminalId === 'tm-2')!.titleColor).toBe('#ff5f56');
+    expect(m.nodes.find((n) => n.terminalId === 'tb-a')!.titleColor).toBe('#ff5f56');
+    expect(m.nodes.find((n) => n.terminalId === 'tb-b')!.titleColor).toBe('#27c93f');
+    expect(m.groups.find((g) => g.tabId === 'tb-a')!.titleColor).toBe('#ff5f56');
+    expect(m.groups.find((g) => g.tabId === 'tb-b')!.titleColor).toBe('#27c93f');
+  });
+
+  it('leaves titleColor undefined for a tab that has none, so default styling survives', () => {
+    // `stateWith` sets no colour on either tab — the reset/never-set case.
+    const m = buildCanvasModel(stateWith());
+    // Cardinality FIRST. `[].every(...)` is `true`, so a builder that returned nothing at all
+    // would satisfy both assertions below without ever deciding a colour.
+    expect(m.nodes).toHaveLength(3);
+    expect(m.groups).toHaveLength(2);
+    expect(m.nodes.every((n) => n.titleColor === undefined)).toBe(true);
+    expect(m.groups.every((g) => g.titleColor === undefined)).toBe(true);
+  });
+
+  /**
+   * The MCP acceptance criterion, driven through the REDUCER the API path actually dispatches.
+   *
+   * `splitPaneInTab` is what `App.tsx`'s Mode 1 branch dispatches when the REST/MCP endpoint
+   * opens a terminal in an existing tab. Running it for real is the difference between pinning
+   * the claim and assuming it: a hand-built tree asserts only that `buildCanvasModel` reads a
+   * colour, and would keep passing if `splitPaneInTab` started clearing tab metadata.
+   *
+   * What this still does NOT cover — stated rather than implied: the Rust endpoint and the
+   * `App.tsx` branch that chooses this reducer and its arguments. Those need the API stack.
+   */
+  it('gives a pane appended by the real splitPaneInTab reducer the owning tab colour', () => {
+    const s = stateWith();
+    s.tabs.tabs = [{ id: 'tb-a', title: 'api', shellType: 'zsh', isActive: true, titleColor: '#ff5f56' }];
+    const panes = panesReducer(
+      { ...s.panes, activePaneByTabId: {}, maximizedPaneByTabId: {}, paneTree: null, activePaneId: null } as never,
+      splitPaneInTab({ tabId: 'tb-a', direction: 'horizontal', name: 'mcp', terminalId: 'tm-mcp' }),
+    );
+    // The reducer really did append the leaf — otherwise the assertion below would be reporting
+    // on a node that does not exist rather than on a colour that was not applied.
+    const m = buildCanvasModel({ ...s, panes });
+    expect(m.nodes.map((n) => n.terminalId)).toContain('tm-mcp');
+    expect(m.nodes.find((n) => n.terminalId === 'tm-mcp')!.titleColor).toBe('#ff5f56');
   });
 
   it('seeds geometry for a terminal that has never been placed', () => {

@@ -26,6 +26,7 @@ import { isHostSessionContended } from '../../services/hostSessionContention';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminal } from '../Canvas/CanvasHiddenBadge';
+import { titleColorStyle } from '../../store/titleColor';
 import './TerminalPane.css';
 
 // Global map to track terminal initialization state
@@ -687,6 +688,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 onBlur={handleNameSave}
                 onKeyDown={handleNameKeyDown}
                 className="pane-name-input"
+                // The box REPLACES the coloured name on screen, and `.pane-name-input` sets its
+                // own colour, so without this a rename reads as the colour having been lost
+                // rather than as an edit in progress.
+                style={titleColorStyle(tab?.titleColor)}
                 autoFocus
               />
             ) : (
@@ -694,6 +699,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 className="pane-name"
                 onDoubleClick={handleNameEdit}
                 title="Double-click to rename"
+                // The owning tab's colour, so every pane in a tab reads as one group. Taken from
+                // `tab` — resolved through the pane tree above — rather than from a prop, which
+                // is what makes an API/MCP pane opened into this tab inherit with nothing copied.
+                // Omitted entirely when the tab has none, so `.pane-name` keeps inheriting the
+                // header's colour exactly as before.
+                style={titleColorStyle(tab?.titleColor)}
               >
                 {name || 'Terminal'}
               </span>

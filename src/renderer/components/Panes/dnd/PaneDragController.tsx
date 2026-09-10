@@ -265,7 +265,13 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         globalSourceRef.current = {
           token, sourceTabId: s.sourceTabId, sourcePaneId: s.sourcePaneId, terminalId: s.terminalId,
         };
-        void api.beginGlobalPaneDrag(token, buildPaneDetachPayload(leaf, { x: e.clientX, y: e.clientY }));
+        // `s.sourceTabId` so a pane dropped into another WINDOW keeps its group colour, exactly
+        // as `detachPaneToNewWindow` does. Both callers build the same payload; a colour passed
+        // by only one of them would depend on how the pane happened to leave the window.
+        void api.beginGlobalPaneDrag(
+          token,
+          buildPaneDetachPayload(leaf, { x: e.clientX, y: e.clientY }, s.sourceTabId),
+        );
       }
 
       const target = outsideWindow ? null : resolveTarget(x, y);

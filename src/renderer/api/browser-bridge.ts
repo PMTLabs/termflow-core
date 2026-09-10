@@ -182,6 +182,7 @@ class BrowserBridge implements ElectronAPI {
     /// browser session has no pane-drag/detach paths to move a pane between tabs.
     async setTerminalOwningTab(_rendererTerminalId: string, _owningTabId: string): Promise<void> { }
     async setTerminalDisplayLabel(_rendererTerminalId: string, _label: string): Promise<void> { }
+    async setTerminalTitleColor(_rendererTerminalId: string, _titleColor: string): Promise<void> { }
 
     async closeTerminal(id: string): Promise<void> {
         try {

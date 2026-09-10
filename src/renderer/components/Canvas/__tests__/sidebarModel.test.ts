@@ -39,6 +39,40 @@ describe('basename', () => {
 });
 
 describe('buildSidebarTree', () => {
+  /**
+   * The sidebar is a THIRD representation of a terminal's title (Tab → CanvasNodeModel →
+   * SidebarRow), so the tab colour has to survive one more hop than the canvas does. A row that
+   * dropped it would leave the list disagreeing with the nodes it is a list OF.
+   */
+  it('carries each row and group\'s own tab colour through, without borrowing a neighbour\'s', () => {
+    const coloured = [
+      { ...nodes[0], titleColor: '#ff5f56' },
+      { ...nodes[1], titleColor: '#ff5f56' },
+      // A different colour, so a row wired to "the first node's colour" fails here.
+      { ...nodes[2], titleColor: '#27c93f' },
+    ];
+    const colouredGroups = [
+      { ...groups[0], titleColor: '#ff5f56' },
+      { ...groups[1], titleColor: '#27c93f' },
+    ];
+    const tree = buildSidebarTree(coloured, colouredGroups, '', cwds);
+    expect(tree.find((g) => g.tabId === 'tb-a')!.titleColor).toBe('#ff5f56');
+    expect(tree.find((g) => g.tabId === 'tb-b')!.titleColor).toBe('#27c93f');
+    expect(tree.find((g) => g.tabId === 'tb-a')!.rows.map((r) => r.titleColor))
+      .toEqual(['#ff5f56', '#ff5f56']);
+    expect(tree.find((g) => g.tabId === 'tb-b')!.rows[0].titleColor).toBe('#27c93f');
+  });
+
+  it('leaves row and group colour undefined when the tab has none', () => {
+    const tree = buildSidebarTree(nodes, groups, '', cwds);
+    // Cardinality FIRST: `[].every(...)` is `true`, so a builder returning an empty tree would
+    // satisfy both assertions below while deciding nothing at all.
+    expect(tree).toHaveLength(2);
+    expect(tree.flatMap((g) => g.rows)).toHaveLength(3);
+    expect(tree.every((g) => g.titleColor === undefined)).toBe(true);
+    expect(tree.flatMap((g) => g.rows).every((r) => r.titleColor === undefined)).toBe(true);
+  });
+
   it('keeps hidden rows present and flags them for the recovery marker', () => {
     const hidden = { ...nodes[0], hidden: true };
     const tree = buildSidebarTree([hidden, ...nodes.slice(1)], groups, '', cwds);

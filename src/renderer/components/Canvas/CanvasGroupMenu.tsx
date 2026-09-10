@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { renameTab } from '../../services/renameTab';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { titleColorStyle } from '../../store/titleColor';
 
 /**
  * Right-click menu for a group — the canvas half of "rename a group".
@@ -26,8 +27,11 @@ export const CanvasGroupMenu: React.FC<{
   tabId: string;
   /** The group's current title, which is its tab's — both the header and the box's seed. */
   title: string;
+  /** The tab's colour, worn by the header AND the rename box. A prop rather than a store lookup,
+   *  like `title` beside it — this menu is presentational and its caller holds the model. */
+  titleColor?: string;
   onClose: () => void;
-}> = ({ x, y, tabId, title, onClose }) => {
+}> = ({ x, y, tabId, title, titleColor, onClose }) => {
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(title);
 
@@ -40,11 +44,12 @@ export const CanvasGroupMenu: React.FC<{
 
   return (
     <CanvasMenu x={x} y={y} onClose={onClose} className="canvas-group-menu">
-      <div className="context-menu-header">{title}</div>
+      <div className="context-menu-header" style={titleColorStyle(titleColor)}>{title}</div>
       <div className="context-menu-divider" />
       {renaming ? (
         <input
           className="canvas-group-name-input"
+          style={titleColorStyle(titleColor)}
           autoFocus
           value={draft}
           placeholder="Name this group"

@@ -10,6 +10,7 @@ import canvasReducer from './slices/canvasSlice';
 import sessionExitReducer from './slices/sessionExitSlice';
 import { attachPaneOwnershipSync } from '../services/paneOwnership';
 import { attachTerminalLabelSync } from '../services/terminalLabelSync';
+import { attachTerminalTitleColorSync } from '../services/terminalTitleColorSync';
 
 // Simple logging middleware for debugging
 const loggingMiddleware = (storeAPI: any) => (next: any) => (action: any) => {
@@ -72,6 +73,7 @@ if (typeof window !== 'undefined') {
   // through the same differ, so the two syncs cannot drift apart. Without this the Automations
   // picker and every activity-log line show a bare `tm-…` id.
   attachTerminalLabelSync(store);
+  attachTerminalTitleColorSync(store);
 }
 
 export type RootState = ReturnType<typeof store.getState>;

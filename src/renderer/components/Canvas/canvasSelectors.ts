@@ -34,6 +34,18 @@ export interface CanvasNodeModel {
    */
   groupTitle: string;
   shellType: string;
+  /**
+   * The owning tab's `titleColor`, or undefined when it has none.
+   *
+   * The tab is the ONE home for this colour — a terminal never carries a colour of its own — so
+   * this is a projection of `Tab.titleColor`, carried here for the same reason `groupTitle` is:
+   * the owning `Tab` is already in scope where a node is built, and every canvas consumer
+   * already holds a node.
+   *
+   * Undefined rather than a default, so a consumer emits NO inline colour and the existing
+   * stylesheet keeps the title exactly as it looks today.
+   */
+  titleColor?: string;
   rect: Rect;
   isRunning: boolean;
   hasUnseenOutput: boolean;
@@ -51,6 +63,9 @@ export interface CanvasNodeModel {
 export interface CanvasGroupModel {
   tabId: string;
   title: string;
+  /** The tab's own `titleColor` — see `CanvasNodeModel.titleColor`. A group IS a tab, so this is
+   *  not a projection of someone else's colour the way the node's is. */
+  titleColor?: string;
   rect: Rect;
   nodeIds: string[];
   anyRunning: boolean;
@@ -238,7 +253,7 @@ function buildModel(
     if (!paneLeaves.length) {
       const kept = storedGroups[tab.id];
       if (kept) {
-        groups.push({ tabId: tab.id, title: tab.title, rect: kept, nodeIds: [], anyRunning: false, allHidden: false });
+        groups.push({ tabId: tab.id, title: tab.title, titleColor: tab.titleColor, rect: kept, nodeIds: [], anyRunning: false, allHidden: false });
       }
       continue;
     }
@@ -295,6 +310,7 @@ function buildModel(
         paneId: leaf.id,
         title: leaf.name || tab.title || 'Terminal',
         groupTitle: tab.title || 'Terminal',
+        titleColor: tab.titleColor,
         shellType: leaf.shellType || tab.shellType || '',
         rect: rects[i],
         // Per-terminal (Req 8, plan/020 §2): this node reports its OWN process's activity,
@@ -325,6 +341,7 @@ function buildModel(
     groups.push({
       tabId: tab.id,
       title: tab.title,
+      titleColor: tab.titleColor,
       rect: drawnFrame,
       nodeIds,
       // Any MEMBER terminal running (Req 8) — strictly more accurate than the old

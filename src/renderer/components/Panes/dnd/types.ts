@@ -62,9 +62,15 @@ export interface DetachPayload {
   cursor?: { x: number; y: number };
   // The fields below carry a whole-tab detach's Tab-level appearance state
   // (icon, title lock, colors) across to the destination window — it's the
-  // SAME tab, just relocated, so these must survive the move. Only ever set
-  // by buildTabDetachPayload (kind: 'tab'); a pane split off into its own tab
-  // (kind: 'pane') has no prior Tab to inherit these from.
+  // SAME tab, just relocated, so these must survive the move.
+  //
+  // `tabIcon` and `titleIsCustom` are set only by buildTabDetachPayload (kind: 'tab'): a pane
+  // split off into its own tab gets a NEW identity, so a custom title lock and an icon chosen
+  // for a different tab would be claims about it that nobody made.
+  //
+  // `titleColor` is the exception, and is set for BOTH kinds. It is a group appearance rather
+  // than an identity, and every title naming this terminal wears it — so a pane that arrived in
+  // a new window wearing default styling would read as having silently left its group.
   tabIcon?: string;
   titleIsCustom?: boolean;
   titleColor?: string;

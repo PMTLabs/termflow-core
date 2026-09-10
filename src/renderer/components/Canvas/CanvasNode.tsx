@@ -2,6 +2,7 @@ import React from 'react';
 import { LodTier, HEAD_H, headScale, headFontSize, paintedNodeH, surfaceShift } from './canvasGeometry';
 import { useCanvasMetrics } from './canvasMetricsContext';
 import { CanvasNodeModel, chipFontSize } from './canvasSelectors';
+import { titleColorStyle } from '../../store/titleColor';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
 import { EyeIcon } from './EyeIcon';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
@@ -118,6 +119,18 @@ export const CanvasNode: React.FC<{
   // starting below the node still look like a spacing preference rather than a bug.
   const nodeH = paintedNodeH(h, zoom, isChip);
 
+  /**
+   * The owning tab's colour, worn by this node's title and its group chip — but NOT once the
+   * shell has ended.
+   *
+   * The suppression is not a style preference. `Canvas.css` mutes an ended node's title through
+   * `.canvas-node.ended .canvas-node-title`, a CLASS rule; an inline colour beats it on
+   * specificity, so leaving it on would quietly cancel the ended treatment for coloured tabs
+   * alone. Status outranks decoration, exactly as `.canvas-node.ended`'s own comment argues for
+   * selection and focus.
+   */
+  const titleColor = node.exited ? undefined : node.titleColor;
+
   return (
     <div
       className={[
@@ -214,7 +227,7 @@ export const CanvasNode: React.FC<{
           {!isChip && busyCue === 'dot' && (
             <span className={node.isRunning ? 'canvas-node-dot running' : 'canvas-node-dot'} />
           )}
-          <span className="canvas-node-title">{node.title}</span>
+          <span className="canvas-node-title" style={titleColorStyle(titleColor)}>{node.title}</span>
           {/* The group this terminal belongs to, in the OVERLAY only.
               A group is a tab (design 010 §2), so this is `Tab.title` while the title beside it
               is `PaneNode.name` — for an unsplit tab those are usually the same string, and the
@@ -222,7 +235,11 @@ export const CanvasNode: React.FC<{
               when the context is simplest is one you cannot learn to rely on.
               Overlay only because that is the one surface at 1:1 with room for it; a preview
               node's header is already competing with the title at a fraction of natural size. */}
-          {overlaid && <span className="canvas-node-group">{node.groupTitle}</span>}
+          {overlaid && (
+            <span className="canvas-node-group" style={titleColorStyle(titleColor)}>
+              {node.groupTitle}
+            </span>
+          )}
           {/* Before the shell badge, because it is the one that changes and the one being
               looked for. Both are suppressed at the chip tier, where the header IS the node
               and there is room for a title and nothing else. */}

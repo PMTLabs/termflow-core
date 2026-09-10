@@ -11,6 +11,7 @@ import type { CloseKind } from '../../services/closeTabs';
 import { setTabColorSchema, setTabTitleColor, setTabMuted } from '../../store/slices/tabsSlice';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { BellIcon } from '../UI/BellIcon';
+import { titleColorStyle } from '../../store/titleColor';
 import './TabContextMenu.css';
 
 // Fixed quick-pick colors for the tab name. NOT derived from the active color
@@ -185,7 +186,9 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       }}
     >
       <div className="context-menu-header">
-        <strong>{tabTitle}</strong>
+        {/* Live from `tab`, not a prop: the Tab Color swatches are in THIS menu, so the header
+            repaints as the user clicks through them — the preview is the header itself. */}
+        <strong style={titleColorStyle(tab?.titleColor)}>{tabTitle}</strong>
       </div>
       <div className="context-menu-info">
         <CopyableInfoRow label="Tab ID:" value={tabId} />

@@ -58,6 +58,7 @@ import { applyEffectiveThemes, applyActivePaneBackground } from './store/termina
 import { refreshGlyphAtlases } from '@termflow/terminal-core';
 import { addTab, markTabExited, flagTabActivity, setActiveTab } from './store/slices/tabsSlice';
 import { RootState, store } from './store';
+import { terminalTitleColor } from './store/titleColor';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
@@ -1080,6 +1081,9 @@ const App: React.FC = () => {
         // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
         // the edge itself was already written by the backend before this event was emitted.
         parentTerminalId?: string;
+        // Mirrored by the caller's renderer so cross-window tab creation can inherit a colour
+        // without looking for the caller leaf in this window's pane tree.
+        parentTitleColor?: string | null;
       };
       console.log('API: Creating terminal tab', options);
 
@@ -1124,6 +1128,18 @@ const App: React.FC = () => {
       const tabExists = (id?: string) =>
         !!(window as any).__REDUX_STORE__?.getState()?.tabs?.tabs?.find((t: any) => t.id === id);
 
+      // Read live, not captured, so a caller in THIS window that was recoloured
+      // between the agent's request and this event contributes its new colour
+      // rather than one snapshotted earlier.
+      //
+      // Two cases this does NOT cover, both by design. A cross-window caller is
+      // not in this store at all, so the transported `parentTitleColor` decides
+      // and may be one mirror round-trip stale. And a caller CLEARED inside that
+      // same window reads as "no colour", which is indistinguishable here from
+      // "not my window", so a not-yet-cleared payload can still win. Inheritance
+      // is a one-time copy either way: the new tab keeps whatever it is given.
+      const titleColorForTerminal = (id?: string) => terminalTitleColor(store.getState(), id);
+
       if (terminalId && !paneId && (!tabId || !tabExists(tabId))) {
         // Mode 0: Create a NEW tab for a backend-spawned terminal that has no
         // open UI tab yet (e.g. an agent created it via the API). The backend now
@@ -1150,6 +1166,7 @@ const App: React.FC = () => {
           addTabTree,
           setActiveTab,
           setActiveTabId,
+          titleColorForTerminal,
           notifyTabCreated: ({ terminalId: notifiedTerminalId, tabId: notifiedTabId, name: notifiedName }) => {
             if (window.electronAPI) {
               window.electronAPI.sendToMain('api:terminalTabCreated', {
@@ -1724,6 +1741,10 @@ const App: React.FC = () => {
           defaultProfile,
           fallbackTitle: 'API Terminal',
           shellTypeFallback: 'cmd',
+          // Same inheritance as Mode 0 — this branch mints a tab too, so
+          // leaving it out would make the colour depend on which mode the
+          // backend happened to take.
+          titleColor: titleColorForTerminal(options.parentTerminalId) || options.parentTitleColor || undefined,
         });
 
         // Store the pane tree for this tab

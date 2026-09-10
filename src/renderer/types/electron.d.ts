@@ -176,6 +176,8 @@ export interface ElectronAPI {
    *  wire in `/api/terminals` and is what MCP's `get_terminal_detail` returns, so changing what it
    *  HOLDS would change what agents see. See services/terminalLabelSync.ts (plan 028 §4.2). */
   setTerminalDisplayLabel?: (rendererTerminalId: string, label: string) => Promise<void>;
+  /** Mirror the owning tab's user-set title colour for cross-window API/MCP spawns. */
+  setTerminalTitleColor?: (rendererTerminalId: string, titleColor: string) => Promise<void>;
   // P0a active-window routing: which window receives API/MCP-created terminals.
   // Optional — only the Tauri bridge implements it (browser bridge is single-window).
   getActiveWindow?: () => Promise<string>;
@@ -355,7 +357,7 @@ export interface ElectronAPI {
   cancelGlobalPaneDrag?: (token: string) => Promise<void>;
 
   // Tab tear-off preview window (Tauri only)
-  showDragPreview?: (title: string, x: number, y: number) => Promise<void>;
+  showDragPreview?: (title: string, color: string | undefined, x: number, y: number) => Promise<void>;
   moveDragPreview?: (x: number, y: number) => Promise<void>;
   hideDragPreview?: () => Promise<void>;
   // Cross-window tab drop (Tauri only)

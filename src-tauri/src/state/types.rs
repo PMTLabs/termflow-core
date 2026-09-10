@@ -149,6 +149,10 @@ pub struct Terminal {
     /// that has no pane at all. Plan 028 §4.2.
     #[serde(default)]
     pub display_label: Option<String>,
+    /// The owning tab's user-set title colour, mirrored from the renderer so an API/MCP spawn
+    /// routed to another window can carry the caller's colour in its event payload.
+    #[serde(default)]
+    pub title_color: Option<String>,
 }
 
 /// The pty-host session key for `t`, applying the documented empty-string fallback.
@@ -819,6 +823,33 @@ pub(crate) fn set_display_label(
     Ok(false)
 }
 
+/// Write a terminal's owning tab title colour, keyed by the durable `tm-` leaf.
+/// Blank input clears the mirrored value.
+pub(crate) fn set_title_color(
+    terminals: &DashMap<String, Terminal>,
+    renderer_terminal_id: &str,
+    title_color: Option<&str>,
+) -> Result<bool, String> {
+    let leaf = renderer_terminal_id.trim();
+    if leaf.is_empty() {
+        return Err("a renderer terminal (leaf) id is required".to_string());
+    }
+    let next = title_color
+        .map(str::trim)
+        .filter(|color| !color.is_empty())
+        .map(str::to_string);
+    for mut entry in terminals.iter_mut() {
+        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+            continue;
+        }
+        if entry.title_color != next {
+            entry.title_color = next.clone();
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Pure selection behind `active_window`/`main_window` promotion: given a
 /// preferred label, a label to treat as already gone (the window mid-close, which
 /// may still appear in `webview_windows()` when this runs from its own destroy
@@ -870,6 +901,7 @@ mod terminal_identity_serde_tests {
             last_input_at: None,
             prompt_hook: false,
             display_label: None,
+            title_color: None,
         }
     }
 
@@ -984,7 +1016,7 @@ mod terminal_identity_serde_tests {
 /// read end (`label_at`) with nothing in the middle.
 #[cfg(test)]
 mod set_display_label_tests {
-    use super::{set_display_label, Terminal, TerminalBackend};
+    use super::{set_display_label, set_title_color, Terminal, TerminalBackend};
     use dashmap::DashMap;
 
     /// Two live terminals, so every assertion can show the OTHER one was left alone — a writer that
@@ -1010,6 +1042,7 @@ mod set_display_label_tests {
                     last_input_at: None,
                     prompt_hook: false,
                     display_label: label.map(str::to_string),
+                    title_color: None,
                 },
             );
         }
@@ -1064,6 +1097,17 @@ mod set_display_label_tests {
         assert!(set_display_label(&terminals, "   ", Some("x")).is_err());
         assert_eq!(label_of(&terminals, "pc-1").as_deref(), Some("codex · core"));
     }
+
+    #[test]
+    fn title_colour_writes_only_its_leaf_and_a_blank_clears_it() {
+        let terminals = two_panes();
+        assert_eq!(set_title_color(&terminals, "tm-y", Some("#a855f7")), Ok(true));
+        assert_eq!(terminals.get("pc-2").and_then(|t| t.title_color.clone()).as_deref(), Some("#a855f7"));
+        assert_eq!(terminals.get("pc-1").and_then(|t| t.title_color.clone()), None);
+
+        assert_eq!(set_title_color(&terminals, "tm-y", Some("")), Ok(true));
+        assert_eq!(terminals.get("pc-2").and_then(|t| t.title_color.clone()), None);
+    }
 }
 
 /// Review 099 T2-F2: the owner recorded at spawn goes stale the moment a pane is
@@ -1095,6 +1139,7 @@ mod retarget_owning_tab_tests {
                 last_input_at: None,
                 prompt_hook: false,
                 display_label: None,
+                title_color: None,
             },
         );
         map
@@ -1236,6 +1281,7 @@ mod session_key_fallback_tests {
             last_input_at: None,
             prompt_hook: false,
             display_label: None,
+            title_color: None,
         }
     }
 

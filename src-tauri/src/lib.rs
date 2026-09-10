@@ -751,6 +751,7 @@ pub fn run() {
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
+        commands::set_terminal_title_color,
         automation_commands::list_automations,
         automation_commands::get_automation_runtime,
         automation_commands::load_automation_log,

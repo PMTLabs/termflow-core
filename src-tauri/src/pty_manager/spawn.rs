@@ -271,6 +271,7 @@ pub fn spawn_terminal(
         // command-suggest prompt gate (see shell_emits_prompt_osc).
         prompt_hook: is_powershell && !has_command_flag,
         display_label: None,
+        title_color: None,
     });
 
     // Spawn thread to read output

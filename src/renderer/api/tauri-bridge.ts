@@ -76,6 +76,7 @@ interface ElectronAPI {
   /// wire in `/api/terminals` and is what MCP returns, so changing what it holds would change what
   /// agents see. See services/terminalLabelSync.ts.
   setTerminalDisplayLabel: (rendererTerminalId: string, label: string) => Promise<void>;
+  setTerminalTitleColor: (rendererTerminalId: string, titleColor: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;
   /// Ask the backend to open/activate the Settings tab in the current main window
@@ -199,7 +200,7 @@ interface ElectronAPI {
   resolveOrphanGlobalDrag: (token: string) => Promise<boolean>;
   cancelGlobalPaneDrag: (token: string) => Promise<void>;
   // Tab tear-off preview window
-  showDragPreview: (title: string, x: number, y: number) => Promise<void>;
+  showDragPreview: (title: string, color: string | undefined, x: number, y: number) => Promise<void>;
   moveDragPreview: (x: number, y: number) => Promise<void>;
   hideDragPreview: () => Promise<void>;
   // Cross-window tab drop (source-driven hit-test)
@@ -417,6 +418,10 @@ const tauriBridge: ElectronAPI = {
 
   setTerminalDisplayLabel: async (rendererTerminalId: string, label: string) => {
     await invoke('set_terminal_display_label', { rendererTerminalId, label });
+  },
+
+  setTerminalTitleColor: async (rendererTerminalId: string, titleColor: string) => {
+    await invoke('set_terminal_title_color', { rendererTerminalId, titleColor });
   },
 
   closeTerminal: async (id) => {
@@ -840,8 +845,8 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Tab tear-off preview window
-  showDragPreview: async (title, x, y) => {
-    await invoke('show_drag_preview', { title, x, y });
+  showDragPreview: async (title, color, x, y) => {
+    await invoke('show_drag_preview', { title, color, x, y });
   },
   moveDragPreview: async (x, y) => {
     await invoke('move_drag_preview', { x, y });
