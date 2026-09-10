@@ -132,10 +132,14 @@ export interface AutomationEditorProps {
     /** This window's label, for the log lines every mutation writes. */
     origin: string;
     onClose: () => void;
+    /** User cancelled closing or a save-before-close failed — keeps the editor open. */
+    onCancelClose?: () => void;
     /** Leave the editor and open this rule's full activity log. */
     onOpenFullLog: (ruleId: string) => void;
     /** Something changed on disk — the panel refetches. */
     onChanged: () => Promise<void> | void;
+    /** Exposes requestClose so a parent (like AutomationsPanel on a list navigation) can request a guarded exit. */
+    requestCloseRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 const INSPECT_WIDTH_KEY = 'termflow.automation.inspectorWidth';
@@ -186,8 +190,10 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     now,
     origin,
     onClose,
+    onCancelClose,
     onOpenFullLog,
     onChanged,
+    requestCloseRef,
 }) => {
     const [draft, dispatch] = useReducer(draftReducer, { rule, opening }, (init) =>
         draftFromRule(init.rule, init.opening));
@@ -432,6 +438,14 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         if (isDirty(latest.current.draft)) setPendingClose(true);
         else onClose();
     }, [onClose]);
+
+    useEffect(() => {
+        if (!requestCloseRef) return undefined;
+        requestCloseRef.current = requestClose;
+        return () => {
+            requestCloseRef.current = null;
+        };
+    }, [requestCloseRef, requestClose]);
 
     // `trapFocus: false` because this editor is non-modal: Tab must be able to walk out of it
     // into the window behind, the same way a click already can. Escape still closes it, since
@@ -994,10 +1008,14 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                             onClose();
                         } else {
                             setPendingClose(false);
+                            onCancelClose?.();
                         }
                     })();
                 }}
-                onCancel={() => setPendingClose(false)}
+                onCancel={() => {
+                    setPendingClose(false);
+                    onCancelClose?.();
+                }}
             />
         </div>,
         document.body,

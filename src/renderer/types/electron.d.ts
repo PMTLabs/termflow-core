@@ -182,7 +182,7 @@ export interface ElectronAPI {
   setActiveWindow?: (label: string) => Promise<void>;
   // Multi-window Settings routing (Tauri bridge only): open/activate Settings in
   // the current main window and focus it. See services/openSettings.ts.
-  openSettingsInMainWindow?: (category?: string) => Promise<void>;
+  openSettingsInMainWindow?: (category?: string, detail?: string) => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   /** Delete persisted terminal scrollback for every renderer id NOT in keepIds (startup orphan sweep). */
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;

@@ -137,9 +137,15 @@ export function getOpenAutomationDraft(): AutomationRule | null {
  * feature's own docs keep catching.
  */
 let pendingLogRuleId: string | null = null;
+const logRequestListeners = new Set<(ruleId: string) => void>();
 
 export function requestAutomationLog(ruleId: string): void {
-    pendingLogRuleId = ruleId;
+    if (logRequestListeners.size > 0) {
+        pendingLogRuleId = null;
+        logRequestListeners.forEach((listener) => listener(ruleId));
+    } else {
+        pendingLogRuleId = ruleId;
+    }
 }
 
 export function consumePendingAutomationLog(): string | null {
@@ -148,10 +154,57 @@ export function consumePendingAutomationLog(): string | null {
     return id;
 }
 
+export function subscribeAutomationLogRequested(listener: (ruleId: string) => void): () => void {
+    logRequestListeners.add(listener);
+    return () => {
+        logRequestListeners.delete(listener);
+    };
+}
+
+/**
+ * A request to navigate to the Automations rule LIST in Settings.
+ *
+ * When clicked from the terminal context menu, the user intends to see the top-level Automations
+ * list. If Settings is already open with a sub-view (activity log, gallery, or editor), this signal
+ * prompts the panel to return to the list (after guarding any dirty draft).
+ *
+ * If an active AutomationsPanel is already mounted, it is notified immediately and no pending state
+ * is kept, preventing stale navigation state from leaking into subsequent panel mounts. If no panel
+ * is mounted yet, pending state is queued for the panel's upcoming mount.
+ */
+let pendingListRequest = false;
+const listRequestListeners = new Set<() => void>();
+
+export function requestAutomationList(): void {
+    if (listRequestListeners.size > 0) {
+        pendingListRequest = false;
+        listRequestListeners.forEach((listener) => listener());
+    } else {
+        pendingListRequest = true;
+    }
+}
+
+export function consumePendingAutomationList(): boolean {
+    const req = pendingListRequest;
+    pendingListRequest = false;
+    return req;
+}
+
+export function subscribeAutomationListRequested(listener: () => void): () => void {
+    listRequestListeners.add(listener);
+    return () => {
+        listRequestListeners.delete(listener);
+    };
+}
+
 /** Test-only: forget the open request and every subscriber. */
 export function __resetAutomationEditorHostForTest(): void {
     openRuleId = null;
     openDraft = null;
     pendingLogRuleId = null;
+    pendingListRequest = false;
     listeners.clear();
+    listRequestListeners.clear();
+    logRequestListeners.clear();
 }
+

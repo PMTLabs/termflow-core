@@ -451,7 +451,14 @@ export const AutomationMenuSection: React.FC<{
  * as `hasSelection` and the detected agent beside it are. `getSurfaceChrome`'s doc states the same
  * split — subscribe for what a surface DRAWS continuously, read once for what a click needs.
  */
-export function automationMenuItems(terminalId: string | null): ContextMenuItem[] {
+export interface AutomationMenuItemsOptions {
+    onOpenSettings?: () => void;
+}
+
+export function automationMenuItems(
+    terminalId: string | null,
+    opts?: AutomationMenuItemsOptions,
+): ContextMenuItem[] {
     if (!terminalId) return [];
     const armed = getArmedAutomations(terminalId);
     // One clock for every row, so two of them cannot disagree about whether a fire was "just now"
@@ -481,6 +488,16 @@ export function automationMenuItems(terminalId: string | null): ContextMenuItem[
         title: 'Automations watching this terminal, plus actions to arm a new one.',
         submenu: {
             searchPlaceholder: 'Search automations…',
+            headerActions: [
+                {
+                    id: 'open-settings',
+                    icon: '⚙️',
+                    title: 'Manage automations in Settings.',
+                    onSelect: () => {
+                        opts?.onOpenSettings?.();
+                    },
+                },
+            ],
             // The ARRAY form, so `ContextMenu`'s own case-insensitive filter over `label` +
             // `detail` does the searching. Snippets takes the function form because
             // `filterSnippets` also owns #tag matching and the flatten-on-search rule; there is no

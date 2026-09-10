@@ -32,10 +32,12 @@ pub fn set_active_window(
 
 /// Payload for the `settings:open` broadcast — every window listens, but only the
 /// one whose label matches `target` actually opens/activates the Settings tab.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 struct SettingsOpenPayload {
     target: String,
     category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 /// Open (or activate) the single Settings tab, always in the current main window —
@@ -50,11 +52,12 @@ pub fn open_settings_in_main_window(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     category: Option<String>,
+    detail: Option<String>,
 ) -> Result<(), String> {
     use tauri::{Emitter, Manager};
     let target = state.resolve_main_window_label();
     app_handle
-        .emit("settings:open", SettingsOpenPayload { target: target.clone(), category })
+        .emit("settings:open", SettingsOpenPayload { target: target.clone(), category, detail })
         .map_err(|e| e.to_string())?;
     if let Some(w) = app_handle.get_webview_window(&target) {
         // Unlike the drag-reattach path, the user didn't just interact with the
@@ -746,6 +749,34 @@ mod quit_teardown_wiring_tests {
              need to stay armed (restart_for_update, update_and_restart) would \
              inherit an exit they never asked for. Body:\n{body}"
         );
+    }
+
+    #[test]
+    fn settings_open_payload_serializes_detail_field() {
+        use super::SettingsOpenPayload;
+        let with_detail = SettingsOpenPayload {
+            target: "main".into(),
+            category: Some("automations".into()),
+            detail: Some("list".into()),
+        };
+        let json = serde_json::to_string(&with_detail).unwrap();
+        assert!(json.contains("\"detail\":\"list\""));
+
+        let with_log = SettingsOpenPayload {
+            target: "main".into(),
+            category: Some("automations".into()),
+            detail: Some("log:rule-123".into()),
+        };
+        let json_log = serde_json::to_string(&with_log).unwrap();
+        assert!(json_log.contains("\"detail\":\"log:rule-123\""));
+
+        let without_detail = SettingsOpenPayload {
+            target: "main".into(),
+            category: Some("automations".into()),
+            detail: None,
+        };
+        let json_none = serde_json::to_string(&without_detail).unwrap();
+        assert!(!json_none.contains("detail"));
     }
 }
 

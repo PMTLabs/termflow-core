@@ -485,6 +485,21 @@ describe('the shared indicator and menu section', () => {
         open.mockRestore();
     });
 
+    it('offers a header action to manage automations in settings', () => {
+        const onOpenSettings = jest.fn();
+        const items = automationMenuItems('tm-1', { onOpenSettings });
+        expect(items).toHaveLength(1);
+        const flyout = items[0].submenu!;
+        expect(flyout.headerActions).toBeDefined();
+        const settingsAction = flyout.headerActions?.find((a) => a.id === 'open-settings');
+        expect(settingsAction).toBeDefined();
+        expect(settingsAction?.icon).toBe('⚙️');
+        expect(settingsAction?.title).toBe('Manage automations in Settings.');
+
+        settingsAction?.onSelect();
+        expect(onOpenSettings).toHaveBeenCalledTimes(1);
+    });
+
     it('still offers ONE item for an unarmed terminal, with no `(0)` in its label', async () => {
         // The old cut returned `[]` here — nothing armed meant nothing to show. Now there is always
         // something behind the item (create a rule, join an existing one), so it must still be
@@ -1039,7 +1054,7 @@ describe('every surface mounts the SHARED components', () => {
             // The terminal-area menu renders from an item array, so it takes the builder rather
             // than the component — but from the same module, and over the same entries.
             file: 'components/Terminal/TerminalDisplay.tsx',
-            mounts: 'automationMenuItems(terminalId)',
+            mounts: '...automationMenuItems(terminalId, {',
             from: "from '../Automation/AutomationMenuSection'",
         },
     ];
