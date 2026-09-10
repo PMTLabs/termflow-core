@@ -148,10 +148,41 @@ export function consumePendingAutomationLog(): string | null {
     return id;
 }
 
+/**
+ * A request to navigate to the Automations rule LIST in Settings.
+ *
+ * When clicked from the terminal context menu, the user intends to see the top-level Automations
+ * list. If Settings is already open with a sub-view (activity log, gallery, or editor), this signal
+ * prompts the panel to return to the list (after guarding any dirty draft).
+ */
+let pendingListRequest = false;
+const listRequestListeners = new Set<() => void>();
+
+export function requestAutomationList(): void {
+    pendingListRequest = true;
+    listRequestListeners.forEach((listener) => listener());
+}
+
+export function consumePendingAutomationList(): boolean {
+    const req = pendingListRequest;
+    pendingListRequest = false;
+    return req;
+}
+
+export function subscribeAutomationListRequested(listener: () => void): () => void {
+    listRequestListeners.add(listener);
+    return () => {
+        listRequestListeners.delete(listener);
+    };
+}
+
 /** Test-only: forget the open request and every subscriber. */
 export function __resetAutomationEditorHostForTest(): void {
     openRuleId = null;
     openDraft = null;
     pendingLogRuleId = null;
+    pendingListRequest = false;
     listeners.clear();
+    listRequestListeners.clear();
 }
+
