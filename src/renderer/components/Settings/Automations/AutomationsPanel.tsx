@@ -20,7 +20,12 @@ import { redactWebhookError } from '../../Automation/webhookRedaction';
 import type { CanvasOpening } from '../../Automation/automationDraft';
 import { automationRowState, JUST_FIRED_MS } from './automationState';
 import { useAutomations } from './useAutomations';
-import { consumePendingAutomationLog } from '../../../services/automationEditorHost';
+import {
+    consumePendingAutomationList,
+    consumePendingAutomationLog,
+    subscribeAutomationListRequested,
+} from '../../../services/automationEditorHost';
+import { isAutomationEditorDirty } from '../../../services/automationEditorGuard';
 import '../../Automation/auToggle.css';
 import './AutomationsPanel.css';
 
@@ -203,8 +208,16 @@ export const AutomationsPanel: React.FC = () => {
     // restore decision has actually been MADE, so the persist effect further down never writes the
     // default 'list' back over a not-yet-read saved value.
     const navClaimedRef = useRef(false);
+    const editorRequestCloseRef = useRef<(() => void) | null>(null);
     const [viewHydrated, setViewHydrated] = useState(false);
     useEffect(() => {
+        const pendingList = consumePendingAutomationList();
+        if (pendingList) {
+            navClaimedRef.current = true;
+            setView({ kind: 'list' });
+            setViewHydrated(true);
+            return;
+        }
         const pending = consumePendingAutomationLog();
         if (pending) {
             navClaimedRef.current = true;
@@ -264,6 +277,20 @@ export const AutomationsPanel: React.FC = () => {
         setLogScope(null);
         setView({ kind: 'list' });
     };
+
+    useEffect(() => {
+        return subscribeAutomationListRequested(() => {
+            if (view.kind === 'gallery' || view.kind === 'log') {
+                backToList();
+            } else if (view.kind === 'editor') {
+                if (editorRequestCloseRef.current) {
+                    editorRequestCloseRef.current();
+                } else if (!isAutomationEditorDirty()) {
+                    backToList();
+                }
+            }
+        });
+    }, [view]);
 
     /**
      * The action line, in the ONE spelling every view uses.
@@ -528,6 +555,7 @@ export const AutomationsPanel: React.FC = () => {
                     onClose={() => setView({ kind: 'list' })}
                     onOpenFullLog={(ruleId) => showLog(ruleId)}
                     onChanged={refresh}
+                    requestCloseRef={editorRequestCloseRef}
                 />
             </>
         );

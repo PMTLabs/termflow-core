@@ -23,8 +23,11 @@ jest.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: '
 import { AutomationsPanel } from '../AutomationsPanel';
 // eslint-disable-next-line import/first
 import { JUST_FIRED_MS } from '../automationState';
-// eslint-disable-next-line import/first
 import type { AutomationRule } from '../../../../types/electron';
+import {
+    requestAutomationList,
+    __resetAutomationEditorHostForTest,
+} from '../../../../services/automationEditorHost';
 
 function rule(over: Partial<AutomationRule> = {}): AutomationRule {
     return {
@@ -100,12 +103,14 @@ describe('AutomationsPanel', () => {
     });
 
     beforeEach(() => {
+        __resetAutomationEditorHostForTest();
         container = document.createElement('div');
         document.body.appendChild(container);
         root = createRoot(container);
     });
 
     afterEach(async () => {
+        __resetAutomationEditorHostForTest();
         await act(async () => root.unmount());
         container.remove();
         document.querySelectorAll('.confirm-dialog-overlay').forEach((n) => n.remove());
@@ -640,5 +645,61 @@ describe('AutomationsPanel', () => {
         });
         expect(container.querySelectorAll('.au-tplcard')).toHaveLength(11);
         expect(container.querySelectorAll('.au-tplcard.blank')).toHaveLength(1);
+    });
+
+    it('when mounted with pending list request, stays on list view even if last view was gallery', async () => {
+        const api = installApi([rule()]);
+        api.getConfigValue = jest.fn(() => Promise.resolve({ kind: 'gallery' }));
+        requestAutomationList();
+        await mount();
+
+        expect(container.querySelectorAll('.au-row')).toHaveLength(1);
+        expect(container.querySelectorAll('.au-tplcard')).toHaveLength(0);
+    });
+
+    it('returns to list view from gallery when a list request arrives', async () => {
+        installApi([rule()]);
+        await mount();
+        await openGallery();
+        expect(container.querySelectorAll('.au-tplcard')).toHaveLength(11);
+
+        await act(async () => {
+            requestAutomationList();
+        });
+        expect(container.querySelectorAll('.au-row')).toHaveLength(1);
+        expect(container.querySelectorAll('.au-tplcard')).toHaveLength(0);
+    });
+
+    it('closes clean editor and returns to list view when list request arrives', async () => {
+        installApi([]);
+        await mount();
+        await openGallery();
+        await act(async () => {
+            (container.querySelector('.au-tplcard.blank') as HTMLButtonElement).click();
+        });
+        expect(document.querySelector('.au-editor')).not.toBeNull();
+
+        await act(async () => {
+            requestAutomationList();
+        });
+        expect(document.querySelector('.au-editor')).toBeNull();
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+    });
+
+    it('prompts before closing when a dirty editor receives a list request', async () => {
+        installApi([]);
+        await mount();
+        await openGallery();
+        const template = [...container.querySelectorAll('.au-tplcard')]
+            .find((c) => !c.classList.contains('blank')) as HTMLButtonElement;
+        await act(async () => { template.click(); });
+
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+
+        await act(async () => {
+            requestAutomationList();
+        });
+        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
+        expect(document.body.textContent).toContain('Leave without saving?');
     });
 });

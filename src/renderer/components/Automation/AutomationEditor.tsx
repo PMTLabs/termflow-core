@@ -136,6 +136,8 @@ export interface AutomationEditorProps {
     onOpenFullLog: (ruleId: string) => void;
     /** Something changed on disk — the panel refetches. */
     onChanged: () => Promise<void> | void;
+    /** Exposes requestClose so a parent (like AutomationsPanel on a list navigation) can request a guarded exit. */
+    requestCloseRef?: React.MutableRefObject<(() => void) | null>;
 }
 
 const INSPECT_WIDTH_KEY = 'termflow.automation.inspectorWidth';
@@ -188,6 +190,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     onClose,
     onOpenFullLog,
     onChanged,
+    requestCloseRef,
 }) => {
     const [draft, dispatch] = useReducer(draftReducer, { rule, opening }, (init) =>
         draftFromRule(init.rule, init.opening));
@@ -432,6 +435,15 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         if (isDirty(latest.current.draft)) setPendingClose(true);
         else onClose();
     }, [onClose]);
+
+    useEffect(() => {
+        if (requestCloseRef) {
+            requestCloseRef.current = requestClose;
+            return () => {
+                requestCloseRef.current = null;
+            };
+        }
+    }, [requestCloseRef, requestClose]);
 
     // `trapFocus: false` because this editor is non-modal: Tab must be able to walk out of it
     // into the window behind, the same way a click already can. Escape still closes it, since
