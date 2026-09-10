@@ -774,5 +774,90 @@ describe('AutomationsPanel', () => {
         // Verify pending log request was consumed and does not leak
         expect(consumePendingAutomationLog()).toBeNull();
     });
+
+    it('navigates to requested log when dirty editor confirms discard', async () => {
+        installApi([rule()]);
+        await mount();
+        await openGallery();
+        const template = [...container.querySelectorAll('.au-tplcard')]
+            .find((c) => !c.classList.contains('blank')) as HTMLButtonElement;
+        await act(async () => { template.click(); });
+
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+
+        await act(async () => {
+            requestAutomationLog('au-1');
+        });
+        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
+
+        // Discard
+        const discardBtn = [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.includes('Discard')) as HTMLButtonElement;
+        await act(async () => { discardBtn.click(); });
+
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+        expect(document.querySelector('.au-editor')).toBeNull();
+        expect(container.querySelector('.au-logbar')).not.toBeNull();
+        expect(container.querySelector('.au-panelhead-text h3')?.textContent).toBe('Activity');
+    });
+
+    it('saves and navigates to requested log when dirty editor confirms save and close', async () => {
+        const api = installApi([rule()]);
+        await mount();
+        await openGallery();
+        const template = [...container.querySelectorAll('.au-tplcard')]
+            .find((c) => !c.classList.contains('blank')) as HTMLButtonElement;
+        await act(async () => { template.click(); });
+
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+
+        await act(async () => {
+            requestAutomationLog('au-1');
+        });
+        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
+
+        // Save and close
+        const saveBtn = [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.includes('Save and close')) as HTMLButtonElement;
+        await act(async () => { saveBtn.click(); });
+
+        expect(api.saveAutomation).toHaveBeenCalled();
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+        expect(document.querySelector('.au-editor')).toBeNull();
+        expect(container.querySelector('.au-logbar')).not.toBeNull();
+        expect(container.querySelector('.au-panelhead-text h3')?.textContent).toBe('Activity');
+    });
+
+    it('clears pending log target when user cancels confirmation and keeps editing', async () => {
+        installApi([rule()]);
+        await mount();
+        await openGallery();
+        const template = [...container.querySelectorAll('.au-tplcard')]
+            .find((c) => !c.classList.contains('blank')) as HTMLButtonElement;
+        await act(async () => { template.click(); });
+
+        await act(async () => {
+            requestAutomationLog('au-1');
+        });
+
+        // Cancel
+        const keepEditingBtn = [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.includes('Keep editing')) as HTMLButtonElement;
+        await act(async () => { keepEditingBtn.click(); });
+
+        // Now request closing normally
+        const closeBtn = document.querySelector('.au-x') as HTMLButtonElement;
+        await act(async () => { closeBtn.click(); });
+
+        // Confirmation pops up again
+        const discardBtn = [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.includes('Discard')) as HTMLButtonElement;
+        await act(async () => { discardBtn.click(); });
+
+        // Should be back on the list view, NOT on the activity log
+        expect(container.querySelector('.au-logbar')).toBeNull();
+        expect(container.querySelectorAll('.au-row')).toHaveLength(1);
+    });
 });
+
 

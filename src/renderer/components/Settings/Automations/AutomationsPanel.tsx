@@ -210,6 +210,7 @@ export const AutomationsPanel: React.FC = () => {
     // default 'list' back over a not-yet-read saved value.
     const navClaimedRef = useRef(false);
     const editorRequestCloseRef = useRef<(() => void) | null>(null);
+    const pendingLogTargetRef = useRef<string | null>(null);
     const [viewHydrated, setViewHydrated] = useState(false);
     useEffect(() => {
         const pendingList = consumePendingAutomationList();
@@ -279,9 +280,20 @@ export const AutomationsPanel: React.FC = () => {
         setView({ kind: 'list' });
     };
 
+    const handleEditorClose = () => {
+        const target = pendingLogTargetRef.current;
+        pendingLogTargetRef.current = null;
+        if (target) {
+            showLog(target);
+        } else {
+            setView({ kind: 'list' });
+        }
+    };
+
     useEffect(() => {
         return subscribeAutomationListRequested(() => {
             consumePendingAutomationList();
+            pendingLogTargetRef.current = null;
             if (view.kind === 'gallery' || view.kind === 'log') {
                 backToList();
             } else if (view.kind === 'editor') {
@@ -299,11 +311,14 @@ export const AutomationsPanel: React.FC = () => {
             consumePendingAutomationLog();
             if (view.kind === 'editor') {
                 if (editorRequestCloseRef.current && isAutomationEditorDirty()) {
+                    pendingLogTargetRef.current = ruleId;
                     editorRequestCloseRef.current();
                 } else {
+                    pendingLogTargetRef.current = null;
                     showLog(ruleId);
                 }
             } else {
+                pendingLogTargetRef.current = null;
                 showLog(ruleId);
             }
         });
@@ -570,7 +585,10 @@ export const AutomationsPanel: React.FC = () => {
                     runtime={runtime}
                     now={now}
                     origin={origin}
-                    onClose={() => setView({ kind: 'list' })}
+                    onClose={handleEditorClose}
+                    onCancelClose={() => {
+                        pendingLogTargetRef.current = null;
+                    }}
                     onOpenFullLog={(ruleId) => showLog(ruleId)}
                     onChanged={refresh}
                     requestCloseRef={editorRequestCloseRef}

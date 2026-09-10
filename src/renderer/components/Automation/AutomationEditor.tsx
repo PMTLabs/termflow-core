@@ -132,6 +132,8 @@ export interface AutomationEditorProps {
     /** This window's label, for the log lines every mutation writes. */
     origin: string;
     onClose: () => void;
+    /** User cancelled closing or a save-before-close failed — keeps the editor open. */
+    onCancelClose?: () => void;
     /** Leave the editor and open this rule's full activity log. */
     onOpenFullLog: (ruleId: string) => void;
     /** Something changed on disk — the panel refetches. */
@@ -188,6 +190,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     now,
     origin,
     onClose,
+    onCancelClose,
     onOpenFullLog,
     onChanged,
     requestCloseRef,
@@ -1005,10 +1008,14 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                             onClose();
                         } else {
                             setPendingClose(false);
+                            onCancelClose?.();
                         }
                     })();
                 }}
-                onCancel={() => setPendingClose(false)}
+                onCancel={() => {
+                    setPendingClose(false);
+                    onCancelClose?.();
+                }}
             />
         </div>,
         document.body,
