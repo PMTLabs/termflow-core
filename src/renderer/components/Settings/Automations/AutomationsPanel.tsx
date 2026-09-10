@@ -24,6 +24,7 @@ import {
     consumePendingAutomationList,
     consumePendingAutomationLog,
     subscribeAutomationListRequested,
+    subscribeAutomationLogRequested,
 } from '../../../services/automationEditorHost';
 import { isAutomationEditorDirty } from '../../../services/automationEditorGuard';
 import '../../Automation/auToggle.css';
@@ -292,6 +293,22 @@ export const AutomationsPanel: React.FC = () => {
             }
         });
     }, [view]);
+
+    useEffect(() => {
+        return subscribeAutomationLogRequested((ruleId) => {
+            consumePendingAutomationLog();
+            if (view.kind === 'editor') {
+                if (editorRequestCloseRef.current && isAutomationEditorDirty()) {
+                    editorRequestCloseRef.current();
+                } else {
+                    showLog(ruleId);
+                }
+            } else {
+                showLog(ruleId);
+            }
+        });
+    }, [view]);
+
 
     /**
      * The action line, in the ONE spelling every view uses.

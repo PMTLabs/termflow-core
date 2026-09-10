@@ -26,6 +26,9 @@ import { JUST_FIRED_MS } from '../automationState';
 import type { AutomationRule } from '../../../../types/electron';
 import {
     requestAutomationList,
+    requestAutomationLog,
+    consumePendingAutomationList,
+    consumePendingAutomationLog,
     __resetAutomationEditorHostForTest,
 } from '../../../../services/automationEditorHost';
 
@@ -714,4 +717,62 @@ describe('AutomationsPanel', () => {
         const { consumePendingAutomationList } = await import('../../../../services/automationEditorHost');
         expect(consumePendingAutomationList()).toBe(false);
     });
+
+    it('switches from list view to activity log when a live log request arrives', async () => {
+        installApi([rule()]);
+        await mount();
+        expect(container.querySelectorAll('.au-row')).toHaveLength(1);
+        expect(container.querySelector('.au-logbar')).toBeNull();
+
+        await act(async () => {
+            requestAutomationLog('au-1');
+        });
+
+        expect(container.querySelector('.au-logbar')).not.toBeNull();
+        expect(container.querySelector('.au-panelhead-text h3')?.textContent).toBe('Activity');
+        expect(consumePendingAutomationLog()).toBeNull();
+    });
+
+    it('switches from gallery view to activity log when a live log request arrives', async () => {
+        installApi([rule()]);
+        await mount();
+        await openGallery();
+        expect(container.querySelectorAll('.au-tplcard')).toHaveLength(11);
+
+        await act(async () => {
+            requestAutomationLog('au-1');
+        });
+
+        expect(container.querySelector('.au-logbar')).not.toBeNull();
+        expect(container.querySelector('.au-panelhead-text h3')?.textContent).toBe('Activity');
+    });
+
+    it('prompts before switching when a dirty editor receives a log request', async () => {
+        installApi([]);
+        await mount();
+        await openGallery();
+        const template = [...container.querySelectorAll('.au-tplcard')]
+            .find((c) => !c.classList.contains('blank')) as HTMLButtonElement;
+        await act(async () => { template.click(); });
+
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+
+        await act(async () => {
+            requestAutomationLog('au-1');
+        });
+        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
+        expect(document.body.textContent).toContain('Leave without saving?');
+
+        // Cancel / Keep editing
+        const keepEditingBtn = [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.includes('Keep editing')) as HTMLButtonElement;
+        await act(async () => { keepEditingBtn.click(); });
+
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+        expect(document.querySelector('.au-editor')).not.toBeNull();
+
+        // Verify pending log request was consumed and does not leak
+        expect(consumePendingAutomationLog()).toBeNull();
+    });
 });
+

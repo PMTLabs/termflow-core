@@ -11,7 +11,29 @@ jest.mock('../../store', () => ({
   store: { getState: () => mockState, dispatch: (a: unknown) => dispatch(a) },
 }));
 
-import { openSettingsTab } from '../openSettings';
+let eventListeners: Record<string, (event: any) => void> = {};
+const mockListen = jest.fn((event: string, cb: (e: any) => void) => {
+  eventListeners[event] = cb;
+  return Promise.resolve(() => {
+    delete eventListeners[event];
+  });
+});
+
+jest.mock('@tauri-apps/api/event', () => ({
+  listen: (event: string, cb: (e: any) => void) => mockListen(event, cb),
+}));
+
+let currentWindowLabel = 'main';
+jest.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({ label: currentWindowLabel }),
+}));
+
+import {
+  openSettingsTab,
+  installSettingsRouting,
+  __resetSettingsRoutingForTest,
+} from '../openSettings';
+
 
 describe('openSettingsTab (single-instance Settings)', () => {
   beforeEach(() => {
@@ -104,5 +126,57 @@ describe('openSettingsTab (single-instance Settings)', () => {
 
     expect(consumePendingAutomationLog()).toBe('rule-custom-1');
   });
+
+  describe('installSettingsRouting (cross-window receiver)', () => {
+    beforeEach(() => {
+      __resetSettingsRoutingForTest();
+      eventListeners = {};
+      mockListen.mockClear();
+      currentWindowLabel = 'main';
+    });
+
+    it('subscribes to settings:open event and routes automations:list when targeted', async () => {
+      const { consumePendingAutomationList } = await import('../automationEditorHost');
+      consumePendingAutomationList();
+
+      await installSettingsRouting();
+
+      expect(mockListen).toHaveBeenCalledWith('settings:open', expect.any(Function));
+      const handler = eventListeners['settings:open'];
+      expect(handler).toBeDefined();
+
+      // Emit synthetic cross-window event for this window
+      handler({ payload: { target: 'main', category: 'automations', detail: 'list' } });
+
+      expect(consumePendingAutomationList()).toBe(true);
+    });
+
+    it('routes automations:log:<id> when targeted with log detail', async () => {
+      const { consumePendingAutomationLog } = await import('../automationEditorHost');
+      consumePendingAutomationLog();
+
+      await installSettingsRouting();
+
+      const handler = eventListeners['settings:open'];
+      handler({ payload: { target: 'main', category: 'automations', detail: 'log:rule-cross-99' } });
+
+      expect(consumePendingAutomationLog()).toBe('rule-cross-99');
+    });
+
+    it('ignores settings:open when payload target does not match current window', async () => {
+      const { consumePendingAutomationList, consumePendingAutomationLog } = await import('../automationEditorHost');
+      consumePendingAutomationList();
+      consumePendingAutomationLog();
+
+      await installSettingsRouting();
+
+      const handler = eventListeners['settings:open'];
+      handler({ payload: { target: 'window-2', category: 'automations', detail: 'list' } });
+
+      expect(consumePendingAutomationList()).toBe(false);
+      expect(consumePendingAutomationLog()).toBeNull();
+    });
+  });
 });
+
 

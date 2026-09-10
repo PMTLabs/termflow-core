@@ -137,15 +137,28 @@ export function getOpenAutomationDraft(): AutomationRule | null {
  * feature's own docs keep catching.
  */
 let pendingLogRuleId: string | null = null;
+const logRequestListeners = new Set<(ruleId: string) => void>();
 
 export function requestAutomationLog(ruleId: string): void {
-    pendingLogRuleId = ruleId;
+    if (logRequestListeners.size > 0) {
+        pendingLogRuleId = null;
+        logRequestListeners.forEach((listener) => listener(ruleId));
+    } else {
+        pendingLogRuleId = ruleId;
+    }
 }
 
 export function consumePendingAutomationLog(): string | null {
     const id = pendingLogRuleId;
     pendingLogRuleId = null;
     return id;
+}
+
+export function subscribeAutomationLogRequested(listener: (ruleId: string) => void): () => void {
+    logRequestListeners.add(listener);
+    return () => {
+        logRequestListeners.delete(listener);
+    };
 }
 
 /**
@@ -192,5 +205,6 @@ export function __resetAutomationEditorHostForTest(): void {
     pendingListRequest = false;
     listeners.clear();
     listRequestListeners.clear();
+    logRequestListeners.clear();
 }
 

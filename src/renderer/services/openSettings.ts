@@ -104,29 +104,31 @@ export function openSettingsTab(category?: string, detail?: string): void {
 
 let routingInstalled = false;
 
+export function __resetSettingsRoutingForTest(): void {
+  routingInstalled = false;
+}
+
 /**
  * Wire up THIS window to react to `settings:open` broadcasts (see
  * `openSettingsTab` above) — call once per window boot. Idempotent.
  */
-export function installSettingsRouting(): void {
+export async function installSettingsRouting(): Promise<void> {
   if (routingInstalled) return;
   routingInstalled = true;
-  void (async () => {
-    try {
-      const { listen } = await import('@tauri-apps/api/event');
-      const { getCurrentWindow } = await import('@tauri-apps/api/window');
-      const myLabel = getCurrentWindow().label;
-      await listen('settings:open', (event: any) => {
-        const p = event?.payload;
-        if (!p || typeof p !== 'object' || p.target !== myLabel) return;
-        openSettingsLocally(
-          typeof p.category === 'string' ? p.category : undefined,
-          typeof p.detail === 'string' ? p.detail : undefined,
-        );
-      });
-    } catch {
-      // Not under Tauri — nothing to route (openSettingsTab already falls back
-      // to opening locally in that case).
-    }
-  })();
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const myLabel = getCurrentWindow().label;
+    await listen('settings:open', (event: any) => {
+      const p = event?.payload;
+      if (!p || typeof p !== 'object' || p.target !== myLabel) return;
+      openSettingsLocally(
+        typeof p.category === 'string' ? p.category : undefined,
+        typeof p.detail === 'string' ? p.detail : undefined,
+      );
+    });
+  } catch {
+    // Not under Tauri — nothing to route (openSettingsTab already falls back
+    // to opening locally in that case).
+  }
 }

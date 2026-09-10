@@ -32,7 +32,7 @@ pub fn set_active_window(
 
 /// Payload for the `settings:open` broadcast — every window listens, but only the
 /// one whose label matches `target` actually opens/activates the Settings tab.
-#[derive(serde::Serialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
 struct SettingsOpenPayload {
     target: String,
     category: Option<String>,
@@ -749,6 +749,34 @@ mod quit_teardown_wiring_tests {
              need to stay armed (restart_for_update, update_and_restart) would \
              inherit an exit they never asked for. Body:\n{body}"
         );
+    }
+
+    #[test]
+    fn settings_open_payload_serializes_detail_field() {
+        use super::SettingsOpenPayload;
+        let with_detail = SettingsOpenPayload {
+            target: "main".into(),
+            category: Some("automations".into()),
+            detail: Some("list".into()),
+        };
+        let json = serde_json::to_string(&with_detail).unwrap();
+        assert!(json.contains("\"detail\":\"list\""));
+
+        let with_log = SettingsOpenPayload {
+            target: "main".into(),
+            category: Some("automations".into()),
+            detail: Some("log:rule-123".into()),
+        };
+        let json_log = serde_json::to_string(&with_log).unwrap();
+        assert!(json_log.contains("\"detail\":\"log:rule-123\""));
+
+        let without_detail = SettingsOpenPayload {
+            target: "main".into(),
+            category: Some("automations".into()),
+            detail: None,
+        };
+        let json_none = serde_json::to_string(&without_detail).unwrap();
+        assert!(!json_none.contains("detail"));
     }
 }
 
