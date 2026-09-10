@@ -1054,7 +1054,7 @@ describe('every surface mounts the SHARED components', () => {
             // The terminal-area menu renders from an item array, so it takes the builder rather
             // than the component — but from the same module, and over the same entries.
             file: 'components/Terminal/TerminalDisplay.tsx',
-            mounts: 'automationMenuItems(terminalId',
+            mounts: '...automationMenuItems(terminalId, {',
             from: "from '../Automation/AutomationMenuSection'",
         },
     ];

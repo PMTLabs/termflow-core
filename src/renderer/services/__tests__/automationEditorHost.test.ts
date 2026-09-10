@@ -18,16 +18,19 @@ describe('automationEditorHost list request hand-off', () => {
         expect(consumePendingAutomationList()).toBe(false);
     });
 
-    it('notifies active subscribers when a list request is made', () => {
+    it('notifies active subscribers when a list request is made and does not leave pending request', () => {
         const listener = jest.fn();
         const unsubscribe = subscribeAutomationListRequested(listener);
 
         requestAutomationList();
         expect(listener).toHaveBeenCalledTimes(1);
+        // Live listener received it, so pending request should not be queued
+        expect(consumePendingAutomationList()).toBe(false);
 
         unsubscribe();
+        // Once unsubscribed, request is queued for future mount
         requestAutomationList();
-        expect(listener).toHaveBeenCalledTimes(1);
+        expect(consumePendingAutomationList()).toBe(true);
     });
 
     it('clears pending request on reset', () => {

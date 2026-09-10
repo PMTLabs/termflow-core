@@ -36,6 +36,8 @@ pub fn set_active_window(
 struct SettingsOpenPayload {
     target: String,
     category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<String>,
 }
 
 /// Open (or activate) the single Settings tab, always in the current main window —
@@ -50,11 +52,12 @@ pub fn open_settings_in_main_window(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     category: Option<String>,
+    detail: Option<String>,
 ) -> Result<(), String> {
     use tauri::{Emitter, Manager};
     let target = state.resolve_main_window_label();
     app_handle
-        .emit("settings:open", SettingsOpenPayload { target: target.clone(), category })
+        .emit("settings:open", SettingsOpenPayload { target: target.clone(), category, detail })
         .map_err(|e| e.to_string())?;
     if let Some(w) = app_handle.get_webview_window(&target) {
         // Unlike the drag-reattach path, the user didn't just interact with the

@@ -81,7 +81,7 @@ interface ElectronAPI {
   /// Ask the backend to open/activate the Settings tab in the current main window
   /// (broadcasts `settings:open`; see services/openSettings.ts) and focus it,
   /// regardless of which window this was invoked from.
-  openSettingsInMainWindow: (category?: string) => Promise<void>;
+  openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
   writeToTerminal: (id: string, data: string) => Promise<void>;
@@ -878,7 +878,7 @@ const tauriBridge: ElectronAPI = {
   // P0a: which window receives API/MCP-created terminals (per-window toggle).
   getActiveWindow: () => invoke<string>('get_active_window'),
   setActiveWindow: (label: string) => invoke<void>('set_active_window', { label }),
-  openSettingsInMainWindow: (category?: string) => invoke<void>('open_settings_in_main_window', { category }),
+  openSettingsInMainWindow: (category?: string, detail?: string) => invoke<void>('open_settings_in_main_window', { category, detail }),
 
   // Peering (termflow-fabric sidecar; Plan 010). Each proxies one fabric
   // control-API route via a Rust #[tauri::command]; camelCase args are mapped

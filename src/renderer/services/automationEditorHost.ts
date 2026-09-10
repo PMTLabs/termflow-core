@@ -154,13 +154,21 @@ export function consumePendingAutomationLog(): string | null {
  * When clicked from the terminal context menu, the user intends to see the top-level Automations
  * list. If Settings is already open with a sub-view (activity log, gallery, or editor), this signal
  * prompts the panel to return to the list (after guarding any dirty draft).
+ *
+ * If an active AutomationsPanel is already mounted, it is notified immediately and no pending state
+ * is kept, preventing stale navigation state from leaking into subsequent panel mounts. If no panel
+ * is mounted yet, pending state is queued for the panel's upcoming mount.
  */
 let pendingListRequest = false;
 const listRequestListeners = new Set<() => void>();
 
 export function requestAutomationList(): void {
-    pendingListRequest = true;
-    listRequestListeners.forEach((listener) => listener());
+    if (listRequestListeners.size > 0) {
+        pendingListRequest = false;
+        listRequestListeners.forEach((listener) => listener());
+    } else {
+        pendingListRequest = true;
+    }
 }
 
 export function consumePendingAutomationList(): boolean {

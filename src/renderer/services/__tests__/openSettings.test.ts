@@ -1,3 +1,6 @@
+/**
+ * @jest-environment jsdom
+ */
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
 
 const dispatch = jest.fn();
@@ -73,4 +76,33 @@ describe('openSettingsTab (single-instance Settings)', () => {
     expect(dispatch).toHaveBeenCalledWith(setActiveTab(created.id));
     expect(mockState.tabs.tabs.filter((t) => t.shellType === 'settings')).toHaveLength(1);
   });
+
+  it('forwards category and detail to openSettingsInMainWindow when available', async () => {
+    const mockOpen = jest.fn().mockResolvedValue(undefined);
+    (window as any).electronAPI = { openSettingsInMainWindow: mockOpen };
+
+    openSettingsTab('automations', 'list');
+
+    expect(mockOpen).toHaveBeenCalledWith('automations', 'list');
+    delete (window as any).electronAPI;
+  });
+
+  it('routes automations:list locally to requestAutomationList', async () => {
+    const { consumePendingAutomationList } = await import('../automationEditorHost');
+    consumePendingAutomationList(); // clear initial
+
+    openSettingsTab('automations', 'list');
+
+    expect(consumePendingAutomationList()).toBe(true);
+  });
+
+  it('routes automations:log:<id> locally to requestAutomationLog', async () => {
+    const { consumePendingAutomationLog } = await import('../automationEditorHost');
+    consumePendingAutomationLog(); // clear initial
+
+    openSettingsTab('automations', 'log:rule-custom-1');
+
+    expect(consumePendingAutomationLog()).toBe('rule-custom-1');
+  });
 });
+

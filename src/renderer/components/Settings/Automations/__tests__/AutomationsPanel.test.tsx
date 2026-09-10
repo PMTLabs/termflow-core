@@ -701,5 +701,17 @@ describe('AutomationsPanel', () => {
         });
         expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
         expect(document.body.textContent).toContain('Leave without saving?');
+
+        // Cancel / Keep editing
+        const keepEditingBtn = [...document.querySelectorAll('button')]
+            .find((b) => b.textContent?.includes('Keep editing')) as HTMLButtonElement;
+        await act(async () => { keepEditingBtn.click(); });
+
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+        expect(document.querySelector('.au-editor')).not.toBeNull();
+
+        // Verify pending state was consumed and does not leak
+        const { consumePendingAutomationList } = await import('../../../../services/automationEditorHost');
+        expect(consumePendingAutomationList()).toBe(false);
     });
 });

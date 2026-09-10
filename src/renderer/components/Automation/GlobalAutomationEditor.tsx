@@ -10,7 +10,6 @@ import {
     closeAutomationEditor,
     getOpenAutomationDraft,
     getOpenAutomationRuleId,
-    requestAutomationLog,
     subscribeAutomationEditorHost,
 } from '../../services/automationEditorHost';
 import { openSettingsTab } from '../../services/openSettings';
@@ -104,9 +103,8 @@ export const GlobalAutomationEditor: React.FC = () => {
             onOpenFullLog={(id) => {
                 // The panel is in a tab that may not exist yet, so the scope travels through the
                 // same race-free hand-off `openSettingsTab`'s own category does.
-                requestAutomationLog(id);
                 closeAutomationEditor();
-                openSettingsTab('automations');
+                openSettingsTab('automations', `log:${id}`);
             }}
             onChanged={refreshAutomationArmed}
         />

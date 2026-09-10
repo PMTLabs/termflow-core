@@ -18,7 +18,6 @@ import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
 import { nextSnippetSortMode } from '../../services/snippetSearch';
 import { openSettingsTab } from '../../services/openSettings';
-import { requestAutomationList } from '../../services/automationEditorHost';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
 import { inputHandler } from '../../services/InputHandler';
@@ -994,8 +993,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       ...automationMenuItems(terminalId, {
         onOpenSettings: () => {
           closeContextMenu();
-          requestAutomationList();
-          openSettingsTab('automations');
+          openSettingsTab('automations', 'list');
         },
       }),
       // plan/029 §6. Command History ABOVE Snippets (stated acceptance criterion).

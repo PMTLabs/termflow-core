@@ -280,6 +280,7 @@ export const AutomationsPanel: React.FC = () => {
 
     useEffect(() => {
         return subscribeAutomationListRequested(() => {
+            consumePendingAutomationList();
             if (view.kind === 'gallery' || view.kind === 'log') {
                 backToList();
             } else if (view.kind === 'editor') {

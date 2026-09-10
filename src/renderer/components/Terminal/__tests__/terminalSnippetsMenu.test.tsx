@@ -562,7 +562,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
    */
   it('placement: separator, then Automation, Command History, Snippets, then a NEW separator, then Clear', () => {
     const muteAt = DISPLAY.indexOf("'Mute Pane Notifications',");
-    const automationAt = DISPLAY.indexOf('...automationMenuItems(terminalId');
+    const automationAt = DISPLAY.indexOf('...automationMenuItems(terminalId, {');
     const historyAt = DISPLAY.indexOf('buildCommandHistoryMenuItem(');
     // The ITEM in the menu array, not the builder call — the builder is now hoisted into
     // its own helper (shared with the keyboard-opened menu) and sits ABOVE this array, so
@@ -590,6 +590,12 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(separators(historyAt, snippetsAt)).toBe(0);
     // Exactly one separator between the group and Clear (the NEW one from §6).
     expect(separators(snippetsAt, clearAt)).toBe(1);
+  });
+
+  it('wires automationMenuItems with terminalId, dismiss, and navigation to automations list', () => {
+    expect(DISPLAY).toMatch(
+      /automationMenuItems\(terminalId,\s*\{\s*onOpenSettings:\s*\(\)\s*=>\s*\{\s*closeContextMenu\(\);\s*openSettingsTab\('automations',\s*'list'\);\s*\},?\s*\}\)/,
+    );
   });
 
   it('targets this pane\'s own terminalId, not resolveKeyboardTerminalId', () => {

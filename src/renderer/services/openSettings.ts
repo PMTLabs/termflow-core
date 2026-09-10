@@ -1,6 +1,7 @@
 import { store } from '../store';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { SETTINGS_SHELL_TYPE } from './tabKinds';
+import { requestAutomationList, requestAutomationLog } from './automationEditorHost';
 
 // A category the newly-opened SettingsPage should navigate to on mount (e.g. the
 // tray "Peers…" item opens Settings pointed at Peers). Consumed exactly once by
@@ -30,8 +31,17 @@ export function consumePendingSettingsCategory(): string | null {
  *
  * Pass `category` to also jump to a specific Settings section (mounted tab: via a
  * DOM event it already listens for; fresh tab: via the pending-category hand-off).
+ * Pass `detail` to convey sub-view intent (e.g. 'list' or 'log:<id>' for automations).
  */
-function openSettingsLocally(category?: string): void {
+function openSettingsLocally(category?: string, detail?: string): void {
+  if (category === 'automations') {
+    if (detail === 'list') {
+      requestAutomationList();
+    } else if (detail?.startsWith('log:')) {
+      requestAutomationLog(detail.slice(4));
+    }
+  }
+
   const { tabs } = store.getState().tabs;
   const existing = tabs.find(tab => tab.shellType === SETTINGS_SHELL_TYPE);
 
@@ -59,6 +69,8 @@ function openSettingsLocally(category?: string): void {
   );
 }
 
+export { openSettingsLocally as __openSettingsLocallyForTest };
+
 /**
  * Open the Settings page, enforcing a single instance AND a single HOST WINDOW.
  *
@@ -75,18 +87,18 @@ function openSettingsLocally(category?: string): void {
  * Falls back to opening locally when there's no Tauri bridge (tests, plain
  * browser dev server) — there's only ever one window in that case anyway.
  */
-export function openSettingsTab(category?: string): void {
+export function openSettingsTab(category?: string, detail?: string): void {
   // No `window` at all outside a browser/webview (e.g. this module under a
   // node-environment unit test) — same "only one window anyway" case as no
   // Tauri bridge.
   const api = typeof window === 'undefined' ? undefined : window.electronAPI;
   if (!api?.openSettingsInMainWindow) {
-    openSettingsLocally(category);
+    openSettingsLocally(category, detail);
     return;
   }
-  api.openSettingsInMainWindow(category).catch((err) => {
+  api.openSettingsInMainWindow(category, detail).catch((err) => {
     console.error('openSettingsInMainWindow failed; opening locally instead', err);
-    openSettingsLocally(category);
+    openSettingsLocally(category, detail);
   });
 }
 
@@ -107,7 +119,10 @@ export function installSettingsRouting(): void {
       await listen('settings:open', (event: any) => {
         const p = event?.payload;
         if (!p || typeof p !== 'object' || p.target !== myLabel) return;
-        openSettingsLocally(typeof p.category === 'string' ? p.category : undefined);
+        openSettingsLocally(
+          typeof p.category === 'string' ? p.category : undefined,
+          typeof p.detail === 'string' ? p.detail : undefined,
+        );
       });
     } catch {
       // Not under Tauri — nothing to route (openSettingsTab already falls back
