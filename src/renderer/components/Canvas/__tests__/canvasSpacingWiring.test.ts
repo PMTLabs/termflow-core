@@ -107,20 +107,76 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(minimap).not.toContain('shownGroups={shownGroups}');
   });
 
-  it('cancels absolute fly-to frames before every compensation pan', () => {
-    // A `setViewport(lerpViewport(...))` frame captured before the pan would overwrite an
-    // otherwise correct relative one. Every site that compensates the camera has to cancel
-    // first, so this counts the pans rather than hard-coding how many there happen to be: a
-    // fourth compensation added without its cancel is the failure this exists to catch.
-    const compensations = MODE.match(/panScreen\(pan\.dx, pan\.dy\)/g) ?? [];
-    expect(compensations.length).toBeGreaterThanOrEqual(3);
-    expect((MODE.match(/flyTo\.cancel\(\);/g) ?? [])).toHaveLength(compensations.length);
+  it('cancels absolute fly-to frames inside every site that corrects the camera', () => {
+    // A `setViewport(lerpViewport(...))` frame captured before the correction overwrites it on
+    // the next animation frame, taking the anchoring with it.
+    //
+    // Counting cancels against pans is NOT enough, and that weaker oracle was the first thing
+    // written here: a cancel deleted from one site and duplicated in another keeps both totals
+    // and still leaves a site unprotected. So each site is sliced and asked separately, and the
+    // ORDER inside it is checked — a cancel after its own pan is no cancel at all.
+    const sliceAt = (open: string, close: string) => {
+      const start = MODE.indexOf(open);
+      return start < 0 ? '' : MODE.slice(start, MODE.indexOf(close, start + open.length));
+    };
+    const SITES = {
+      dragEntry: sliceAt('const beginRealDrag = useCallback(', '\n  }, ['),
+      dragExit: sliceAt('if (wasDraggingRef.current && !drag.dragActive) {', '\n  }, ['),
+      transform: sliceAt('const was = paintedRef.current;', '\n  }, ['),
+      zoom: sliceAt('const zoomAtAnchor = useCallback(', '\n  );'),
+    };
+
+    for (const [name, body] of Object.entries(SITES)) {
+      const cancel = body.indexOf('flyTo.cancel();');
+      expect({ name, cancels: cancel >= 0 }).toEqual({ name, cancels: true });
+      // The zoom site returns a viewport rather than panning; the other three pan.
+      const pan = body.indexOf('panScreen(');
+      if (name !== 'zoom') {
+        expect({ name, pans: pan >= 0 }).toEqual({ name, pans: true });
+        expect({ name, cancelsFirst: cancel < pan }).toEqual({ name, cancelsFirst: true });
+      }
+    }
+
+    // Completeness: no camera correction may live OUTSIDE the four sites above. Without this the
+    // per-site checks pass happily while a fifth, unprotected one is added next to them.
+    const total = (MODE.match(/panScreen\(pan\.dx, pan\.dy\)/g) ?? []).length;
+    const accounted = Object.entries(SITES)
+      .filter(([name]) => name !== 'zoom')
+      .reduce((n, [, body]) => n + (body.match(/panScreen\(pan\.dx, pan\.dy\)/g) ?? []).length, 0);
+    expect({ total, accounted }).toEqual({ total: 3, accounted: 3 });
+
     expect(VIEWPORT).toContain('const cancel = useCallback(() => {');
     expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel }), [flyTo, cancel]);');
   });
 
+  /**
+   * The transform is replaced by four things, not one. A zoom anchors itself; the other three are
+   * the drag pair and this effect, which covers BOTH the toolbar toggle and a change in which
+   * nodes participate — hiding a terminal re-shrink-wraps its frame and re-sweeps the canvas
+   * without a single stored rect changing, so the view jumps by the whole offset difference.
+   */
+  it('compensates a transform replaced by anything other than a zoom', () => {
+    const effect = MODE.slice(
+      MODE.indexOf('const was = paintedRef.current;'),
+      MODE.indexOf('\n  }, [', MODE.indexOf('const was = paintedRef.current;')),
+    );
+    // Keyed on what can replace the transform. `vp` and `spacing` change on every pan and zoom,
+    // which anchor themselves — listing either would re-pan the camera on ordinary navigation.
+    expect(MODE).toContain('}, [membershipKey, spacingRendered]);');
+    expect(MODE).toContain("`${paintedNodes.map((n) => n.terminalId).join(',')}|${shownGroups.map((g) => g.tabId).join(',')}`");
+    // A drag paints raw on BOTH sides of a toggle, so there is no transform change to pay for.
+    expect(effect).toContain('drag.dragActive');
+    // Same-zoom only: `was` was swept at the old zoom, so across a zoom the difference is not
+    // the transform's alone — and the zoom already anchored itself.
+    expect(effect).toContain('if (was.z !== vpRef.current.z) return;');
+    // The recorder must be declared AFTER the comparer, or it overwrites the previous transform
+    // before the comparer ever sees it and every compensation silently becomes a no-op.
+    expect(MODE.indexOf('const was = paintedRef.current;'))
+      .toBeLessThan(MODE.indexOf('paintedRef.current = { model: spacingModel, spacing, z: vp.z };'));
+  });
+
   it('uses raw geometry only for a real slop-crossed drag and compensates both transitions', () => {
-    expect(MODE).toContain('drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing');
+    expect(MODE).toContain('applySpacing(spacingModel, vp.z, spacingRendered)');
     expect(MODE).toContain("spacingTransitionPan(offset, source.z, 'toRaw')");
     expect(MODE).toContain("spacingTransitionPan(offset, vp.z, 'toDisplay')");
     expect(MODE).not.toContain('applyFrozenOffsets');
@@ -146,7 +202,7 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
 
   it('keeps the whole real drag raw even if wheel zoom changes mid-gesture', () => {
     // `dragActive` gates the identity result itself; no frozen offset can survive at z=1.
-    expect(MODE).toContain('drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing');
+    expect(MODE).toContain('applySpacing(spacingModel, vp.z, spacingRendered)');
     expect(MODE).not.toContain('frozenOffsets');
   });
 
@@ -210,30 +266,49 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
    * what stops it coming back is structural: exactly one function may call `zoomAt`, and every
    * gesture goes through it.
    */
-  it('routes every zoom through the one anchored helper', () => {
+  it('routes every point-anchored zoom through the one anchored helper', () => {
     const dir = path.resolve(__dirname, '..');
     const OWNERS = ['canvasGeometry.ts', 'canvasSpacing.ts'];
-    const consumers = fs.readdirSync(dir)
-      .filter((f) => /\.tsx?$/.test(f) && !OWNERS.includes(f));
+    // Recursive, so moving a raw-zoom helper into a subfolder does not walk out of the sweep.
+    const walk = (at: string): string[] => fs.readdirSync(at, { withFileTypes: true })
+      .flatMap((e) => {
+        const full = path.join(at, e.name);
+        if (e.isDirectory()) return e.name === '__tests__' ? [] : walk(full);
+        return /\.tsx?$/.test(e.name) && !OWNERS.includes(e.name) ? [full] : [];
+      });
+    const consumers = walk(dir);
 
-    // An absence census is the one kind that passes when it has stopped looking at anything, so
+    // An absence census is the one kind that passes once it has stopped looking at anything, so
     // pin that the sweep still covers the two files that USED to call `zoomAt` themselves.
-    expect(consumers).toEqual(expect.arrayContaining(['CanvasMode.tsx', 'CanvasViewport.tsx']));
+    expect(consumers.map((f) => path.basename(f)))
+      .toEqual(expect.arrayContaining(['CanvasMode.tsx', 'CanvasViewport.tsx']));
     for (const file of consumers) {
-      expect({ file, callsZoomAt: code(path.join(dir, file)).includes('zoomAt(') })
-        .toEqual({ file, callsZoomAt: false });
+      const src = code(file);
+      // Both spellings: the call, and the IMPORT that would let it be called under another name.
+      // `import { zoomAt as rawZoom }` passes a `zoomAt(` scan while doing exactly the old thing.
+      expect({
+        file: path.relative(dir, file),
+        callsZoomAt: /\bzoomAt\s*\(/.test(src),
+        importsZoomAt: /\bimport\s*\{[^}]*\bzoomAt\b[^}]*\}\s*from/.test(src),
+      }).toEqual({ file: path.relative(dir, file), callsZoomAt: false, importsZoomAt: false });
     }
 
     // The anchor has to agree with what is RENDERED, not with the setting: a real drag swaps the
     // world back to raw for the whole gesture, so a wheel turned mid-drag must anchor raw too.
     // These two lines are the pair that has to move together.
-    expect(MODE).toContain('drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing');
-    expect(MODE).toContain('metrics.zMax, spacingModel, dynamicSpacing && !drag.dragActive');
+    expect(MODE).toContain('applySpacing(spacingModel, vp.z, spacingRendered)');
+    expect(MODE).toContain('const spacingRendered = dynamicSpacing && !drag.dragActive;');
+    expect(MODE).toContain('metrics.zMax, spacingModel, spacingRendered');
 
     // And that the owner really is the anchored one — not `zoomAnchoredAt` delegating to a copy.
     const SPACING = code(path.resolve(dir, 'canvasSpacing.ts'));
     const anchored = SPACING.slice(SPACING.indexOf('export function zoomAnchoredAt'));
     expect(anchored).toContain('const next = zoomAt(vp, factor, cx, cy, zMax);');
-    expect(anchored).toContain('spacingAnchorPan(model, from, to, screenToWorld(vp, cx, cy), next.z)');
+    // A single SAMPLE of the camera path, so a stepped zoom and an animated one cannot land
+    // anywhere different — the endpoint is not computed a second way.
+    expect(anchored).toContain('return anchoredCamera(vp, cx, cy, model, enabled)(next.z);');
+    // And the animation is handed the path itself, not two endpoints to interpolate between.
+    expect(MODE).toContain('anchoredCamera(vp, size.w / 2, size.h / 2, spacingModel, spacingRendered)');
+    expect(VIEWPORT).toContain('dispatch(setViewport(cameraAt ? cameraAt(frame.z) : frame));');
   });
 });

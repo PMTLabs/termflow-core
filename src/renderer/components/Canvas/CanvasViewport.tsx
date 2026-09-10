@@ -86,6 +86,12 @@ export const CanvasViewport: React.FC<{
    * holds the model and the transform, so the whole zoom decision comes from there and this
    * stays a pure gesture host. A default of plain `zoomAt` would make the broken case the one
    * you get by forgetting.
+   *
+   * It also CANCELS any camera flight the wheel is interrupting. That is not a stray side
+   * effect: without it the next animation frame writes an absolute viewport from the flight's
+   * own captured endpoints and throws the wheel's zoom — and its anchoring — away, which is the
+   * defect this whole prop exists to prevent, arriving by a different route. `CanvasMode` owns
+   * the `useFlyTo` instance holding that frame request, so the cancel has to come from there too.
    */
   zoomAtAnchor: (vp: Viewport, factor: number, cx: number, cy: number) => Viewport;
 }> = ({ children, onSize, onBackgroundPointerDown, onBackgroundContextMenu, overlay, zoomAtAnchor }) => {
@@ -319,7 +325,13 @@ export const CanvasViewport: React.FC<{
  * Shared deliberately: Tasks 14, 18 and 23 all need animated viewport flight, and
  * without one helper each would invent an incompatible curve and duration.
  */
-export type FlyTo = ((to: Viewport, onDone?: () => void) => void) & { cancel: () => void };
+export type FlyTo = ((
+  to: Viewport,
+  onDone?: () => void,
+  /** Where the camera belongs at an interpolated zoom, for a flight that must hold an anchor
+   *  throughout rather than only on arrival. See `anchoredCamera`. */
+  cameraAt?: (z: number) => Viewport,
+) => void) & { cancel: () => void };
 
 export function useFlyTo(): FlyTo {
   const dispatch = useDispatch();
@@ -344,7 +356,7 @@ export function useFlyTo(): FlyTo {
     raf.current = null;
   }, []);
 
-  const flyTo = useCallback((to: Viewport, onDone?: () => void) => {
+  const flyTo = useCallback((to: Viewport, onDone?: () => void, cameraAt?: (z: number) => Viewport) => {
     if (raf.current) cancelAnimationFrame(raf.current);
     if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
       dispatch(setViewport(to));
@@ -355,7 +367,12 @@ export function useFlyTo(): FlyTo {
     const t0 = performance.now();
     const step = (now: number) => {
       const k = Math.min(1, (now - t0) / FLY_MS);
-      dispatch(setViewport(lerpViewport(from, to, k)));
+      const frame = lerpViewport(from, to, k);
+      // `cameraAt` is how an ANCHORED zoom stays anchored while it animates. Interpolating two
+      // correct cameras does not produce a correct one in between, because the spacing offset is
+      // not affine in `z` — so a flight given one takes only its ZOOM from the interpolation and
+      // asks for the translation that belongs to that zoom.
+      dispatch(setViewport(cameraAt ? cameraAt(frame.z) : frame));
       if (k < 1) {
         raf.current = requestAnimationFrame(step);
         return;

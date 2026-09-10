@@ -618,7 +618,7 @@ describe('the viewport toolbar', () => {
     expect(MODE).toContain('zoomAtAnchor(vp, factor, size.w / 2, size.h / 2)');
     // The ceiling did not vanish with the argument — it moved inside the one zoom every gesture
     // now shares, which is also what keeps a button press anchored the way the wheel is.
-    expect(MODE).toContain('zoomAnchoredAt(v, factor, cx, cy, metrics.zMax, spacingModel, dynamicSpacing && !drag.dragActive)');
+    expect(MODE).toContain('zoomAnchoredAt(v, factor, cx, cy, metrics.zMax, spacingModel, spacingRendered)');
   });
 });
 
