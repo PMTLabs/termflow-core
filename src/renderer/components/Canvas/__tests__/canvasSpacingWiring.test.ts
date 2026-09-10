@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import { readSource } from '../../../utils/readSource';
 
@@ -106,10 +107,14 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(minimap).not.toContain('shownGroups={shownGroups}');
   });
 
-  it('cancels absolute fly-to frames before either drag compensation pan', () => {
-    // A `setViewport(lerpViewport(...))` frame captured before the drag would overwrite an
-    // otherwise correct relative pan. Entry cancels it synchronously; exit repeats the guard.
-    expect((MODE.match(/flyTo\.cancel\(\);/g) ?? [])).toHaveLength(2);
+  it('cancels absolute fly-to frames before every compensation pan', () => {
+    // A `setViewport(lerpViewport(...))` frame captured before the pan would overwrite an
+    // otherwise correct relative one. Every site that compensates the camera has to cancel
+    // first, so this counts the pans rather than hard-coding how many there happen to be: a
+    // fourth compensation added without its cancel is the failure this exists to catch.
+    const compensations = MODE.match(/panScreen\(pan\.dx, pan\.dy\)/g) ?? [];
+    expect(compensations.length).toBeGreaterThanOrEqual(3);
+    expect((MODE.match(/flyTo\.cancel\(\);/g) ?? [])).toHaveLength(compensations.length);
     expect(VIEWPORT).toContain('const cancel = useCallback(() => {');
     expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel }), [flyTo, cancel]);');
   });
@@ -192,5 +197,43 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     expect(APP).toContain('buildCanvasModel(state),');
     expect(APP).toContain('dispatch(setNodeGeom({ id: plan.terminalId, rect: plan.rect }));');
     expect(APP).not.toMatch(/\b(?:spacing|spaced)\w*/i);
+  });
+
+  /**
+   * `zoomAt` pins the RAW world point under the anchor, which is right only while the world is
+   * drawn at its stored coordinates. Under Dynamic Spacing it is drawn at `raw + offset(z)`, so
+   * a zoom that does not also correct for the change in that offset slides the terminal the user
+   * aimed at out from under the cursor — cumulatively most of a screen by the top of the range,
+   * which is felt as a canvas that will not zoom in rather than as a misplaced node.
+   *
+   * That defect shipped once. It is invisible to every oracle that looks at ONE zoom level, so
+   * what stops it coming back is structural: exactly one function may call `zoomAt`, and every
+   * gesture goes through it.
+   */
+  it('routes every zoom through the one anchored helper', () => {
+    const dir = path.resolve(__dirname, '..');
+    const OWNERS = ['canvasGeometry.ts', 'canvasSpacing.ts'];
+    const consumers = fs.readdirSync(dir)
+      .filter((f) => /\.tsx?$/.test(f) && !OWNERS.includes(f));
+
+    // An absence census is the one kind that passes when it has stopped looking at anything, so
+    // pin that the sweep still covers the two files that USED to call `zoomAt` themselves.
+    expect(consumers).toEqual(expect.arrayContaining(['CanvasMode.tsx', 'CanvasViewport.tsx']));
+    for (const file of consumers) {
+      expect({ file, callsZoomAt: code(path.join(dir, file)).includes('zoomAt(') })
+        .toEqual({ file, callsZoomAt: false });
+    }
+
+    // The anchor has to agree with what is RENDERED, not with the setting: a real drag swaps the
+    // world back to raw for the whole gesture, so a wheel turned mid-drag must anchor raw too.
+    // These two lines are the pair that has to move together.
+    expect(MODE).toContain('drag.dragActive ? applySpacing(spacingModel, vp.z, false) : liveSpacing');
+    expect(MODE).toContain('metrics.zMax, spacingModel, dynamicSpacing && !drag.dragActive');
+
+    // And that the owner really is the anchored one — not `zoomAnchoredAt` delegating to a copy.
+    const SPACING = code(path.resolve(dir, 'canvasSpacing.ts'));
+    const anchored = SPACING.slice(SPACING.indexOf('export function zoomAnchoredAt'));
+    expect(anchored).toContain('const next = zoomAt(vp, factor, cx, cy, zMax);');
+    expect(anchored).toContain('spacingAnchorPan(model, from, to, screenToWorld(vp, cx, cy), next.z)');
   });
 });

@@ -22,7 +22,7 @@ import { snapshotCache } from './snapshotCache';
 import {
   Rect, assignTiers, overlayGeometry, canvasMetrics, headScale, chromeScale, isFullyVisible,
   aimedNodeRect,
-  paintedNodeRect, zoomAt, NODE_W, NODE_H, HEAD_H, Z_MIN,
+  paintedNodeRect, screenToWorld, Viewport, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
 import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
@@ -39,7 +39,7 @@ import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
-import { applySpacing, spacingOffsets } from './canvasSpacing';
+import { applySpacing, spacingAnchorPan, spacingOffsets, zoomAnchoredAt } from './canvasSpacing';
 import { spacingTransitionPan } from './canvasDragCompensation';
 import { fitGroupFrame } from './canvasLayout';
 import { ShellProfileLike } from '../../services/newTabActions';
@@ -355,6 +355,47 @@ export const CanvasMode: React.FC = () => {
     typeof window === 'undefined' ? 1920 : window.innerWidth,
     typeof window === 'undefined' ? 1040 : window.innerHeight,
   ));
+  /**
+   * The canvas's ONE zoom. Every gesture that changes `z` goes through it — the wheel (which is
+   * handed it as a prop, since `CanvasViewport` owns the gesture but not where the world is
+   * drawn), the toolbar buttons and the keyboard steps.
+   *
+   * It exists because the camera has to be corrected whenever the spacing FIELD moves under it,
+   * and zoom is one of the three things that move it. The other two are already handled: a drag
+   * swaps the transform out for the whole gesture (`spacingTransitionPan`), and the toggle is
+   * compensated just below. A change in the MODEL is deliberately NOT on that list — content
+   * genuinely moved, and every fly-to already aims in display space via `targetRectAt`.
+   */
+  const zoomAtAnchor = useCallback(
+    (v: Viewport, factor: number, cx: number, cy: number) =>
+      // `drag.dragActive` and not `dynamicSpacing` alone: a wheel turned mid-gesture must anchor
+      // whatever is on screen, and a real drag has already swapped the world back to RAW. The
+      // anchor's job is to agree with the render, not with the setting.
+      zoomAnchoredAt(v, factor, cx, cy, metrics.zMax, spacingModel, dynamicSpacing && !drag.dragActive),
+    [metrics, spacingModel, dynamicSpacing, drag.dragActive],
+  );
+
+  /**
+   * Toggling Dynamic Spacing replaces the whole transform in one frame. Without this the canvas
+   * jumps by the full offset at the current zoom — most of a screen width at the top of the
+   * range — which reads as the toggle throwing the view away rather than relaxing it.
+   *
+   * Anchored on the viewport centre, which is the only anchor a toolbar button has, exactly like
+   * `zoomStep`. Runs in a layout effect so the pan lands in the same paint as the new transform.
+   */
+  const wasSpacingOnRef = useRef(dynamicSpacing);
+  useLayoutEffect(() => {
+    if (wasSpacingOnRef.current === dynamicSpacing) return;
+    wasSpacingOnRef.current = dynamicSpacing;
+    if (!size.w || !size.h) return;
+    flyTo.cancel();
+    const from = applySpacing(spacingModel, vp.z, !dynamicSpacing);
+    const to = applySpacing(spacingModel, vp.z, dynamicSpacing);
+    const centre = screenToWorld(vp, size.w / 2, size.h / 2);
+    const pan = spacingAnchorPan(spacingModel, from, to, centre, vp.z);
+    if (pan.dx !== 0 || pan.dy !== 0) panScreen(pan.dx, pan.dy);
+  }, [dynamicSpacing, spacingModel, vp, size, flyTo, panScreen]);
+
   /**
    * Is this canvas still on screen?
    *
@@ -731,8 +772,8 @@ export const CanvasMode: React.FC = () => {
   /** One press of a zoom button, about the middle of the viewport — the point the user is
    *  looking at, and the only anchor a button has (the wheel has the cursor). */
   const zoomStep = useCallback((factor: number) => {
-    flyTo(zoomAt(vp, factor, size.w / 2, size.h / 2, metrics.zMax));
-  }, [flyTo, vp, size, metrics]);
+    flyTo(zoomAtAnchor(vp, factor, size.w / 2, size.h / 2));
+  }, [flyTo, vp, size, zoomAtAnchor]);
 
   /**
    * Ctrl/Cmd + `+`/`−`/`0` — the same three steps as the buttons, so a user who learns one
@@ -1143,6 +1184,7 @@ export const CanvasMode: React.FC = () => {
       {sidebarOpen && <CanvasSidebar model={model} vw={size.w} vh={size.h} onFlyToNode={flyToNode} />}
       <CanvasViewport
         onSize={onSize}
+        zoomAtAnchor={zoomAtAnchor}
         onBackgroundPointerDown={clearSelection}
         // Item 3. The world point is resolved HERE rather than inside the viewport because the
         // conversion needs the current `vp`, and `e.currentTarget` is `.canvas-viewport` itself

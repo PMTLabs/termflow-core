@@ -2,8 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setViewport, panViewport } from '../../store/slices/canvasSlice';
-import { Viewport, zoomAt } from './canvasGeometry';
-import { useCanvasMetrics } from './canvasMetricsContext';
+import { Viewport } from './canvasGeometry';
 import { gridStyle, worldStyle, rasterStyle, lerpViewport, FLY_MS } from './viewportStyles';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, wheelAction, wheelPanDelta, CanvasWheelMode,
@@ -77,7 +76,19 @@ export const CanvasViewport: React.FC<{
    * because it is anchored `right`, where the two frames coincide.
    */
   overlay?: React.ReactNode;
-}> = ({ children, onSize, onBackgroundPointerDown, onBackgroundContextMenu, overlay }) => {
+  /**
+   * The wheel's zoom, injected rather than computed here — REQUIRED, deliberately, in the same
+   * spirit as `clampZoom`'s `zMax`.
+   *
+   * The viewport owns the gesture; it does not own where the world is DRAWN. Under Dynamic
+   * Spacing a rect is painted at `raw + offset(z)`, so a zoom that pins the raw point under the
+   * cursor lets the terminal being aimed at slide away (`zoomAnchoredAt`). Only `CanvasMode`
+   * holds the model and the transform, so the whole zoom decision comes from there and this
+   * stays a pure gesture host. A default of plain `zoomAt` would make the broken case the one
+   * you get by forgetting.
+   */
+  zoomAtAnchor: (vp: Viewport, factor: number, cx: number, cy: number) => Viewport;
+}> = ({ children, onSize, onBackgroundPointerDown, onBackgroundContextMenu, overlay, zoomAtAnchor }) => {
   const dispatch = useDispatch();
   const vp = useSelector((s: RootState) => s.canvas.viewport);
   const ref = useRef<HTMLDivElement>(null);
@@ -96,10 +107,10 @@ export const CanvasViewport: React.FC<{
   const vpRef = useRef(vp);
   vpRef.current = vp;
 
-  // Same reason as `vpRef`: the wheel listener is attached natively, once, and must not be
-  // torn down and re-registered to learn the session's zoom ceiling. The ceiling is frozen for
-  // the session anyway (see `canvasMetrics`), so a ref is exact rather than merely convenient.
-  const zMaxRef = useRef(useCanvasMetrics().zMax);
+  // Same reason as `vpRef`: the wheel listener is attached natively, once, and must not be torn
+  // down and re-registered every time the model or the zoom transform changes underneath it.
+  const zoomRef = useRef(zoomAtAnchor);
+  zoomRef.current = zoomAtAnchor;
 
   // Read through a ref for the same reason: the wheel listener is registered once, and
   // re-registering it every time the overlay opened would drop a wheel mid-gesture.
@@ -143,7 +154,7 @@ export const CanvasViewport: React.FC<{
       }
       const r = el.getBoundingClientRect();
       dispatch(setViewport(
-        zoomAt(vpRef.current, Math.pow(0.9989, e.deltaY), e.clientX - r.left, e.clientY - r.top, zMaxRef.current)
+        zoomRef.current(vpRef.current, Math.pow(0.9989, e.deltaY), e.clientX - r.left, e.clientY - r.top)
       ));
     };
     // CAPTURE, for the reason above: the terminals are descendants, so this is the only phase
