@@ -437,12 +437,11 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     }, [onClose]);
 
     useEffect(() => {
-        if (requestCloseRef) {
-            requestCloseRef.current = requestClose;
-            return () => {
-                requestCloseRef.current = null;
-            };
-        }
+        if (!requestCloseRef) return undefined;
+        requestCloseRef.current = requestClose;
+        return () => {
+            requestCloseRef.current = null;
+        };
     }, [requestCloseRef, requestClose]);
 
     // `trapFocus: false` because this editor is non-modal: Tab must be able to walk out of it
