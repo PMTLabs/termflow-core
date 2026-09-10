@@ -2,6 +2,7 @@ import React from 'react';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 import { EyeIcon } from './EyeIcon';
+import { titleColorStyle } from '../../store/titleColor';
 
 /**
  * Right-click menu for a terminal node (Tam, 2026-08-21).
@@ -29,6 +30,10 @@ export const CanvasNodeMenu: React.FC<{
   y: number;
   /** The terminal's own title — `PaneNode.name`, the same string the node header shows. */
   title: string;
+  /** The owning tab's colour, so the header naming this terminal matches every other surface
+   *  that names it. A prop rather than a store lookup, like `title` beside it: this menu is
+   *  presentational, and its caller already holds the node model that carries the colour. */
+  titleColor?: string;
   /**
    * The node's durable `tm-` leaf, for the `Automation ▸` section (`plan/028` item D).
    *
@@ -57,9 +62,10 @@ export const CanvasNodeMenu: React.FC<{
   onCloseTerminal: () => void;
   /** Dismiss the menu without doing anything. */
   onDismiss: () => void;
-}> = ({ x, y, title, terminalId, overlaid, hidden, onToggleHide, onToggleOverlay, onOpenAsTab, onCloseTerminal, onDismiss }) => (
+}> = ({ x, y, title, titleColor, terminalId, overlaid, hidden, onToggleHide, onToggleOverlay, onOpenAsTab, onCloseTerminal, onDismiss }) => {
+  return (
   <CanvasMenu x={x} y={y} onClose={onDismiss}>
-    <div className="context-menu-header">{title}</div>
+    <div className="context-menu-header" style={titleColorStyle(titleColor)}>{title}</div>
     <div className="context-menu-divider" />
     {/* The glyphs are the header buttons' too, and they are sizing glyphs in BOTH states —
         never ✕, which one row below this means "kill this shell". */}
@@ -96,6 +102,7 @@ export const CanvasNodeMenu: React.FC<{
       Close Terminal
     </CanvasMenuItem>
   </CanvasMenu>
-);
+  );
+};
 
 export default CanvasNodeMenu;

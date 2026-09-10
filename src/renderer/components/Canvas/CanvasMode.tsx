@@ -1544,6 +1544,7 @@ export const CanvasMode: React.FC = () => {
           x={nodeMenu.x}
           y={nodeMenu.y}
           title={nodeMenu.node.title}
+          titleColor={nodeMenu.node.titleColor}
           terminalId={nodeMenu.node.terminalId}
           // Read from `overlayId` rather than remembered when the menu opened: the overlay can be
           // dismissed by a backdrop click while the menu is up, and a stale copy would then offer
@@ -1568,6 +1569,9 @@ export const CanvasMode: React.FC = () => {
           y={groupMenu.y}
           tabId={groupMenu.tabId}
           title={groupMenu.title}
+          // From the live model rather than remembered when the menu opened, so recolouring the
+          // tab while the menu is up repaints its header and rename box.
+          titleColor={model.groups.find((g) => g.tabId === groupMenu.tabId)?.titleColor}
           onClose={() => setGroupMenu(null)}
         />
       )}

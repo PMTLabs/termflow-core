@@ -44,22 +44,45 @@ fn encode_query(s: &str) -> String {
         .collect()
 }
 
+/// The tab identity the preview card draws: its name, and the user-set colour that name wears
+/// everywhere else. Sent as one payload so the two can never disagree.
+#[derive(Clone, serde::Serialize)]
+struct PreviewTitle {
+    title: String,
+    color: Option<String>,
+}
+
 /// Show (creating on first use) the tear-off preview at the cursor with `title`.
 /// `x`/`y` are CLIENT coords in the calling (source) window.
+///
+/// `color` travels by BOTH routes below on purpose: the query string when this window is created,
+/// and the event when an existing one is reused for another tab. Wiring one alone would colour
+/// either the session's first drag or all the others, depending on drag order.
 #[tauri::command]
 pub async fn show_drag_preview(
     app_handle: tauri::AppHandle,
     window: tauri::WebviewWindow,
     title: String,
+    color: Option<String>,
     x: f64,
     y: f64,
 ) -> Result<(), String> {
     let win = if let Some(w) = app_handle.get_webview_window(PREVIEW_LABEL) {
-        // Reuse the existing preview window; just refresh its title.
-        let _ = w.emit("drag-preview:title", title.clone());
+        // Reuse the existing preview window; just refresh its title and colour.
+        let _ = w.emit(
+            "drag-preview:title",
+            PreviewTitle { title: title.clone(), color: color.clone() },
+        );
         w
     } else {
-        let url = format!("index.html?dragPreview=1&title={}", encode_query(&title));
+        let url = match color.as_deref() {
+            Some(c) => format!(
+                "index.html?dragPreview=1&title={}&color={}",
+                encode_query(&title),
+                encode_query(c),
+            ),
+            None => format!("index.html?dragPreview=1&title={}", encode_query(&title)),
+        };
         #[cfg_attr(not(windows), allow(unused_mut))]
         let mut builder = tauri::WebviewWindowBuilder::new(
             &app_handle,

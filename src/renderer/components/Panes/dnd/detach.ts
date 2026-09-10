@@ -74,10 +74,25 @@ async function openWindowWithPayload(payload: DetachPayload): Promise<boolean> {
   return true;
 }
 
-/** Build (but don't stash) a single-pane detach payload from a leaf node. */
-export function buildPaneDetachPayload(paneNode: PaneNode, cursor?: { x: number; y: number }): DetachPayload {
+/**
+ * Build (but don't stash) a single-pane detach payload from a leaf node.
+ *
+ * `sourceTabId` is what lets the new tab keep the group's COLOUR. A detached pane becomes a new
+ * tab, so it does not inherit the source tab's identity wholesale the way a whole-tab detach
+ * does — but the colour is a user-set group appearance, and a pane that changes colour purely by
+ * being moved to another window reads as having lost its group rather than as having been moved.
+ * Optional so a caller with no source tab (there is none today) still type-checks.
+ */
+export function buildPaneDetachPayload(
+  paneNode: PaneNode,
+  cursor?: { x: number; y: number },
+  sourceTabId?: string,
+): DetachPayload {
   const terminals: DetachTerminal[] = [];
   collectTerminals(paneNode, terminals);
+  const sourceTab = sourceTabId
+    ? store.getState().tabs.tabs.find((t) => t.id === sourceTabId)
+    : undefined;
   return {
     kind: 'pane',
     tabId: generateId('tb'),
@@ -85,6 +100,7 @@ export function buildPaneDetachPayload(paneNode: PaneNode, cursor?: { x: number;
     paneTree: paneNode,
     terminals,
     cursor,
+    titleColor: sourceTab?.titleColor,
   };
 }
 
@@ -122,7 +138,7 @@ export async function detachPaneToNewWindow(opts: {
   paneNode: PaneNode;
   cursor?: { x: number; y: number };
 }): Promise<void> {
-  const payload = buildPaneDetachPayload(opts.paneNode, opts.cursor);
+  const payload = buildPaneDetachPayload(opts.paneNode, opts.cursor, opts.sourceTabId);
   const ok = await openWindowWithPayload(payload);
   if (!ok) return;
   // The PTY keeps running in the shared backend; just drop the pane from here.

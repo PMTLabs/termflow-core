@@ -6,7 +6,7 @@ import ReactDOM from 'react-dom/client';
 const previewParams = new URLSearchParams(window.location.search);
 if (previewParams.has('dragPreview')) {
   const { renderDragPreview } = require('./components/Tabs/DragPreview');
-  renderDragPreview(previewParams.get('title') || 'Terminal');
+  renderDragPreview(previewParams.get('title') || 'Terminal', previewParams.get('color') || undefined);
 } else {
   void bootstrapApp();
 }

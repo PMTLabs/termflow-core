@@ -3,6 +3,7 @@ import { useDispatch } from 'react-redux';
 import { CanvasEdge, removeEdge, updateEdge } from '../../store/slices/canvasSlice';
 import { deleteEdge, patchEdgeLabel } from '../../services/canvasGraph';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
+import { useTerminalTitleColor, titleColorStyle } from '../../store/titleColor';
 
 /**
  * Right-click menu for a connection — `plan/013` Task 18, design 010 D3.
@@ -27,6 +28,11 @@ export const CanvasWireMenu: React.FC<{
   const dispatch = useDispatch();
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(edge.label ?? '');
+  // TWO colours, resolved separately. A wire's whole purpose is to join terminals that are
+  // usually in DIFFERENT tabs, so colouring the header as one string would state that both ends
+  // belong to whichever group won — the exact claim the colour exists to make.
+  const fromColor = useTerminalTitleColor(edge.from);
+  const toColor = useTerminalTitleColor(edge.to);
 
   const commitLabel = () => {
     const trimmed = draft.trim();
@@ -49,7 +55,11 @@ export const CanvasWireMenu: React.FC<{
 
   return (
     <CanvasMenu x={x} y={y} onClose={onClose} className="canvas-wire-menu">
-      <div className="context-menu-header">{fromTitle} → {toTitle}</div>
+      <div className="context-menu-header">
+        <span className="canvas-wire-endpoint" style={titleColorStyle(fromColor)}>{fromTitle}</span>
+        {' → '}
+        <span className="canvas-wire-endpoint" style={titleColorStyle(toColor)}>{toTitle}</span>
+      </div>
       <div className="context-menu-divider" />
       {renaming ? (
         <input

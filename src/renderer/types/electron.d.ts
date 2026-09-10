@@ -355,7 +355,7 @@ export interface ElectronAPI {
   cancelGlobalPaneDrag?: (token: string) => Promise<void>;
 
   // Tab tear-off preview window (Tauri only)
-  showDragPreview?: (title: string, x: number, y: number) => Promise<void>;
+  showDragPreview?: (title: string, color: string | undefined, x: number, y: number) => Promise<void>;
   moveDragPreview?: (x: number, y: number) => Promise<void>;
   hideDragPreview?: () => Promise<void>;
   // Cross-window tab drop (Tauri only)

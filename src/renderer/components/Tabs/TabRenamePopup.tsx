@@ -1,10 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { titleColorStyle } from '../../store/titleColor';
 import './TabRenamePopup.css';
 
 interface TabRenamePopupProps {
   x: number;
   y: number;
   initialTitle: string;
+  /** The tab's own colour. The box REPLACES the tab title on screen and `.tab-rename-input` sets
+   *  a fixed colour of its own, so without this a rename reads as the colour having been lost. */
+  titleColor?: string;
   onSubmit: (title: string) => void;
   onClose: () => void;
 }
@@ -19,6 +23,7 @@ export const TabRenamePopup: React.FC<TabRenamePopupProps> = ({
   x,
   y,
   initialTitle,
+  titleColor,
   onSubmit,
   onClose,
 }) => {
@@ -94,6 +99,7 @@ export const TabRenamePopup: React.FC<TabRenamePopupProps> = ({
         ref={inputRef}
         type="text"
         className="tab-rename-input"
+        style={titleColorStyle(titleColor)}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}

@@ -28,6 +28,7 @@ import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows, detachTabToNewWindow } from '../Panes/dnd/detach';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
+import { titleColorStyle } from '../../store/titleColor';
 import './TabManager.css';
 
 /** A pending tab-close awaiting confirmation (single tab or a bulk set). */
@@ -83,6 +84,9 @@ function pointOutsideStrip(rect: { top: number; bottom: number } | null, clientY
 interface TabDragHandlers {
   tabId: string;
   tabTitle: string;
+  /** The tab's colour, so both drag previews — the DOM ghost and the real OS preview window —
+   *  show the title as the tab strip shows it. */
+  tabTitleColor?: string;
   onDragStateChange: (dragging: boolean) => void;
   /** Move the dragged tab to sit where the tab currently under the pointer is. */
   requestReorder: (draggedId: string, targetId: string) => void;
@@ -93,12 +97,16 @@ interface TabDragHandlers {
  * the cursor. It cannot leave the window bounds — that's why the Tauri path uses
  * a real OS preview window instead (see beginTabDrag).
  */
-function makeTabGhost(title: string): HTMLElement {
+function makeTabGhost(title: string, titleColor?: string): HTMLElement {
   const el = document.createElement('div');
   el.className = 'tab-drag-ghost';
   const bar = document.createElement('div');
   bar.className = 'tab-drag-ghost__bar';
   bar.textContent = title;
+  // Imperative DOM rather than React here, so the shared `titleColorStyle` helper does not
+  // apply — but the rule it encodes does: set nothing at all when the tab has no colour, so
+  // the stylesheet keeps deciding.
+  if (titleColor) bar.style.color = titleColor;
   const body = document.createElement('div');
   body.className = 'tab-drag-ghost__body';
   el.appendChild(bar);
@@ -167,8 +175,8 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
       document.body.classList.add('tab-dragging');
       window.getSelection?.()?.removeAllRanges?.();
       h.onDragStateChange(true);
-      if (useNativePreview) void api?.showDragPreview?.(h.tabTitle, ev.clientX, ev.clientY);
-      else ghost = makeTabGhost(h.tabTitle);
+      if (useNativePreview) void api?.showDragPreview?.(h.tabTitle, h.tabTitleColor, ev.clientX, ev.clientY);
+      else ghost = makeTabGhost(h.tabTitle, h.tabTitleColor);
     }
     if (useNativePreview) {
       // The OS preview window follows the real cursor (resolved in the backend);
@@ -290,6 +298,7 @@ const TabItem: React.FC<TabItemProps> = ({
     beginTabDrag(e, {
       tabId: tab.id,
       tabTitle: tab.title,
+      tabTitleColor: tab.titleColor,
       onDragStateChange: setIsDragging,
       requestReorder,
     });
@@ -403,7 +412,7 @@ const TabItem: React.FC<TabItemProps> = ({
         <span
           key={tab.activityTick ?? 0}
           className="tab-title"
-          style={tab.titleColor ? { color: tab.titleColor } : undefined}
+          style={titleColorStyle(tab.titleColor)}
         >
           {tab.title}
         </span>
@@ -454,6 +463,7 @@ const TabItem: React.FC<TabItemProps> = ({
           x={renamePos.x}
           y={renamePos.y}
           initialTitle={tab.title}
+          titleColor={tab.titleColor}
           onSubmit={(title) => onEditTitle(tab.id, title)}
           onClose={onCloseRename}
         />

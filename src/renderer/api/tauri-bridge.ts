@@ -199,7 +199,7 @@ interface ElectronAPI {
   resolveOrphanGlobalDrag: (token: string) => Promise<boolean>;
   cancelGlobalPaneDrag: (token: string) => Promise<void>;
   // Tab tear-off preview window
-  showDragPreview: (title: string, x: number, y: number) => Promise<void>;
+  showDragPreview: (title: string, color: string | undefined, x: number, y: number) => Promise<void>;
   moveDragPreview: (x: number, y: number) => Promise<void>;
   hideDragPreview: () => Promise<void>;
   // Cross-window tab drop (source-driven hit-test)
@@ -840,8 +840,8 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Tab tear-off preview window
-  showDragPreview: async (title, x, y) => {
-    await invoke('show_drag_preview', { title, x, y });
+  showDragPreview: async (title, color, x, y) => {
+    await invoke('show_drag_preview', { title, color, x, y });
   },
   moveDragPreview: async (x, y) => {
     await invoke('move_drag_preview', { x, y });
