@@ -18,6 +18,12 @@ export interface ApiCreatedTabOptions {
   fallbackTitle?: string;
   /** shellType fallback when neither profile nor defaultProfile is set. Defaults to 'default' (Mode 0's convention; Mode 3 uses 'cmd'). */
   shellTypeFallback?: string;
+  /**
+   * Colour inherited from the tab of the terminal whose agent asked for this
+   * one. Undefined whenever there is no caller to inherit from — see
+   * `runApiCreateMode0`.
+   */
+  titleColor?: string;
 }
 
 export interface ApiCreatedTabFields {
@@ -26,6 +32,7 @@ export interface ApiCreatedTabFields {
   shellType: string;
   icon: string;
   titleIsCustom?: true;
+  titleColor?: string;
 }
 
 /**
@@ -36,7 +43,7 @@ export interface ApiCreatedTabFields {
  * pre-existing `name || fallback` convention this replaces.
  */
 export function buildApiCreatedTab(options: ApiCreatedTabOptions): ApiCreatedTabFields {
-  const { targetTabId, name, profile, defaultProfile, fallbackTitle, shellTypeFallback = 'default' } = options;
+  const { targetTabId, name, profile, defaultProfile, fallbackTitle, shellTypeFallback = 'default', titleColor } = options;
 
   const tab: ApiCreatedTabFields = {
     id: targetTabId,
@@ -47,6 +54,16 @@ export function buildApiCreatedTab(options: ApiCreatedTabOptions): ApiCreatedTab
 
   if (name) {
     tab.titleIsCustom = true;
+  }
+
+  // Assigned only when there IS a colour, matching how the reducers represent
+  // an uncoloured tab: `setTabTitleColor` and `updateTabMeta` DELETE the field
+  // rather than assigning undefined. Persistence would not tell the two apart
+  // (`durableTab` copies the field unconditionally and JSON drops undefined),
+  // but an own key is still visible to spreads and `in` checks, so keeping one
+  // representation is worth the two lines.
+  if (titleColor) {
+    tab.titleColor = titleColor;
   }
 
   return tab;
@@ -139,6 +156,19 @@ export interface ApiCreateMode0Deps {
   setActiveTab: (tabId: string) => any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   setActiveTabId: (tabId: string) => any;
+  /**
+   * "What colour does the tab owning this terminal wear" — production passes
+   * `store/titleColor.ts`'s `terminalTitleColor` bound to the live store. Which
+   * terminal to ask about is decided HERE rather than by the caller, so the
+   * choice is covered by this function's tests.
+   *
+   * REQUIRED deliberately. The one hop these tests cannot reach is App.tsx
+   * handing this resolver over; an optional dep would let that wiring be
+   * dropped with the whole suite still green, which is precisely how Mode 0
+   * came to have no colour in the first place. Required makes the omission a
+   * typecheck failure. Return undefined for "no colour", never omit the dep.
+   */
+  titleColorForTerminal: (terminalId?: string) => string | undefined;
 }
 
 export interface ApiCreateMode0Result {
@@ -180,6 +210,15 @@ export function runApiCreateMode0(
     tabId?: string;
     /** A pending pty-host session to adopt rather than a process already registered here. */
     sessionKey?: string;
+    /**
+     * The terminal whose agent asked for this spawn (`getCallerId()` in the MCP
+     * sidecar, resolved to a renderer leaf by the backend). Absent when the tool
+     * was called with `connectToCaller: false`, or by a REST client that is not
+     * a terminal at all.
+     */
+    parentTerminalId?: string;
+    /** The caller tab's mirrored colour, for a target window that does not hold the caller leaf. */
+    parentTitleColor?: string | null;
   },
   deps: ApiCreateMode0Deps,
 ): ApiCreateMode0Result {
@@ -197,7 +236,13 @@ export function runApiCreateMode0(
     deps.registerExistingTerminal(leafId, terminalId);
   }
 
-  const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile: deps.defaultProfile });
+  // A brand-new tab has no colour of its own, so the group it belongs to can
+  // only come from the terminal that asked for it. Whole-tab detach already
+  // carries the colour across windows for the same reason: being spawned
+  // elsewhere should not change which group a terminal reads as.
+  const titleColor = deps.titleColorForTerminal(detail.parentTerminalId) || detail.parentTitleColor || undefined;
+
+  const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile: deps.defaultProfile, titleColor });
 
   const paneTree: ApiCreateMode0Result['paneTree'] = {
     id: deps.generateId('pn'),

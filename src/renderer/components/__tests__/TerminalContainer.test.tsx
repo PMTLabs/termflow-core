@@ -131,6 +131,9 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
         addTabTree,
         setActiveTab,
         setActiveTabId,
+        // No calling agent in these cases: this file is about which tree the
+        // tab gets, not what colour it wears (see apiCreatedTab.test.ts).
+        titleColorForTerminal: () => undefined,
       },
     );
 
@@ -173,6 +176,9 @@ describe('TerminalContainer — API-created tab keeps its backend tm- leaf', () 
         addTabTree,
         setActiveTab,
         setActiveTabId,
+        // No calling agent in these cases: this file is about which tree the
+        // tab gets, not what colour it wears (see apiCreatedTab.test.ts).
+        titleColorForTerminal: () => undefined,
       },
     );
 

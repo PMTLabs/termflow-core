@@ -296,6 +296,23 @@ pub fn set_terminal_display_label(
     Ok(())
 }
 
+/// Push the owning tab's user-set title colour down to a live terminal, keyed by its renderer leaf.
+/// A blank colour clears the stored value; API/MCP create uses it only to transport a caller's
+/// colour to a different renderer window.
+#[tauri::command]
+pub fn set_terminal_title_color(
+    state: State<'_, AppState>,
+    renderer_terminal_id: String,
+    title_color: Option<String>,
+) -> Result<(), String> {
+    if !crate::state::set_title_color(&state.terminals, &renderer_terminal_id, title_color.as_deref())? {
+        log::debug!(
+            "set_terminal_title_color: no live terminal carries leaf {renderer_terminal_id}"
+        );
+    }
+    Ok(())
+}
+
 /// Everything a spawn needs, independent of WHO asked for it — the renderer
 /// (`create_terminal`), the REST/MCP API (`api_server::create_terminal`), or the
 /// fleet responder (`api_server::fleet_local_run`).
@@ -590,6 +607,7 @@ fn register_host_terminal(
             last_input_at: None,
             prompt_hook,
             display_label: None,
+            title_color: None,
         },
     );
 }

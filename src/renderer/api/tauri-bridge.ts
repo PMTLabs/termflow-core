@@ -76,6 +76,7 @@ interface ElectronAPI {
   /// wire in `/api/terminals` and is what MCP returns, so changing what it holds would change what
   /// agents see. See services/terminalLabelSync.ts.
   setTerminalDisplayLabel: (rendererTerminalId: string, label: string) => Promise<void>;
+  setTerminalTitleColor: (rendererTerminalId: string, titleColor: string) => Promise<void>;
   getActiveWindow: () => Promise<string>;
   setActiveWindow: (label: string) => Promise<void>;
   /// Ask the backend to open/activate the Settings tab in the current main window
@@ -417,6 +418,10 @@ const tauriBridge: ElectronAPI = {
 
   setTerminalDisplayLabel: async (rendererTerminalId: string, label: string) => {
     await invoke('set_terminal_display_label', { rendererTerminalId, label });
+  },
+
+  setTerminalTitleColor: async (rendererTerminalId: string, titleColor: string) => {
+    await invoke('set_terminal_title_color', { rendererTerminalId, titleColor });
   },
 
   closeTerminal: async (id) => {

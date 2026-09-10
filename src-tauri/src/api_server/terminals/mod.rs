@@ -8,6 +8,20 @@ use serde_json::json;
 use crate::state::AppState;
 use tauri::Emitter;
 
+/// The colour mirrored by the caller's renderer for a parent leaf, if that leaf is live.
+/// This is a payload fallback only: the receiving renderer still prefers its local store lookup.
+fn parent_title_color(
+    terminals: &dashmap::DashMap<String, crate::state::Terminal>,
+    parent_leaf: Option<&str>,
+) -> Option<String> {
+    let leaf = parent_leaf?;
+    terminals.iter().find_map(|terminal| {
+        (terminal.renderer_terminal_id.as_deref() == Some(leaf))
+            .then_some(terminal.title_color.clone())
+            .flatten()
+    })
+}
+
 pub(crate) async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     Json(health_body(&state.instance_id))
 }
@@ -406,6 +420,7 @@ pub(crate) async fn create_terminal(
             // payload: every window receives it, but only the one whose label equals
             // `targetWindow` acts on it (the same pattern as app:close-requested).
             let target_window = state.resolve_active_window_label();
+            let parent_title_color = parent_title_color(&state.terminals, parent_leaf.as_deref());
             if let Err(e) = state.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": terminal_name,
                 "profile": shell_name,
@@ -431,6 +446,7 @@ pub(crate) async fn create_terminal(
                 // must agree, since a placement without a wire fans a node out from a
                 // terminal it has no visible relationship to.
                 "parentTerminalId": parent_leaf,
+                "parentTitleColor": parent_title_color,
                 "targetWindow": target_window
             })) {
                 log::warn!("Failed to emit api:createTerminalTab: {}", e);

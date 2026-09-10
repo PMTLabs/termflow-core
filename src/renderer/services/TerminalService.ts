@@ -2,6 +2,7 @@ import { termDiag } from '../utils/diag';
 import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
+import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
 import type { PromptGate } from '@termflow/terminal-core';
 
 export interface TerminalProcess {
@@ -206,6 +207,7 @@ class TerminalServiceClass {
       // the re-assert only corrects a move. No label is sent at spawn, so without this a terminal
       // created before its tree was committed has no label for the rest of the session.
       reassertLabelAfterSpawn(terminalId);
+      reassertTitleColorAfterSpawn(terminalId);
 
       return processId;
     } catch (error) {

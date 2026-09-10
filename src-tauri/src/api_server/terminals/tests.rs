@@ -1,4 +1,5 @@
     use super::*;
+    use dashmap::DashMap;
 
     fn identity_sample() -> crate::state::Terminal {
         crate::state::Terminal {
@@ -17,7 +18,34 @@
             last_input_at: None,
             prompt_hook: true,
             display_label: None,
+            title_color: None,
         }
+    }
+
+    #[test]
+    fn parent_title_colour_reads_only_the_resolved_parent_leaf() {
+        let terminals = DashMap::new();
+        let mut parent = identity_sample();
+        parent.renderer_terminal_id = Some("tm-parent".into());
+        parent.title_color = Some("#a855f7".into());
+        terminals.insert(parent.id.clone(), parent);
+        let mut sibling = identity_sample();
+        sibling.id = "pc-sibling".into();
+        sibling.renderer_terminal_id = Some("tm-sibling".into());
+        sibling.title_color = Some("#06b6d4".into());
+        terminals.insert(sibling.id.clone(), sibling);
+
+        assert_eq!(parent_title_color(&terminals, Some("tm-parent")).as_deref(), Some("#a855f7"));
+        assert_eq!(parent_title_color(&terminals, Some("tm-sibling")).as_deref(), Some("#06b6d4"));
+        assert_eq!(parent_title_color(&terminals, Some("tm-gone")), None);
+    }
+
+    #[test]
+    fn create_terminal_event_carries_the_parent_title_colour_without_replacing_routing() {
+        let source = include_str!("mod.rs");
+        let create = &source[source.find("pub(crate) async fn create_terminal(").expect("create handler")..];
+        assert!(create.contains("\"parentTitleColor\": parent_title_color,"));
+        assert!(create.contains("\"targetWindow\": target_window"));
     }
 
     /// The canvas `node` block belongs to `GET /api/terminals/:id` ALONE.

@@ -1,4 +1,9 @@
-import { buildApiCreatedTab, resolveApiCreateIds } from '../apiCreatedTab';
+import { configureStore } from '@reduxjs/toolkit';
+import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
+import panesReducer, { addTabTree, setActiveTabId } from '../../store/slices/panesSlice';
+import { terminalTitleColor } from '../../store/titleColor';
+import type { RootState } from '../../store';
+import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from '../apiCreatedTab';
 
 describe('buildApiCreatedTab', () => {
   it('pins the title (titleIsCustom: true) when the caller supplies a name', () => {
@@ -57,6 +62,166 @@ describe('buildApiCreatedTab', () => {
       expect(tab.title).toBe('My Agent');
       expect(tab.titleIsCustom).toBe(true);
     });
+  });
+
+  describe('inherited tab colour', () => {
+    it.each(['#22c55e', '#f59e0b'])('carries the inherited colour %s onto the new tab', (colour) => {
+      expect(buildApiCreatedTab({ targetTabId: 'tb-1', titleColor: colour }).titleColor).toBe(colour);
+    });
+
+    // Not merely `undefined`: the reducers represent an uncoloured tab by
+    // DELETING the field (`setTabTitleColor`, `updateTabMeta`), so an own
+    // `titleColor: undefined` key is a second spelling of the same state that
+    // spreads and `in` checks can still tell apart. Persistence cannot —
+    // `durableTab` copies the field either way and JSON drops undefined.
+    it('omits the key entirely when nothing is inherited', () => {
+      const tab = buildApiCreatedTab({ targetTabId: 'tb-1', name: 'x' });
+
+      expect('titleColor' in tab).toBe(false);
+    });
+
+    it('omits the key entirely for an empty inherited colour', () => {
+      const tab = buildApiCreatedTab({ targetTabId: 'tb-1', titleColor: '' });
+
+      expect('titleColor' in tab).toBe(false);
+    });
+  });
+});
+
+/**
+ * The acceptance case that Mode 1 (a split into an existing tab) already met and
+ * Mode 0 did not: an agent living in a coloured tab asks the MCP layer for a new
+ * TAB. The tab is brand new, so it has no colour of its own to propagate — it
+ * has to inherit one from the terminal whose agent asked for it, which arrives
+ * as `parentTerminalId` (already carried for canvas placement).
+ */
+describe('runApiCreateMode0 — an agent-spawned tab inherits its caller tab colour', () => {
+  const PARENT_TAB = 'tb-parent';
+  const PARENT_LEAF = 'tm-parent-leaf';
+
+  function makeStore(parentColour?: string) {
+    const store = configureStore({ reducer: { tabs: tabsReducer, panes: panesReducer } });
+    store.dispatch(addTab({
+      id: PARENT_TAB, title: 'Parent', shellType: 'bash', icon: '🖥️', isActive: true,
+      ...(parentColour ? { titleColor: parentColour } : {}),
+    } as never));
+    store.dispatch(addTabTree({
+      tabId: PARENT_TAB,
+      tree: { id: 'pn-parent', type: 'terminal', terminalId: PARENT_LEAF },
+    } as never));
+    return store;
+  }
+
+  function run(
+    store: ReturnType<typeof makeStore>,
+    detail: Record<string, unknown>,
+    titleColorForTerminal: (terminalId?: string) => string | undefined,
+  ) {
+    return runApiCreateMode0(
+      { name: 'Spawned', profile: 'bash', processId: 'pc-new', rendererTerminalId: 'tm-new', ...detail },
+      {
+        dispatch: store.dispatch,
+        generateId: (prefix: string) => `${prefix}-generated`,
+        defaultProfile: 'default',
+        registerExistingTerminal: jest.fn(),
+        tabPanes: {},
+        tabExists: () => false,
+        activateOnApiCreate: false,
+        tabCount: 1,
+        addTab,
+        addTabTree,
+        setActiveTab,
+        setActiveTabId,
+        titleColorForTerminal,
+      },
+    );
+  }
+
+  const spawnedTab = (store: ReturnType<typeof makeStore>, id: string) =>
+    store.getState().tabs.tabs.find((t) => t.id === id);
+
+  // Two DIFFERENT colours: a single-colour oracle is satisfied by a hard-coded
+  // constant, which would leave the tab green no matter what the caller wore.
+  it.each(['#22c55e', '#f59e0b'])('paints the new tab with the caller tab colour %s', (colour) => {
+    const store = makeStore(colour);
+
+    // The REAL selector against a REAL store, so the pane-tree walk from the
+    // parent LEAF up to its owning TAB is pinned here too, not stubbed away.
+    const result = run(store, { parentTerminalId: PARENT_LEAF }, (id) =>
+      terminalTitleColor(store.getState() as unknown as RootState, id));
+
+    expect(spawnedTab(store, result.targetTabId)?.titleColor).toBe(colour);
+  });
+
+  // The id App.tsx could plausibly hand over instead — the new tab's own leaf,
+  // or the owning tab id — resolves to no colour at all, so a wrong argument
+  // shows up as a bare tab rather than as a passing test.
+  it('resolves the colour from the caller terminal, not the terminal it is creating', () => {
+    const store = makeStore('#22c55e');
+    const asked: (string | undefined)[] = [];
+
+    run(store, { parentTerminalId: PARENT_LEAF }, (id) => {
+      asked.push(id);
+      return terminalTitleColor(store.getState() as unknown as RootState, id);
+    });
+
+    expect(asked).toEqual([PARENT_LEAF]);
+  });
+
+  // `connectToCaller: false` on the MCP tool, or a REST caller that is not a
+  // terminal at all: there is no caller to inherit from.
+  it('leaves the tab uncoloured when the create names no caller', () => {
+    const store = makeStore('#22c55e');
+
+    const result = run(store, {}, (id) =>
+      terminalTitleColor(store.getState() as unknown as RootState, id));
+
+    expect('titleColor' in (spawnedTab(store, result.targetTabId) ?? {})).toBe(false);
+  });
+
+  it('leaves the tab uncoloured when the caller tab has no colour', () => {
+    const store = makeStore(undefined);
+
+    const result = run(store, { parentTerminalId: PARENT_LEAF }, (id) =>
+      terminalTitleColor(store.getState() as unknown as RootState, id));
+
+    expect('titleColor' in (spawnedTab(store, result.targetTabId) ?? {})).toBe(false);
+  });
+
+  it.each(['#a855f7', '#06b6d4'])('falls back to transported parent colour %s when this window has no caller leaf', (colour) => {
+    const store = makeStore(undefined);
+
+    const result = run(store, {
+      parentTerminalId: 'tm-in-other-window',
+      parentTitleColor: colour,
+    }, () => undefined);
+
+    expect(spawnedTab(store, result.targetTabId)?.titleColor).toBe(colour);
+  });
+
+  it.each([
+    ['#22c55e', '#ec4899'],
+    ['#f59e0b', '#3b82f6'],
+  ])('prefers local colour %s over different transported colour %s', (localColour, payloadColour) => {
+    const store = makeStore(localColour);
+
+    const result = run(store, {
+      parentTerminalId: PARENT_LEAF,
+      parentTitleColor: payloadColour,
+    }, (id) => terminalTitleColor(store.getState() as unknown as RootState, id));
+
+    expect(spawnedTab(store, result.targetTabId)?.titleColor).toBe(localColour);
+  });
+
+  it('treats an empty transported colour as no colour and omits the titleColor key', () => {
+    const store = makeStore(undefined);
+
+    const result = run(store, {
+      parentTerminalId: 'tm-in-other-window',
+      parentTitleColor: '',
+    }, () => undefined);
+
+    expect('titleColor' in (spawnedTab(store, result.targetTabId) ?? {})).toBe(false);
   });
 });
 
