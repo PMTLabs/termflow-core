@@ -412,17 +412,26 @@ export const CanvasMode: React.FC = () => {
     () => `${paintedNodes.map((n) => n.terminalId).join(',')}|${shownGroups.map((g) => g.tabId).join(',')}`,
     [paintedNodes, shownGroups],
   );
-  const paintedRef = useRef<{ model: typeof spacingModel; spacing: SpacingResult; z: number } | null>(null);
+  const paintedRef = useRef<
+    { model: typeof spacingModel; spacing: SpacingResult; z: number; dragging: boolean } | null
+  >(null);
   useLayoutEffect(() => {
     const was = paintedRef.current;
-    // Nothing was painted before this (first commit), or the world is currently raw for a drag —
-    // in which case both sides of a toggle are raw and the drop's own transition owns the one
-    // real raw-to-display step.
-    if (!was || drag.dragActive || !size.w || !size.h) return;
+    if (!was || !size.w || !size.h) return;
+    // EITHER SIDE of a drag boundary belongs to the drag, not here. During one, both sides are
+    // raw and nothing moved; on the drop commit `spacingRendered` flips back to true and this
+    // effect is scheduled — but the drag-exit effect above has already paid that exact raw-to-
+    // display transition for the grabbed node. Both firing pays it twice and throws the dropped
+    // node hundreds of pixels off. One transition, one owner.
+    if (drag.dragActive || was.dragging) return;
     // A zoom in the same commit already anchored itself, and `was` was swept at the old zoom, so
     // the difference here would not be the transform's alone.
     if (was.z !== vpRef.current.z) return;
-    flyTo.cancel();
+    // A flight already OWNS the camera, and it is aimed at a destination computed from the state
+    // that asked for it — `flyToNode` unhides a terminal and flies to where it will be drawn
+    // AFTER the unhide, in one gesture. Cancelling that (or panning under it) silently drops a
+    // navigation the user requested, which happens even with the transform switched off.
+    if (flyTo.active()) return;
     const centre = screenToWorld(vpRef.current, size.w / 2, size.h / 2);
     const pan = spacingAnchorPan(was, { model: spacingModel, spacing }, centre, vpRef.current.z);
     if (pan.dx !== 0 || pan.dy !== 0) panScreen(pan.dx, pan.dy);
@@ -435,7 +444,7 @@ export const CanvasMode: React.FC = () => {
   // it on purpose: React runs layout effects in declaration order, so this still holds the
   // PREVIOUS commit's transform while that one is deciding what changed.
   useLayoutEffect(() => {
-    paintedRef.current = { model: spacingModel, spacing, z: vp.z };
+    paintedRef.current = { model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive };
   });
 
   /**

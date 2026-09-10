@@ -331,7 +331,7 @@ export type FlyTo = ((
   /** Where the camera belongs at an interpolated zoom, for a flight that must hold an anchor
    *  throughout rather than only on arrival. See `anchoredCamera`. */
   cameraAt?: (z: number) => Viewport,
-) => void) & { cancel: () => void };
+) => void) & { cancel: () => void; active: () => boolean };
 
 export function useFlyTo(): FlyTo {
   const dispatch = useDispatch();
@@ -355,6 +355,13 @@ export function useFlyTo(): FlyTo {
     if (raf.current) cancelAnimationFrame(raf.current);
     raf.current = null;
   }, []);
+
+  /**
+   * Is a flight airborne? Asked by camera corrections that must DEFER to one rather than fight
+   * it: a flight already owns the camera and is aimed at a destination computed from the state
+   * that requested it, so cancelling it silently drops a navigation the user asked for.
+   */
+  const active = useCallback(() => raf.current !== null, []);
 
   const flyTo = useCallback((to: Viewport, onDone?: () => void, cameraAt?: (z: number) => Viewport) => {
     if (raf.current) cancelAnimationFrame(raf.current);
@@ -385,7 +392,7 @@ export function useFlyTo(): FlyTo {
     raf.current = requestAnimationFrame(step);
   }, [dispatch]);
 
-  return useMemo(() => Object.assign(flyTo, { cancel }), [flyTo, cancel]);
+  return useMemo(() => Object.assign(flyTo, { cancel, active }), [flyTo, cancel, active]);
 }
 
 export default CanvasViewport;

@@ -126,27 +126,36 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
       zoom: sliceAt('const zoomAtAnchor = useCallback(', '\n  );'),
     };
 
+    // A gesture SEIZES the camera and cancels whatever was flying; a transform transition DEFERS
+    // to a flight instead, because a flight is aimed at a destination computed from the state
+    // that asked for it — `flyToNode` unhides and flies in one action, and cancelling there
+    // drops the navigation outright, with the transform switched off as much as on.
     for (const [name, body] of Object.entries(SITES)) {
       const cancel = body.indexOf('flyTo.cancel();');
-      expect({ name, cancels: cancel >= 0 }).toEqual({ name, cancels: true });
-      // The zoom site returns a viewport rather than panning; the other three pan.
-      const pan = body.indexOf('panScreen(');
-      if (name !== 'zoom') {
-        expect({ name, pans: pan >= 0 }).toEqual({ name, pans: true });
-        expect({ name, cancelsFirst: cancel < pan }).toEqual({ name, cancelsFirst: true });
-      }
+      const defers = body.indexOf('if (flyTo.active()) return;');
+      expect({ name, seizesOrDefers: (cancel >= 0) !== (defers >= 0) })
+        .toEqual({ name, seizesOrDefers: true });
+      const pan = name === 'zoom' ? body.indexOf('return zoomAnchoredAt(') : body.indexOf('panScreen(');
+      expect({ name, acts: pan >= 0 }).toEqual({ name, acts: true });
+      // Whichever it does, it must do it BEFORE it moves the camera. A cancel that runs after
+      // its own pan — or after the zoom's `return` — is not a cancel at all.
+      expect({ name, decidesFirst: Math.max(cancel, defers) < pan })
+        .toEqual({ name, decidesFirst: true });
     }
+    expect(SITES.transform).not.toContain('flyTo.cancel();');
 
     // Completeness: no camera correction may live OUTSIDE the four sites above. Without this the
     // per-site checks pass happily while a fifth, unprotected one is added next to them.
-    const total = (MODE.match(/panScreen\(pan\.dx, pan\.dy\)/g) ?? []).length;
+    const total = (MODE.match(/panScreen\(/g) ?? []).length;
     const accounted = Object.entries(SITES)
-      .filter(([name]) => name !== 'zoom')
-      .reduce((n, [, body]) => n + (body.match(/panScreen\(pan\.dx, pan\.dy\)/g) ?? []).length, 0);
-    expect({ total, accounted }).toEqual({ total: 3, accounted: 3 });
+      .reduce((n, [, body]) => n + (body.match(/panScreen\(/g) ?? []).length, 0);
+    // `panScreen` also reaches the keyboard pan and the minimap, which move the camera on
+    // purpose and correct nothing — hence a floor rather than an equality.
+    expect({ compensations: accounted, strayCompensations: total - accounted <= 2 })
+      .toEqual({ compensations: 3, strayCompensations: true });
 
     expect(VIEWPORT).toContain('const cancel = useCallback(() => {');
-    expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel }), [flyTo, cancel]);');
+    expect(VIEWPORT).toContain('return useMemo(() => Object.assign(flyTo, { cancel, active }), [flyTo, cancel, active]);');
   });
 
   /**
@@ -164,15 +173,19 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
     // which anchor themselves — listing either would re-pan the camera on ordinary navigation.
     expect(MODE).toContain('}, [membershipKey, spacingRendered]);');
     expect(MODE).toContain("`${paintedNodes.map((n) => n.terminalId).join(',')}|${shownGroups.map((g) => g.tabId).join(',')}`");
-    // A drag paints raw on BOTH sides of a toggle, so there is no transform change to pay for.
-    expect(effect).toContain('drag.dragActive');
+    // EITHER SIDE of a drag boundary belongs to the drag. During one, both sides are raw and
+    // nothing moved; on the DROP commit `spacingRendered` flips back and this effect is
+    // scheduled — but the drag-exit effect has already paid that same raw-to-display transition,
+    // and both firing pays it twice, throwing the dropped node hundreds of pixels off.
+    expect(effect).toContain('if (drag.dragActive || was.dragging) return;');
+    expect(MODE).toContain('paintedRef.current = { model: spacingModel, spacing, z: vp.z, dragging: drag.dragActive };');
     // Same-zoom only: `was` was swept at the old zoom, so across a zoom the difference is not
     // the transform's alone — and the zoom already anchored itself.
     expect(effect).toContain('if (was.z !== vpRef.current.z) return;');
     // The recorder must be declared AFTER the comparer, or it overwrites the previous transform
     // before the comparer ever sees it and every compensation silently becomes a no-op.
     expect(MODE.indexOf('const was = paintedRef.current;'))
-      .toBeLessThan(MODE.indexOf('paintedRef.current = { model: spacingModel, spacing, z: vp.z };'));
+      .toBeLessThan(MODE.indexOf('paintedRef.current = { model: spacingModel, spacing, z: vp.z, dragging'));
   });
 
   it('uses raw geometry only for a real slop-crossed drag and compensates both transitions', () => {
@@ -274,7 +287,9 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
       .flatMap((e) => {
         const full = path.join(at, e.name);
         if (e.isDirectory()) return e.name === '__tests__' ? [] : walk(full);
-        return /\.tsx?$/.test(e.name) && !OWNERS.includes(e.name) ? [full] : [];
+        // Matched on the path relative to the Canvas root, not the basename: a NEW nested file
+        // that happened to be called `canvasGeometry.ts` would otherwise exempt itself.
+        return /\.tsx?$/.test(e.name) && !OWNERS.includes(path.relative(dir, full)) ? [full] : [];
       });
     const consumers = walk(dir);
 
@@ -290,7 +305,15 @@ describe('Dynamic Spacing consumers (plan/039)', () => {
         file: path.relative(dir, file),
         callsZoomAt: /\bzoomAt\s*\(/.test(src),
         importsZoomAt: /\bimport\s*\{[^}]*\bzoomAt\b[^}]*\}\s*from/.test(src),
-      }).toEqual({ file: path.relative(dir, file), callsZoomAt: false, importsZoomAt: false });
+        // `import * as geometry` and then `const { zoomAt: rawZoom } = geometry` reaches the same
+        // function with neither of the spellings above appearing anywhere in the file.
+        namespacesGeometry: /\bimport\s+\*\s+as\s+\w+\s+from\s+'\.\/canvasGeometry'/.test(src),
+      }).toEqual({
+        file: path.relative(dir, file),
+        callsZoomAt: false,
+        importsZoomAt: false,
+        namespacesGeometry: false,
+      });
     }
 
     // The anchor has to agree with what is RENDERED, not with the setting: a real drag swaps the

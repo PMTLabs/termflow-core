@@ -2,7 +2,8 @@ import { NODE_H, NODE_W, paintedNodeRect, Rect, worldToScreen, Z_MIN, zoomAt } f
 import { drawnFrameRect, fitGroupFrame, GAP_X, GROUP_GAP, PAD, PAD_SCREEN_MAX, PAD_TOP } from '../canvasLayout';
 import { CanvasGroupModel, CanvasModel, CanvasNodeModel } from '../canvasSelectors';
 import {
-  anchoredCamera, applySpacing, MIN_GAP_SCREEN_PX, spacingAnchorAt, spacingFactor, spacingOffsets,
+  anchoredCamera, applySpacing, MIN_GAP_SCREEN_PX, spacingAnchorAt, spacingAnchorPan, spacingFactor,
+  spacingOffsets,
   SPACING_Z_BASE,
   zoomAnchoredAt,
 } from '../canvasSpacing';
@@ -982,6 +983,55 @@ describe('zoom anchoring', () => {
       expect(spacingAnchorAt(stacked, out, px, py, z)).toEqual({ kind: 'node', id: 's1' });
       // The two really do carry different offsets, so picking the wrong one is not free.
       expect(a.x - stacked.nodes[1].rect.x).not.toBeCloseTo(b.x - stacked.nodes[2].rect.x, 6);
+    });
+  });
+
+  /**
+   * The delta every non-zoom transition pays. Tested directly because the wiring around it is a
+   * React layout effect that this suite cannot mount — which means a `spacingAnchorPan` returning
+   * a flat zero would disable all toggle and visibility compensation while every source pin and
+   * every zoom property in this file still passed. The camera properties above prove the ZOOM
+   * path only; `anchoredCamera` computes its own correction and never calls this.
+   */
+  describe('spacingAnchorPan', () => {
+    const z = 4;
+    const on = { model, spacing: applySpacing(model, z, true) };
+    const off = { model, spacing: applySpacing(model, z, false) };
+    const far = on.spacing.nodeRects[FAR];
+    const centre = { x: far.x + far.w / 2, y: far.y + far.h / 2 };
+
+    it('pays the anchor offset, in screen pixels, when the transform is switched on', () => {
+      const pan = spacingAnchorPan(off, on, centre, z);
+      const raw = model.nodes.find((n) => n.terminalId === FAR)!.rect;
+      expect(pan.dx).toBeCloseTo((far.x - raw.x) * z, 6);
+      expect(pan.dx).not.toBeCloseTo(0, 1);
+      // And exactly reverses when switched back off, so a toggle round trip is a no-op.
+      const back = spacingAnchorPan(on, off, centre, z);
+      expect(back.dx).toBeCloseTo(-pan.dx, 6);
+    });
+
+    it('is zero for a refit that leaves the offsets alone — that motion is not this feature', () => {
+      // The same nodes, but every stored group rect moved: with the transform off both sides,
+      // the offsets are zero and nothing here is owed, however far the frames travelled.
+      const shifted: CanvasModel = {
+        nodes: model.nodes,
+        groups: model.groups.map((g) => ({ ...g, rect: { ...g.rect, y: g.rect.y + 500 } })),
+      };
+      const pan = spacingAnchorPan(off, { model: shifted, spacing: applySpacing(shifted, z, false) }, centre, z);
+      expect(pan).toEqual({ dx: 0, dy: 0 });
+    });
+
+    it('holds the camera still when the anchor itself has gone', () => {
+      const without: CanvasModel = {
+        nodes: model.nodes.filter((n) => n.terminalId !== FAR),
+        groups: model.groups.filter((g) => g.tabId !== 't2'),
+      };
+      const pan = spacingAnchorPan(on, { model: without, spacing: applySpacing(without, z, true) }, centre, z);
+      expect(pan).toEqual({ dx: 0, dy: 0 });
+    });
+
+    it('is zero over empty canvas', () => {
+      expect(spacingAnchorPan(off, on, { x: 0, y: 100_000 }, z)).toEqual({ dx: 0, dy: 0 });
     });
   });
 
