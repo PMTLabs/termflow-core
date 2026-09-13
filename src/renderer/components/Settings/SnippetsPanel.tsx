@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import {
@@ -30,6 +30,10 @@ interface FolderGroup {
     snippets: Snippet[];
 }
 
+interface SnippetsPanelProps {
+    focusSearchSignal?: number;
+}
+
 /** Group snippets by folder, sorted alphabetically, unfiled last (plan/029 §7.2). */
 function groupByFolder(snippets: Snippet[]): FolderGroup[] {
     const byFolder = new Map<string, Snippet[]>();
@@ -53,10 +57,11 @@ function groupByFolder(snippets: Snippet[]): FolderGroup[] {
  * and Import/Export. Every mutation applies live via the settingsSlice reducers —
  * there is no Save button and no local draft state for the list itself.
  */
-export const SnippetsPanel: React.FC = () => {
+export const SnippetsPanel: React.FC<SnippetsPanelProps> = ({ focusSearchSignal }) => {
     const dispatch = useDispatch<AppDispatch>();
     const snippets = useSelector((s: RootState) => s.settings.snippets);
     const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
+    const searchRef = useRef<HTMLInputElement>(null);
 
     const [dialogOpen, setDialogOpen] = useState(false);
     const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
@@ -67,6 +72,20 @@ export const SnippetsPanel: React.FC = () => {
     const [resultLine, setResultLine] = useState<string | null>(null);
     const [search, setSearch] = useState('');
     const [page, setPage] = useState(1);
+
+    // Re-focus on tab reactivation, same-category deep links, and dirty-guard completion as well as
+    // mount; a passive effect wins over useDialogA11y's passive cleanup that restores sidebar focus.
+    //
+    // Not while one of this panel's own dialogs is open: the panel stays mounted (and its dialog
+    // stays open) while the Settings tab is hidden, so a reactivation would otherwise pull focus out
+    // of the modal into the search behind it and leave its focus trap deaf. Read through a ref, not
+    // the deps, so CLOSING a dialog does not re-run this and steal the focus useDialogA11y restores.
+    const modalOpenRef = useRef(false);
+    modalOpenRef.current = dialogOpen || deleteTarget !== null;
+    useEffect(() => {
+        if (modalOpenRef.current) return;
+        searchRef.current?.focus();
+    }, [focusSearchSignal]);
 
     const filteredSnippets = useMemo(() => search.trim() ? filterSnippets(snippets, search) : snippets, [snippets, search]);
     const sortedGroups = useMemo(
@@ -198,7 +217,7 @@ export const SnippetsPanel: React.FC = () => {
                 <button type="button" className="snippets-toolbar-btn" onClick={() => { void runExport(); }} disabled={portBusy}>
                     Export…
                 </button>
-                <input className="snippets-search" value={search} onChange={(e) => setSearch(e.target.value)}
+                <input ref={searchRef} className="snippets-search" value={search} onChange={(e) => setSearch(e.target.value)}
                     placeholder="Search name, text, tag, or initials…" aria-label="Search snippets" />
                 <select className="snippets-sort" aria-label="Sort snippets by" value={snippetsSortMode}
                     onChange={(e) => dispatch(setSnippetsSortMode(e.target.value as typeof snippetsSortMode))}>

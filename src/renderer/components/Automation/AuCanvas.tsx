@@ -359,7 +359,15 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                 />
             )}
 
-            {children}
+            {/* The drawer is rendered through this slot but sits ABOVE the graph, so its wheel must
+                scroll it, not zoom the canvas underneath. Stopped here in the REACT tree rather than
+                filtered by DOM ancestry in `onWheel`: the drawer's select opens a listbox portalled to
+                `document.body` (`AuSelect`), and a synthetic wheel from that listbox still bubbles up
+                the component tree to this host while `e.target.closest(...)` sees only `body`.
+                `display: contents` keeps the drawer's absolute positioning untouched. */}
+            <div style={{ display: 'contents' }} onWheel={(e) => e.stopPropagation()}>
+                {children}
+            </div>
         </div>
     );
 };

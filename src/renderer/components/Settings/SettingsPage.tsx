@@ -137,6 +137,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // list them — the two features landed independently and each hit all seven.
     type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
+    const [snippetsEntry, setSnippetsEntry] = useState(0);
 
     // Launch-at-login is OS-owned and externally mutable (Startup Apps / Login Items /
     // another instance). A monotonic generation guards against stale async readbacks:
@@ -423,6 +424,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             const cat = (e as CustomEvent).detail;
             if (typeof cat === 'string' && isCategory(cat)) {
                 requestCategoryChange(cat);
+                setSnippetsEntry((entry) => entry + 1);
             }
         };
         window.addEventListener('settings:goto-category', handler);
@@ -538,6 +540,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             return;
         }
         if (!dirtyOnLeaveRef.current) resnapshot(activeCategory);
+        setSnippetsEntry((entry) => entry + 1);
         // Deliberately keyed on isActive alone: this is an entry/exit edge, not a
         // reaction to settings changing.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2059,7 +2062,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
             case 'peers': return <PeersPanel />;
-            case 'snippets': return <SnippetsPanel />;
+            case 'snippets': return <SnippetsPanel focusSearchSignal={snippetsEntry} />;
             case 'updates': return renderUpdates();
             case 'about': return <AboutLegalPanel />;
             default: return null;
