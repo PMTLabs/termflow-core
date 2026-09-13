@@ -87,23 +87,6 @@ const DRAWER_LOG_LIMIT = 40;
  */
 const ROSTER_POLL_MS = 3000;
 
-/**
- * How long the *Enabled* switch draws attention to itself after a clean save.
- *
- * **The thing this is a cue for is deliberate, and is not being changed.** A rule taken from a
- * template lands `enabled: false` — `automationTemplates.ts` calls that its safety property — and
- * `save` below can only ever turn `enabled` OFF (it disarms a rule that would be refused). So the
- * whole picking-a-template path ends with a save that visibly does nothing: the rule is stored, and
- * it will never run, and the screen says neither. Tam's ruling was *"let's keep it disabled for
- * safe, however let's flash the enable toggle to attract user to enable it"*, so what changes is
- * what the user is TOLD, not what is stored.
- *
- * Long enough for three pulses of the 0.6s keyframe in `auToggle.css` and no longer: this stops on
- * its own, because a control that keeps blinking until it is clicked is a control that has started
- * nagging.
- */
-export const ENABLE_FLASH_MS = 1800;
-
 export interface AutomationEditorProps {
     /** The rule or draft to edit. `id: ''` means it has never been saved. */
     rule: AutomationRule;
@@ -215,9 +198,17 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const [pendingDelete, setPendingDelete] = useState(false);
     const [pendingClose, setPendingClose] = useState(false);
     const [saving, setSaving] = useState(false);
-    /** See `ENABLE_FLASH_MS`. Set by a clean save of a rule that is off and could be on. */
-    const [enableFlash, setEnableFlash] = useState(false);
-    const enableFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    /**
+     * A successful clean save of an off rule pauses here so the user can decide whether it should
+     * start running. Keeping the answer pending makes Save and close, Ctrl+S, and the navigation
+     * guard share one round-trip instead of each having to know about the prompt.
+     *
+     * Holds the WRITTEN rule's name, not a boolean: the editor is editable while the write is in
+     * flight, so `draft.rule.name` at render time can be a newer, unsaved name than the one the
+     * question is about — and Confirm can only switch on what is stored.
+     */
+    const [pendingEnable, setPendingEnable] = useState<string | null>(null);
+    const enableAnswer = useRef<(() => void) | null>(null);
 
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
     const pairs = draft.rule.id.length > 0 ? runtime.rules[draft.rule.id] : undefined;
@@ -246,11 +237,10 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     // unmount because Settings closed — the counter comes back down.
     useEffect(() => suspendGlobalShortcuts(), []);
 
-    // The flash ends by itself after `ENABLE_FLASH_MS`; this is for the editor being closed inside
-    // that window, where the timeout would otherwise fire into an unmounted component.
+    // A save waits for this answer, so an unmount while the prompt is open must release its caller.
     useEffect(() => () => {
-        if (enableFlashTimer.current) clearTimeout(enableFlashTimer.current);
-        enableFlashTimer.current = null;
+        enableAnswer.current?.();
+        enableAnswer.current = null;
     }, []);
 
     // --- the data the editor needs ----------------------------------------------------------------
@@ -389,26 +379,40 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 toast(`Saved “${outgoing.name || 'Untitled automation'}”.`, 'success');
             }
 
-            // **Point at the switch, but only when the switch would say yes.**
+            // **Ask about the switch, but only when the switch would say yes.**
             //
             // `blockingNow` is `blockingProblems(problems(rule))` — the same predicate the toggle's
             // own `disabled` uses, taken from the rule that was just WRITTEN rather than from the
-            // render-time draft, which is the only version the cue may speak about. A second,
-            // privately-worded "is this rule fine" test here is how a cue ends up pointing at a
-            // control that refuses. Three cases, and only one of them flashes:
+            // render-time draft, which is the only version the prompt may speak about. A second,
+            // privately-worded "is this rule fine" test here is how a prompt ends up offering a
+            // control that refuses. Three cases, and only one of them gets the question:
             // a rule saved ON is already running and needs no prompt; a rule saved OFF *because* it
             // is blocked would be pointed at a switch that is dimmed and will refuse, which is
             // worse than saying nothing; a rule saved OFF with nothing wrong with it is one click
-            // from working, and that click is the step nothing on this screen was asking for.
+            // from working, and that click is the step nothing on this screen was asking for. The
+            // answer is part of this save's round-trip, so every caller waits for the user's choice.
+            //
+            // The "Leave without saving?" dialog is dismissed HERE, not by its own handler before
+            // it calls `save`: it has to stay up for the whole write, because a `saved` action
+            // keeps whatever was typed during the request as a dirty edit, and *Save and close*
+            // then closes on the `true` this returns — edits typed into an uncovered editor during
+            // the write would be thrown away. Swapping one modal for the next at this instant is
+            // what keeps the editor covered from the click to the answer.
             if (!outgoing.enabled && blockingNow.length === 0) {
-                if (enableFlashTimer.current) clearTimeout(enableFlashTimer.current);
-                setEnableFlash(true);
-                enableFlashTimer.current = setTimeout(() => {
-                    setEnableFlash(false);
-                    enableFlashTimer.current = null;
-                }, ENABLE_FLASH_MS);
+                await new Promise<void>((resolve) => {
+                    enableAnswer.current = resolve;
+                    setPendingClose(false);
+                    setPendingEnable(outgoing.name || 'Untitled automation');
+                });
             }
-            return true;
+            // **`true` means "nothing on screen is unsaved", not "the write happened".** Two
+            // callers close the editor on it, and both the write and the switch-on request leave
+            // the editor editable for one round-trip each; `saved` keeps whatever was typed in
+            // that time as a dirty edit. Reporting such a save as clean is how *Save and close*
+            // and the navigation guard would throw those edits away. On a `false`, *Save and
+            // close* leaves the editor open wearing its "unsaved" badge and the guard re-raises
+            // its own dialog — both of which are the truth.
+            return !isDirty(latest.current.draft);
         } catch (e) {
             // Reported, and REFUSED. The navigation guard reads this boolean, so swallowing the
             // error here would let a failed save close the editor and take the draft with it.
@@ -547,6 +551,24 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             // the mirror exists for and must not be hidden.
             toast(`Could not switch it ${enabled ? 'on' : 'off'}: ${redactWebhookError(e)}`, 'error');
         }
+    };
+
+    // One answer per question. The resolver is taken BEFORE anything else runs, so a second event
+    // landing before React commits `pendingEnable=false` finds nothing and does nothing — the
+    // backend toggle is the side effect that must not fire twice.
+    //
+    // A refused switch-on (the backend re-checks and may disagree) is toasted by `setEnabled` and
+    // the save still resolves `true`: the rule IS saved, and answering `false` would send the
+    // navigation guard back to "Leave without saving?" about work that was not lost.
+    const answerEnable = (enable: boolean) => {
+        const done = enableAnswer.current;
+        if (!done) return;
+        enableAnswer.current = null;
+        setPendingEnable(null);
+        void (async () => {
+            if (enable) await setEnabled(true);
+            done();
+        })();
     };
 
     // --- derived ---------------------------------------------------------------------------------------
@@ -793,10 +815,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                         Enabled
                         <button
                             type="button"
-                            // `flash` is additive and temporary — `.au-tog` stays, so every
-                            // selector and every test that reaches this control by its class keeps
-                            // reaching it while the cue is playing.
-                            className={`au-tog${enableFlash ? ' flash' : ''}`}
+                            className="au-tog"
                             role="switch"
                             aria-checked={draft.rule.enabled}
                             // A disabled control that explains itself: the switch is dimmed AND the
@@ -1000,9 +1019,13 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 }}
                 onConfirm={() => {
                     void (async () => {
-                        // Only close if the save actually happened. A refused save that closed
-                        // anyway would destroy the draft — the same failure the navigation guard
-                        // exists to prevent, one dialog further in.
+                        // Only close if the save left nothing unsaved — a refused save, or one
+                        // that was typed over while it ran. Closing anyway would destroy the
+                        // draft — the same failure the navigation guard exists to prevent, one
+                        // dialog further in.
+                        //
+                        // This dialog stays up for the whole write — `save` swaps it for the
+                        // "Switch on?" question if one is due — see the note where it does.
                         if (await save()) {
                             setPendingClose(false);
                             onClose();
@@ -1016,6 +1039,22 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                     setPendingClose(false);
                     onCancelClose?.();
                 }}
+            />
+
+            <ConfirmDialog
+                isOpen={pendingEnable !== null}
+                title={`Switch on “${pendingEnable ?? ''}”?`}
+                message={
+                    <p>
+                        It is saved, but it is switched off — an automation that is off never runs.
+                        Switch it on now to start it, or keep it off and switch it on from the Enabled
+                        toggle whenever you are ready.
+                    </p>
+                }
+                confirmText="Switch on"
+                cancelText="Keep it off"
+                onConfirm={() => answerEnable(true)}
+                onCancel={() => answerEnable(false)}
             />
         </div>,
         document.body,

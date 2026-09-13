@@ -20,7 +20,7 @@ import { AutomationsPanel } from '../../Settings/Automations/AutomationsPanel';
 // eslint-disable-next-line import/first
 import { inputHandler } from '../../../services/InputHandler';
 // eslint-disable-next-line import/first
-import { ENABLE_FLASH_MS } from '../AutomationEditor';
+import { saveAutomationEditorDraft } from '../../../services/automationEditorGuard';
 // eslint-disable-next-line import/first
 import type { AutomationRule, WatchableTerminal } from '../../../types/electron';
 
@@ -258,7 +258,7 @@ describe('the editor, mounted', () => {
     });
 
     it('Ctrl+S refuses a second save while the first is still in flight', async () => {
-        const api = await openEditorOn(rule());
+        const api = await openEditorOn(rule({ enabled: true }));
         let release: (v: unknown) => void = () => {};
         api.saveAutomation.mockImplementation(
             () => new Promise((resolve) => { release = resolve; }),
@@ -348,10 +348,10 @@ describe('the editor, mounted', () => {
         expect(sent.graph.action.message).toBe('');
         // And the header agrees with what was written, rather than still reading *Enabled*.
         expect(editor()!.querySelector('.au-tog')!.getAttribute('aria-checked')).toBe('false');
-        // The OTHER route to a rule that is stored switched off, and it must not flash either: the
+        // The OTHER route to a rule that is stored switched off, and it must not ask either: the
         // switch it would point at is disabled and would refuse. The table below covers a rule that
         // was ALREADY off; this covers one this save turned off.
-        expect(editor()!.querySelector('.au-tog')!.classList.contains('flash')).toBe(false);
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
     });
 
     /**
@@ -480,22 +480,20 @@ describe('the editor, mounted', () => {
     });
 
     /**
-     * **A save that visibly does nothing, on the most common path into this editor.**
+     * **A successful save must explain the quietest, most misleading state.**
      *
      * A rule taken from a template lands `enabled: false` — `automationTemplates.ts` calls that its
-     * safety property and it is NOT being changed — and `save` above can only ever turn `enabled`
-     * OFF, never on. So: pick a template, edit it, save, and the screen reports a successful write
-     * of a rule that will never run, with nothing anywhere saying so. Tam's ruling was to keep the
-     * safety property and make the next step visible instead: the switch flashes.
+     * safety property and it is NOT being changed — and `save` can only ever turn `enabled` OFF,
+     * never on. So a successful save can leave a rule stored but guaranteed never to run. The
+     * switch-on question makes the saved/off facts explicit and offers the safe next action.
      *
-     * **Three cases, and two of them must NOT flash**, which is the half worth testing. Pointing a
-     * user at a control that is dimmed and will refuse them is worse than saying nothing at all, and
-     * a rule that saved switched ON is already running — there is nothing to prompt for. The
-     * blocking check is `blockingProblems(...)`, the SAME list the toggle's own `disabled` is
-     * computed from, so the cue and the control cannot disagree about whether the rule may run.
+     * **Three cases, and only one asks.** A rule saved ON is already running, while a rule saved OFF
+     * because it is blocked points at a disabled switch that would refuse. The blocking check is
+     * `blockingProblems(...)`, the SAME list the toggle's own `disabled` is computed from, so the
+     * question and the control cannot disagree about whether the rule may run.
      *
-     * `saveAutomation` is asserted to have happened in every row: without it, "did not flash" is
-     * green for a save that never took place, which is true of any mutation that breaks saving.
+     * `saveAutomation` is asserted in every row: without it, "no prompt" is green for a save that
+     * never took place, which is true of any mutation that breaks saving.
      */
     const tog = () => editor()!.querySelector<HTMLButtonElement>('.au-tog')!;
 
@@ -508,72 +506,198 @@ describe('the editor, mounted', () => {
         });
     };
 
-    // Ordered `[case, flashes, subject]` so both `%s` in the title land on the two values worth
+    // Ordered `[case, prompts, subject]` so both `%s` in the title land on the two values worth
     // reading in the runner's output — with the factory second, jest prints its SOURCE as the name.
     it.each([
         ['off, with nothing wrong with it', true, () => rule({ enabled: false })],
         ['on, so it is already running', false, () => rule({ enabled: true })],
         ['off BECAUSE something blocks it', false, blocked],
     ] as Array<[string, boolean, () => AutomationRule]>)(
-        'saved %s — the Enable toggle flashes: %s',
-        async (_case, flashes, subject) => {
+        'saved %s — the switch-on dialog is shown: %s',
+        async (_case, prompts, subject) => {
             const api = await openEditorOn(subject());
             await pressCtrlS();
             await settle();
 
             expect(api.saveAutomation).toHaveBeenCalledTimes(1);
-            expect(tog().classList.contains('flash')).toBe(flashes);
-            // `.au-tog` is never replaced by `.flash`, it is joined by it: every selector and every
-            // other test in this file reaches this control by that class.
+            const dialog = document.querySelector('.confirm-dialog');
+            expect(dialog !== null).toBe(prompts);
+            if (prompts) {
+                // Named after the rule that was WRITTEN — a question about some other rule, or a
+                // generic one, would pass a bare `^Switch on`.
+                expect(api.saveAutomation).toHaveBeenCalledWith(
+                    expect.objectContaining({
+                        id: 'au-1', enabled: false, name: 'Context handoff reminder',
+                    }),
+                    expect.anything(),
+                );
+                expect(dialog!.querySelector('h3')!.textContent)
+                    .toBe('Switch on “Context handoff reminder”?');
+                await act(async () => byText('.confirm-btn', 'Keep it off')!.click());
+                await settle();
+            }
             expect(tog().classList.contains('au-tog')).toBe(true);
         },
     );
 
     /**
-     * It stops on its own. A control that keeps blinking until it is clicked has started nagging.
-     *
-     * The registered callback is invoked directly rather than through fake timers, because this
-     * suite flushes promises on the real clock — the same technique the roster test above uses, and
-     * for the same reason. What is asserted is that a timeout of exactly `ENABLE_FLASH_MS` was
-     * registered and that running it ENDS the cue.
+     * **Confirming answers the save's question, not a copy of its work.** `setEnabled` owns the API
+     * call, reducer update, refresh, and error toast; this assertion pins that the prompt delegates
+     * to it and leaves the stored-off rule shown as enabled only after that call finishes.
      */
-    it('stops flashing by itself', async () => {
-        const spy = jest.spyOn(window, 'setTimeout');
-        try {
-            await openEditorOn(rule({ enabled: false }));
-            await pressCtrlS();
-            await settle();
-            expect(tog().classList.contains('flash')).toBe(true);
+    it('switches the saved rule on when the prompt is confirmed', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        await pressCtrlS();
+        await settle();
 
-            const ends = spy.mock.calls.filter(([, ms]) => ms === ENABLE_FLASH_MS);
-            expect(ends).toHaveLength(1);
-            await act(async () => { (ends[0][0] as () => void)(); });
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        // Twice inside one act — the second click lands before React has committed the dialog
+        // away, which is the window in which a non-one-shot answer would toggle the backend twice.
+        await act(async () => {
+            const btn = byText('.confirm-btn', 'Switch on')!;
+            btn.click();
+            btn.click();
+        });
+        await settle();
 
-            expect(tog().classList.contains('flash')).toBe(false);
-        } finally {
-            spy.mockRestore();
-        }
+        expect(api.setAutomationEnabled).toHaveBeenCalledTimes(1);
+        expect(api.setAutomationEnabled).toHaveBeenCalledWith('au-1', true, expect.anything());
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+        expect(tog().getAttribute('aria-checked')).toBe('true');
     });
 
-    /** …and if the editor is closed while it is still playing, the timer goes with it. */
-    it('clears the flash timer when the editor unmounts mid-flash', async () => {
-        const setSpy = jest.spyOn(window, 'setTimeout');
-        const clearSpy = jest.spyOn(window, 'clearTimeout');
-        try {
-            await openEditorOn(rule({ enabled: false }));
-            await pressCtrlS();
-            await settle();
+    /** Cancel is a safe exit: it must not mutate a rule that was just saved. */
+    it('keeps the saved rule off when the prompt is cancelled', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        await pressCtrlS();
+        await settle();
 
-            const at = setSpy.mock.calls.findIndex(([, ms]) => ms === ENABLE_FLASH_MS);
-            expect(at).toBeGreaterThanOrEqual(0);
-            const handle = setSpy.mock.results[at].value;
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        await act(async () => byText('.confirm-btn', 'Keep it off')!.click());
+        await settle();
 
-            await act(async () => root.unmount());
-            expect(clearSpy).toHaveBeenCalledWith(handle);
-        } finally {
-            setSpy.mockRestore();
-            clearSpy.mockRestore();
-        }
+        expect(api.setAutomationEnabled).not.toHaveBeenCalled();
+        expect(document.querySelector('.confirm-dialog-overlay')).toBeNull();
+        expect(tog().getAttribute('aria-checked')).toBe('false');
+    });
+
+    /**
+     * **The prompt is part of Save and close's round-trip.** If the close handler called `onClose`
+     * after the write but before this answer, the editor would disappear behind the question and a
+     * navigation guard would move on without knowing whether the user chose to enable the rule.
+     */
+    it('waits to close until Save and close has been answered', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        await type(field('Automation name'), 'x');
+
+        await act(async () => byText('.au-x', '✕')!.click());
+        await settle();
+        expect(byText('.confirm-btn', 'Save and close')).not.toBeUndefined();
+
+        // Hold the write, because the window between the click and the question is where the
+        // editor must stay COVERED: `saved` keeps anything typed during the request as a dirty
+        // edit, and the close that follows this save would throw it away.
+        let release: (v: unknown) => void = () => {};
+        api.saveAutomation.mockImplementation(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
+        await act(async () => byText('.confirm-btn', 'Save and close')!.click());
+        await settle();
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('.confirm-dialog h3')!.textContent).toBe('Leave without saving?');
+
+        await act(async () => { release({ id: 'au-1', previousUpdatedAt: null }); });
+        await settle();
+
+        expect(editor()).not.toBeNull();
+        // One modal at a time: the leave dialog is gone, the question has taken its place.
+        expect(document.querySelectorAll('.confirm-dialog')).toHaveLength(1);
+        expect(document.querySelector('.confirm-dialog h3')!.textContent)
+            .toBe('Switch on “x”?');
+
+        await act(async () => byText('.confirm-btn', 'Switch on')!.click());
+        await settle();
+
+        expect(api.setAutomationEnabled).toHaveBeenCalledWith('au-1', true, expect.anything());
+        expect(editor()).toBeNull();
+    });
+
+    /**
+     * **Confirm uncovers the editor for one more round-trip, and that one is editable too.** The
+     * question is gone the moment it is answered, the switch-on request is still out, and *Save and
+     * close* is still waiting on `save()`. Anything typed in that gap is a dirty edit that `saved`
+     * has already kept — so `save()` must answer `false` and the close must not happen. The same
+     * `false` sends the Settings navigation guard back to its own "unsaved" dialog.
+     */
+    it('does not close on Save and close when the draft was edited while switching on', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        await type(field('Automation name'), 'x');
+        await act(async () => byText('.au-x', '✕')!.click());
+        await settle();
+
+        let release: (v: unknown) => void = () => {};
+        api.setAutomationEnabled.mockImplementation(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
+        await act(async () => byText('.confirm-btn', 'Save and close')!.click());
+        await settle();
+        await act(async () => byText('.confirm-btn', 'Switch on')!.click());
+        await settle();
+        expect(api.setAutomationEnabled).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('.confirm-dialog')).toBeNull();
+
+        // The gap: the request is out, the editor is bare, and the user types.
+        await type(field('Automation name'), 'xy');
+        await act(async () => { release(undefined); });
+        await settle();
+
+        expect(editor()).not.toBeNull();
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+    });
+
+    /**
+     * The question is about the rule that was WRITTEN. The editor stays editable during the write,
+     * so a name typed in that window is not the one stored, and Confirm could not switch it on.
+     */
+    it('names the written rule in the question, not the name typed during the write', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        let release: (v: unknown) => void = () => {};
+        api.saveAutomation.mockImplementation(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
+        await pressCtrlS();
+        await type(field('Automation name'), 'typed during the write');
+        await act(async () => { release({ id: 'au-1', previousUpdatedAt: null }); });
+        await settle();
+
+        expect(api.saveAutomation).toHaveBeenCalledWith(
+            expect.objectContaining({ name: 'Context handoff reminder' }),
+            expect.anything(),
+        );
+        expect(document.querySelector('.confirm-dialog h3')!.textContent)
+            .toBe('Switch on “Context handoff reminder”?');
+    });
+
+    /**
+     * **Closing the owner must not strand a caller awaiting Save.** Settings and window teardown can
+     * unmount the editor while the question is visible; the cleanup resolves that pending answer so
+     * the guard's promise and the save's `finally` can both finish.
+     */
+    it('resolves a save when the editor unmounts with the prompt open', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        // Through the guard, the way Settings navigation saves: this is the caller that would
+        // otherwise wait forever, and its promise is the one thing here that can be observed.
+        let settled = false;
+        const pending = saveAutomationEditorDraft().then((saved) => { settled = true; return saved; });
+        await settle();
+
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
+        expect(settled).toBe(false);
+
+        await act(async () => root.unmount());
+        await expect(pending).resolves.toBe(true);
+        expect(api.setAutomationEnabled).not.toHaveBeenCalled();
     });
 
     /**
