@@ -239,7 +239,7 @@ describe('PaneContextMenu — consolidated New Pane row', () => {
     (splitPaneById as jest.Mock).mockClear();
   });
 
-  it('shows exactly one row, maps every direction, handles body whitespace, and closes after each activation', async () => {
+  it('shows exactly one row, maps all six activation surfaces, and closes after each activation', async () => {
     const renderHosted = async () => {
       const Host = () => {
         const [open, setOpen] = useState(true);
@@ -261,10 +261,13 @@ describe('PaneContextMenu — consolidated New Pane row', () => {
 
     const expected = [
       ['vertical', 'after'],
+      ['vertical', 'after'],
+      ['vertical', 'after'],
       ['horizontal', 'after'],
       ['vertical', 'before'],
       ['horizontal', 'before'],
     ] as const;
+    const labels = ['New pane right', 'New pane bottom', 'New pane left', 'New pane up'];
     for (let index = 0; index < expected.length; index += 1) {
       await renderHosted();
       const rows = document.querySelectorAll('.pane-context-menu .new-pane-row');
@@ -276,16 +279,20 @@ describe('PaneContextMenu — consolidated New Pane row', () => {
       }
       const row = rows[0] as HTMLElement;
       const controls = Array.from(row.querySelectorAll<HTMLButtonElement>('.new-pane-row-action'));
-      expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual([
-        'New pane right', 'New pane bottom', 'New pane left', 'New pane up',
-      ]);
+      expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual(labels);
 
       await act(async () => {
-        if (index === 0) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        else controls[index].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        const target = index === 0
+          ? row
+          : index === 1
+            ? row.querySelector<HTMLButtonElement>('.new-pane-row-main')!
+            : controls[index - 2];
+        target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
-      expect(splitPaneById).toHaveBeenNthCalledWith(index + 1, 'pn-1', ...expected[index]);
+      expect(splitPaneById).toHaveBeenCalledTimes(1);
+      expect(splitPaneById).toHaveBeenCalledWith('pn-1', ...expected[index]);
       expect(document.querySelector('.pane-context-menu')).toBeNull();
+      (splitPaneById as jest.Mock).mockClear();
     }
     expect(onClose).toHaveBeenCalledTimes(expected.length);
   });

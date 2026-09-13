@@ -341,15 +341,13 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const activeRowRef = useRef<HTMLButtonElement>(null);
-  const contextRowRef = useRef<HTMLButtonElement>(null);
   const contextActionsRef = useRef<HTMLDivElement>(null);
   const contextActionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
   const [openContextRowId, setOpenContextRowId] = useState<string | null>(null);
-  const [contextActionTop, setContextActionTop] = useState(0);
-  const [contextActionFlipLeft, setContextActionFlipLeft] = useState(false);
+  const [contextActionPos, setContextActionPos] = useState<{ top: number; left: number } | null>(null);
   const [focusContextAction, setFocusContextAction] = useState(false);
   const [flashedActionId, setFlashedActionId] = useState<string | null>(null);
   const flashTimer = useRef<number | null>(null);
@@ -435,15 +433,6 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
         (row) => row.id === openContextRowId && row.contextActions && row.contextActions.length > 0,
       ) ?? null);
 
-  useLayoutEffect(() => {
-    contextRowRef.current = null;
-    if (openContextRowId === null) return;
-    const row = Array.from(
-      panelRef.current?.querySelectorAll<HTMLButtonElement>('.context-menu-flyout-row') ?? [],
-    ).find((candidate) => candidate.dataset.rowId === openContextRowId);
-    contextRowRef.current = row ?? null;
-  }, [openContextRowId, visible]);
-
   useEffect(() => {
     if (openContextRowId !== null && contextRow === null) setOpenContextRowId(null);
   }, [contextRow, openContextRowId]);
@@ -455,25 +444,39 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   }, [contextRow, focusContextAction]);
 
   useLayoutEffect(() => {
-    const anchor = contextRowRef.current;
     const panel = panelRef.current;
     const actions = contextActionsRef.current;
-    if (!anchor || !panel || !actions) return;
+    if (!contextRow || !panel || !actions) return;
+    const anchor = Array.from(
+      panel.querySelectorAll<HTMLButtonElement>('.context-menu-flyout-row'),
+    ).find((candidate) => candidate.dataset.rowId === contextRow.id);
+    if (!anchor) return;
     const panelRect = panel.getBoundingClientRect();
     const rowRect = anchor.getBoundingClientRect();
-    const baseTop = Math.max(0, rowRect.top - panelRect.top);
-    if (contextActionTop !== baseTop) {
-      setContextActionTop(baseTop);
-      return;
-    }
-    const actionsRect = actions.getBoundingClientRect();
-    const bottomOverflow = actionsRect.bottom - (window.innerHeight - EDGE_MARGIN);
-    const nextTop = bottomOverflow > 0
-      ? Math.max(0, contextActionTop - bottomOverflow)
-      : contextActionTop;
-    if (nextTop !== contextActionTop) setContextActionTop(nextTop);
-    if (actionsRect.right > window.innerWidth - EDGE_MARGIN) setContextActionFlipLeft(true);
-  }, [contextActionTop, contextRow, contextActionFlipLeft, visible]);
+    const actionsW = actions.offsetWidth;
+    const actionsH = actions.offsetHeight;
+    const baseTop = rowRect.top - panelRect.top;
+    const maxTop = (window.innerHeight - EDGE_MARGIN - actionsH) - panelRect.top;
+    const top = Math.min(Math.max(baseTop, 0), Math.max(0, maxTop));
+    const rightLeft = panelRect.width + 2;
+    const leftLeft = -(actionsW + 2);
+    const fitsRight = panelRect.left + rightLeft + actionsW <= window.innerWidth - EDGE_MARGIN;
+    const fitsLeft = panelRect.left + leftLeft >= EDGE_MARGIN;
+    const left = fitsRight
+      ? rightLeft
+      : fitsLeft
+        ? leftLeft
+        : Math.min(
+          Math.max(
+            (window.innerWidth - EDGE_MARGIN - actionsW) - panelRect.left,
+            EDGE_MARGIN - panelRect.left,
+          ),
+          rightLeft,
+        );
+    setContextActionPos((prev) => (
+      prev && prev.top === top && prev.left === left ? prev : { top, left }
+    ));
+  }, [contextRow, visible]);
 
   // Keep the active row in view as the arrows move past the `max-height` (§4.4).
   useEffect(() => {
@@ -556,8 +559,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
         e.preventDefault();
         e.stopPropagation();
         setOpenContextRowId(row.id);
-        setContextActionTop(0);
-        setContextActionFlipLeft(false);
+        setContextActionPos((prev) => (openContextRowId === row.id ? prev : null));
         setFocusContextAction(true);
       }
       return;
@@ -659,8 +661,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             e.preventDefault();
             e.stopPropagation();
             setOpenContextRowId(row.id);
-            setContextActionTop(0);
-            setContextActionFlipLeft(false);
+            setContextActionPos((prev) => (openContextRowId === row.id ? prev : null));
             setKeyboardNav(false);
           }}
           onClick={() => activate(row)}
@@ -739,6 +740,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             onMouseDown={(e) => e.preventDefault()}
             onClick={(e) => {
               e.stopPropagation();
+              setOpenContextRowId(null);
               action.onSelect();
               if (action.flash) {
                 if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
@@ -792,10 +794,13 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
       {contextRow && (
         <div
           ref={contextActionsRef}
-          className={`context-menu-flyout-row-actions${contextActionFlipLeft ? ' is-flip-left' : ''}`}
+          className="context-menu-flyout-row-actions"
           role="menu"
           aria-label="Snippet actions"
-          style={{ top: contextActionTop }}
+          style={{
+            ...(contextActionPos ?? { top: 0, left: 0 }),
+            visibility: contextActionPos ? 'visible' : 'hidden',
+          }}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -823,6 +828,15 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
                   e.stopPropagation();
                   const step = e.key === 'ArrowDown' ? 1 : -1;
                   const next = (index + step + contextRow.contextActions!.length) % contextRow.contextActions!.length;
+                  contextActionRefs.current[next]?.focus();
+                  return;
+                }
+                if (e.key === 'Tab') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const step = e.shiftKey ? -1 : 1;
+                  const next = (index + step + contextRow.contextActions!.length)
+                    % contextRow.contextActions!.length;
                   contextActionRefs.current[next]?.focus();
                   return;
                 }

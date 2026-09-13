@@ -201,6 +201,14 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     const expectActions = (row: any) => {
       expect(row).toBeDefined();
       expect(row.contextActions.map((a: any) => a.id)).toEqual(['copy', 'insert', 'edit', 'delete']);
+      const expectedId = row.id.replace(/^snippet-/, '');
+      for (const [actionId, callback] of [
+        ['copy', callbacks.onCopy], ['edit', callbacks.onEdit], ['delete', callbacks.onDelete],
+      ] as const) {
+        callback.mockClear();
+        row.contextActions.find((a: any) => a.id === actionId).onSelect();
+        expect(callback).toHaveBeenCalledWith(expect.objectContaining({ id: expectedId }));
+      }
     };
     const gitFolder = folderRows.find((r) => r.id === 'folder-Git');
     const dockerFolder = folderRows.find((r) => r.id === 'folder-Docker');

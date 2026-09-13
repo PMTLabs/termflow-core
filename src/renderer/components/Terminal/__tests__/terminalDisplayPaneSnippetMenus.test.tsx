@@ -11,6 +11,8 @@ import { Provider } from 'react-redux';
 import { store } from '../../../store';
 import { setSnippets } from '../../../store/slices/settingsSlice';
 import type { Snippet } from '../../../store/slices/settingsSlice';
+import { addTab, setActiveTab } from '../../../store/slices/tabsSlice';
+import { addTabTree, resetPanes, setActiveTabId } from '../../../store/slices/panesSlice';
 import { TerminalDisplay } from '../TerminalDisplay';
 import { splitPaneById } from '../../../services/paneActions';
 import { setSurfaceChrome } from '../../../services/surfaceChrome';
@@ -96,7 +98,16 @@ jest.mock('../../../services/AgentSchemeTracker', () => ({
 jest.mock('../../../services/openSettings', () => ({ openSettingsTab: jest.fn() }));
 jest.mock('../../../services/insertTextIntoTerminal', () => ({ insertTextIntoTerminal: jest.fn() }));
 jest.mock('../../../services/surfaceChrome', () => ({
-  setSurfaceChrome: jest.fn(), clearSurfaceChrome: jest.fn(),
+  ...(() => {
+    const surfaces = new Map<string, unknown>();
+    return {
+      setSurfaceChrome: jest.fn((id: string, _owner: unknown, chrome: unknown) => {
+        surfaces.set(id, chrome);
+      }),
+      clearSurfaceChrome: jest.fn((id: string) => { surfaces.delete(id); }),
+      getSurfaceChrome: jest.fn((id: string) => surfaces.get(id)),
+    };
+  })(),
 }));
 jest.mock('../../../api/tauri-bridge', () => ({ getWindowsBuildNumber: jest.fn(() => 0) }));
 jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn(() => Promise.resolve(jest.fn())) }));
@@ -113,12 +124,19 @@ jest.mock('../../../store/terminalTheme', () => ({
 jest.mock('../../../utils/diag', () => ({ termDiag: jest.fn(), isTermDiagEnabled: jest.fn(() => false), setTermDiag: jest.fn() }));
 
 const longText = `${'echo a very long command '.repeat(4)}\necho second line`;
-const originalSnippet: Snippet = {
-  id: 'mounted-snippet',
-  label: 'Saved label '.repeat(8),
-  text: longText,
+const firstSnippet: Snippet = {
+  id: 'mounted-first',
+  label: 'First saved label',
+  text: 'first snippet text',
   createdAt: 1000,
 };
+const secondSnippet: Snippet = {
+  id: 'mounted-second',
+  label: 'Saved label '.repeat(8),
+  text: longText,
+  createdAt: 2000,
+};
+const seedSnippets = [firstSnippet, secondSnippet];
 
 let container: HTMLDivElement;
 let root: Root;
@@ -136,7 +154,12 @@ beforeEach(async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  store.dispatch(setSnippets([originalSnippet]));
+  store.dispatch(resetPanes());
+  store.dispatch(addTab({ id: 'shortcut-tab', title: 'Shortcut tab', shellType: 'default' }));
+  store.dispatch(addTabTree({ tabId: 'shortcut-tab', tree: { id: 'pane-b', type: 'terminal', terminalId: 'term-b' } }));
+  store.dispatch(setActiveTabId('shortcut-tab'));
+  store.dispatch(setActiveTab('shortcut-tab'));
+  store.dispatch(setSnippets(seedSnippets));
   dispatchSpy = jest.spyOn(store, 'dispatch');
   (splitPaneById as jest.Mock).mockClear();
   (writeClipboardText as jest.Mock).mockClear();
@@ -147,6 +170,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  store.dispatch(resetPanes());
   store.dispatch(setSnippets([]));
   dispatchSpy.mockRestore();
   jest.clearAllMocks();
@@ -184,9 +208,9 @@ async function openSnippetsFromContext(id: string) {
   await act(async () => item.dispatchEvent(new MouseEvent('click', { bubbles: true })));
 }
 
-async function openSnippetActions(id: string) {
+async function openSnippetActions(id: string, snippetId = secondSnippet.id) {
   await openSnippetsFromContext(id);
-  const row = flyoutRows()[0];
+  const row = flyoutRows().find((candidate) => candidate.dataset.rowId === `snippet-${snippetId}`)!;
   await act(async () => row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
 }
 
@@ -197,11 +221,14 @@ function setField(field: HTMLInputElement | HTMLTextAreaElement, value: string) 
 }
 
 describe('mounted TerminalDisplay plan 041 hosts', () => {
-  it('renders one New Pane row for terminal B and maps body plus every inline direction', async () => {
+  it('renders one New Pane row for terminal B and maps all six activation surfaces', async () => {
     const expected = [
-      ['vertical', 'after'], ['horizontal', 'after'], ['vertical', 'before'], ['horizontal', 'before'],
+      ['vertical', 'after'], ['vertical', 'after'], ['vertical', 'after'],
+      ['horizontal', 'after'], ['vertical', 'before'], ['horizontal', 'before'],
     ] as const;
     const labels = ['New pane right', 'New pane bottom', 'New pane left', 'New pane up'];
+    const surface = (row: HTMLElement, controls: HTMLButtonElement[], index: number) =>
+      index === 0 ? row : index === 1 ? row.querySelector<HTMLButtonElement>('.new-pane-row-main')! : controls[index - 2];
 
     for (let index = 0; index < expected.length; index += 1) {
       await rightClickTerminal('term-b');
@@ -216,11 +243,12 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
       const controls = Array.from(row.querySelectorAll<HTMLButtonElement>('.new-pane-row-action'));
       expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual(labels);
       await act(async () => {
-        if (index === 0) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        else controls[index].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        surface(row, controls, index).dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
-      expect(splitPaneById).toHaveBeenNthCalledWith(index + 1, 'pane-b', ...expected[index]);
+      expect(splitPaneById).toHaveBeenCalledTimes(1);
+      expect(splitPaneById).toHaveBeenCalledWith('pane-b', ...expected[index]);
       expect(rootMenu()).toBeNull();
+      (splitPaneById as jest.Mock).mockClear();
     }
   });
 
@@ -228,58 +256,74 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
     const insertTextIntoTerminal = jest.requireMock('../../../services/insertTextIntoTerminal').insertTextIntoTerminal as jest.Mock;
 
     await openSnippetActions('term-b');
-    const row = flyoutRows()[0];
+    const row = flyoutRows().find((candidate) => candidate.dataset.rowId === `snippet-${secondSnippet.id}`)!;
     expect(row.querySelector('.context-menu-flyout-label')!.textContent!.length)
       .toBeLessThan(longText.split('\n', 1)[0].length);
     await act(async () => action('Insert').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(insertTextIntoTerminal).toHaveBeenCalledTimes(1);
     expect(insertTextIntoTerminal).toHaveBeenCalledWith('term-b', longText);
-    expect(store.getState().settings.snippets[0].usageCount).toBe(1);
+    expect(insertTextIntoTerminal.mock.calls.every(([terminalId]) => terminalId !== 'term-a')).toBe(true);
+    expect(store.getState().settings.snippets.find((snippet) => snippet.id === secondSnippet.id)!.usageCount).toBe(1);
     const recordCall = dispatchSpy.mock.calls.findIndex(([value]) => value.type === 'settings/recordSnippetUse');
     expect(recordCall).toBeGreaterThanOrEqual(0);
     expect(dispatchSpy.mock.invocationCallOrder[recordCall]).toBeLessThan(insertTextIntoTerminal.mock.invocationCallOrder[0]);
 
     await openSnippetActions('term-b');
     await act(async () => action('Copy').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(writeClipboardText).toHaveBeenCalledTimes(1);
     expect(writeClipboardText).toHaveBeenCalledWith(longText);
 
+    await act(async () => { store.dispatch(setSnippets(seedSnippets)); });
     await openSnippetActions('term-b');
     await act(async () => action('Edit').dispatchEvent(new MouseEvent('click', { bubbles: true })));
     const dialog = document.querySelector<HTMLElement>('.snippet-dialog')!;
     const textarea = dialog.querySelector<HTMLTextAreaElement>('textarea')!;
     const label = dialog.querySelector<HTMLInputElement>('[data-field="label"]')!;
     expect(textarea.value).toBe(longText);
-    expect(label.value).toBe(originalSnippet.label);
+    expect(label.value).toBe(secondSnippet.label);
     await act(async () => setField(textarea, 'edited first line\nedited second line'));
     await act(async () => dialog.querySelector<HTMLButtonElement>('[data-dialog-confirm]')!.click());
-    expect(store.getState().settings.snippets[0]).toMatchObject({ id: originalSnippet.id, text: 'edited first line\nedited second line' });
+    expect(dispatchSpy.mock.calls.some(([value]) => value.type === 'settings/updateSnippet'
+      && value.payload?.id === secondSnippet.id
+      && value.payload?.patch?.text === 'edited first line\nedited second line')).toBe(true);
+    expect(store.getState().settings.snippets.find((snippet) => snippet.id === secondSnippet.id))
+      .toMatchObject({ id: secondSnippet.id, text: 'edited first line\nedited second line' });
+    expect(store.getState().settings.snippets.find((snippet) => snippet.id === firstSnippet.id)).toEqual(firstSnippet);
 
+    await act(async () => { store.dispatch(setSnippets(seedSnippets)); });
     await openSnippetActions('term-b');
     await act(async () => action('Edit').dispatchEvent(new MouseEvent('click', { bubbles: true })));
     const cancelBefore = dispatchSpy.mock.calls.length;
     await act(async () => document.querySelector<HTMLButtonElement>('.snippet-dialog [data-dialog-cancel]')!.click());
     expect(dispatchSpy.mock.calls).toHaveLength(cancelBefore);
-    expect(store.getState().settings.snippets[0].text).toBe('edited first line\nedited second line');
+    expect(store.getState().settings.snippets).toEqual(seedSnippets);
 
+    await act(async () => { store.dispatch(setSnippets(seedSnippets)); });
     await openSnippetActions('term-b');
     await act(async () => action('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(document.querySelector('.confirm-dialog')).not.toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('.confirm-dialog [data-dialog-cancel]')!.click());
-    expect(store.getState().settings.snippets).toHaveLength(1);
+    expect(store.getState().settings.snippets).toEqual(seedSnippets);
 
-    const bChrome = [...(setSurfaceChrome as jest.Mock).mock.calls]
-      .reverse().find(([id]) => id === 'term-b')![2];
-    await act(async () => bChrome.openSnippets());
-    const standaloneRow = flyoutRows()[0];
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 's', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+      }));
+    });
+    const standaloneRow = flyoutRows().find((candidate) => candidate.dataset.rowId === `snippet-${secondSnippet.id}`)!;
     await act(async () => standaloneRow.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true })));
     await act(async () => action('Insert').dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(insertTextIntoTerminal).toHaveBeenLastCalledWith('term-b', 'edited first line\nedited second line');
+    expect(insertTextIntoTerminal).toHaveBeenCalledTimes(2);
+    expect(insertTextIntoTerminal).toHaveBeenLastCalledWith('term-b', longText);
+    expect(insertTextIntoTerminal.mock.calls.every(([terminalId]) => terminalId !== 'term-a')).toBe(true);
 
     await openSnippetActions('term-b');
     await act(async () => action('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true })));
     const confirmBefore = dispatchSpy.mock.calls.length;
     await act(async () => document.querySelector<HTMLButtonElement>('.confirm-dialog [data-dialog-confirm]')!.click());
     expect(dispatchSpy.mock.calls.length).toBeGreaterThan(confirmBefore);
-    expect(dispatchSpy.mock.calls.some(([value]) => value.type === 'settings/removeSnippet' && value.payload === originalSnippet.id)).toBe(true);
-    expect(store.getState().settings.snippets).toHaveLength(0);
+    expect(dispatchSpy.mock.calls.some(([value]) => value.type === 'settings/removeSnippet' && value.payload === secondSnippet.id)).toBe(true);
+    expect(store.getState().settings.snippets.map((snippet) => snippet.id)).toEqual([firstSnippet.id]);
+    expect(store.getState().settings.snippets[0]).toEqual(firstSnippet);
   });
 });

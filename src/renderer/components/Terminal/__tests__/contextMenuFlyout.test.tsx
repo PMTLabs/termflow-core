@@ -1716,7 +1716,7 @@ describe('snippet row context actions', () => {
         expect(edit).not.toHaveBeenCalled();
     });
 
-    it('keeps swallowing the native context menu on the search box and non-row flyout area', async () => {
+    it('keeps swallowing the native context menu on the search box, folder search, and non-row area', async () => {
         await render(menuWith({ rows: [row('a', 'alpha')] }));
         await click(menuItem('Snippets'));
         const rowEvent = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
@@ -1729,6 +1729,16 @@ describe('snippet row context actions', () => {
         const panelEvent = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
         await fire(panel(), panelEvent);
         expect(panelEvent.defaultPrevented).toBe(true);
+
+        await render(menuWith({
+            rows: [row('folder', 'Folder', { children: [row('child', 'Child')] })],
+        }));
+        await click(menuItem('Snippets'));
+        await click(rows()[0]);
+        const nestedSearchEvent = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        await fire(search(1), nestedSearchEvent);
+        expect(nestedSearchEvent.defaultPrevented).toBe(true);
+        expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
     });
 
     it('runs the selected row action and then dismisses the whole menu', async () => {
@@ -1750,12 +1760,13 @@ describe('snippet row context actions', () => {
         expect(onClose).toHaveBeenCalledTimes(1);
     });
 
-    it('closes on list scroll, another row hover, and a changed query', async () => {
+    it('closes on list scroll, another row hover, a changed query, and a header action', async () => {
         await render(menuWith({
             rows: [
                 row('a', 'alpha', { contextActions: [{ id: 'copy', label: 'Copy', onSelect: jest.fn() }] }),
                 row('b', 'beta', { contextActions: [{ id: 'copy', label: 'Copy', onSelect: jest.fn() }] }),
             ],
+            headerActions: [{ id: 'view-mode', icon: '☰', title: 'View mode', onSelect: jest.fn() }],
         }));
         await click(menuItem('Snippets'));
         const first = rows()[0];
@@ -1771,13 +1782,75 @@ describe('snippet row context actions', () => {
         await fire(first, new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
         await type(search(), 'beta');
         expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
+
+        await fire(rows()[0], new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        await click(search());
+        expect(document.querySelector('.context-menu-flyout-row-actions')).not.toBeNull();
+
+        await click(panel()!.querySelector('[data-action-id="view-mode"]')!);
+        expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
     });
 
-    it('clamps its own panel to the viewport and flips independently of the flyout', async () => {
+    it.each([
+        {
+            name: 'uses the preferred right position without edge clamping',
+            width: 1000,
+            height: 800,
+            panel: { top: 100, left: 100, width: 200 },
+            rowTop: 150,
+            actionsW: 120,
+            actionsH: 100,
+            expectedTop: 50,
+            expectedLeft: 202,
+        },
+        {
+            name: 'shifts a nonzero base upward for bottom overflow',
+            width: 1000,
+            height: 400,
+            panel: { top: 100, left: 100, width: 200 },
+            rowTop: 300,
+            actionsW: 120,
+            actionsH: 145,
+            expectedTop: 150,
+            expectedLeft: 202,
+        },
+        {
+            name: 'uses the left position when the right side overflows and the left fits',
+            width: 450,
+            height: 800,
+            panel: { top: 100, left: 300, width: 100 },
+            rowTop: 150,
+            actionsW: 120,
+            actionsH: 100,
+            expectedTop: 50,
+            expectedLeft: -122,
+        },
+        {
+            name: 'clamps between both viewport edges when neither side fits',
+            width: 450,
+            height: 800,
+            panel: { top: 100, left: 5, width: 400 },
+            rowTop: 150,
+            actionsW: 120,
+            actionsH: 100,
+            expectedTop: 50,
+            expectedLeft: 320,
+        },
+    ])('$name', async ({ width, height, panel: panelBox, rowTop, actionsW, actionsH, expectedTop, expectedLeft }) => {
         const previousWidth = window.innerWidth;
         const previousHeight = window.innerHeight;
-        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
-        Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 });
+        const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+        const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+        Object.defineProperty(window, 'innerHeight', { configurable: true, value: height });
+        Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+            configurable: true,
+            get() { return this.classList.contains('context-menu-flyout-row-actions') ? actionsW : 0; },
+        });
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+            configurable: true,
+            get() { return this.classList.contains('context-menu-flyout-row-actions') ? actionsH : 0; },
+        });
         try {
             await render(menuWith({
                 rows: [row('a', 'alpha', {
@@ -1788,29 +1861,31 @@ describe('snippet row context actions', () => {
             const rowEl = rows()[0];
             const flyout = panel()!;
             jest.spyOn(flyout, 'getBoundingClientRect').mockReturnValue({
-                top: 700, left: 100, right: 400, bottom: 900, width: 300, height: 200,
-                x: 100, y: 700, toJSON: () => ({}),
+                top: panelBox.top, left: panelBox.left, right: panelBox.left + panelBox.width,
+                bottom: panelBox.top + 200, width: panelBox.width, height: 200,
+                x: panelBox.left, y: panelBox.top, toJSON: () => ({}),
             });
             jest.spyOn(rowEl, 'getBoundingClientRect').mockReturnValue({
-                top: 700, left: 700, right: 780, bottom: 724, width: 80, height: 24,
-                x: 700, y: 700, toJSON: () => ({}),
-            });
-            jest.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
-                if (this.classList.contains('context-menu-flyout-row-actions')) {
-                    return {
-                        top: 700, left: 780, right: 980, bottom: 900, width: 200, height: 200,
-                        x: 780, y: 700, toJSON: () => ({}),
-                    };
-                }
-                return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON: () => ({}) };
+                top: rowTop, left: panelBox.left, right: panelBox.left + 80, bottom: rowTop + 24,
+                width: 80, height: 24, x: panelBox.left, y: rowTop, toJSON: () => ({}),
             });
             await fire(rowEl, new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
             const actions = document.querySelector<HTMLElement>('.context-menu-flyout-row-actions')!;
-            expect(actions.classList.contains('is-flip-left')).toBe(true);
-            expect(actions.style.top).toBe('0px');
+            expect(actions.style.top).toBe(`${expectedTop}px`);
+            expect(actions.style.left).toBe(`${expectedLeft}px`);
+
+            await render(menuWith({
+                rows: [row('a', 'alpha', {
+                    contextActions: [{ id: 'copy', label: 'Copy', onSelect: jest.fn() }],
+                })],
+            }));
+            expect(actions.style.top).toBe(`${expectedTop}px`);
+            expect(actions.style.left).toBe(`${expectedLeft}px`);
         } finally {
             Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
             Object.defineProperty(window, 'innerHeight', { configurable: true, value: previousHeight });
+            if (offsetWidth) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth);
+            if (offsetHeight) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight);
         }
     });
 
@@ -1836,6 +1911,55 @@ describe('snippet row context actions', () => {
         expect(document.activeElement).toBe(actionButtons[1]);
         await fire(actionButtons[1], new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
         expect(document.activeElement).toBe(actionButtons[0]);
+        await fire(actionButtons[0], new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(actionButtons[1]);
+        await fire(actionButtons[1], new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(actionButtons[0]);
+        await fire(actionButtons[0], new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(input);
+        expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
+
+        await fire(input, new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true, cancelable: true }));
+        const reopened = document.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+        await fire(reopened, new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+        expect(copy).toHaveBeenCalledTimes(1);
+        expect(insert).not.toHaveBeenCalled();
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('supports the complete keyboard action flow in a bare standalone flyout', async () => {
+        const copy = jest.fn();
+        const insert = jest.fn();
+        await act(async () => {
+            root.render(
+                <ContextMenu
+                    x={10}
+                    y={10}
+                    items={[{
+                        label: 'Snippets',
+                        submenu: {
+                            rows: [{
+                                ...row('a', 'alpha'),
+                                contextActions: [
+                                    { id: 'copy', label: 'Copy', onSelect: copy },
+                                    { id: 'insert', label: 'Insert', onSelect: insert },
+                                ],
+                            }],
+                        },
+                    }]}
+                    standaloneSubmenu={0}
+                    onClose={onClose}
+                />,
+            );
+        });
+        const input = search();
+        await fire(input, new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true }));
+        const actionButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+        expect(document.activeElement).toBe(actionButtons[0]);
+        await fire(actionButtons[0], new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(actionButtons[1]);
+        await fire(actionButtons[1], new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+        expect(document.activeElement).toBe(actionButtons[0]);
         await fire(actionButtons[0], new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
         expect(document.activeElement).toBe(input);
         expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
@@ -1858,6 +1982,9 @@ describe('snippet row context actions', () => {
             newPane: { onSplit, onDone },
         }]);
         const rowEl = document.querySelector<HTMLElement>('.new-pane-row')!;
+        expect(rowEl.classList.contains('is-disabled')).toBe(true);
+        expect(Array.from(rowEl.querySelectorAll<HTMLButtonElement>('button')).every((button) => button.disabled)).toBe(true);
+        await hover(rowEl);
         expect(rowEl.classList.contains('is-disabled')).toBe(true);
         expect(Array.from(rowEl.querySelectorAll<HTMLButtonElement>('button')).every((button) => button.disabled)).toBe(true);
         await click(rowEl);

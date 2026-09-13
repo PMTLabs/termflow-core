@@ -3,8 +3,10 @@
   cursor: default;
 }
 
-.new-pane-row.is-disabled {
-  opacity: 0.6;
+.new-pane-row.is-disabled,
+.new-pane-row.is-disabled:hover {
+  background: transparent;
+  opacity: 0.5;
   cursor: default;
 }
 
@@ -53,10 +55,16 @@
   text-align: center;
 }
 
-.new-pane-row-main:hover,
-.new-pane-row-action:hover {
+.new-pane-row-main:hover:not(:disabled),
+.new-pane-row-action:hover:not(:disabled) {
   background-color: var(--menu-hover-background, #094771);
   color: #ffffff;
+}
+
+.context-menu-item.is-disabled:hover,
+.context-menu-item.new-pane-row.is-disabled:hover {
+  background-color: transparent;
+  color: inherit;
 }
 
 .new-pane-row-main:disabled,
