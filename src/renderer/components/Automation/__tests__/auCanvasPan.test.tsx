@@ -36,6 +36,7 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
     let container: HTMLDivElement;
     let root: Root;
     let toWorld: ((x: number, y: number) => { x: number; y: number } | null) | null;
+    let onSelect: jest.Mock;
 
     beforeAll(() => {
         (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -46,6 +47,7 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
         document.body.appendChild(container);
         root = createRoot(container);
         toWorld = null;
+        onSelect = jest.fn();
 
         const rule = draftFromTemplate(AUTOMATION_TEMPLATES[0]);
         const draft = draftFromRule(rule);
@@ -64,7 +66,7 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
                     faces={faces}
                     states={states}
                     chips={{}}
-                    onSelect={() => {}}
+                    onSelect={onSelect}
                     onMove={() => {}}
                     onConnect={() => {}}
                     onDisconnect={() => {}}
@@ -131,7 +133,7 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
             window.dispatchEvent(pointer('pointermove', { clientX: 500 + DRAG, clientY: 400 }));
         });
         await act(async () => {
-            window.dispatchEvent(pointer('pointerup', { buttons: 0 }));
+            window.dispatchEvent(pointer('pointerup', { buttons: 0, clientX: 500 + DRAG, clientY: 400 }));
             window.dispatchEvent(new KeyboardEvent('keyup', { code: 'Space', key: ' ', bubbles: true }));
         });
     }
@@ -142,6 +144,7 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
         expect(before).not.toBeNull();
 
         await spaceDragRight();
+        expect(onSelect).not.toHaveBeenCalled();
 
         const after = toWorld!(500, 400);
         expect(after).not.toBeNull();
@@ -167,18 +170,15 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
             window.dispatchEvent(pointer('pointermove', { clientX: 500 + DRAG, clientY: 400 }));
         });
         await act(async () => {
-            window.dispatchEvent(pointer('pointerup', { buttons: 0 }));
+            window.dispatchEvent(pointer('pointerup', { buttons: 0, clientX: 500 + DRAG, clientY: 400 }));
         });
     }
 
     /**
      * **Dragging the empty canvas pans it, and dragging a NODE still does not.**
      *
-     * The pan is armed on the same branch that deselects — `e.target === e.currentTarget` — so the
-     * two assertions here are one claim: that branch runs for the background and for nothing else.
-     * The node case is not padding. Arming the pan one line higher, outside the `if`, would pass the
-     * first assertion and drag the world out from under every node drag in the editor; only the
-     * second one fails on that mutant, and I ran it to check it does.
+     * The pan is armed only when `e.target === e.currentTarget`, so the background and node paths
+     * remain separate. A background drag also must not resolve its click candidate as a deselect.
      */
     it('pans on a background drag, but not on a drag that starts on a node', async () => {
         expect(toWorld).not.toBeNull();
@@ -196,5 +196,30 @@ describe('AuCanvas — a drag moves the world with the pointer', () => {
         const beforeNode = toWorld!(500, 400);
         await bareDragRight(node!);
         expect(toWorld!(500, 400)!.x).toBeCloseTo(beforeNode!.x, 6);
+    });
+
+    it('preserves the selected step during a background drag past the slop threshold', async () => {
+        const host = container.querySelector('.au-canvas') as HTMLElement;
+
+        await bareDragRight(host);
+
+        expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('deselects on a background click with only negligible movement', async () => {
+        const host = container.querySelector('.au-canvas') as HTMLElement;
+
+        await act(async () => {
+            host.dispatchEvent(pointer('pointerdown', { clientX: 500, clientY: 400 }));
+        });
+        await act(async () => {
+            window.dispatchEvent(pointer('pointermove', { clientX: 502, clientY: 402 }));
+        });
+        await act(async () => {
+            window.dispatchEvent(pointer('pointerup', { buttons: 0, clientX: 502, clientY: 402 }));
+        });
+
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect).toHaveBeenCalledWith(null);
     });
 });
