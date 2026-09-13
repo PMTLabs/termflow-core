@@ -377,21 +377,48 @@ export interface PathLinkMatch {
 //      (feature/audit-x, origin/develop) AND range expressions (a...b) — none of
 //      which form a real filename — are NOT mistaken for files. Folder-only paths
 //      need the anchored form (./folder) to be detected.
-//   6. Verb-prefixed bare relative: name.ext after an allowlisted file verb. The `\b` before
-//      the verb prevents word-internal matches such as `Unread foo.ts`. Parenthesized rows admit
-//      the full tool-verb list; space/colon rows admit only row verbs, so prose such as
-//      `Create Node.js project` and `Open example.com` is not linked. The final extension starts
-//      with `[A-Za-z]`, deliberately rejecting version strings such as `v1.2.3` at the cost of
-//      not linking rare digit-first extensions such as `.7z`. Its variable-length positive
-//      lookbehind carries the verb and separator without consuming them, so the match's
-//      `start`/`end` cover only the filename for hit-testing and Copy Path.
-//      The row form remains deliberately ambiguous for prose such as
-//      `Remove example.com from the hosts file`, which may produce the existing
-//      `File not found` toast.
-// Negated/anchored char classes keep branches 1-5 free of unbounded backtracking; branch 6 uses
-// a bounded `[ \t]{1,8}` separator and a right-anchored filename tail.
-const PATH_RE =
-  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+|(?<=\b(?:(?:[Rr]ead|[Ww]rite|[Ee]dit|[Uu]pdate|[Cc]reate|[Dd]elete|[Rr]emove|[Mm]ulti[Ee]dit|[Nn]otebook[Ee]dit|[Rr]ead[Ff]ile|[Ww]rite[Ff]ile|[Oo]pen|[Vv]iew)\(|(?:[Rr]ead|[Ww]rite|[Ee]dit|[Uu]pdate|[Dd]elete|[Rr]emove|[Rr]ead[Ff]ile|[Ww]rite[Ff]ile|[Ee]dited|[Cc]reated|[Dd]eleted|[Rr]emoved|[Uu]pdated|[Ww]rote):?[ \t]{1,8}))[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*(?![\w\\/-]|\.[\w-]))(?::(\d+)(?::(\d+))?)?/g;
+//   6. Verb-prefixed bare relative: `name.ext` with NO separator, admitted only when an
+//      agent-CLI file verb introduces it — `Update(015-x.html)`, `read(app.tsx)`, `Read foo.ts`,
+//      `ReadFile: a.md`, `Edited main.rs`. The verb sits in a positive lookbehind, so the match
+//      (and with it the underline, the hit-test and Copy Path) covers only the filename. Two
+//      forms, both derived from FILE_VERBS below so they cannot drift apart: `Verb(` admits every
+//      verb (tool syntax is unambiguous); `Verb ` / `Verb: ` drops PROSE_STARTERS. The ASCII `\b`
+//      before the verb keeps `Unread foo.ts` out. The final extension starts with a letter, so
+//      `v1.2.3` is not a file — at the cost of digit-first extensions such as `.7z` after a
+//      verb. The trailing lookahead makes the token END there: not followed by a word char, a
+//      separator, or a dot-run that leads to one — so `Read(archive.tar.7z)` does not link
+//      `archive.tar` and `Read foo.ts..bar` does not link `foo.ts`, while `read config.json.`
+//      and `Edited a.rs...` still link. The row form stays ambiguous for prose such as
+//      `Remove example.com from the hosts file` (accepted: the cost is a "File not found" toast).
+// Negated/anchored char classes keep branches 1-5 free of unbounded backtracking. Branch 6's
+// lookbehind is evaluated at every scan position, so its separator is bounded (`{1,8}` — nine
+// spaces do not link) and its tail is right-anchored.
+
+// Verbs an agent CLI prints in front of a file it touched. ONE list; the two branch-6 forms are
+// derived from it, so a verb added here is admitted by both (minus PROSE_STARTERS for the row form).
+const FILE_VERBS = [
+  'Read', 'Write', 'Edit', 'Update', 'Create', 'Delete', 'Remove', 'MultiEdit', 'NotebookEdit',
+  'ReadFile', 'WriteFile', 'Open', 'View',
+  'Edited', 'Created', 'Deleted', 'Removed', 'Updated', 'Wrote',
+];
+// Imperatives that open ordinary prose too often to trust without `Verb(` tool syntax:
+// `Open example.com in your browser`, `Create Node.js project`, `View ...`.
+const PROSE_STARTERS = new Set(['Open', 'View', 'Create']);
+/** `ReadFile` → `[Rr]ead[Ff]ile`: each capital may also be lower-case (opencode prints `edit(`). */
+const verbAlternation = (verbs: string[]): string =>
+  verbs.map((v) => v.replace(/[A-Z]/g, (c) => `[${c}${c.toLowerCase()}]`)).join('|');
+const VERB_PAREN = `\\b(?:${verbAlternation(FILE_VERBS)})\\(`;
+const VERB_ROW = `\\b(?:${verbAlternation(FILE_VERBS.filter((v) => !PROSE_STARTERS.has(v)))}):?[ \\t]{1,8}`;
+
+const PATH_RE = new RegExp(
+  '(?:' +
+    // Branches 1-5, kept as a literal so their escaping is exactly what the notes above describe.
+    /(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+/.source +
+    // Branch 6.
+    `|(?<=${VERB_PAREN}|${VERB_ROW})[\\w-]+(?:\\.[\\w-]+)*\\.[A-Za-z][\\w-]*(?![\\w\\\\/-]|\\.+[\\w\\\\/-])` +
+    ')(?::(\\d+)(?::(\\d+))?)?',
+  'g',
+);
 
 // Strip trailing punctuation that terminals / markdown / tool logs place right
 // AFTER a path but that isn't part of it — e.g. the `)` in `Write(C:\a\b.md)` or

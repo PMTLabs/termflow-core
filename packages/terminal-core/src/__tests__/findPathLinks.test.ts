@@ -288,6 +288,23 @@ describe('findPathLinks', () => {
 
   it('does not link a prefix before a separator continuation', () => {
     expect(findPathLinks('Read foo.ts/bar')).toHaveLength(0);
+    expect(findPathLinks('Read foo.ts\\bar')).toHaveLength(0);
+  });
+
+  it('does not link a prefix before a dot-run that continues the token', () => {
+    // Review round 2: a lookahead that only forbade `.`+word let `foo.ts` through here,
+    // because the char after the first dot was another dot. The token must END at the
+    // filename — a dot-run counts as continuation whenever something token-ish follows it.
+    expect(findPathLinks('Read foo.ts..bar')).toHaveLength(0);
+    expect(findPathLinks('Read foo.ts...bar')).toHaveLength(0);
+  });
+
+  it('still links a filename followed by an ellipsis', () => {
+    // The dot-run rule must not eat the common spinner/ellipsis suffix.
+    const text = 'Edited main.rs...';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('main.rs');
+    expect(text.slice(m.start, m.end)).toBe('main.rs');
   });
 
   it('links a multi-dot filename through its final letter-first extension', () => {
@@ -306,13 +323,12 @@ describe('findPathLinks', () => {
     expect(text.slice(m.start, m.end)).toBe('config.json');
   });
 
-  it('bounds a long failed whitespace scan', () => {
-    const text = 'Read' + ' '.repeat(20000);
-    const started = performance.now();
-    for (let i = 0; i < 10; i++) {
-      expect(findPathLinks(text)).toHaveLength(0);
-    }
-    expect(performance.now() - started).toBeLessThan(200);
+  it('scans a long run of whitespace after a verb without linking anything', () => {
+    // Smoke only. The BOUND on the separator (the thing that keeps this scan linear — an
+    // unbounded `[ \t]+` inside the per-position lookbehind was O(N²)) is pinned
+    // deterministically by the 8-space / 9-space pair below, not by a wall-clock limit that
+    // would flake on a loaded CI runner.
+    expect(findPathLinks('Read' + ' '.repeat(20000))).toHaveLength(0);
   });
 
   it('does not link a long word without a filename extension', () => {
@@ -357,6 +373,28 @@ describe('findPathLinks', () => {
     const [m] = findPathLinks(text);
     expect(m.path).toBe('e.rs');
     expect(text.slice(m.start, m.end)).toBe('e.rs');
+  });
+
+  it('admits every FILE_VERB in the paren form, past tense included', () => {
+    // Review round 2: the paren and row allowlists were two hand-copied lists and the paren
+    // copy had lost the past-tense verbs. Both forms now derive from ONE list; this pins that
+    // the paren form is the whole list.
+    for (const verb of ['Edited', 'Created', 'Deleted', 'Removed', 'Updated', 'Wrote', 'Open', 'View', 'Create']) {
+      const text = `${verb}(z.md)`;
+      const [m] = findPathLinks(text);
+      expect(m?.path).toBe('z.md');
+      expect(text.slice(m.start, m.end)).toBe('z.md');
+    }
+  });
+
+  it('drops only the prose starters from the row form', () => {
+    for (const verb of ['Open', 'View', 'Create']) {
+      expect(findPathLinks(`${verb} z.md`)).toHaveLength(0);
+    }
+    for (const verb of ['Delete', 'Remove', 'Deleted', 'Wrote']) {
+      const text = `${verb} z.md`;
+      expect(findPathLinks(text).map((m) => text.slice(m.start, m.end))).toEqual(['z.md']);
+    }
   });
 
   it('parses :line:col after a Read row filename', () => {
