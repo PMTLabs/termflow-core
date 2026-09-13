@@ -202,8 +202,12 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
      * A successful clean save of an off rule pauses here so the user can decide whether it should
      * start running. Keeping the answer pending makes Save and close, Ctrl+S, and the navigation
      * guard share one round-trip instead of each having to know about the prompt.
+     *
+     * Holds the WRITTEN rule's name, not a boolean: the editor is editable while the write is in
+     * flight, so `draft.rule.name` at render time can be a newer, unsaved name than the one the
+     * question is about — and Confirm can only switch on what is stored.
      */
-    const [pendingEnable, setPendingEnable] = useState(false);
+    const [pendingEnable, setPendingEnable] = useState<string | null>(null);
     const enableAnswer = useRef<(() => void) | null>(null);
 
     const api = typeof window === 'undefined' ? undefined : window.electronAPI;
@@ -398,10 +402,16 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 await new Promise<void>((resolve) => {
                     enableAnswer.current = resolve;
                     setPendingClose(false);
-                    setPendingEnable(true);
+                    setPendingEnable(outgoing.name || 'Untitled automation');
                 });
             }
-            return true;
+            // **`true` means "nothing on screen is unsaved", not "the write happened".** Two
+            // callers close the editor on it, and both the write and the switch-on request leave
+            // the editor editable for one round-trip each; `saved` keeps whatever was typed in
+            // that time as a dirty edit. Reporting such a save as clean is how *Save and close*
+            // and the navigation guard would throw those edits away. A `false` here sends both
+            // back to their own "unsaved" prompt, which is the truth.
+            return !isDirty(latest.current.draft);
         } catch (e) {
             // Reported, and REFUSED. The navigation guard reads this boolean, so swallowing the
             // error here would let a failed save close the editor and take the draft with it.
@@ -553,7 +563,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         const done = enableAnswer.current;
         if (!done) return;
         enableAnswer.current = null;
-        setPendingEnable(false);
+        setPendingEnable(null);
         void (async () => {
             if (enable) await setEnabled(true);
             done();
@@ -1008,9 +1018,10 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                 }}
                 onConfirm={() => {
                     void (async () => {
-                        // Only close if the save actually happened. A refused save that closed
-                        // anyway would destroy the draft — the same failure the navigation guard
-                        // exists to prevent, one dialog further in.
+                        // Only close if the save left nothing unsaved — a refused save, or one
+                        // that was typed over while it ran. Closing anyway would destroy the
+                        // draft — the same failure the navigation guard exists to prevent, one
+                        // dialog further in.
                         //
                         // This dialog stays up for the whole write — `save` swaps it for the
                         // "Switch on?" question if one is due — see the note where it does.
@@ -1030,8 +1041,8 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             />
 
             <ConfirmDialog
-                isOpen={pendingEnable}
-                title={`Switch on “${draft.rule.name || 'Untitled automation'}”?`}
+                isOpen={pendingEnable !== null}
+                title={`Switch on “${pendingEnable ?? ''}”?`}
                 message={
                     <p>
                         It is saved, but it is switched off — an automation that is off never runs.

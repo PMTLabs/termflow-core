@@ -526,7 +526,9 @@ describe('the editor, mounted', () => {
                 // Named after the rule that was WRITTEN — a question about some other rule, or a
                 // generic one, would pass a bare `^Switch on`.
                 expect(api.saveAutomation).toHaveBeenCalledWith(
-                    expect.objectContaining({ id: 'au-1', enabled: false }),
+                    expect.objectContaining({
+                        id: 'au-1', enabled: false, name: 'Context handoff reminder',
+                    }),
                     expect.anything(),
                 );
                 expect(dialog!.querySelector('h3')!.textContent)
@@ -618,6 +620,62 @@ describe('the editor, mounted', () => {
 
         expect(api.setAutomationEnabled).toHaveBeenCalledWith('au-1', true, expect.anything());
         expect(editor()).toBeNull();
+    });
+
+    /**
+     * **Confirm uncovers the editor for one more round-trip, and that one is editable too.** The
+     * question is gone the moment it is answered, the switch-on request is still out, and *Save and
+     * close* is still waiting on `save()`. Anything typed in that gap is a dirty edit that `saved`
+     * has already kept — so `save()` must answer `false` and the close must not happen. The same
+     * `false` sends the Settings navigation guard back to its own "unsaved" dialog.
+     */
+    it('does not close on Save and close when the draft was edited while switching on', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        await type(field('Automation name'), 'x');
+        await act(async () => byText('.au-x', '✕')!.click());
+        await settle();
+
+        let release: (v: unknown) => void = () => {};
+        api.setAutomationEnabled.mockImplementation(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
+        await act(async () => byText('.confirm-btn', 'Save and close')!.click());
+        await settle();
+        await act(async () => byText('.confirm-btn', 'Switch on')!.click());
+        await settle();
+        expect(api.setAutomationEnabled).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('.confirm-dialog')).toBeNull();
+
+        // The gap: the request is out, the editor is bare, and the user types.
+        await type(field('Automation name'), 'xy');
+        await act(async () => { release(undefined); });
+        await settle();
+
+        expect(editor()).not.toBeNull();
+        expect(document.querySelector('.au-unsaved')?.textContent).toBe('unsaved');
+    });
+
+    /**
+     * The question is about the rule that was WRITTEN. The editor stays editable during the write,
+     * so a name typed in that window is not the one stored, and Confirm could not switch it on.
+     */
+    it('names the written rule in the question, not the name typed during the write', async () => {
+        const api = await openEditorOn(rule({ enabled: false }));
+        let release: (v: unknown) => void = () => {};
+        api.saveAutomation.mockImplementation(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
+        await pressCtrlS();
+        await type(field('Automation name'), 'typed during the write');
+        await act(async () => { release({ id: 'au-1', previousUpdatedAt: null }); });
+        await settle();
+
+        expect(api.saveAutomation).toHaveBeenCalledWith(
+            expect.objectContaining({ name: 'Context handoff reminder' }),
+            expect.anything(),
+        );
+        expect(document.querySelector('.confirm-dialog h3')!.textContent)
+            .toBe('Switch on “Context handoff reminder”?');
     });
 
     /**
