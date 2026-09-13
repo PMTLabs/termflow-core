@@ -358,7 +358,7 @@ export interface PathLinkMatch {
 }
 
 // Bounded, ReDoS-safe matcher for file paths in terminal output (backlog 003).
-// Five alternatives, each with an optional :line(:col) suffix:
+// Six alternatives, each with an optional :line(:col) suffix:
 //   1. Windows-abs: C:\foo\bar OR C:/foo/bar (tools/agent logs print either
 //      separator). The `(?<![A-Za-z])` guard keeps a URL scheme's single letter
 //      before `://` (the `p` in `http://`) from being read as a `p:` drive.
@@ -377,9 +377,15 @@ export interface PathLinkMatch {
 //      (feature/audit-x, origin/develop) AND range expressions (a...b) — none of
 //      which form a real filename — are NOT mistaken for files. Folder-only paths
 //      need the anchored form (./folder) to be detected.
+//   6. Verb-prefixed bare relative: name.ext after an allowlisted file verb. The `\b` before
+//      the verb prevents word-internal matches such as `Unread foo.ts`. The final extension
+//      starts with `[A-Za-z]`, deliberately rejecting version strings such as `v1.2.3` at the
+//      cost of not linking rare digit-first extensions such as `.7z`. Its variable-length
+//      positive lookbehind carries the verb and separator without consuming them, so the
+//      match's `start`/`end` cover only the filename for hit-testing and Copy Path.
 // Negated/anchored char classes keep every branch free of unbounded backtracking.
 const PATH_RE =
-  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+)(?::(\d+)(?::(\d+))?)?/g;
+  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+|(?<=\b(?:[Rr]ead|[Ww]rite|[Ee]dit|[Uu]pdate|[Cc]reate|[Dd]elete|[Rr]emove|[Mm]ulti[Ee]dit|[Nn]otebook[Ee]dit|[Rr]ead[Ff]ile|[Ww]rite[Ff]ile|[Ee]dited|[Cc]reated|[Dd]eleted|[Rr]emoved|[Uu]pdated|[Ww]rote|[Oo]pen|[Oo]pened|[Vv]iew)(?:\(|:?[ \t]+))[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*)(?::(\d+)(?::(\d+))?)?/g;
 
 // Strip trailing punctuation that terminals / markdown / tool logs place right
 // AFTER a path but that isn't part of it — e.g. the `)` in `Write(C:\a\b.md)` or

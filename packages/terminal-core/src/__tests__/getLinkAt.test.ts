@@ -44,6 +44,13 @@ describe('linkAtIndex picks the link covering a character', () => {
     expect(linkAtIndex(LINE, pathStart + 2)).toEqual({ kind: 'path', text: './x/y.txt' });
   });
 
+  it('hits only the filename in a verb-prefixed bare path', () => {
+    const text = 'Update(015-x.html)';
+    expect(linkAtIndex(text, text.indexOf('015-x.html') + 1))
+      .toEqual({ kind: 'path', text: '015-x.html' });
+    expect(linkAtIndex(text, text.indexOf('U'))).toBeNull();
+  });
+
   it('finds nothing at all in ordinary output', () => {
     expect(linkAtIndex('$ git status', 4)).toBeNull();
   });
