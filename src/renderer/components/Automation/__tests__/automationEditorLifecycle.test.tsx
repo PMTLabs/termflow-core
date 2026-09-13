@@ -523,7 +523,14 @@ describe('the editor, mounted', () => {
             const dialog = document.querySelector('.confirm-dialog');
             expect(dialog !== null).toBe(prompts);
             if (prompts) {
-                expect(dialog!.querySelector('h3')!.textContent).toMatch(/^Switch on/);
+                // Named after the rule that was WRITTEN — a question about some other rule, or a
+                // generic one, would pass a bare `^Switch on`.
+                expect(api.saveAutomation).toHaveBeenCalledWith(
+                    expect.objectContaining({ id: 'au-1', enabled: false }),
+                    expect.anything(),
+                );
+                expect(dialog!.querySelector('h3')!.textContent)
+                    .toBe('Switch on “Context handoff reminder”?');
                 await act(async () => byText('.confirm-btn', 'Keep it off')!.click());
                 await settle();
             }
@@ -542,7 +549,13 @@ describe('the editor, mounted', () => {
         await settle();
 
         expect(api.saveAutomation).toHaveBeenCalledTimes(1);
-        await act(async () => byText('.confirm-btn', 'Switch on')!.click());
+        // Twice inside one act — the second click lands before React has committed the dialog
+        // away, which is the window in which a non-one-shot answer would toggle the backend twice.
+        await act(async () => {
+            const btn = byText('.confirm-btn', 'Switch on')!;
+            btn.click();
+            btn.click();
+        });
         await settle();
 
         expect(api.setAutomationEnabled).toHaveBeenCalledTimes(1);
@@ -551,7 +564,7 @@ describe('the editor, mounted', () => {
         expect(tog().getAttribute('aria-checked')).toBe('true');
     });
 
-    /** Cancel and Escape are both safe exits: neither should mutate a rule that was just saved. */
+    /** Cancel is a safe exit: it must not mutate a rule that was just saved. */
     it('keeps the saved rule off when the prompt is cancelled', async () => {
         const api = await openEditorOn(rule({ enabled: false }));
         await pressCtrlS();
@@ -579,13 +592,26 @@ describe('the editor, mounted', () => {
         await settle();
         expect(byText('.confirm-btn', 'Save and close')).not.toBeUndefined();
 
+        // Hold the write, because the window between the click and the question is where the
+        // editor must stay COVERED: `saved` keeps anything typed during the request as a dirty
+        // edit, and the close that follows this save would throw it away.
+        let release: (v: unknown) => void = () => {};
+        api.saveAutomation.mockImplementation(
+            () => new Promise((resolve) => { release = resolve; }),
+        );
         await act(async () => byText('.confirm-btn', 'Save and close')!.click());
         await settle();
-
         expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        expect(document.querySelector('.confirm-dialog h3')!.textContent).toBe('Leave without saving?');
+
+        await act(async () => { release({ id: 'au-1', previousUpdatedAt: null }); });
+        await settle();
+
         expect(editor()).not.toBeNull();
-        expect(document.querySelector('.confirm-dialog-overlay')).not.toBeNull();
-        expect(document.querySelector('.confirm-dialog h3')!.textContent).toMatch(/^Switch on/);
+        // One modal at a time: the leave dialog is gone, the question has taken its place.
+        expect(document.querySelectorAll('.confirm-dialog')).toHaveLength(1);
+        expect(document.querySelector('.confirm-dialog h3')!.textContent)
+            .toBe('Switch on “x”?');
 
         await act(async () => byText('.confirm-btn', 'Switch on')!.click());
         await settle();

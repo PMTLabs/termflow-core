@@ -821,9 +821,14 @@ describe('AutomationsPanel', () => {
             .find((b) => b.textContent?.includes('Save and close')) as HTMLButtonElement;
         await act(async () => { saveBtn.click(); });
 
-        expect(api.saveAutomation).toHaveBeenCalled();
         // A template lands switched off and valid, so the save pauses on the "Switch on?" prompt
-        // and the close waits for the answer — the editor is still here until it is given.
+        // and the close waits for the answer — the editor is still here until it is given. The
+        // written rule is pinned as OFF so a save that flipped it on could not pass on the prompt.
+        expect(api.saveAutomation).toHaveBeenCalledTimes(1);
+        expect(api.saveAutomation).toHaveBeenCalledWith(
+            expect.objectContaining({ enabled: false }),
+            expect.anything(),
+        );
         expect(document.querySelector('.au-editor')).not.toBeNull();
         const keepOff = [...document.querySelectorAll('button')]
             .find((b) => b.textContent?.includes('Keep it off')) as HTMLButtonElement;

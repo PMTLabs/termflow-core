@@ -387,9 +387,17 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             // worse than saying nothing; a rule saved OFF with nothing wrong with it is one click
             // from working, and that click is the step nothing on this screen was asking for. The
             // answer is part of this save's round-trip, so every caller waits for the user's choice.
+            //
+            // The "Leave without saving?" dialog is dismissed HERE, not by its own handler before
+            // it calls `save`: it has to stay up for the whole write, because a `saved` action
+            // keeps whatever was typed during the request as a dirty edit, and *Save and close*
+            // then closes on the `true` this returns — edits typed into an uncovered editor during
+            // the write would be thrown away. Swapping one modal for the next at this instant is
+            // what keeps the editor covered from the click to the answer.
             if (!outgoing.enabled && blockingNow.length === 0) {
                 await new Promise<void>((resolve) => {
                     enableAnswer.current = resolve;
+                    setPendingClose(false);
                     setPendingEnable(true);
                 });
             }
@@ -534,13 +542,21 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         }
     };
 
+    // One answer per question. The resolver is taken BEFORE anything else runs, so a second event
+    // landing before React commits `pendingEnable=false` finds nothing and does nothing — the
+    // backend toggle is the side effect that must not fire twice.
+    //
+    // A refused switch-on (the backend re-checks and may disagree) is toasted by `setEnabled` and
+    // the save still resolves `true`: the rule IS saved, and answering `false` would send the
+    // navigation guard back to "Leave without saving?" about work that was not lost.
     const answerEnable = (enable: boolean) => {
-        setPendingEnable(false);
         const done = enableAnswer.current;
+        if (!done) return;
         enableAnswer.current = null;
+        setPendingEnable(false);
         void (async () => {
             if (enable) await setEnabled(true);
-            done?.();
+            done();
         })();
     };
 
@@ -991,14 +1007,18 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
                     onClose();
                 }}
                 onConfirm={() => {
-                    setPendingClose(false);
                     void (async () => {
                         // Only close if the save actually happened. A refused save that closed
                         // anyway would destroy the draft — the same failure the navigation guard
                         // exists to prevent, one dialog further in.
+                        //
+                        // This dialog stays up for the whole write — `save` swaps it for the
+                        // "Switch on?" question if one is due — see the note where it does.
                         if (await save()) {
+                            setPendingClose(false);
                             onClose();
                         } else {
+                            setPendingClose(false);
                             onCancelClose?.();
                         }
                     })();
