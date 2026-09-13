@@ -138,6 +138,7 @@ describe('SnippetsPanel', () => {
             snip({ id: 'docker', label: 'docker up', text: 'docker up', folder: 'Docker' }),
         ]));
         const search = container.querySelector('[aria-label="Search snippets"]') as HTMLInputElement;
+        expect(document.activeElement).toBe(search);
         await act(async () => {
             const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
             set.call(search, 'git'); search.dispatchEvent(new Event('input', { bubbles: true }));
