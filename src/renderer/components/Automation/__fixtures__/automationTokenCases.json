@@ -22,6 +22,8 @@
     { "input": "${terminal.cwd}", "tokens": [{ "kind": "named", "name": "terminal.cwd" }], "rendered": "/fx" },
     { "input": "${time}", "tokens": [{ "kind": "named", "name": "time" }], "rendered": "2026-01-02 03:04:05" },
     { "input": "$${time}", "tokens": [], "rendered": "${time}" },
-    { "input": "$1 in ${terminal.cwd} at ${time}", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "terminal.cwd" }, { "kind": "named", "name": "time" }], "rendered": "[g1] in /fx at 2026-01-02 03:04:05" }
+    { "input": "$1 in ${terminal.cwd} at ${time}", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "terminal.cwd" }, { "kind": "named", "name": "time" }], "rendered": "[g1] in /fx at 2026-01-02 03:04:05" },
+    { "input": "${unfinished", "tokens": [], "rendered": "${unfinished" },
+    { "input": "${terminal.nope}", "tokens": [{ "kind": "named", "name": "terminal.nope" }], "rendered": null }
   ]
 }

@@ -344,7 +344,9 @@ mod tests {
         struct Case {
             input: String,
             tokens: Vec<FixtureToken>,
-            rendered: String,
+            /// `null`: the scanner recognises the token but nothing resolves it — a dotted name
+            /// is accepted by the grammar, and only the reserved spellings have a value.
+            rendered: Option<String>,
         }
         #[derive(serde::Deserialize)]
         #[serde(tag = "kind", rename_all = "lowercase")]
@@ -371,13 +373,16 @@ mod tests {
                 })
                 .collect();
             assert_eq!(tokens_used(&case.input), want, "input was {:?}", case.input);
-            assert_eq!(
-                substitute(&case.input, Some(&fixture_caps()), &fixture_reserved())
-                    .expect("fixture captures resolve every token"),
-                case.rendered,
-                "input was {:?}",
-                case.input,
-            );
+            let result = substitute(&case.input, Some(&fixture_caps()), &fixture_reserved());
+            match case.rendered {
+                Some(rendered) => assert_eq!(
+                    result.expect("fixture captures resolve every token"),
+                    rendered,
+                    "input was {:?}",
+                    case.input,
+                ),
+                None => assert!(result.is_err(), "{:?} should not resolve", case.input),
+            }
         }
     }
 

@@ -7,6 +7,8 @@
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { fireEvent } from '@testing-library/react';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 jest.mock('@tauri-apps/api/core', () => ({ invoke: jest.fn(() => Promise.resolve(undefined)) }));
 jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn(async () => jest.fn()) }));
@@ -47,7 +49,7 @@ describe('SnippetPickerButton', () => {
         });
     }
 
-    it('opens above the editor with a focused search field', async () => {
+    it('opens as the picker-classed menu with a focused search field', async () => {
         await show();
         await act(async () => {
             container.querySelector<HTMLButtonElement>('button[aria-label="Insert a saved snippet"]')!.click();
@@ -56,6 +58,24 @@ describe('SnippetPickerButton', () => {
         const picker = document.querySelector('.context-menu.au-snippet-picker');
         expect(picker).not.toBeNull();
         expect(picker?.querySelector<HTMLInputElement>('.context-menu-flyout-search')).toBe(document.activeElement);
+    });
+
+    /**
+     * jsdom does not paint, so "above the editor" is pinned where it is decided: the picker class's
+     * `z-index` against the editor's, read from the two stylesheets. The class itself being applied
+     * is the test above; the number order is what a regression would change.
+     */
+    it('is stacked above the editor by its z-index', () => {
+        const css = (rel: string) => readFileSync(join(__dirname, '..', rel), 'utf8');
+        const zIndexOf = (source: string, selector: string): number => {
+            const rule = new RegExp(`${selector.replace(/\./g, '\\.')}\\s*\\{[^}]*?z-index:\\s*(\\d+)`);
+            const found = source.match(rule);
+            if (!found) throw new Error(`no z-index rule for ${selector}`);
+            return Number(found[1]);
+        };
+        const picker = zIndexOf(css('../Terminal/ContextMenu.css'), '.context-menu.au-snippet-picker');
+        const editor = zIndexOf(css('AutomationEditor.css'), '.au-editor');
+        expect(picker).toBeGreaterThan(editor);
     });
 
     it('inserts exact multiline text and records a use', async () => {

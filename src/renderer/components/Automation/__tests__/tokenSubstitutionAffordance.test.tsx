@@ -19,12 +19,12 @@
  * action carries the same chips over the same toggle, and a fix applied to one side of a pair is
  * how the other side keeps the bug.
  */
-import React, { act } from 'react';
+import React, { act, useState } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 
 import { AuInspector } from '../AuInspector';
-import { draftFromRule } from '../automationDraft';
-import type { DraftAction } from '../automationDraft';
+import { draftFromRule, draftReducer } from '../automationDraft';
+import type { AutomationDraft, DraftAction } from '../automationDraft';
 import { problems } from '../automationValidation';
 import type { AutomationRule } from '../../../types/electron';
 import { blankDraft } from '../../Settings/Automations/automationTemplates';
@@ -87,25 +87,38 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
         container.remove();
     });
 
+    /**
+     * A stateful host: every dispatch is recorded AND applied through the real reducer, so the
+     * textarea re-renders with the new value the way the editor's does. The caret tests need that —
+     * a restore that ran before the value grew would be clamped by jsdom exactly as by a browser.
+     */
+    function Host({ initial, rule }: { initial: AutomationDraft; rule: AutomationRule }) {
+        const [draft, setDraft] = useState(initial);
+        return (
+            <AuInspector
+                draft={draft}
+                problems={problems(rule)}
+                now={1_700_000_000_000}
+                terminals={[]}
+                terminalsError={null}
+                terminalsLoading={false}
+                report={null}
+                onRearm={null}
+                onTest={() => {}}
+                onFocusStep={() => {}}
+                dispatch={(action) => {
+                    dispatched.push(action);
+                    setDraft((current) => draftReducer(current, action));
+                }}
+            />
+        );
+    }
+
     async function show(message: string) {
         const rule = ruleWith(destination, message);
         const draft = { ...draftFromRule(rule), selected: destination };
         await act(async () => {
-            root.render(
-                <AuInspector
-                    draft={draft}
-                    problems={problems(rule)}
-                    now={1_700_000_000_000}
-                    terminals={[]}
-                    terminalsError={null}
-                    terminalsLoading={false}
-                    report={null}
-                    onRearm={null}
-                    onTest={() => {}}
-                    onFocusStep={() => {}}
-                    dispatch={(action) => { dispatched.push(action); }}
-                />,
-            );
+            root.render(<Host initial={draft} rule={rule} />);
         });
     }
 
@@ -215,23 +228,26 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
 
     /**
      * The caret lands after what was inserted, in BOTH panels — the webhook panel used to insert at
-     * the caret and then leave focus and the selection wherever they were. `dispatch` here records
-     * rather than re-renders, so the textarea's value never grows and jsdom would clamp a real
-     * selection; the spy pins the position the panel ASKED for, which is the fact under test.
+     * the caret and then leave focus and the selection wherever they were. The host applies the
+     * patch, so this reads the selection the textarea actually holds once the new value has
+     * rendered: a restore that ran before the re-render would have been clamped to the old length.
      */
     it('restores focus and puts the caret after the inserted token', async () => {
-        await show('sent at ');
-        caretToEnd();
-        const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
-        const setRange = jest.spyOn(box, 'setSelectionRange');
-        box.blur();
+        // Mid-text on purpose: a value set programmatically parks the caret at the END, so an
+        // insert at the end could not tell a restored caret from no restore at all.
+        await show('sent at , ok');
+        const before = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        before.setSelectionRange('sent at '.length, 'sent at '.length);
+        before.blur();
 
         await act(async () => { chip('${time}').click(); });
         await act(async () => { await new Promise<void>((done) => requestAnimationFrame(() => done())); });
 
+        const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        expect(box.value).toBe('sent at ${time}, ok');
         expect(document.activeElement).toBe(box);
         const after = 'sent at ${time}'.length;
-        expect(setRange).toHaveBeenLastCalledWith(after, after);
+        expect([box.selectionStart, box.selectionEnd]).toEqual([after, after]);
     });
 
     it('does not block a schedule message that uses only a reserved token', async () => {
@@ -273,9 +289,7 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
 
     it('splices a picked multiline snippet at the selection without enabling substitution', async () => {
         await show('0123456789');
-        const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
-        box.setSelectionRange(3, 5);
-        const setRange = jest.spyOn(box, 'setSelectionRange');
+        container.querySelector<HTMLTextAreaElement>('textarea')!.setSelectionRange(3, 5);
 
         await act(async () => {
             container.querySelector<HTMLButtonElement>('[aria-label="Test snippet picker"]')!.click();
@@ -287,9 +301,12 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
             type: destination,
             patch: { [field]: '012a\n$1 $$ ${terminal.id}\nb56789' },
         }]);
-        // After the snippet, not after the replaced selection: 3 + the snippet's own length.
+        const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        expect(box.value).toBe('012a\n$1 $$ ${terminal.id}\nb56789');
+        // After the snippet, not after the replaced selection: 3 + the snippet's own length — read
+        // from the textarea after the new value rendered, not from what the panel asked for.
         const after = 3 + 'a\n$1 $$ ${terminal.id}\nb'.length;
-        expect(setRange).toHaveBeenLastCalledWith(after, after);
+        expect([box.selectionStart, box.selectionEnd]).toEqual([after, after]);
         expect(document.activeElement).toBe(box);
     });
 });

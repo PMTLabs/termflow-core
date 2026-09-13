@@ -18,7 +18,8 @@ const named = (name: string): Token => ({ kind: 'named', name, text: `\${${name}
 interface FixtureCase {
     input: string;
     tokens: Array<{ kind: 'group'; n: number } | { kind: 'named'; name: string }>;
-    rendered: string;
+    /** `null`: recognised by the scanner, resolved by nothing (an unknown dotted name). */
+    rendered: string | null;
 }
 
 const cases = (fixture as unknown as { cases: FixtureCase[] }).cases;
@@ -49,7 +50,9 @@ describe('tokensUsed — the shared grammar fixture', () => {
         expect(tokensUsed(testCase.input)).toEqual(want);
 
         const preview = previewSubstitute(testCase.input, fixtureGroups, fixtureSample);
-        expect(preview).toEqual({ ok: true, parts: [{ kind: 'text', text: testCase.rendered }] });
+        expect(preview).toEqual(testCase.rendered === null
+            ? { ok: false, badToken: testCase.input }
+            : { ok: true, parts: [{ kind: 'text', text: testCase.rendered }] });
     });
 });
 
