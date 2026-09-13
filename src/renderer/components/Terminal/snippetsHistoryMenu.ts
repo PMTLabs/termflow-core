@@ -46,6 +46,9 @@ function buildSnippetLeafRow(
   insert: (text: string) => void,
   onUse: (id: string) => void,
   showFolder: boolean,
+  onCopy: (snippet: Snippet) => void,
+  onEdit: (snippet: Snippet) => void,
+  onDelete: (snippet: Snippet) => void,
 ): ContextMenuFlyoutRow {
   return {
     id: `snippet-${s.id}`,
@@ -54,13 +57,28 @@ function buildSnippetLeafRow(
     detailTitle: leafDetailTitle(s, showFolder),
     title: s.text,
     onSelect: () => { onUse(s.id); insert(s.text); },
+    contextActions: [
+      { id: 'copy', label: 'Copy', onSelect: () => onCopy(s) },
+      { id: 'insert', label: 'Insert', onSelect: () => { onUse(s.id); insert(s.text); } },
+      // The menu stays up under the edit dialog (`keepMenuOpen`), exactly as the footer's
+      // Add-New-Snippet does, so the edited row is one click away when the dialog closes.
+      { id: 'edit', label: 'Edit', onSelect: () => onEdit(s), keepMenuOpen: true },
+      { id: 'delete', label: 'Delete', onSelect: () => onDelete(s) },
+    ],
     closeMenuOnSelect: true,
   };
 }
 
 /** Folder-grouped shape (empty query): one folder row per `snippetFolders`, its
  *  children the snippets in that folder, then the unfiled snippets flat. */
-function buildGroupedRows(snippets: Snippet[], insert: (text: string) => void, onUse: (id: string) => void): ContextMenuFlyoutRow[] {
+function buildGroupedRows(
+  snippets: Snippet[],
+  insert: (text: string) => void,
+  onUse: (id: string) => void,
+  onCopy: (snippet: Snippet) => void,
+  onEdit: (snippet: Snippet) => void,
+  onDelete: (snippet: Snippet) => void,
+): ContextMenuFlyoutRow[] {
   const folders = snippetFolders(snippets);
   const rows: ContextMenuFlyoutRow[] = folders.map((folder) => ({
     id: `folder-${folder}`,
@@ -68,18 +86,25 @@ function buildGroupedRows(snippets: Snippet[], insert: (text: string) => void, o
     icon: '📁',
     children: snippets
       .filter((s) => (s.folder?.trim() || undefined) === folder)
-      .map((s) => buildSnippetLeafRow(s, insert, onUse, false)),
+      .map((s) => buildSnippetLeafRow(s, insert, onUse, false, onCopy, onEdit, onDelete)),
   }));
   const unfiled = snippets.filter((s) => !s.folder?.trim());
-  rows.push(...unfiled.map((s) => buildSnippetLeafRow(s, insert, onUse, false)));
+  rows.push(...unfiled.map((s) => buildSnippetLeafRow(s, insert, onUse, false, onCopy, onEdit, onDelete)));
   return rows;
 }
 
 /** Flat shape (empty query): every snippet as one row, in registry order, each carrying
  *  its own folder as a `📁 name` chip — so the grouping the folder view draws
  *  structurally stays legible here as data rather than being dropped. */
-function buildFlatRows(snippets: Snippet[], insert: (text: string) => void, onUse: (id: string) => void): ContextMenuFlyoutRow[] {
-  return snippets.map((s) => buildSnippetLeafRow(s, insert, onUse, true));
+function buildFlatRows(
+  snippets: Snippet[],
+  insert: (text: string) => void,
+  onUse: (id: string) => void,
+  onCopy: (snippet: Snippet) => void,
+  onEdit: (snippet: Snippet) => void,
+  onDelete: (snippet: Snippet) => void,
+): ContextMenuFlyoutRow[] {
+  return snippets.map((s) => buildSnippetLeafRow(s, insert, onUse, true, onCopy, onEdit, onDelete));
 }
 
 /**
@@ -102,13 +127,16 @@ export function buildSnippetsMenuItem(opts: {
   sortMode: SnippetSortMode;
   insert: (text: string) => void;
   onUse: (id: string) => void;
+  onCopy: (snippet: Snippet) => void;
+  onEdit: (snippet: Snippet) => void;
+  onDelete: (snippet: Snippet) => void;
   onAddNew: (seedText?: string) => void;
   onToggleViewMode: () => void;
   onCycleSortMode: () => void;
   onOpenSettings: () => void;
   selectionText?: string;
 }): ContextMenuItem {
-  const { snippets, viewMode, sortMode, insert, onUse, onAddNew, onToggleViewMode, onCycleSortMode, onOpenSettings, selectionText } = opts;
+  const { snippets, viewMode, sortMode, insert, onUse, onCopy, onEdit, onDelete, onAddNew, onToggleViewMode, onCycleSortMode, onOpenSettings, selectionText } = opts;
   const flat = viewMode === 'flat';
 
   return {
@@ -143,10 +171,12 @@ export function buildSnippetsMenuItem(opts: {
         // A query flattens in BOTH modes, so `viewMode` is read only on the browse path.
         if (!q) {
           const sorted = sortSnippets(snippets, sortMode);
-          return flat ? buildFlatRows(sorted, insert, onUse) : buildGroupedRows(sorted, insert, onUse);
+          return flat
+            ? buildFlatRows(sorted, insert, onUse, onCopy, onEdit, onDelete)
+            : buildGroupedRows(sorted, insert, onUse, onCopy, onEdit, onDelete);
         }
         // Search already ranks relevance; sorting it again would bury the best match.
-        return filterSnippets(snippets, q).map((s) => buildSnippetLeafRow(s, insert, onUse, true));
+        return filterSnippets(snippets, q).map((s) => buildSnippetLeafRow(s, insert, onUse, true, onCopy, onEdit, onDelete));
       },
       emptyRow: (query: string): ContextMenuFlyoutRow =>
         snippets.length === 0
