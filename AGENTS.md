@@ -1,7 +1,7 @@
-# AGENT.MD - Shared AI Agent Instructions
-## Auto-Terminal Project
+# AGENTS.MD - Shared AI Agent Instructions
+## TermFlow Project
 
-> **NOTE:** This file contains shared instructions for all AI agents working on Auto-Terminal.
+> **NOTE:** This file contains shared instructions for all AI agents working on TermFlow.
 >
 > **Agent-Specific Instructions:**
 > - Claude agents: Read `CLAUDE.md` after this file
