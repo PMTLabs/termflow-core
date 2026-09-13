@@ -261,12 +261,26 @@ async fn a_schedule_send_resolves_reserved_tokens_without_captures() {
     );
     engine.runtime.set_watched("au-schedule-reserved", ["tm-1".to_string()].into());
 
+    // `${time}` is the wall clock when the send runs (`now_ms()`), not the synthetic tick that
+    // fired the schedule — so it is bracketed between two real clock reads rather than matched
+    // by shape, which a fixed timestamp of the right shape would also satisfy. The bounds are
+    // formatted by chrono directly, not by `time_from_ms`, so they do not move with a mutant.
+    let before = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
     tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let after = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let written = fake.written().join("\n");
-    let re = regex::Regex::new(r"tm-1\|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").unwrap();
-    assert!(re.is_match(&written), "the reserved-only schedule send did not resolve: {written}");
+    // The write is wrapped in bracketed-paste sequences, so take the value by its length.
+    let rendered = written
+        .split("tm-1|")
+        .nth(1)
+        .map(|rest| rest.chars().take(before.chars().count()).collect::<String>())
+        .unwrap_or_else(|| panic!("the reserved-only schedule send did not resolve: {written}"));
+    assert!(
+        before <= rendered && rendered <= after,
+        "the send's time {rendered} is not between {before} and {after}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

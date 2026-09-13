@@ -1281,9 +1281,17 @@ mod tests {
             .strip_prefix("would type `codex · core@/w ")
             .and_then(|text| text.strip_suffix("` into codex · core"))
             .expect("the dry-run detail should contain only the rendered time after the cwd");
-        assert!(regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-            .unwrap()
-            .is_match(rendered_time));
+        // The Test pane renders the caller's `now_ms` (here 1 000 ms after the epoch), not a
+        // second read of the clock: the exact value, formatted by chrono directly rather than by
+        // `time_from_ms`, so a bag built from `Utc::now()` and a fixed string both fail here.
+        use chrono::TimeZone;
+        let expected = chrono::Local
+            .timestamp_millis_opt(1_000)
+            .single()
+            .expect("one local rendering")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        assert_eq!(rendered_time, expected);
     }
 
     /// **The same defect, at the site the clause fix did not cover.**

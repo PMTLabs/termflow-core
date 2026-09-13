@@ -280,11 +280,13 @@ export function webhookValueEscape(provider: AutomationWebhookProvider): ValueEs
 
 function webhookSampleValues(groups: { count: number; names: Set<string> }): Record<string, string> {
     // The same shapes `automation_validation.rs`'s `sample_webhook_captures` and `Reserved::sample`
-    // render, so a body that saves here is one the Rust check accepts too.
+    // render, so a body that saves here is one the Rust check accepts too. The title carries a `"`
+    // and the cwd a `\` on purpose: they are the two characters `'json-string'` exists for, so a
+    // Custom body's JSON check can only pass on a rendering that substituted AND escaped.
     const sample: Record<string, string> = {
         'terminal.id': 'tm-sample',
-        'terminal.title': '[terminal.title]',
-        'terminal.cwd': '[terminal.cwd]',
+        'terminal.title': '[terminal.title] "quoted"',
+        'terminal.cwd': '[terminal.cwd]\\sub',
         time: '[time]',
     };
     for (let index = 0; index <= groups.count; index += 1) {
@@ -296,7 +298,12 @@ function webhookSampleValues(groups: { count: number; names: Set<string> }): Rec
     return sample;
 }
 
-function renderWebhookBodyForValidation(
+/**
+ * The body the Custom-provider JSON check below parses. Exported for its own test only: the
+ * check's verdict cannot tell a validator that substituted from one that did not (the untouched
+ * body is valid JSON too), so the test reads the rendering itself.
+ */
+export function renderWebhookBodyForValidation(
     webhook: NonNullable<AutomationGraph['webhook']>,
     parse: AutomationParseStep | null,
 ): string {

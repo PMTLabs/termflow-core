@@ -68,12 +68,18 @@ impl Reserved {
             .to_string()
     }
 
-    /// Fixed values for shared validation and substitution fixtures.
+    /// Fixed values for the save-time validator (`automation_validation::rendered_webhook_body`)
+    /// and its tests. Mirrored by `webhookSampleValues` in `automationValidation.ts`.
+    ///
+    /// The title carries a `"` and the cwd a `\` on purpose: they are the two characters
+    /// `ValueEscape::JsonString` exists for, so a Custom body's JSON check can only pass on a
+    /// rendering that substituted AND escaped — a raw rendering, or a validator that never
+    /// substituted, is told apart by the value, not by the placeholder's own quotes.
     pub fn sample() -> Self {
         Self {
             terminal_id: "tm-sample".into(),
-            terminal_title: Some("[terminal.title]".into()),
-            terminal_cwd: Some("[terminal.cwd]".into()),
+            terminal_title: Some("[terminal.title] \"quoted\"".into()),
+            terminal_cwd: Some("[terminal.cwd]\\sub".into()),
             time: "[time]".into(),
         }
     }
@@ -536,14 +542,52 @@ mod tests {
         );
     }
 
+    /// The value, not only the shape: a fixed string of the right shape must fail here, so the
+    /// engine tests that bracket `${time}` between two clock reads have something to lean on.
+    /// The expected value comes from chrono's OTHER local-time path (`Local.timestamp_millis_opt`)
+    /// rather than the UTC-then-`with_timezone` one the function uses.
     #[test]
-    fn time_from_ms_has_the_documented_shape() {
-        let time = Reserved::time_from_ms(1_609_459_445_000);
+    fn time_from_ms_renders_that_instant_in_local_time() {
+        use chrono::{Local, TimeZone};
+        let ms = 1_609_459_445_000;
+        let expected = Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .expect("a real instant has one local rendering")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        assert_eq!(Reserved::time_from_ms(ms), expected);
+        assert_ne!(
+            Reserved::time_from_ms(ms + 1_000),
+            expected,
+            "one second later must render differently"
+        );
         assert!(
             regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
                 .unwrap()
-                .is_match(&time),
-            "unexpected local timestamp format: {time}"
+                .is_match(&expected),
+            "unexpected local timestamp format: {expected}"
         );
+    }
+
+    /// `RESERVED_NAMES` (what the validators exempt) and `Reserved::get` (what a send resolves)
+    /// are two lists; a name in one and not the other is a message that saves and then fails to
+    /// send, or the reverse. The four names are spelled out here rather than read from the
+    /// constant, so a constant that lost one fails instead of shrinking the loop.
+    #[test]
+    fn every_reserved_name_is_exempt_and_resolves() {
+        assert_eq!(RESERVED_NAMES, ["terminal.id", "terminal.title", "terminal.cwd", "time"]);
+        let reserved = Reserved::sample();
+        for name in ["terminal.id", "terminal.title", "terminal.cwd", "time"] {
+            assert!(is_reserved(name), "{name} is not exempt");
+            assert!(reserved.get(name).is_some(), "{name} does not resolve");
+            assert_eq!(
+                substitute(&format!("${{{name}}}"), None, &reserved).unwrap(),
+                reserved.get(name).unwrap(),
+                "{name} did not substitute to its own value"
+            );
+        }
+        assert!(!is_reserved("terminal.nope"));
+        assert!(reserved.get("terminal.nope").is_none());
     }
 }

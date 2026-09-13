@@ -593,17 +593,28 @@ fn a_schedule_or_a_complete_set_of_input_steps_never_trips_never_runs() {
     );
 }
 
+/// All four names, at BOTH destinations: an exemption list that lost a name would still pass a
+/// `${terminal.id}`-only probe (and a loop over `RESERVED_NAMES` would shrink with it), and the
+/// webhook body goes through the same loop as the message but is a different `field`.
 #[test]
 fn reserved_tokens_need_no_pattern() {
-    let mut rule = crate::automation_engine::test_host::schedule_only_rule("au-reserved");
-    rule.graph.action_mut().message = "${terminal.id}".into();
-    rule.graph.action_mut().substitute = true;
+    for name in ["terminal.id", "terminal.title", "terminal.cwd", "time"] {
+        let mut rule = crate::automation_engine::test_host::schedule_only_rule("au-reserved");
+        rule.graph.action_mut().message = format!("${{{name}}}");
+        rule.graph.action_mut().substitute = true;
+        rule.graph.webhook = Some(WebhookStep {
+            provider: WebhookProvider::Custom,
+            url: "https://example.test/webhook".into(),
+            body: format!(r#"{{"v":"${{{name}}}"}}"#),
+            substitute: true,
+        });
 
-    assert!(
-        problems(&rule).is_empty(),
-        "reserved-only schedule messages are valid: {:?}",
-        problems(&rule)
-    );
+        assert!(
+            problems(&rule).is_empty(),
+            "a reserved-only schedule rule naming {name} is valid: {:?}",
+            problems(&rule)
+        );
+    }
 }
 
 #[test]
@@ -629,15 +640,29 @@ fn a_declared_time_group_is_accepted_as_a_capture() {
     assert!(problems(&rule).is_empty(), "declared time group is valid: {:?}", problems(&rule));
 }
 
+/// The rendering the JSON check reads, not only its verdict: the untouched body is valid JSON
+/// too, so "no `bodyNotJson`" alone cannot tell a validator that substituted from one that did
+/// not. The sample title carries a `"` and the cwd a `\`, so a RAW rendering is invalid JSON and
+/// only substituted-and-escaped parses back to the sample values.
 #[test]
 fn a_reserved_token_in_custom_json_webhook_is_rendered_before_json_check() {
     let mut rule = valid_rule();
     rule.graph.webhook = Some(WebhookStep {
         provider: WebhookProvider::Custom,
         url: "https://example.test/webhook".into(),
-        body: r#"{"t":"${terminal.title}"}"#.into(),
+        body: r#"{"t":"${terminal.title}","cwd":"${terminal.cwd}","g":"$1"}"#.into(),
         substitute: true,
     });
+
+    let webhook = rule.graph.webhook.as_ref().unwrap();
+    let rendered = rendered_webhook_body(webhook, parse_step(&rule.graph));
+    assert_eq!(
+        rendered,
+        r#"{"t":"[terminal.title] \"quoted\"","cwd":"[terminal.cwd]\\sub","g":"[g1]"}"#
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("escaped body parses");
+    assert_eq!(parsed["t"], "[terminal.title] \"quoted\"");
+    assert_eq!(parsed["cwd"], "[terminal.cwd]\\sub");
 
     assert!(
         !problems(&rule).iter().any(|problem| problem.code == "webhook.bodyNotJson"),

@@ -408,16 +408,26 @@ async fn a_crossing_posts_the_source_terminal_reserved_values() {
     fake.roster.lock().unwrap()[0].cwd = Some("/one".into());
     let send = pending(&engine, &host, ArmState::armed(), 4_000);
 
+    let before = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     run_crossing(engine.clone(), host.clone(), send).await;
 
     let request = posted
         .recv_timeout(Duration::from_secs(3))
         .expect("the webhook was never posted");
     let text = String::from_utf8_lossy(&request);
-    assert!(text.contains("codex · core|tm-1|/one|"), "source values were not posted: {text}");
+    let after = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let rendered = text
+        .split("codex · core|tm-1|/one|")
+        .nth(1)
+        .map(|rest| rest.chars().take(before.chars().count()).collect::<String>())
+        .unwrap_or_else(|| panic!("source values were not posted: {text}"));
+    // Bracketed between two real clock reads, not matched by shape: the bag's `${time}` is the
+    // crossing's own `now_ms()`, and a fixed timestamp of the right shape must fail here. The
+    // bounds are formatted by chrono directly, not by `time_from_ms`, so they do not move with
+    // a mutant.
     assert!(
-        regex::Regex::new(r"\|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").unwrap().is_match(&text),
-        "the timestamp was not rendered: {text}"
+        before <= rendered && rendered <= after,
+        "the posted time {rendered} is not between {before} and {after}"
     );
 }
 

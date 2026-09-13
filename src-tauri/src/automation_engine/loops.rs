@@ -872,10 +872,12 @@ async fn run_crossing(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>, 
 /// The clock is read once here, before the concurrent destination tasks start, so both
 /// destinations render one `${time}`. The title is the DECIDE-time label the crossing already
 /// carries (`PendingSend::label`, resolved before a parked wait, when the terminal may still have
-/// had one); the cwd is resolved NOW, at fire time, for the crossing's own process — the directory
-/// a shell was in when it printed the match is what a delayed send's reader wants, and it is the
-/// one potentially blocking value, so it is fetched only when a substituting destination names it
-/// and never on the evaluator's thread.
+/// had one); the cwd is resolved NOW, at fire time, for the crossing's own process (`pair.pc`,
+/// see `EngineHost::cwd_for`) — a parked send therefore reads the directory that process is in
+/// when the send runs, not the one it printed the match from, and a leaf restarted in between
+/// yields `""` rather than the new shell's directory. It is the one potentially blocking value,
+/// so it is fetched only when a substituting destination names it and never on the evaluator's
+/// thread.
 async fn build_reserved(
     host: &Arc<dyn EngineHost>,
     send: &PendingSend,

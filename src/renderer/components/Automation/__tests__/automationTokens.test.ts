@@ -116,8 +116,24 @@ describe('previewSubstitute — absent prototype-named captures', () => {
 });
 
 describe('previewSubstitute — reserved terminal values', () => {
+    /**
+     * The sample map is flat, so a declared `time` group and the reserved clock share one key and
+     * a value alone cannot say which path resolved it (`{ time: '42' }` reads `42` either way).
+     * The observable difference is an ABSENT key: a declared group that did not participate is
+     * empty text, exactly like any optional capture; a reserved name with no sample is a
+     * placeholder. A resolver that always takes the reserved path for `${time}` fails the first.
+     */
     it('lets a declared time group shadow the reserved clock value', () => {
-        expect(previewSubstitute('${time}', { count: 1, names: new Set(['time']) }, { time: '42' })).toEqual({
+        const declared = { count: 1, names: new Set(['time']) };
+        expect(previewSubstitute('${time}', declared, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: '' }],
+        });
+        expect(previewSubstitute('${time}', { count: 0, names: new Set() }, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'placeholder', token: '${time}' }],
+        });
+        expect(previewSubstitute('${time}', declared, { time: '42' })).toEqual({
             ok: true,
             parts: [{ kind: 'text', text: '42' }],
         });
