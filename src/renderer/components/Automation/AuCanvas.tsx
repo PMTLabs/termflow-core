@@ -168,9 +168,6 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
     }, []);
 
     const onWheel = (e: React.WheelEvent) => {
-        // The drawer is rendered through this slot but sits above the graph; its own scrolling must
-        // not also zoom the canvas underneath it.
-        if (e.target instanceof Element && e.target.closest('[data-au-canvas-children]')) return;
         // `mode: 'zoom'` and no overlay: a plain wheel zooms, and Ctrl+wheel is left to the browser
         // (which is where the app's own font zoom lives). The shared function rather than an
         // inlined `if`, so this canvas cannot develop its own wheel convention.
@@ -362,9 +359,13 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
                 />
             )}
 
-            {/* `display: contents` keeps the drawer's existing absolute positioning while marking
-                the overlaid children so their wheel events do not zoom the graph underneath. */}
-            <div data-au-canvas-children="true" style={{ display: 'contents' }}>
+            {/* The drawer is rendered through this slot but sits ABOVE the graph, so its wheel must
+                scroll it, not zoom the canvas underneath. Stopped here in the REACT tree rather than
+                filtered by DOM ancestry in `onWheel`: the drawer's select opens a listbox portalled to
+                `document.body` (`AuSelect`), and a synthetic wheel from that listbox still bubbles up
+                the component tree to this host while `e.target.closest(...)` sees only `body`.
+                `display: contents` keeps the drawer's absolute positioning untouched. */}
+            <div style={{ display: 'contents' }} onWheel={(e) => e.stopPropagation()}>
                 {children}
             </div>
         </div>

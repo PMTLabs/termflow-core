@@ -7,6 +7,7 @@
  */
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 
 import { AuCanvas } from '../AuCanvas';
 import { draftFromRule } from '../automationDraft';
@@ -62,6 +63,12 @@ describe('AuCanvas — wheel zoom excludes overlaid children', () => {
                     <div className="au-drawer" data-testid="drawer">
                         <div className="au-dpane">
                             <select data-testid="picker" />
+                            {/* What `AuSelect` does with its open listbox: a React child of the
+                                drawer whose DOM lives under document.body. */}
+                            {createPortal(
+                                <div role="listbox" data-testid="portalled-listbox" />,
+                                document.body,
+                            )}
                         </div>
                     </div>
                 </AuCanvas>,
@@ -130,6 +137,20 @@ describe('AuCanvas — wheel zoom excludes overlaid children', () => {
 
         await act(async () => {
             wheel(picker);
+        });
+
+        expect(container.querySelector('.au-zl')?.textContent).toBe('100%');
+    });
+
+    it('does not zoom when the wheel starts in a listbox the drawer portalled to body', async () => {
+        // Bubbles to AuCanvas through the REACT tree only; a DOM-ancestry check cannot see it.
+        const listbox = document.querySelector('[data-testid="portalled-listbox"]') as HTMLElement;
+        expect(listbox).not.toBeNull();
+        expect(container.contains(listbox)).toBe(false);
+        expect(container.querySelector('.au-zl')?.textContent).toBe('100%');
+
+        await act(async () => {
+            wheel(listbox);
         });
 
         expect(container.querySelector('.au-zl')?.textContent).toBe('100%');
