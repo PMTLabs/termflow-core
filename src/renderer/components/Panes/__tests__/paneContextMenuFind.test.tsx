@@ -18,7 +18,7 @@
  * Rendered for real (`react-dom/client` + `React.act`) against a trimmed store, the pattern
  * `usePaneMuteState.test.tsx` established; there is no testing-library in this repo.
  */
-import React, { act } from 'react';
+import React, { act, useState } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
@@ -239,27 +239,55 @@ describe('PaneContextMenu — consolidated New Pane row', () => {
     (splitPaneById as jest.Mock).mockClear();
   });
 
-  it('shows one row, maps its four direction buttons, and closes after each activation', () => {
-    render('tm-mine');
-    const row = document.querySelector<HTMLElement>('.pane-context-menu .new-pane-row')!;
-    const main = row.querySelector<HTMLButtonElement>('.new-pane-row-main')!;
-    const controls = Array.from(row.querySelectorAll<HTMLButtonElement>('.new-pane-row-action'));
+  it('shows exactly one row, maps every direction, handles body whitespace, and closes after each activation', async () => {
+    const renderHosted = async () => {
+      const Host = () => {
+        const [open, setOpen] = useState(true);
+        return open ? (
+          <PaneContextMenu
+            x={10}
+            y={20}
+            paneId="pn-1"
+            paneName="Pane 1"
+            terminalId="tm-mine"
+            onClose={() => { onClose(); setOpen(false); }}
+          />
+        ) : null;
+      };
+      await act(async () => {
+        root.render(<Provider store={makeStore()}><Host /></Provider>);
+      });
+    };
 
-    expect(row.textContent).toContain('New Pane');
-    expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual([
-      'New pane right', 'New pane bottom', 'New pane left', 'New pane up',
-    ]);
+    const expected = [
+      ['vertical', 'after'],
+      ['horizontal', 'after'],
+      ['vertical', 'before'],
+      ['horizontal', 'before'],
+    ] as const;
+    for (let index = 0; index < expected.length; index += 1) {
+      await renderHosted();
+      const rows = document.querySelectorAll('.pane-context-menu .new-pane-row');
+      expect(rows).toHaveLength(1);
+      const allText = document.querySelector('.pane-context-menu')!.textContent ?? '';
+      expect(allText).toContain('New Pane');
+      for (const oldLabel of ['Open New Pane Right', 'Open New Pane Left', 'Open New Pane Up', 'Open New Pane Down']) {
+        expect(allText).not.toContain(oldLabel);
+      }
+      const row = rows[0] as HTMLElement;
+      const controls = Array.from(row.querySelectorAll<HTMLButtonElement>('.new-pane-row-action'));
+      expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual([
+        'New pane right', 'New pane bottom', 'New pane left', 'New pane up',
+      ]);
 
-    act(() => { main.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    act(() => { controls[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    act(() => { controls[2].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-    act(() => { controls[3].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
-
-    expect(splitPaneById).toHaveBeenNthCalledWith(1, 'pn-1', 'vertical', 'after');
-    expect(splitPaneById).toHaveBeenNthCalledWith(2, 'pn-1', 'horizontal', 'after');
-    expect(splitPaneById).toHaveBeenNthCalledWith(3, 'pn-1', 'vertical', 'before');
-    expect(splitPaneById).toHaveBeenNthCalledWith(4, 'pn-1', 'horizontal', 'before');
-    expect(onClose).toHaveBeenCalledTimes(4);
+      await act(async () => {
+        if (index === 0) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        else controls[index].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(splitPaneById).toHaveBeenNthCalledWith(index + 1, 'pn-1', ...expected[index]);
+      expect(document.querySelector('.pane-context-menu')).toBeNull();
+    }
+    expect(onClose).toHaveBeenCalledTimes(expected.length);
   });
 });
 

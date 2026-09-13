@@ -343,7 +343,10 @@
   box-shadow: 0 3px 8px rgb(0 0 0 / 35%);
 }
 
-.context-menu-flyout.flip-left > .context-menu-flyout-row-actions {
+/* Two ways to end up on the left: the parent flyout already flipped, or the panel measured
+   its OWN right edge past the viewport (`is-flip-left`, set by the layout effect). */
+.context-menu-flyout.flip-left > .context-menu-flyout-row-actions,
+.context-menu-flyout-row-actions.is-flip-left {
   right: calc(100% + 2px);
   left: auto;
 }

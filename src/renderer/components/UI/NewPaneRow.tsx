@@ -7,6 +7,7 @@ export type NewPanePosition = 'before' | 'after';
 export interface NewPaneRowProps {
   onSplit: (direction: NewPaneDirection, position: NewPanePosition) => void;
   onDone: () => void;
+  disabled?: boolean;
   title?: string;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -24,6 +25,7 @@ const directions = [
 export const NewPaneRow: React.FC<NewPaneRowProps> = ({
   onSplit,
   onDone,
+  disabled = false,
   title,
   onMouseEnter,
   onMouseLeave,
@@ -40,18 +42,21 @@ export const NewPaneRow: React.FC<NewPaneRowProps> = ({
 
   return (
     <div
-      className="context-menu-item new-pane-row"
+      className={`context-menu-item new-pane-row${disabled ? ' is-disabled' : ''}`}
       title={title}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       onFocus={onFocus}
       onBlur={onBlur}
-      onClick={() => activate('vertical', 'after')}
+      onClick={() => {
+        if (!disabled) activate('vertical', 'after');
+      }}
     >
       <button
         type="button"
         className="new-pane-row-main"
         aria-label="New pane right"
+        disabled={disabled}
       >
         <span className="new-pane-row-icon">➡️</span>
         <span className="new-pane-row-label">New Pane</span>
@@ -64,6 +69,7 @@ export const NewPaneRow: React.FC<NewPaneRowProps> = ({
             className="new-pane-row-action"
             title={`New pane ${label.toLowerCase()}`}
             aria-label={`New pane ${label.toLowerCase()}`}
+            disabled={disabled}
             onClick={(e) => {
               e.stopPropagation();
               activate(direction, position);

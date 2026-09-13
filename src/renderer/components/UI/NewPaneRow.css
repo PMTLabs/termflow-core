@@ -3,6 +3,11 @@
   cursor: default;
 }
 
+.new-pane-row.is-disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .new-pane-row-main,
 .new-pane-row-action {
   border: none;
@@ -52,4 +57,9 @@
 .new-pane-row-action:hover {
   background-color: var(--menu-hover-background, #094771);
   color: #ffffff;
+}
+
+.new-pane-row-main:disabled,
+.new-pane-row-action:disabled {
+  cursor: default;
 }

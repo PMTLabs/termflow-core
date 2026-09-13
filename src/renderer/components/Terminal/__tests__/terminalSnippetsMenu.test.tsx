@@ -198,12 +198,24 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     };
     const item = snippetsItem(callbacks);
     const folderRows = (item.submenu!.rows as (q: string) => any[])('');
-    const leaves = folderRows.flatMap((r) => r.children ?? [r]);
-    expect(leaves.every((r) => r.contextActions?.map((a: any) => a.label))).toBe(true);
-    expect(leaves[0].contextActions.map((a: any) => a.label)).toEqual(['Copy', 'Insert', 'Edit', 'Delete']);
+    const expectActions = (row: any) => {
+      expect(row).toBeDefined();
+      expect(row.contextActions.map((a: any) => a.id)).toEqual(['copy', 'insert', 'edit', 'delete']);
+    };
+    const gitFolder = folderRows.find((r) => r.id === 'folder-Git');
+    const dockerFolder = folderRows.find((r) => r.id === 'folder-Docker');
+    expectActions(gitFolder?.children.find((r: any) => r.id === 'snippet-s1'));
+    expectActions(gitFolder?.children.find((r: any) => r.id === 'snippet-s2'));
+    expectActions(dockerFolder?.children.find((r: any) => r.id === 'snippet-s3'));
+    expectActions(folderRows.find((r) => r.id === 'snippet-s4'));
 
+    const flat = (snippetsItem({ ...callbacks, viewMode: 'flat' }).submenu!.rows as (q: string) => any[])('');
+    for (const id of ['snippet-s1', 'snippet-s2', 'snippet-s3', 'snippet-s4']) {
+      expectActions(flat.find((r) => r.id === id));
+    }
     const filtered = (item.submenu!.rows as (q: string) => any[])('git');
-    expect(filtered.map((r) => r.contextActions?.length)).toEqual([4, 4]);
+    expectActions(filtered.find((r) => r.id === 'snippet-s1'));
+    expectActions(filtered.find((r) => r.id === 'snippet-s2'));
   });
 
   it('Copy receives the full multi-line text even when the displayed label is truncated', () => {

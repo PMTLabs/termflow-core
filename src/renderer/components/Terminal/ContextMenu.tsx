@@ -320,11 +320,10 @@ interface FlyoutPanelProps {
  * nothing to the menu's intrinsic width and the edge-aware repositioning in
  * `ContextMenu` is unaffected.
  *
- * DOM focus stays in the search input the whole time; the "active" row is only
- * *styled* (`.is-active`) and announced via `aria-activedescendant`. That is what
- * keeps typing filtering rather than navigating, and it is why P1's "keyboard
- * navigation must not interfere with terminal input" holds by construction — an
- * editable non-terminal element owns the keyboard.
+ * DOM focus normally stays in the search input; the "active" row is only
+ * *styled* (`.is-active`) and announced via `aria-activedescendant`. A row's
+ * context-action panel is the deliberate exception: its keyboard entry path
+ * moves focus into the named action menu, and Escape returns it to search.
  */
 const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   flyout,
@@ -342,11 +341,16 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const activeRowRef = useRef<HTMLButtonElement>(null);
+  const contextRowRef = useRef<HTMLButtonElement>(null);
+  const contextActionsRef = useRef<HTMLDivElement>(null);
+  const contextActionRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [query, setQuery] = useState('');
   const [activeIdx, setActiveIdx] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
   const [openContextRowId, setOpenContextRowId] = useState<string | null>(null);
   const [contextActionTop, setContextActionTop] = useState(0);
+  const [contextActionFlipLeft, setContextActionFlipLeft] = useState(false);
+  const [focusContextAction, setFocusContextAction] = useState(false);
   const [flashedActionId, setFlashedActionId] = useState<string | null>(null);
   const flashTimer = useRef<number | null>(null);
   const wasDismissSuppressed = useRef(suppressDismiss);
@@ -390,8 +394,6 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const activeId = safeIdx >= 0 ? navigable[safeIdx].id : null;
 
   const rowDomId = (row: ContextMenuFlyoutRow) => `${uid}-${row.id}`;
-  const contextRowRef = useRef<HTMLButtonElement>(null);
-
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
@@ -412,6 +414,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     setActiveIdx(0);
     // Folders are hidden while filtering, so an open one has no anchor left.
     setOpenFolderId(null);
+    setOpenContextRowId(null);
     /**
      * **And the dwell, which is the one with teeth.** The search box is focused when the panel
      * opens, so re-filtering needs no pointer event at all — and `useTooltipDwell` is cleared only
@@ -432,17 +435,45 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
         (row) => row.id === openContextRowId && row.contextActions && row.contextActions.length > 0,
       ) ?? null);
 
+  useLayoutEffect(() => {
+    contextRowRef.current = null;
+    if (openContextRowId === null) return;
+    const row = Array.from(
+      panelRef.current?.querySelectorAll<HTMLButtonElement>('.context-menu-flyout-row') ?? [],
+    ).find((candidate) => candidate.dataset.rowId === openContextRowId);
+    contextRowRef.current = row ?? null;
+  }, [openContextRowId, visible]);
+
   useEffect(() => {
     if (openContextRowId !== null && contextRow === null) setOpenContextRowId(null);
   }, [contextRow, openContextRowId]);
 
+  useEffect(() => {
+    if (!focusContextAction || !contextRow) return;
+    contextActionRefs.current[0]?.focus();
+    setFocusContextAction(false);
+  }, [contextRow, focusContextAction]);
+
   useLayoutEffect(() => {
     const anchor = contextRowRef.current;
     const panel = panelRef.current;
-    if (!anchor || !panel) return;
-    const next = Math.max(0, anchor.getBoundingClientRect().top - panel.getBoundingClientRect().top);
-    setContextActionTop((previous) => (previous === next ? previous : next));
-  }, [contextRow, visible]);
+    const actions = contextActionsRef.current;
+    if (!anchor || !panel || !actions) return;
+    const panelRect = panel.getBoundingClientRect();
+    const rowRect = anchor.getBoundingClientRect();
+    const baseTop = Math.max(0, rowRect.top - panelRect.top);
+    if (contextActionTop !== baseTop) {
+      setContextActionTop(baseTop);
+      return;
+    }
+    const actionsRect = actions.getBoundingClientRect();
+    const bottomOverflow = actionsRect.bottom - (window.innerHeight - EDGE_MARGIN);
+    const nextTop = bottomOverflow > 0
+      ? Math.max(0, contextActionTop - bottomOverflow)
+      : contextActionTop;
+    if (nextTop !== contextActionTop) setContextActionTop(nextTop);
+    if (actionsRect.right > window.innerWidth - EDGE_MARGIN) setContextActionFlipLeft(true);
+  }, [contextActionTop, contextRow, contextActionFlipLeft, visible]);
 
   // Keep the active row in view as the arrows move past the `max-height` (§4.4).
   useEffect(() => {
@@ -487,6 +518,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     (row: ContextMenuFlyoutRow) => {
       if (row.disabled) return;
       if (isFolder(row)) {
+        setOpenContextRowId(null);
         setOpenFolderId(row.id);
         return;
       }
@@ -503,11 +535,33 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
 
   /** Close the open folder and take the caret back — used by the child's Escape/ArrowLeft. */
   const closeFolder = useCallback(() => {
+    setOpenContextRowId(null);
     setOpenFolderId(null);
     inputRef.current?.focus();
   }, []);
 
+  const runContextAction = useCallback((action: ContextMenuRowAction) => {
+    try {
+      action.onSelect();
+    } finally {
+      setOpenContextRowId(null);
+      onCloseMenu();
+    }
+  }, [onCloseMenu]);
+
   const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if ((e.key === 'F10' && e.shiftKey) || e.key === 'ContextMenu') {
+      const row = safeIdx >= 0 ? navigable[safeIdx] : null;
+      if (row?.contextActions?.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        setOpenContextRowId(row.id);
+        setContextActionTop(0);
+        setContextActionFlipLeft(false);
+        setFocusContextAction(true);
+      }
+      return;
+    }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       if (navigable.length === 0) return;
       e.preventDefault();
@@ -528,6 +582,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
       const row = safeIdx >= 0 ? navigable[safeIdx] : null;
       if (row && isFolder(row)) {
         e.preventDefault();
+        setOpenContextRowId(null);
         setOpenFolderId(row.id);
       }
       return;
@@ -576,11 +631,9 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     return (
       <div className="context-menu-flyout-item" key={row.id}>
         <button
-          ref={(node) => {
-            if (active) activeRowRef.current = node;
-            if (row.id === openContextRowId) contextRowRef.current = node;
-          }}
+          ref={active ? activeRowRef : undefined}
           id={rowDomId(row)}
+          data-row-id={row.id}
           type="button"
           role="option"
           aria-selected={active}
@@ -592,6 +645,9 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           // and the keyboard would be dead the moment the mouse was used once.
           onMouseDown={(e) => e.preventDefault()}
           onMouseEnter={() => {
+            if (openContextRowId !== null && row.id !== openContextRowId) {
+              setOpenContextRowId(null);
+            }
             const i = navigable.indexOf(row);
             if (i >= 0) setActiveIdx(i);
             setKeyboardNav(false);
@@ -603,6 +659,8 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             e.preventDefault();
             e.stopPropagation();
             setOpenContextRowId(row.id);
+            setContextActionTop(0);
+            setContextActionFlipLeft(false);
             setKeyboardNav(false);
           }}
           onClick={() => activate(row)}
@@ -695,7 +753,12 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           >{action.icon}</button>
         ))}
       </div>
-      <div className="context-menu-flyout-list" id={`${uid}-list`} role="listbox">
+      <div
+        className="context-menu-flyout-list"
+        id={`${uid}-list`}
+        role="listbox"
+        onScroll={() => setOpenContextRowId(null)}
+      >
         {visible.head.map(renderRow)}
         {visible.footer.length > 0 && visible.head.length > 0 && (
           <div className="context-menu-separator" />
@@ -728,8 +791,10 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
       )}
       {contextRow && (
         <div
-          className="context-menu-flyout-row-actions"
+          ref={contextActionsRef}
+          className={`context-menu-flyout-row-actions${contextActionFlipLeft ? ' is-flip-left' : ''}`}
           role="menu"
+          aria-label="Snippet actions"
           style={{ top: contextActionTop }}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -739,25 +804,38 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             if (e.key !== 'Escape') return;
             e.preventDefault();
             e.stopPropagation();
+            inputRef.current?.focus();
             setOpenContextRowId(null);
           }}
         >
-          {contextRow.contextActions!.map((action) => (
+          {contextRow.contextActions!.map((action, index) => (
             <button
               key={action.id}
+              ref={(node) => { contextActionRefs.current[index] = node; }}
               type="button"
               className="context-menu-flyout-row-action"
               role="menuitem"
+              tabIndex={index === 0 ? 0 : -1}
               onMouseDown={(e) => e.preventDefault()}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const step = e.key === 'ArrowDown' ? 1 : -1;
+                  const next = (index + step + contextRow.contextActions!.length) % contextRow.contextActions!.length;
+                  contextActionRefs.current[next]?.focus();
+                  return;
+                }
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  runContextAction(action);
+                }
+              }}
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                try {
-                  action.onSelect();
-                } finally {
-                  setOpenContextRowId(null);
-                  onCloseMenu();
-                }
+                runContextAction(action);
               }}
             >
               {action.label}
@@ -922,6 +1000,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             <NewPaneRow
               key={index}
               {...item.newPane}
+              disabled={disabled}
               title={instantTitles || disabled ? item.title : tip.titleFor(tipKey, item.title)}
               onMouseEnter={() => {
                 if (disabled) return;
