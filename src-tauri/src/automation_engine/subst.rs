@@ -29,14 +29,41 @@ pub struct Reserved {
 }
 
 impl Reserved {
-    /// Build the display value for a millisecond Unix timestamp in the user's local timezone.
-    pub fn time_from_ms(ms: i64) -> String {
-        use chrono::TimeZone;
+    /// The bag for one send: the id, the DECIDE-time title, the FIRE-time cwd and the clock.
+    ///
+    /// **Title and cwd are scrubbed of control characters here, once, for both builders.** They are
+    /// the two values a person or a filesystem can spell: a pane can be renamed through the API to
+    /// anything, and a directory on Linux/macOS may be called `\x1b[201~\r…`. Both are about to be
+    /// typed into a pty inside a bracketed paste (`automation::send::deliver`), and an ESC or CR
+    /// inside them would close the paste early and submit the rest — a wider exposure than `$1`,
+    /// which is bounded to screen text xterm has already stripped of C0/ESC. The id is ours and the
+    /// time is formatted here, so neither needs it.
+    pub fn for_send(
+        terminal_id: &str,
+        terminal_title: Option<String>,
+        terminal_cwd: Option<String>,
+        at_ms: i64,
+    ) -> Self {
+        Self {
+            terminal_id: terminal_id.to_string(),
+            terminal_title: terminal_title.map(scrub_control_chars),
+            terminal_cwd: terminal_cwd.map(scrub_control_chars),
+            time: Self::time_from_ms(at_ms),
+        }
+    }
 
-        chrono::Local
-            .timestamp_millis_opt(ms)
-            .single()
-            .unwrap_or_else(chrono::Local::now)
+    /// `${time}` for a millisecond Unix timestamp, as local wall-clock `YYYY-MM-DD HH:MM:SS`.
+    ///
+    /// The same UTC-then-`with_timezone` conversion as `schedule::local_now`, for the same reason it
+    /// gives: UTC→local is total (DST ambiguity only exists the other way), and an out-of-range
+    /// `ms` — which `now_ms()` cannot produce — falls to the epoch rather than to a SECOND read of
+    /// the clock, so a crossing's `${time}` is always its own `at_ms`.
+    pub fn time_from_ms(ms: i64) -> String {
+        use chrono::{DateTime, Local, Utc};
+
+        DateTime::from_timestamp_millis(ms)
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+            .with_timezone(&Local)
             .format("%Y-%m-%d %H:%M:%S")
             .to_string()
     }
@@ -64,6 +91,34 @@ impl Reserved {
 
 pub fn is_reserved(name: &str) -> bool {
     RESERVED_NAMES.contains(&name)
+}
+
+/// How a resolved VALUE is written into the message. The literal text around it is never touched.
+///
+/// `JsonString` is for a body the sender posts byte-for-byte as JSON (`WebhookProvider::Custom`):
+/// every value lands inside a JSON string the user wrote, so a Windows path (`D:\\src`) or a
+/// title with a quote must arrive as a JSON string FRAGMENT — `D:\\\\src`, `\\"` — or the whole
+/// body is malformed. The preset providers serialise the finished message themselves, so `Raw`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueEscape {
+    Raw,
+    JsonString,
+}
+
+/// `serde_json`'s own escaping of `value`, minus the quotes it wraps a string in.
+fn json_string_fragment(value: &str) -> String {
+    let quoted = serde_json::to_string(value).expect("a &str is always serialisable as JSON");
+    quoted[1..quoted.len() - 1].to_string()
+}
+
+/// Drop every C0/C1/ESC character. Printable text — including spaces and every non-ASCII letter —
+/// passes through untouched, so a title or path that never carried one is returned as it was.
+fn scrub_control_chars(value: String) -> String {
+    if value.chars().any(char::is_control) {
+        value.chars().filter(|c| !c.is_control()).collect()
+    } else {
+        value
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +224,16 @@ pub fn substitute(
     caps: Option<&Captures>,
     reserved: &Reserved,
 ) -> Result<String, SubstError> {
+    substitute_escaped(message, caps, reserved, ValueEscape::Raw)
+}
+
+/// [`substitute`], with every resolved value written through `escape` — see [`ValueEscape`].
+pub fn substitute_escaped(
+    message: &str,
+    caps: Option<&Captures>,
+    reserved: &Reserved,
+    escape: ValueEscape,
+) -> Result<String, SubstError> {
     let mut out = String::new();
     for (lit, tok) in scan(message) {
         out.push_str(&lit);
@@ -201,7 +266,10 @@ pub fn substitute(
                 }
             }
         };
-        out.push_str(resolved);
+        match escape {
+            ValueEscape::Raw => out.push_str(resolved),
+            ValueEscape::JsonString => out.push_str(&json_string_fragment(resolved)),
+        }
     }
     Ok(out)
 }
@@ -418,6 +486,53 @@ mod tests {
         assert_eq!(
             substitute("$${time}", None, &Reserved::sample()).unwrap(),
             "${time}"
+        );
+    }
+
+    /// The paste-breaking bytes: ESC (a bracketed-paste end), CR (a submit) and LF, in both of the
+    /// values a person or a filesystem can spell. The id is left alone — it is ours.
+    #[test]
+    fn a_title_or_cwd_with_control_characters_is_scrubbed_for_the_paste() {
+        let reserved = Reserved::for_send(
+            "tm-1",
+            Some("x\x1b[201~\ry".into()),
+            Some("/repo\n\x07b".into()),
+            0,
+        );
+        assert_eq!(reserved.terminal_title.as_deref(), Some("x[201~y"));
+        assert_eq!(reserved.terminal_cwd.as_deref(), Some("/repob"));
+        assert_eq!(reserved.terminal_id, "tm-1");
+    }
+
+    /// The negative control: a value with nothing to scrub is returned exactly as it was, spaces
+    /// and non-ASCII included.
+    #[test]
+    fn a_clean_title_and_cwd_pass_through_the_scrub_untouched() {
+        let reserved = Reserved::for_send("tm-1", Some("codex · core".into()), Some("D:\\src core".into()), 0);
+        assert_eq!(reserved.terminal_title.as_deref(), Some("codex · core"));
+        assert_eq!(reserved.terminal_cwd.as_deref(), Some("D:\\src core"));
+    }
+
+    /// `JsonString` escapes the VALUES and only the values: the braces and quotes the user wrote
+    /// around `$1` and `${terminal.cwd}` are literal text and go out as they are.
+    #[test]
+    fn json_string_escape_touches_values_and_never_the_literal_text() {
+        let reserved = Reserved::for_send("tm-1", Some("say \"hi\"".into()), Some("D:\\src\\core".into()), 0);
+        let body = r#"{"cwd":"${terminal.cwd}","t":"${terminal.title}","n":"$2"}"#;
+        let rendered = substitute_escaped(body, Some(&caps()), &reserved, ValueEscape::JsonString).unwrap();
+        assert_eq!(rendered, r#"{"cwd":"D:\\src\\core","t":"say \"hi\"","n":"a.ts"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["cwd"], "D:\\src\\core");
+        assert_eq!(parsed["t"], "say \"hi\"");
+    }
+
+    /// The negative control: `Raw` is what every other caller gets, and it leaves the value alone.
+    #[test]
+    fn raw_escape_writes_the_value_verbatim() {
+        let reserved = Reserved::for_send("tm-1", None, Some("D:\\src".into()), 0);
+        assert_eq!(
+            substitute_escaped("in ${terminal.cwd}", None, &reserved, ValueEscape::Raw).unwrap(),
+            "in D:\\src"
         );
     }
 

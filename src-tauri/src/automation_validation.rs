@@ -156,7 +156,12 @@ fn rendered_webhook_body(webhook: &crate::automation_store::WebhookStep, parse: 
     };
     let reserved = subst::Reserved::sample();
     let captures = sample_webhook_captures(&compiled);
-    match subst::substitute(&webhook.body, Some(&captures), &reserved) {
+    match subst::substitute_escaped(
+        &webhook.body,
+        Some(&captures),
+        &reserved,
+        crate::automation_webhook::value_escape(webhook.provider),
+    ) {
         Ok(body) => body,
         Err(_) => webhook.body.clone(),
     }

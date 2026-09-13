@@ -32,9 +32,10 @@ import type {
     AutomationParseStep,
     AutomationRule,
     AutomationSource,
+    AutomationWebhookProvider,
 } from '../../types/electron';
 import { isReservedToken, previewSubstitute, tokensUsed } from './automationTokens';
-import type { Token } from './automationTokens';
+import type { Token, ValueEscape } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
 
@@ -267,8 +268,25 @@ function parseStep(graph: AutomationGraph): AutomationParseStep | null {
     return parse && parse.find.trim().length > 0 ? parse : null;
 }
 
+/**
+ * The one rule for how a substituted value is written into a webhook body — the mirror of
+ * `automation_webhook::value_escape`, read by the panel's preview and by the JSON check below so the
+ * two cannot disagree about a `"`. Preset providers serialise the finished message as a JSON value;
+ * a Custom body is posted byte-for-byte and must be JSON, so its values are JSON string fragments.
+ */
+export function webhookValueEscape(provider: AutomationWebhookProvider): ValueEscape {
+    return provider === 'custom' ? 'json-string' : 'raw';
+}
+
 function webhookSampleValues(groups: { count: number; names: Set<string> }): Record<string, string> {
-    const sample: Record<string, string> = {};
+    // The same shapes `automation_validation.rs`'s `sample_webhook_captures` and `Reserved::sample`
+    // render, so a body that saves here is one the Rust check accepts too.
+    const sample: Record<string, string> = {
+        'terminal.id': 'tm-sample',
+        'terminal.title': '[terminal.title]',
+        'terminal.cwd': '[terminal.cwd]',
+        time: '[time]',
+    };
     for (let index = 0; index <= groups.count; index += 1) {
         sample[String(index)] = `[g${index}]`;
     }
@@ -292,7 +310,7 @@ function renderWebhookBodyForValidation(
     }
 
     const sample = webhookSampleValues(groups);
-    const rendered = previewSubstitute(webhook.body, groups, sample);
+    const rendered = previewSubstitute(webhook.body, groups, sample, webhookValueEscape(webhook.provider));
     if (!rendered.ok) {
         return webhook.body;
     }

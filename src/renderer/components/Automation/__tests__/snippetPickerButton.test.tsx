@@ -85,5 +85,24 @@ describe('SnippetPickerButton', () => {
 
         expect(document.querySelector('.context-menu.au-snippet-picker')).toBeNull();
         expect(onInsert).not.toHaveBeenCalled();
+        // Focus comes back to the button rather than parking on <body>, where the editor's own
+        // Escape would then close nothing until the next click.
+        expect(document.activeElement).toBe(
+            container.querySelector('button[aria-label="Insert a saved snippet"]'),
+        );
+    });
+
+    it('dismisses on a click outside without inserting', async () => {
+        store.dispatch(addSnippet(SNIPPET));
+        await show();
+        await act(async () => {
+            container.querySelector<HTMLButtonElement>('button[aria-label="Insert a saved snippet"]')!.click();
+        });
+        expect(document.querySelector('.context-menu.au-snippet-picker')).not.toBeNull();
+
+        await act(async () => { fireEvent.mouseDown(document.body); });
+
+        expect(document.querySelector('.context-menu.au-snippet-picker')).toBeNull();
+        expect(onInsert).not.toHaveBeenCalled();
     });
 });

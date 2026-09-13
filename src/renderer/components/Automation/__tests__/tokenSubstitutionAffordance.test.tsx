@@ -213,6 +213,27 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
         expect(container.querySelector('.au-fhelp.warn')).toBeNull();
     });
 
+    /**
+     * The caret lands after what was inserted, in BOTH panels — the webhook panel used to insert at
+     * the caret and then leave focus and the selection wherever they were. `dispatch` here records
+     * rather than re-renders, so the textarea's value never grows and jsdom would clamp a real
+     * selection; the spy pins the position the panel ASKED for, which is the fact under test.
+     */
+    it('restores focus and puts the caret after the inserted token', async () => {
+        await show('sent at ');
+        caretToEnd();
+        const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        const setRange = jest.spyOn(box, 'setSelectionRange');
+        box.blur();
+
+        await act(async () => { chip('${time}').click(); });
+        await act(async () => { await new Promise<void>((done) => requestAnimationFrame(() => done())); });
+
+        expect(document.activeElement).toBe(box);
+        const after = 'sent at ${time}'.length;
+        expect(setRange).toHaveBeenLastCalledWith(after, after);
+    });
+
     it('does not block a schedule message that uses only a reserved token', async () => {
         if (destination !== 'action') return;
         const blank = blankDraft();
@@ -254,15 +275,21 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
         await show('0123456789');
         const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
         box.setSelectionRange(3, 5);
+        const setRange = jest.spyOn(box, 'setSelectionRange');
 
         await act(async () => {
             container.querySelector<HTMLButtonElement>('[aria-label="Test snippet picker"]')!.click();
         });
+        await act(async () => { await new Promise<void>((done) => requestAnimationFrame(() => done())); });
 
         const field = destination === 'webhook' ? 'body' : 'message';
         expect(dispatched).toEqual([{
             type: destination,
             patch: { [field]: '012a\n$1 $$ ${terminal.id}\nb56789' },
         }]);
+        // After the snippet, not after the replaced selection: 3 + the snippet's own length.
+        const after = 3 + 'a\n$1 $$ ${terminal.id}\nb'.length;
+        expect(setRange).toHaveBeenLastCalledWith(after, after);
+        expect(document.activeElement).toBe(box);
     });
 });

@@ -137,3 +137,28 @@ describe('previewSubstitute — reserved terminal values', () => {
         });
     });
 });
+
+describe('previewSubstitute — JSON-string escaping for a Custom webhook body', () => {
+    const groups = { count: 1, names: new Set<string>() };
+    const sample = { '1': 'D:\\src "x"', 'terminal.cwd': 'D:\\core' };
+
+    /** Values are escaped as JSON string fragments; the braces and quotes the user wrote are not. */
+    it('escapes the values and never the literal text', () => {
+        const result = previewSubstitute('{"a":"$1","cwd":"${terminal.cwd}"}', groups, sample, 'json-string');
+        expect(result).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: '{"a":"D:\\\\src \\"x\\"","cwd":"D:\\\\core"}' }],
+        });
+        // What the recipient parses back is the raw path — the whole point of the escape.
+        const rendered = (result as { parts: { kind: 'text'; text: string }[] }).parts[0].text;
+        expect(JSON.parse(rendered)).toEqual({ a: 'D:\\src "x"', cwd: 'D:\\core' });
+    });
+
+    /** The negative control: the default is raw, exactly what the terminal message gets. */
+    it('writes the value verbatim by default', () => {
+        expect(previewSubstitute('in $1', groups, sample)).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: 'in D:\\src "x"' }],
+        });
+    });
+});

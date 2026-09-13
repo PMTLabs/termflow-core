@@ -421,6 +421,91 @@ async fn a_crossing_posts_the_source_terminal_reserved_values() {
     );
 }
 
+/// **The cwd is the crossing's own process's, not whatever the leaf points at when it fires.**
+///
+/// A parked send is decided against run A and drained up to `MAX_DELAY_MS` later; a Ctrl+R in
+/// between re-indexes the same `tm-` to run B. `run_send` refuses that crossing (`pc !=
+/// send.pair.pc`), but the webhook has no such guard and still posts — so a cwd looked up BY LEAF
+/// would pair run A's `$1` with run B's directory. The rig replaces `pc-1` (cwd `/a`) with `pc-2`
+/// (cwd `/b`) under the same `tm-1` after the crossing was read from `pc-1`: the matched process
+/// is gone, so the honest value is `""` — and it must not be `/b`, which is what EVERY leaf-keyed
+/// lookup (by `process_for_leaf`, or by the first roster row for the leaf) would say.
+#[tokio::test]
+async fn a_webhook_after_a_restart_posts_the_cwd_of_the_process_that_matched() {
+    let (url, posted) = capturing_webhook_endpoint();
+    let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|graph| {
+        add_discord_webhook(graph, url);
+        let webhook = graph.webhook.as_mut().expect("the webhook just added");
+        webhook.body = "in ${terminal.cwd}".into();
+        webhook.substitute = true;
+    });
+    fake.roster.lock().unwrap()[0].cwd = Some("/a".into());
+    let send = pending(&engine, &host, ArmState::armed(), 4_000);
+    // The restart: `pc-1` is gone, and the leaf now resolves to a new process with its own
+    // directory.
+    fake.leaves.lock().unwrap().insert("tm-1".into(), "pc-2".into());
+    fake.roster.lock().unwrap().retain(|r| r.process_id != "pc-1");
+    fake.roster.lock().unwrap().push(crate::automation::roster::RosterRow {
+        terminal_id: Some("tm-1".into()),
+        process_id: "pc-2".into(),
+        name: "Terminal-powershell".into(),
+        shell: "powershell".into(),
+        pid: 101,
+        display_label: Some("codex · core".into()),
+        cwd: Some("/b".into()),
+        command_lines: Vec::new(),
+    });
+
+    run_crossing(engine.clone(), host.clone(), send).await;
+
+    let request = posted
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the webhook was never posted");
+    let text = String::from_utf8_lossy(&request);
+    assert!(
+        text.contains(r#""content":"in ""#),
+        "the gone process's cwd should render empty: {text}"
+    );
+    assert!(!text.contains("/b"), "the restarted process's cwd leaked in: {text}");
+}
+
+/// **A Custom body carries a Windows path and a quoted title as JSON string fragments.**
+///
+/// `payload` posts a Custom body byte-for-byte, so before this every `${terminal.cwd}` on Windows
+/// produced `{"cwd":"D:\src"}` — invalid JSON, 100% of the time — while validation's
+/// backslash-free sample let it save. The oracle parses the posted bytes and reads the raw values
+/// back, which a body that merely CONTAINS the path cannot satisfy.
+#[tokio::test]
+async fn a_custom_body_escapes_substituted_values_as_json_strings() {
+    let (url, posted) = capturing_webhook_endpoint();
+    let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|graph| {
+        add_discord_webhook(graph, url);
+        let webhook = graph.webhook.as_mut().expect("the webhook just added");
+        webhook.provider = WebhookProvider::Custom;
+        webhook.body = r#"{"cwd":"${terminal.cwd}","title":"${terminal.title}"}"#.into();
+        webhook.substitute = true;
+    });
+    {
+        let mut roster = fake.roster.lock().unwrap();
+        roster[0].cwd = Some(r"D:\src\core".into());
+        roster[0].display_label = Some(r#"say "hi""#.into());
+    }
+    let send = pending(&engine, &host, ArmState::armed(), 4_000);
+
+    run_crossing(engine.clone(), host.clone(), send).await;
+
+    let request = posted
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the webhook was never posted");
+    let text = String::from_utf8_lossy(&request);
+    // The endpoint captures the whole request; the body is what follows the header block.
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or_default();
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).unwrap_or_else(|e| panic!("not JSON ({e}): {body}"));
+    assert_eq!(parsed["cwd"], r"D:\src\core");
+    assert_eq!(parsed["title"], r#"say "hi""#);
+}
+
 /// The other half of the pair, and the reason the flag is worth having: with substitution off
 /// the body is posted EXACTLY as typed. Asserted so that "resolved" above cannot be satisfied
 /// by a sender that always substitutes — a webhook body is sometimes JSON a user wrote by

@@ -215,12 +215,12 @@ impl EngineHost for FakeHost {
             .find(|r| r.terminal_id.as_deref() == Some(tm))
             .and_then(|r| r.display_label.clone())
     }
-    fn cwd_for(&self, tm: &str) -> Option<String> {
+    fn cwd_for(&self, pc: &str) -> Option<String> {
         self.roster
             .lock()
             .unwrap()
             .iter()
-            .find(|r| r.terminal_id.as_deref() == Some(tm))
+            .find(|r| r.process_id == pc)
             .and_then(|r| r.cwd.clone())
     }
     fn store(&self) -> &Arc<AutomationStore> {

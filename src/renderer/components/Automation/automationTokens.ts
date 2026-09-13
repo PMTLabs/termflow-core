@@ -38,6 +38,19 @@ export function isReservedToken(t: Token | string): boolean {
     return name !== null && (RESERVED_TOKENS as readonly string[]).includes(name);
 }
 
+/**
+ * How a resolved VALUE is written into the message — the mirror of `subst::ValueEscape`. The literal
+ * text around it is never touched. `'json-string'` is what a Custom webhook body gets: the sender
+ * posts it byte-for-byte as JSON, so a value inside a JSON string the user wrote must arrive as a
+ * JSON string FRAGMENT (`D:\\src`, `\\"`) or the whole body is malformed.
+ */
+export type ValueEscape = 'raw' | 'json-string';
+
+/** `JSON.stringify`'s own escaping of `value`, minus the quotes it wraps a string in. */
+export function jsonStringFragment(value: string): string {
+    return JSON.stringify(value).slice(1, -1);
+}
+
 const isAllDigits = (s: string): boolean => s.length > 0 && /^[0-9]+$/.test(s);
 
 interface ScanSegment {
@@ -162,7 +175,9 @@ export function previewSubstitute(
     message: string,
     groups: { count: number; names: Set<string> },
     sample: Record<string, string> | null,
+    escape: ValueEscape = 'raw',
 ): PreviewResult {
+    const write = (value: string): string => (escape === 'json-string' ? jsonStringFragment(value) : value);
     const parts: PreviewPart[] = [];
     let text = '';
     const flushText = () => {
@@ -186,14 +201,14 @@ export function previewSubstitute(
         }
         if (token.kind === 'named' && reserved && !declared) {
             if (token.name in sample) {
-                text += sample[token.name];
+                text += write(sample[token.name]);
             } else {
                 flushText();
                 parts.push({ kind: 'placeholder', token: token.text });
             }
         } else {
             const key = token.kind === 'group' ? String(token.n) : token.name;
-            text += captureText(sample, key) ?? '';
+            text += write(captureText(sample, key) ?? '');
         }
     }
     flushText();

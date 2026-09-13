@@ -134,7 +134,7 @@ fn action_trace(
     reserved: &subst::Reserved,
 ) -> Option<StepTrace> {
     let action = action?;
-    Some(match preview_message(&action.message, action.substitute, caps, reserved) {
+    Some(match preview_message(&action.message, action.substitute, caps, reserved, subst::ValueEscape::Raw) {
         Ok(body) => step(ACTION, "ok", match terminal_name {
             Some(name) => format!("would type `{}` into {}", body, name),
             None => format!("would type `{}`", body),
@@ -163,7 +163,13 @@ fn webhook_trace(
     reserved: &subst::Reserved,
 ) -> Option<StepTrace> {
     let webhook = webhook?;
-    Some(match preview_message(&webhook.body, webhook.substitute, caps, reserved) {
+    Some(match preview_message(
+        &webhook.body,
+        webhook.substitute,
+        caps,
+        reserved,
+        crate::automation_webhook::value_escape(webhook.provider),
+    ) {
         Ok(message) => {
             let body = String::from_utf8(crate::automation_webhook::payload(webhook.provider, &message))
                 .expect("a webhook payload from a UTF-8 string is UTF-8");
@@ -277,12 +283,14 @@ pub fn evaluate_once(
     }) || rule.graph.webhook.as_ref().is_some_and(|webhook| {
         webhook.substitute && subst::names_token(&webhook.body, "terminal.cwd")
     });
-    let reserved = subst::Reserved {
-        terminal_id: tm.to_string(),
-        terminal_title: terminal_name.clone(),
-        terminal_cwd: if needs_cwd { host.cwd_for(tm) } else { None },
-        time: subst::Reserved::time_from_ms(now_ms),
+    // `cwd_for` is process-keyed (see `EngineHost::cwd_for`); a test run is against the terminal's
+    // CURRENT process, which is the only one it can mean.
+    let terminal_cwd = if needs_cwd {
+        host.process_for_leaf(tm).and_then(|pc| host.cwd_for(&pc))
+    } else {
+        None
     };
+    let reserved = subst::Reserved::for_send(tm, terminal_name.clone(), terminal_cwd, now_ms);
 
     let finish = |verdict: &str, steps: Vec<StepTrace>| -> DryRunReport {
         let report = DryRunReport {
@@ -616,8 +624,13 @@ pub fn preview_message(
     substitute: bool,
     caps: Option<&eval::Captures>,
     reserved: &subst::Reserved,
+    escape: subst::ValueEscape,
 ) -> Result<String, subst::SubstError> {
-    if substitute { subst::substitute(message, caps, reserved) } else { Ok(message.to_string()) }
+    if substitute {
+        subst::substitute_escaped(message, caps, reserved, escape)
+    } else {
+        Ok(message.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -1195,14 +1208,14 @@ mod tests {
         let msg = "Fix the $1 failing tests in $2";
         let reserved = subst::Reserved::sample();
         let sent = subst::substitute(msg, Some(&caps), &reserved).unwrap();
-        let previewed = preview_message(msg, true, Some(&caps), &reserved).unwrap();
+        let previewed = preview_message(msg, true, Some(&caps), &reserved, subst::ValueEscape::Raw).unwrap();
         assert_eq!(previewed, sent);
     }
 
     #[test]
     fn the_preview_says_it_would_send_nothing_when_a_token_is_unresolvable() {
         let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
-        assert!(preview_message("Fix $3", true, Some(&caps), &subst::Reserved::sample()).is_err());
+        assert!(preview_message("Fix $3", true, Some(&caps), &subst::Reserved::sample(), subst::ValueEscape::Raw).is_err());
     }
 
     /// The call site, not just the helper: with substitution on and every token resolvable, the

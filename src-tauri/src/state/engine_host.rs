@@ -80,15 +80,20 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
         })
     }
 
-    fn cwd_for(&self, tm: &str) -> Option<String> {
-        let pc = self.identity.process_for_leaf(tm)?;
-        // The same two-step lookup `commands::get_terminal_cwd` makes: the shell-reported OSC cwd
-        // is instant, the process scan is not — the engine's caller runs this on a blocking worker.
-        if let Some(cwd) = self.terminal_cwds.get(&pc) {
+    fn cwd_for(&self, pc: &str) -> Option<String> {
+        // The same two sources, in the same order, as `commands::get_terminal_cwd`: the
+        // shell-reported OSC cwd is instant; the process scan is not, and goes through the roster's
+        // own `proc_snapshot` so a schedule rule with N targets naming `${terminal.cwd}` costs one
+        // `System::new_all()` per TTL, not N — `proc_snapshot.rs`'s whole point is that Automations
+        // is not a fourth independent enumerator. A ≤ TTL-stale directory is fine for a message.
+        if let Some(cwd) = self.terminal_cwds.get(pc) {
             return Some(cwd.value().clone());
         }
-        let pid = self.terminals.get(&pc)?.pid;
-        crate::pty_manager::get_process_cwd(pid)
+        let pid = self.terminals.get(pc)?.pid;
+        let now = chrono::Utc::now().timestamp_millis();
+        self.proc_snapshot.with(now, sysinfo::System::new_all, |sys| {
+            crate::pty_manager::get_process_cwd_with(sys, pid)
+        })
     }
 
     fn store(&self) -> &std::sync::Arc<crate::automation_store::AutomationStore> {

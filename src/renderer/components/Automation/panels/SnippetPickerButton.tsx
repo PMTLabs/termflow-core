@@ -55,11 +55,19 @@ export const SnippetPickerButton: React.FC<SnippetPickerButtonProps> = ({ onInse
     const viewMode = useSyncExternalStore(subscribe, readViewMode);
     const sortMode = useSyncExternalStore(subscribe, readSortMode);
     const [point, setPoint] = React.useState<{ x: number; y: number } | null>(null);
-    const close = useCallback(() => setPoint(null), []);
+    const buttonRef = React.useRef<HTMLButtonElement | null>(null);
+    // Closing removes the flyout's focused search box, which would park focus on `<body>` — the
+    // state the editor documents as "Escape closes nothing until you click". Hand it back to the
+    // button; after a pick, the host panel's `restoreCaret` then moves it on to the textarea.
+    const close = useCallback(() => {
+        setPoint(null);
+        buttonRef.current?.focus();
+    }, []);
 
     return (
         <>
             <button
+                ref={buttonRef}
                 type="button"
                 className="au-token au-snippet-btn"
                 aria-label="Insert a saved snippet"

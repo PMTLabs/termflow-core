@@ -52,8 +52,12 @@ pub trait EngineHost: Send + Sync {
     /// `None` is stored as NULL and rendered as an empty column — **never invented**.
     fn label_for(&self, tm: &str) -> Option<String>;
 
-    /// The terminal's best-effort working directory, resolved only by a send that names it.
-    fn cwd_for(&self, tm: &str) -> Option<String>;
+    /// The best-effort working directory of one PROCESS, resolved only by a send that names
+    /// `${terminal.cwd}` — and keyed by the `pc-` the crossing was read from, never by its leaf:
+    /// `leaf_to_process` is overwritten on every spawn, so a lookup by `tm-` after a Ctrl+R inside a
+    /// parked wait would pair run A's captures with run B's directory. `run_send` refuses that
+    /// crossing (`pc != send.pair.pc`); `run_webhook` has no such guard, so the key must carry it.
+    fn cwd_for(&self, pc: &str) -> Option<String>;
 
     /// The activity log and the rule definitions. The engine writes rows; it never emits from here.
     fn store(&self) -> &Arc<AutomationStore>;

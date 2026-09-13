@@ -8,7 +8,7 @@
 import React from 'react';
 import type { AutomationWebhookProvider } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
-import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
+import { compilePattern, groupsOf, resolvableTokens, webhookValueEscape } from '../automationValidation';
 import { isReservedToken, previewSubstitute, tokensUsed } from '../automationTokens';
 import { sampleFromPattern } from './ActionPanel';
 import { AuCheck, AuField, AuHelp } from './AuFields';
@@ -65,7 +65,7 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
     const usesTokens = tokensUsed(webhook.body).length > 0;
     const usesPatternTokens = tokensUsed(webhook.body).some((token) => !isReservedToken(token));
     const rendered = substitute && usesTokens
-        ? previewSubstitute(webhook.body, groups, sample)
+        ? previewSubstitute(webhook.body, groups, sample, webhookValueEscape(webhook.provider))
         : null;
     const previewMessage = rendered && rendered.ok
         ? rendered.parts.map((part) => part.kind === 'text' ? part.text : `⟨${part.token}⟩`).join('')
