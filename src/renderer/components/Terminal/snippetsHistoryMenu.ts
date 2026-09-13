@@ -60,7 +60,9 @@ function buildSnippetLeafRow(
     contextActions: [
       { id: 'copy', label: 'Copy', onSelect: () => onCopy(s) },
       { id: 'insert', label: 'Insert', onSelect: () => { onUse(s.id); insert(s.text); } },
-      { id: 'edit', label: 'Edit', onSelect: () => onEdit(s) },
+      // The menu stays up under the edit dialog (`keepMenuOpen`), exactly as the footer's
+      // Add-New-Snippet does, so the edited row is one click away when the dialog closes.
+      { id: 'edit', label: 'Edit', onSelect: () => onEdit(s), keepMenuOpen: true },
       { id: 'delete', label: 'Delete', onSelect: () => onDelete(s) },
     ],
     closeMenuOnSelect: true,

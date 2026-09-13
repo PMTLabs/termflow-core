@@ -100,6 +100,11 @@ export interface ContextMenuRowAction {
   id: string;
   label: string;
   onSelect: () => void;
+  /** Leave the whole menu (and this flyout) open after `onSelect`; only the row's action
+   *  panel closes. For an action that opens a dialog OVER the menu — the Add-New-Snippet
+   *  footer precedent — so the list is still there, live, when the dialog closes and the
+   *  user can pick the row they just edited. Default: the action dismisses the menu. */
+  keepMenuOpen?: boolean;
 }
 
 /** A depth-zero header action. Four Snippets controls now share this surface, so a list
@@ -548,7 +553,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
       action.onSelect();
     } finally {
       setOpenContextRowId(null);
-      onCloseMenu();
+      if (!action.keepMenuOpen) onCloseMenu();
     }
   }, [onCloseMenu]);
 

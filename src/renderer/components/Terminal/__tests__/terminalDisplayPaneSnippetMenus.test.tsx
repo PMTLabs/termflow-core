@@ -281,7 +281,13 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
     const label = dialog.querySelector<HTMLInputElement>('[data-field="label"]')!;
     expect(textarea.value).toBe(longText);
     expect(label.value).toBe(secondSnippet.label);
+    // Edit leaves the menu and its Snippets list up UNDER the dialog (the Add-New-Snippet
+    // precedent); only the row's action panel has gone.
+    expect(document.querySelector('.context-menu')).not.toBeNull();
+    expect(flyoutRows().filter((r) => r.dataset.rowId?.startsWith('snippet-')).length).toBe(seedSnippets.length);
+    expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
     await act(async () => setField(textarea, 'edited first line\nedited second line'));
+    await act(async () => setField(label, 'edited label'));
     await act(async () => dialog.querySelector<HTMLButtonElement>('[data-dialog-confirm]')!.click());
     expect(dispatchSpy.mock.calls.some(([value]) => value.type === 'settings/updateSnippet'
       && value.payload?.id === secondSnippet.id
@@ -289,6 +295,16 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
     expect(store.getState().settings.snippets.find((snippet) => snippet.id === secondSnippet.id))
       .toMatchObject({ id: secondSnippet.id, text: 'edited first line\nedited second line' });
     expect(store.getState().settings.snippets.find((snippet) => snippet.id === firstSnippet.id)).toEqual(firstSnippet);
+    // After Save the SAME still-open list shows the edit and inserts the new text at once.
+    expect(document.querySelector('.snippet-dialog')).toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
+    const editedRow = flyoutRows().find((candidate) => candidate.dataset.rowId === `snippet-${secondSnippet.id}`)!;
+    expect(editedRow.querySelector('.context-menu-flyout-label')!.textContent).toBe('edited label');
+    insertTextIntoTerminal.mockClear();
+    await act(async () => editedRow.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(insertTextIntoTerminal).toHaveBeenCalledTimes(1);
+    expect(insertTextIntoTerminal).toHaveBeenCalledWith('term-b', 'edited first line\nedited second line');
+    expect(document.querySelector('.context-menu')).toBeNull();
 
     await act(async () => { store.dispatch(setSnippets(seedSnippets)); });
     await openSnippetActions('term-b');
@@ -297,6 +313,10 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
     await act(async () => document.querySelector<HTMLButtonElement>('.snippet-dialog [data-dialog-cancel]')!.click());
     expect(dispatchSpy.mock.calls).toHaveLength(cancelBefore);
     expect(store.getState().settings.snippets).toEqual(seedSnippets);
+    // Cancel also lands back on the still-open list.
+    expect(document.querySelector('.context-menu')).not.toBeNull();
+    expect(flyoutRows().filter((r) => r.dataset.rowId?.startsWith('snippet-')).length).toBe(seedSnippets.length);
+    await act(async () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
 
     await act(async () => { store.dispatch(setSnippets(seedSnippets)); });
     await openSnippetActions('term-b');
