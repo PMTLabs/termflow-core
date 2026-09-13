@@ -16,6 +16,7 @@ import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surf
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 import { useTooltipDwell } from '../../hooks/useTooltipDwell';
 import { useTerminalTitleColor, titleColorStyle } from '../../store/titleColor';
+import { NewPaneRow } from '../UI/NewPaneRow';
 import './PaneContextMenu.css';
 
 interface PaneContextMenuProps {
@@ -226,22 +227,11 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">🪟</span>
         Open New Window
       </button>
-      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'vertical', 'after'))}>
-        <span className="menu-icon">➡️</span>
-        Open New Pane Right
-      </button>
-      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'vertical', 'before'))}>
-        <span className="menu-icon">⬅️</span>
-        Open New Pane Left
-      </button>
-      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'horizontal', 'before'))}>
-        <span className="menu-icon">⬆️</span>
-        Open New Pane Up
-      </button>
-      <button className="context-menu-item" onClick={() => runAndClose(() => splitPaneById(paneId, 'horizontal', 'after'))}>
-        <span className="menu-icon">⬇️</span>
-        Open New Pane Down
-      </button>
+      <NewPaneRow
+        onSplit={(direction, position) => splitPaneById(paneId, direction, position)}
+        onDone={onClose}
+        title="Split this pane with a new terminal to its right."
+      />
       <div className="context-menu-divider" />
       {/* Find… — `plan/027` R2, the pane-title half.
           This menu reaches nothing per-terminal on its own: every other action here is Redux, a

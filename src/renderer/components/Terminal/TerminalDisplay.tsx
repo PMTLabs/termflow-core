@@ -11,12 +11,13 @@ import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { SnippetDialog } from '../UI/SnippetDialog';
+import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
-import { nextSnippetSortMode } from '../../services/snippetSearch';
+import { nextSnippetSortMode, snippetDisplayLabel } from '../../services/snippetSearch';
 import { openSettingsTab } from '../../services/openSettings';
 import { commandHistoryService } from '../../services/commandHistoryService';
 import { getCwdSnapshot } from '../../services/cwdSnapshot';
@@ -36,7 +37,8 @@ import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { blendEndedTint, endedRailColor } from '../../store/endedTint';
-import { setAgentColorScheme, removeAgentColorScheme, addSnippet, recordSnippetUse, setSnippetsSortMode, setSnippetsViewMode } from '../../store/slices/settingsSlice';
+import { setAgentColorScheme, removeAgentColorScheme, addSnippet, updateSnippet, removeSnippet, recordSnippetUse, setSnippetsSortMode, setSnippetsViewMode } from '../../store/slices/settingsSlice';
+import type { Snippet } from '../../store/slices/settingsSlice';
 import { addToast } from '../../store/slices/uiSlice';
 import { listen } from '@tauri-apps/api/event';
 import { isAbsolutePath, joinCwd } from '../../utils/pathResolve';
@@ -128,6 +130,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
   const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
   const [snippetSeedText, setSnippetSeedText] = useState<string | undefined>(undefined);
+  const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
+  const [snippetDeleteTarget, setSnippetDeleteTarget] = useState<Snippet | null>(null);
   // Dialog exits need to know whether a flyout remains mounted, but including either menu state
   // in their stable callback would churn the close handler passed into the portalled dialog.
   const contextMenuOpenRef = useRef(false);
@@ -283,7 +287,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   }, [refocusTerminal]);
   const openSnippetDialog = useCallback((seedText?: string) => {
     snippetDialogOpenRef.current = true;
+    setEditingSnippet(null);
     setSnippetSeedText(seedText);
+    setSnippetDialogOpen(true);
+  }, []);
+  const openSnippetEditor = useCallback((snippet: Snippet) => {
+    snippetDialogOpenRef.current = true;
+    setEditingSnippet(snippet);
+    setSnippetSeedText(undefined);
     setSnippetDialogOpen(true);
   }, []);
   /** Both dialog exits (Save and Cancel) land here. `useDialogA11y` restores focus to the
@@ -293,6 +304,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     snippetDialogOpenRef.current = false;
     setSnippetDialogOpen(false);
     setSnippetSeedText(undefined);
+    setEditingSnippet(null);
     // An open flyout's search input is the next keyboard destination. Refocusing the terminal
     // here would leave that visible menu unable to receive typing after its dialog closes.
     if (!contextMenuOpenRef.current && !snippetsMenuOpenRef.current) refocusTerminal();
@@ -433,8 +445,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // `engineGeneration` comes from.
 
   // Canvas Mode surface relocation (design 012 §4.2). Placed here because its
-  // callbacks close over dispatch (:85), setContextMenu (:123), setPathPicker
-  // (:126), setSchemaPicker (:133) and suggestRef (:173), all declared above.
+  // callbacks close over dispatch (:85), floating-surface setters and suggestRef (:173), all
+  // declared above.
   // `engineMounted` is a stable useCallback the engine effect below calls right
   // after mount() — that bump is what makes relocation-at-mount reachable at all
   // (hazard H12, measured by spike 004 Q1).
@@ -821,6 +833,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     sortMode: snippetsSortMode,
     insert: (text) => insertTextIntoTerminal(terminalId, text),
     onUse: (id) => dispatch(recordSnippetUse(id)),
+    onCopy: (snippet) => { void writeClipboardText(snippet.text); },
+    onEdit: (snippet) => openSnippetEditor(snippet),
+    onDelete: (snippet) => setSnippetDeleteTarget(snippet),
     onAddNew: (seedText) => openSnippetDialog(seedText),
     onToggleViewMode: () => dispatch(
       setSnippetsViewMode(snippetsViewMode === 'flat' ? 'folders' : 'flat'),
@@ -847,41 +862,26 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     return [
       // Pane-tree actions, and ONLY while the surface is actually in its pane (`plan/021` R2).
       //
-      // The menu became reachable from the canvas overlay, where these four are wrong in a way
+      // The menu became reachable from the canvas overlay, where these are wrong in a way
       // the text actions are not: Copy/Paste/Clear act on the engine, which is the same engine
       // wherever it is drawn, but these act on a pane tree in a tab that is off screen. Picked
-      // from the overlay, "New Pane Right" silently re-lays-out a background tab and spawns a
+      // from the overlay, the New Pane row silently re-lays-out a background tab and spawns a
       // PTY, and nothing visible happens on the surface the user clicked.
       //
       // `relocationHost` is the accurate test — it is non-null exactly when the terminal is
       // drawn somewhere other than its pane — rather than `overlaidOnCanvas`, which would leave
       // these live on a focused ordinary node for the same reason.
-      ...(paneId && !relocationHost ? [
-        {
-          label: 'New Pane Right',
-          icon: '➡️',
-          title: 'Split this pane with a new terminal to its right.',
-          click: () => splitPaneById(paneId, 'vertical', 'after'),
+      ...(paneId && !relocationHost ? [{
+        type: 'new-pane' as const,
+        label: 'New Pane',
+        icon: '➡️',
+        title: 'Split this pane with a new terminal to its right.',
+        newPane: {
+          onSplit: (direction: 'vertical' | 'horizontal', position: 'before' | 'after') =>
+            splitPaneById(paneId, direction, position),
+          onDone: closeContextMenu,
         },
-        {
-          label: 'New Pane Left',
-          icon: '⬅️',
-          title: 'Split this pane with a new terminal to its left.',
-          click: () => splitPaneById(paneId, 'vertical', 'before'),
-        },
-        {
-          label: 'New Pane Up',
-          icon: '⬆️',
-          title: 'Split this pane with a new terminal above it.',
-          click: () => splitPaneById(paneId, 'horizontal', 'before'),
-        },
-        {
-          label: 'New Pane Down',
-          icon: '⬇️',
-          title: 'Split this pane with a new terminal below it.',
-          click: () => splitPaneById(paneId, 'horizontal', 'after'),
-        },
-      ] : []),
+      }] : []),
       {
         label: 'New Tab',
         icon: '➕',
@@ -1145,20 +1145,31 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           onClose={closeSchemaPicker}
         />
       )}
-      {/* plan/029 §6 — opened by the Snippets flyout's "Add New Snippet" footer row.
-          Create mode only here (`snippet={null}`); editing lives in the Settings
-          panel (T7). Never dispatches itself — this component owns the choice of
-          `addSnippet` vs. `updateSnippet`. */}
+      {/* plan/029 §6 — opened by the Snippets flyout's Add/Edit actions. Never dispatches
+          itself — this component owns the choice of `addSnippet` vs. `updateSnippet`. */}
       <SnippetDialog
         isOpen={snippetDialogOpen}
-        snippet={null}
+        snippet={editingSnippet}
         initialText={snippetSeedText}
         snippets={snippets}
         onSave={(snippet) => {
-          dispatch(addSnippet(snippet));
+          if (editingSnippet) dispatch(updateSnippet({ id: snippet.id, patch: snippet }));
+          else dispatch(addSnippet(snippet));
           closeSnippetDialog();
         }}
         onCancel={closeSnippetDialog}
+      />
+      <ConfirmDialog
+        isOpen={snippetDeleteTarget !== null}
+        title="Delete snippet"
+        message={snippetDeleteTarget ? `Delete "${snippetDisplayLabel(snippetDeleteTarget)}"? This cannot be undone.` : ''}
+        onConfirm={() => {
+          if (snippetDeleteTarget) dispatch(removeSnippet(snippetDeleteTarget.id));
+          setSnippetDeleteTarget(null);
+        }}
+        onCancel={() => setSnippetDeleteTarget(null)}
+        confirmText="Delete"
+        destructive
       />
     </div>
   );

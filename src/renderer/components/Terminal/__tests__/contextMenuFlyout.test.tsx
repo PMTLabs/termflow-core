@@ -1684,3 +1684,95 @@ describe('row rendering', () => {
         expect(search().getAttribute('aria-activedescendant')).toBe(rows()[1].id);
     });
 });
+
+describe('snippet row context actions', () => {
+    it('opens actions on right-click without activating the row, and Escape closes only the panel', async () => {
+        const onUse = jest.fn();
+        const insert = jest.fn();
+        const edit = jest.fn();
+        await render(menuWith({
+            rows: [row('snippet-1', 'long label', {
+                onSelect: () => { onUse(); insert(); },
+                contextActions: [
+                    { id: 'copy', label: 'Copy', onSelect: jest.fn() },
+                    { id: 'insert', label: 'Insert', onSelect: jest.fn() },
+                    { id: 'edit', label: 'Edit', onSelect: edit },
+                    { id: 'delete', label: 'Delete', onSelect: jest.fn() },
+                ],
+            })],
+        }));
+        await click(menuItem('Snippets'));
+
+        await fire(rows()[0], new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        const actionPanel = document.querySelector<HTMLElement>('.context-menu-flyout-row-actions')!;
+        expect(actionPanel).not.toBeNull();
+        expect(actionPanel.parentElement).toBe(panel());
+        expect(onUse).not.toHaveBeenCalled();
+        expect(insert).not.toHaveBeenCalled();
+
+        await key(search(), 'Escape');
+        expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
+        expect(panel()).not.toBeNull();
+        expect(edit).not.toHaveBeenCalled();
+    });
+
+    it('keeps swallowing the native context menu on the search box and non-row flyout area', async () => {
+        await render(menuWith({ rows: [row('a', 'alpha')] }));
+        await click(menuItem('Snippets'));
+        const searchEvent = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        await fire(search(), searchEvent);
+        expect(searchEvent.defaultPrevented).toBe(true);
+        const panelEvent = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+        await fire(panel(), panelEvent);
+        expect(panelEvent.defaultPrevented).toBe(true);
+    });
+
+    it('runs the selected row action and then dismisses the whole menu', async () => {
+        const action = jest.fn();
+        const activate = jest.fn();
+        await render(menuWith({
+            rows: [row('a', 'alpha', {
+                onSelect: activate,
+                contextActions: [{ id: 'edit', label: 'Edit', onSelect: action }],
+            })],
+        }));
+        await click(menuItem('Snippets'));
+        await fire(rows()[0], new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        const edit = document.querySelector<HTMLButtonElement>('.context-menu-flyout-row-action')!;
+        await click(edit);
+
+        expect(action).toHaveBeenCalledTimes(1);
+        expect(activate).not.toHaveBeenCalled();
+        expect(onClose).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('consolidated New Pane row', () => {
+    it('renders one row with Right, Bottom, Left, Up controls and maps every activation', async () => {
+        const onSplit = jest.fn();
+        const done = jest.fn();
+        await render([{
+            type: 'new-pane',
+            label: 'New Pane',
+            newPane: { onSplit, onDone: done },
+        }]);
+
+        const rowEl = document.querySelector<HTMLElement>('.new-pane-row')!;
+        const controls = Array.from(rowEl.querySelectorAll<HTMLButtonElement>('.new-pane-row-action'));
+        expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual([
+            'New pane right', 'New pane bottom', 'New pane left', 'New pane up',
+        ]);
+
+        await click(rowEl.querySelector<HTMLButtonElement>('.new-pane-row-main')!);
+        await click(controls[1]);
+        await click(controls[2]);
+        await click(controls[3]);
+        expect(onSplit.mock.calls).toEqual([
+            ['vertical', 'after'],
+            ['horizontal', 'after'],
+            ['vertical', 'before'],
+            ['horizontal', 'before'],
+        ]);
+        expect(done).toHaveBeenCalledTimes(4);
+    });
+});

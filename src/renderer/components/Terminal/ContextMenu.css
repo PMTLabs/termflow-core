@@ -331,6 +331,40 @@
   white-space: nowrap;
 }
 
+.context-menu-flyout-row-actions {
+  position: absolute;
+  top: 0;
+  left: calc(100% + 2px);
+  z-index: 2;
+  min-width: 110px;
+  padding: 4px 0;
+  background-color: var(--menu-background, #252526);
+  border: 1px solid var(--menu-border, #454545);
+  box-shadow: 0 3px 8px rgb(0 0 0 / 35%);
+}
+
+.context-menu-flyout.flip-left > .context-menu-flyout-row-actions {
+  right: calc(100% + 2px);
+  left: auto;
+}
+
+.context-menu-flyout-row-action {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: var(--menu-foreground, #cccccc);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu-flyout-row-action:hover {
+  background-color: var(--menu-hover-background, #094771);
+  color: #ffffff;
+}
+
 /* Theme Variables */
 :root {
   --menu-background: #252526;

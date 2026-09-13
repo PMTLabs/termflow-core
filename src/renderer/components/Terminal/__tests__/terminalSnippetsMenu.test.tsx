@@ -74,6 +74,9 @@ const snippetsItem = (over: Partial<Parameters<typeof buildSnippetsMenuItem>[0]>
     sortMode: 'lastUsed',
     insert: jest.fn(),
     onUse: jest.fn(),
+    onCopy: jest.fn(),
+    onEdit: jest.fn(),
+    onDelete: jest.fn(),
     onAddNew: jest.fn(),
     onToggleViewMode: jest.fn(),
     onCycleSortMode: jest.fn(),
@@ -186,6 +189,45 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     expect(insert).toHaveBeenCalledWith(multiline.text);
     expect(onUse.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
   });
+
+  it('attaches Copy, Insert, Edit and Delete to every leaf, including filtered rows', () => {
+    const callbacks = {
+      onCopy: jest.fn(),
+      onEdit: jest.fn(),
+      onDelete: jest.fn(),
+    };
+    const item = snippetsItem(callbacks);
+    const folderRows = (item.submenu!.rows as (q: string) => any[])('');
+    const leaves = folderRows.flatMap((r) => r.children ?? [r]);
+    expect(leaves.every((r) => r.contextActions?.map((a: any) => a.label))).toBe(true);
+    expect(leaves[0].contextActions.map((a: any) => a.label)).toEqual(['Copy', 'Insert', 'Edit', 'Delete']);
+
+    const filtered = (item.submenu!.rows as (q: string) => any[])('git');
+    expect(filtered.map((r) => r.contextActions?.length)).toEqual([4, 4]);
+  });
+
+  it('Copy receives the full multi-line text even when the displayed label is truncated', () => {
+    const longText = `${'echo a very long command '.repeat(4)}\necho second line`;
+    const snippet = makeSnippet({ id: 'long', text: longText });
+    const onCopy = jest.fn();
+    const row = (snippetsItem({ snippets: [snippet], onCopy }).submenu!.rows as (q: string) => any[])('')[0];
+
+    expect(row.label.length).toBeLessThan(longText.length);
+    row.contextActions.find((action: any) => action.label === 'Copy').onSelect();
+    expect(onCopy).toHaveBeenCalledWith(snippet);
+  });
+
+  it('the Insert context action preserves record-before-verbatim-insert semantics', () => {
+    const onUse = jest.fn();
+    const insert = jest.fn();
+    const row = (snippetsItem({ onUse, insert }).submenu!.rows as (q: string) => any[])('echo')[0];
+    row.contextActions.find((action: any) => action.label === 'Insert').onSelect();
+
+    expect(onUse).toHaveBeenCalledWith('s4');
+    expect(insert).toHaveBeenCalledWith(multiline.text);
+    expect(onUse.mock.invocationCallOrder[0]).toBeLessThan(insert.mock.invocationCallOrder[0]);
+  });
+
   it('lists EVERY snippet as one row in shared browse-sort order, with no folder rows at all', () => {
     const rows = (snippetsItem({ viewMode: 'flat' }).submenu!.rows as (q: string) => any[])('');
     expect(rows.map((r) => r.id)).toEqual([
@@ -598,6 +640,14 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     );
   });
 
+  it('wires the terminal New Pane item through the shared directional row', () => {
+    expect(DISPLAY).toMatch(/type: 'new-pane' as const/);
+    expect(DISPLAY).toMatch(/label: 'New Pane'/);
+    expect(DISPLAY).toMatch(/splitPaneById\(paneId, direction, position\)/);
+    expect(DISPLAY).toMatch(/onDone: closeContextMenu/);
+    expect(DISPLAY).toMatch(/paneId && !relocationHost/);
+  });
+
   it('targets this pane\'s own terminalId, not resolveKeyboardTerminalId', () => {
     expect(DISPLAY).not.toMatch(/resolveKeyboardTerminalId/);
     expect(DISPLAY).toMatch(/insert:\s*\(command\)\s*=>\s*insertTextIntoTerminal\(terminalId,\s*command\)/);
@@ -721,8 +771,16 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(DISPLAY).toMatch(/items=\{\[snippetsMenuItem\(closeSnippetsMenu, snippetsMenu\.selectionText\)\]\}/);
   });
 
-  it('renders SnippetDialog wired to addSnippet, never dispatching from inside the dialog itself', () => {
+  it('renders SnippetDialog wired to create/edit mutations, never dispatching from inside the dialog itself', () => {
     expect(DISPLAY).toMatch(/<SnippetDialog/);
-    expect(DISPLAY).toMatch(/onSave=\{\(snippet\) => \{\s*\n\s*dispatch\(addSnippet\(snippet\)\);/);
+    expect(DISPLAY).toMatch(/onSave=\{\(snippet\) => \{[\s\S]*?dispatch\(addSnippet\(snippet\)\);/);
+    expect(DISPLAY).toMatch(/dispatch\(updateSnippet\(\{ id: snippet\.id, patch: snippet \}\)\)/);
+    expect(DISPLAY).toMatch(/dispatch\(removeSnippet\(snippetDeleteTarget\.id\)\)/);
+    expect(DISPLAY).toMatch(/onCopy: \(snippet\) => \{ void writeClipboardText\(snippet\.text\); \}/);
+    expect(DISPLAY).toMatch(/snippet=\{editingSnippet\}/);
+    expect(DISPLAY).toMatch(/onCancel=\{closeSnippetDialog\}/);
+    expect(DISPLAY).toMatch(/title="Delete snippet"[\s\S]*?message=\{snippetDeleteTarget/);
+    expect(DISPLAY).toMatch(/onCancel=\{\(\) => setSnippetDeleteTarget\(null\)\}/);
+    expect(DISPLAY).toMatch(/setSnippetDeleteTarget\(null\);/);
   });
 });

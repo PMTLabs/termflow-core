@@ -1,0 +1,55 @@
+.new-pane-row {
+  gap: 8px;
+  cursor: default;
+}
+
+.new-pane-row-main,
+.new-pane-row-action {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.new-pane-row-main {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.new-pane-row-icon {
+  flex: 0 0 auto;
+  width: 20px;
+  margin-right: 8px;
+  text-align: center;
+}
+
+.new-pane-row-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-pane-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.new-pane-row-action {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border-radius: 2px;
+  text-align: center;
+}
+
+.new-pane-row-main:hover,
+.new-pane-row-action:hover {
+  background-color: var(--menu-hover-background, #094771);
+  color: #ffffff;
+}

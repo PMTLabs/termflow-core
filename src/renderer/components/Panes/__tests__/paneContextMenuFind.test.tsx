@@ -49,6 +49,14 @@ jest.mock('../../../services/AgentSchemeTracker', () => ({
   },
 }));
 
+jest.mock('../../../services/paneActions', () => ({
+  openNewTabWithDefaultProfile: jest.fn(),
+  openNewWindow: jest.fn(),
+  splitPaneById: jest.fn(),
+}));
+
+import { splitPaneById } from '../../../services/paneActions';
+
 function makeStore() {
   return configureStore({
     reducer: { tabs: tabsReducer, panes: panesReducer, settings: settingsReducer },
@@ -223,6 +231,35 @@ describe('PaneContextMenu — Find…', () => {
     expect(findItem().disabled).toBe(false);
     act(() => { clearSurfaceChrome('tm-mine', owner); });
     expect(findItem().disabled).toBe(true);
+  });
+});
+
+describe('PaneContextMenu — consolidated New Pane row', () => {
+  beforeEach(() => {
+    (splitPaneById as jest.Mock).mockClear();
+  });
+
+  it('shows one row, maps its four direction buttons, and closes after each activation', () => {
+    render('tm-mine');
+    const row = document.querySelector<HTMLElement>('.pane-context-menu .new-pane-row')!;
+    const main = row.querySelector<HTMLButtonElement>('.new-pane-row-main')!;
+    const controls = Array.from(row.querySelectorAll<HTMLButtonElement>('.new-pane-row-action'));
+
+    expect(row.textContent).toContain('New Pane');
+    expect(controls.map((button) => button.getAttribute('aria-label'))).toEqual([
+      'New pane right', 'New pane bottom', 'New pane left', 'New pane up',
+    ]);
+
+    act(() => { main.dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    act(() => { controls[1].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    act(() => { controls[2].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+    act(() => { controls[3].dispatchEvent(new MouseEvent('click', { bubbles: true })); });
+
+    expect(splitPaneById).toHaveBeenNthCalledWith(1, 'pn-1', 'vertical', 'after');
+    expect(splitPaneById).toHaveBeenNthCalledWith(2, 'pn-1', 'horizontal', 'after');
+    expect(splitPaneById).toHaveBeenNthCalledWith(3, 'pn-1', 'vertical', 'before');
+    expect(splitPaneById).toHaveBeenNthCalledWith(4, 'pn-1', 'horizontal', 'before');
+    expect(onClose).toHaveBeenCalledTimes(4);
   });
 });
 
