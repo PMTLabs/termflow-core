@@ -409,8 +409,9 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             // callers close the editor on it, and both the write and the switch-on request leave
             // the editor editable for one round-trip each; `saved` keeps whatever was typed in
             // that time as a dirty edit. Reporting such a save as clean is how *Save and close*
-            // and the navigation guard would throw those edits away. A `false` here sends both
-            // back to their own "unsaved" prompt, which is the truth.
+            // and the navigation guard would throw those edits away. On a `false`, *Save and
+            // close* leaves the editor open wearing its "unsaved" badge and the guard re-raises
+            // its own dialog — both of which are the truth.
             return !isDirty(latest.current.draft);
         } catch (e) {
             // Reported, and REFUSED. The navigation guard reads this boolean, so swallowing the

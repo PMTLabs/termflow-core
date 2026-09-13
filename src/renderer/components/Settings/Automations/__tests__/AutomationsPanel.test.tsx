@@ -826,7 +826,8 @@ describe('AutomationsPanel', () => {
         // written rule is pinned as OFF so a save that flipped it on could not pass on the prompt.
         expect(api.saveAutomation).toHaveBeenCalledTimes(1);
         expect(api.saveAutomation).toHaveBeenCalledWith(
-            expect.objectContaining({ enabled: false, name: 'Context handoff reminder' }),
+            // `id: ''` is the template's NEW draft — the fixture's stored `au-1` shares the name.
+            expect.objectContaining({ id: '', enabled: false, name: 'Context handoff reminder' }),
             expect.anything(),
         );
         expect(document.querySelector('.au-editor')).not.toBeNull();
