@@ -378,14 +378,20 @@ export interface PathLinkMatch {
 //      which form a real filename — are NOT mistaken for files. Folder-only paths
 //      need the anchored form (./folder) to be detected.
 //   6. Verb-prefixed bare relative: name.ext after an allowlisted file verb. The `\b` before
-//      the verb prevents word-internal matches such as `Unread foo.ts`. The final extension
-//      starts with `[A-Za-z]`, deliberately rejecting version strings such as `v1.2.3` at the
-//      cost of not linking rare digit-first extensions such as `.7z`. Its variable-length
-//      positive lookbehind carries the verb and separator without consuming them, so the
-//      match's `start`/`end` cover only the filename for hit-testing and Copy Path.
-// Negated/anchored char classes keep every branch free of unbounded backtracking.
+//      the verb prevents word-internal matches such as `Unread foo.ts`. Parenthesized rows admit
+//      the full tool-verb list; space/colon rows admit only row verbs, so prose such as
+//      `Create Node.js project` and `Open example.com` is not linked. The final extension starts
+//      with `[A-Za-z]`, deliberately rejecting version strings such as `v1.2.3` at the cost of
+//      not linking rare digit-first extensions such as `.7z`. Its variable-length positive
+//      lookbehind carries the verb and separator without consuming them, so the match's
+//      `start`/`end` cover only the filename for hit-testing and Copy Path.
+//      The row form remains deliberately ambiguous for prose such as
+//      `Remove example.com from the hosts file`, which may produce the existing
+//      `File not found` toast.
+// Negated/anchored char classes keep branches 1-5 free of unbounded backtracking; branch 6 uses
+// a bounded `[ \t]{1,8}` separator and a right-anchored filename tail.
 const PATH_RE =
-  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+|(?<=\b(?:[Rr]ead|[Ww]rite|[Ee]dit|[Uu]pdate|[Cc]reate|[Dd]elete|[Rr]emove|[Mm]ulti[Ee]dit|[Nn]otebook[Ee]dit|[Rr]ead[Ff]ile|[Ww]rite[Ff]ile|[Ee]dited|[Cc]reated|[Dd]eleted|[Rr]emoved|[Uu]pdated|[Ww]rote|[Oo]pen|[Oo]pened|[Vv]iew)(?:\(|:?[ \t]+))[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*)(?::(\d+)(?::(\d+))?)?/g;
+  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+|(?<=\b(?:(?:[Rr]ead|[Ww]rite|[Ee]dit|[Uu]pdate|[Cc]reate|[Dd]elete|[Rr]emove|[Mm]ulti[Ee]dit|[Nn]otebook[Ee]dit|[Rr]ead[Ff]ile|[Ww]rite[Ff]ile|[Oo]pen|[Vv]iew)\(|(?:[Rr]ead|[Ww]rite|[Ee]dit|[Uu]pdate|[Dd]elete|[Rr]emove|[Rr]ead[Ff]ile|[Ww]rite[Ff]ile|[Ee]dited|[Cc]reated|[Dd]eleted|[Rr]emoved|[Uu]pdated|[Ww]rote):?[ \t]{1,8}))[\w-]+(?:\.[\w-]+)*\.[A-Za-z][\w-]*(?![\w\\/-]|\.[\w-]))(?::(\d+)(?::(\d+))?)?/g;
 
 // Strip trailing punctuation that terminals / markdown / tool logs place right
 // AFTER a path but that isn't part of it — e.g. the `)` in `Write(C:\a\b.md)` or
