@@ -52,6 +52,9 @@ pub trait EngineHost: Send + Sync {
     /// `None` is stored as NULL and rendered as an empty column — **never invented**.
     fn label_for(&self, tm: &str) -> Option<String>;
 
+    /// The terminal's best-effort working directory, resolved only by a send that names it.
+    fn cwd_for(&self, tm: &str) -> Option<String>;
+
     /// The activity log and the rule definitions. The engine writes rows; it never emits from here.
     fn store(&self) -> &Arc<AutomationStore>;
 

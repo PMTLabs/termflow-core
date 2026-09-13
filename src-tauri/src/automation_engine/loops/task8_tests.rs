@@ -396,6 +396,31 @@ async fn a_crossing_posts_the_resolved_webhook_body() {
     assert!(!text.contains("$1"), "a raw token was posted: {text}");
 }
 
+#[tokio::test]
+async fn a_crossing_posts_the_source_terminal_reserved_values() {
+    let (url, posted) = capturing_webhook_endpoint();
+    let (engine, fake, host) = rig_with_rule_bypassing_the_enable_gate(|graph| {
+        add_discord_webhook(graph, url);
+        let webhook = graph.webhook.as_mut().expect("the webhook just added");
+        webhook.body = "${terminal.title}|${terminal.id}|${terminal.cwd}|${time}".into();
+        webhook.substitute = true;
+    });
+    fake.roster.lock().unwrap()[0].cwd = Some("/one".into());
+    let send = pending(&engine, &host, ArmState::armed(), 4_000);
+
+    run_crossing(engine.clone(), host.clone(), send).await;
+
+    let request = posted
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the webhook was never posted");
+    let text = String::from_utf8_lossy(&request);
+    assert!(text.contains("codex · core|tm-1|/one|"), "source values were not posted: {text}");
+    assert!(
+        regex::Regex::new(r"\|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}").unwrap().is_match(&text),
+        "the timestamp was not rendered: {text}"
+    );
+}
+
 /// The other half of the pair, and the reason the flag is worth having: with substitution off
 /// the body is posted EXACTLY as typed. Asserted so that "resolved" above cannot be satisfied
 /// by a sender that always substitutes — a webhook body is sometimes JSON a user wrote by

@@ -72,6 +72,53 @@ describe('automationValidation — the shared fixture', () => {
     });
 });
 
+describe('automationValidation — reserved message tokens', () => {
+    const scheduleWith = (message: string): AutomationRule => {
+        const source = cases[0].rule;
+        return {
+            ...source,
+            graph: {
+                ...source.graph,
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } },
+                action: { ...source.graph.action!, message, substitute: true },
+            },
+        };
+    };
+
+    it('allows a schedule rule to use a reserved terminal id without a pattern', () => {
+        expect(problems(scheduleWith('${terminal.id}')).map((problem) => problem.code))
+            .not.toContain('action.tokenWithoutParse');
+    });
+
+    it('still rejects an unknown named token', () => {
+        const source = cases[0].rule;
+        const rule = {
+            ...source,
+            graph: {
+                ...source.graph,
+                action: { ...source.graph.action!, message: '${nope}', substitute: true },
+            },
+        };
+        expect(problems(rule).map((problem) => problem.code)).toContain('action.unknownToken');
+    });
+
+    it('lets a declared time capture shadow the reserved token', () => {
+        const source = cases[0].rule;
+        const rule = {
+            ...source,
+            graph: {
+                ...source.graph,
+                parse: { ...source.graph.parse!, find: String.raw`(?<time>\d+)` },
+                action: { ...source.graph.action!, message: '${time}', substitute: true },
+            },
+        };
+        expect(problems(rule).map((problem) => problem.code)).not.toContain('action.unknownToken');
+    });
+});
+
 describe('automationValidation — the words the user reads', () => {
     const find = (rule: AutomationRule, code: ProblemCode) =>
         problems(rule).find((p) => p.code === code);

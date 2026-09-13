@@ -487,7 +487,11 @@ describe('ActionPanel — the substitute checkbox, token chips, and live preview
     it("renders one chip per group the pattern produces, plus $0 and $$, and marks the next one out of range as dead", async () => {
         await renderAction({ message: '', substitute: false });
         const chips = [...container.querySelectorAll('.au-tokens .au-token')].map((el) => el.textContent);
-        expect(chips).toEqual(['$0', '$1', '$2', '$$']);
+        expect(chips).toEqual([
+            '$0', '$1', '$2', '$$',
+            '${terminal.id}', '${terminal.title}', '${terminal.cwd}', '${time}',
+            '✂️ Insert snippet…',
+        ]);
         const dead = [...container.querySelectorAll('.au-tokens .au-token.dead')].map((el) => el.textContent);
         expect(dead).toEqual(['$2']);
     });

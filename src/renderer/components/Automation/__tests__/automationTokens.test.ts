@@ -31,6 +31,10 @@ const fixtureSample: Record<string, string> = {
     ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [String(i + 1), `[g${i + 1}]`])),
     file: 'file',
     '1x': 'one-x',
+    'terminal.id': 'tm-fx',
+    'terminal.title': 'fx-title',
+    'terminal.cwd': '/fx',
+    time: '2026-01-02 03:04:05',
 };
 
 describe('tokensUsed — the shared grammar fixture', () => {
@@ -107,6 +111,29 @@ describe('previewSubstitute — absent prototype-named captures', () => {
         expect(previewSubstitute('send ${toString}', { count: 1, names: new Set(['toString']) }, {})).toEqual({
             ok: true,
             parts: [{ kind: 'text', text: 'send ' }],
+        });
+    });
+});
+
+describe('previewSubstitute — reserved terminal values', () => {
+    it('lets a declared time group shadow the reserved clock value', () => {
+        expect(previewSubstitute('${time}', { count: 1, names: new Set(['time']) }, { time: '42' })).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: '42' }],
+        });
+    });
+
+    it('shows an undeclared reserved token as a placeholder without a sample', () => {
+        expect(previewSubstitute('${time}', { count: 0, names: new Set() }, null)).toEqual({
+            ok: true,
+            parts: [{ kind: 'placeholder', token: '${time}' }],
+        });
+    });
+
+    it('shows a placeholder when a real sample has no reserved value', () => {
+        expect(previewSubstitute('at ${time}', { count: 0, names: new Set() }, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: 'at ' }, { kind: 'placeholder', token: '${time}' }],
         });
     });
 });

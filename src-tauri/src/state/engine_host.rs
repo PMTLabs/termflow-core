@@ -80,6 +80,17 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
         })
     }
 
+    fn cwd_for(&self, tm: &str) -> Option<String> {
+        let pc = self.identity.process_for_leaf(tm)?;
+        // The same two-step lookup `commands::get_terminal_cwd` makes: the shell-reported OSC cwd
+        // is instant, the process scan is not — the engine's caller runs this on a blocking worker.
+        if let Some(cwd) = self.terminal_cwds.get(&pc) {
+            return Some(cwd.value().clone());
+        }
+        let pid = self.terminals.get(&pc)?.pid;
+        crate::pty_manager::get_process_cwd(pid)
+    }
+
     fn store(&self) -> &std::sync::Arc<crate::automation_store::AutomationStore> {
         &self.automation_store
     }

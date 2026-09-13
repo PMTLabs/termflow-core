@@ -29,6 +29,21 @@ import { problems } from '../automationValidation';
 import type { AutomationRule } from '../../../types/electron';
 import { blankDraft } from '../../Settings/Automations/automationTemplates';
 
+// The picker has its own mounted-menu tests; this small seam exercises the panel's splice path
+// with the exact text a selected picker row hands back, without coupling the caret assertion to
+// the store-backed menu's portal.
+jest.mock('../panels/SnippetPickerButton', () => ({
+    SnippetPickerButton: ({ onInsert }: { onInsert: (text: string) => void }) => (
+        <button
+            type="button"
+            aria-label="Test snippet picker"
+            onClick={() => onInsert('a\n$1 $$ ${terminal.id}\nb')}
+        >
+            Test snippet
+        </button>
+    ),
+}));
+
 const URL = 'https://hooks.example.invalid/secret';
 const PATTERN = String.raw`ctx:(\d+)%`;
 
@@ -126,6 +141,25 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
         expect(action.patch[destination === 'webhook' ? 'body' : 'message']).toBe('the context is over $0');
     });
 
+    it('shows all four reserved terminal chips and inserts time with substitution enabled', async () => {
+        await show('sent at ');
+        caretToEnd();
+        for (const token of ['${terminal.id}', '${terminal.title}', '${terminal.cwd}', '${time}']) {
+            expect(chip(token)).not.toBeUndefined();
+            expect(chip(token).title).toBeTruthy();
+        }
+
+        await act(async () => { chip('${time}').click(); });
+
+        expect(dispatched).toEqual([{
+            type: destination,
+            patch: {
+                [destination === 'webhook' ? 'body' : 'message']: 'sent at ${time}',
+                substitute: true,
+            },
+        }]);
+    });
+
     it('says what will happen to a token that was typed rather than clicked', async () => {
         await show('the context is over $0');
         const warning = container.querySelector<HTMLElement>('.au-fhelp.warn')!;
@@ -177,5 +211,58 @@ describe.each(['action', 'webhook'] as Destination[])('%s — token chips and th
             );
         });
         expect(container.querySelector('.au-fhelp.warn')).toBeNull();
+    });
+
+    it('does not block a schedule message that uses only a reserved token', async () => {
+        if (destination !== 'action') return;
+        const blank = blankDraft();
+        const rule: AutomationRule = {
+            ...blank,
+            graph: {
+                ...blank.graph,
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } },
+                action: { ...blank.graph.action!, message: '${terminal.id}', substitute: true },
+            },
+        };
+        const draft = { ...draftFromRule(rule), selected: 'action' as const };
+        await act(async () => {
+            root.render(
+                <AuInspector
+                    draft={draft}
+                    problems={problems(rule)}
+                    now={1_700_000_000_000}
+                    terminals={[]}
+                    terminalsError={null}
+                    terminalsLoading={false}
+                    report={null}
+                    onRearm={null}
+                    onTest={() => {}}
+                    onFocusStep={() => {}}
+                    dispatch={(action) => { dispatched.push(action); }}
+                />,
+            );
+        });
+        const preview = container.querySelector<HTMLElement>('[data-testid="action-preview"]')!;
+        expect(preview.classList.contains('blocked')).toBe(false);
+        expect(preview.textContent).toContain('⟨${terminal.id}⟩');
+    });
+
+    it('splices a picked multiline snippet at the selection without enabling substitution', async () => {
+        await show('0123456789');
+        const box = container.querySelector<HTMLTextAreaElement>('textarea')!;
+        box.setSelectionRange(3, 5);
+
+        await act(async () => {
+            container.querySelector<HTMLButtonElement>('[aria-label="Test snippet picker"]')!.click();
+        });
+
+        const field = destination === 'webhook' ? 'body' : 'message';
+        expect(dispatched).toEqual([{
+            type: destination,
+            patch: { [field]: '012a\n$1 $$ ${terminal.id}\nb56789' },
+        }]);
     });
 });

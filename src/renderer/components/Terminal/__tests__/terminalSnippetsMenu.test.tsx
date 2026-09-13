@@ -87,6 +87,38 @@ const snippetsItem = (over: Partial<Parameters<typeof buildSnippetsMenuItem>[0]>
 /* ── part 1: pure builder tests (no mounting) ────────────────────────────── */
 
 describe('buildSnippetsMenuItem — pure row shape', () => {
+  it('pickOnly strips management affordances and addresses this message', () => {
+    const item = snippetsItem({
+      pickOnly: true,
+      onCopy: undefined,
+      onEdit: undefined,
+      onDelete: undefined,
+      onAddNew: undefined,
+    });
+    const rows = (item.submenu!.rows as (q: string) => any[])('');
+    const leaves = rows.flatMap((row) => row.children ?? [row]).filter((row) => row.id.startsWith('snippet-'));
+
+    expect(leaves.every((row) => !('contextActions' in row))).toBe(true);
+    expect(item.submenu!.headerActions!.map((action) => action.id)).toEqual([
+      'view-mode', 'sort-mode', 'open-settings',
+    ]);
+    expect(item.submenu!.footerRows).toBeUndefined();
+    expect(item.title).toContain('this message');
+    expect(item.submenu!.searchPlaceholder).toContain('this message');
+  });
+
+  it('keeps the default builder shape unchanged when pickOnly is omitted', () => {
+    const item = snippetsItem();
+    const rows = (item.submenu!.rows as (q: string) => any[])('');
+    expect(rows.find((row) => row.id === 'snippet-s4')).toMatchObject({
+      contextActions: expect.any(Array),
+    });
+    expect(item.submenu!.headerActions!.map((action) => action.id)).toEqual([
+      'view-mode', 'sort-mode', 'add-snippet', 'open-settings',
+    ]);
+    expect(item.submenu!.footerRows).toHaveLength(1);
+  });
+
   it('groups by folder + unfiled when the query is empty', () => {
     const insert = jest.fn();
     const item = snippetsItem({ insert });

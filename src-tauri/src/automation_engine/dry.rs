@@ -127,9 +127,14 @@ fn skipped(kind: &str) -> StepTrace {
     step(kind, "skipped", "not reached".to_string())
 }
 
-fn action_trace(action: Option<&ActionStep>, caps: Option<&eval::Captures>, terminal_name: Option<&str>) -> Option<StepTrace> {
+fn action_trace(
+    action: Option<&ActionStep>,
+    caps: Option<&eval::Captures>,
+    terminal_name: Option<&str>,
+    reserved: &subst::Reserved,
+) -> Option<StepTrace> {
     let action = action?;
-    Some(match preview_message(&action.message, action.substitute, caps) {
+    Some(match preview_message(&action.message, action.substitute, caps, reserved) {
         Ok(body) => step(ACTION, "ok", match terminal_name {
             Some(name) => format!("would type `{}` into {}", body, name),
             None => format!("would type `{}`", body),
@@ -152,9 +157,13 @@ fn masked_webhook_url(url: &str) -> String {
     }
 }
 
-fn webhook_trace(webhook: Option<&WebhookStep>, caps: Option<&eval::Captures>) -> Option<StepTrace> {
+fn webhook_trace(
+    webhook: Option<&WebhookStep>,
+    caps: Option<&eval::Captures>,
+    reserved: &subst::Reserved,
+) -> Option<StepTrace> {
     let webhook = webhook?;
-    Some(match preview_message(&webhook.body, webhook.substitute, caps) {
+    Some(match preview_message(&webhook.body, webhook.substitute, caps, reserved) {
         Ok(message) => {
             let body = String::from_utf8(crate::automation_webhook::payload(webhook.provider, &message))
                 .expect("a webhook payload from a UTF-8 string is UTF-8");
@@ -263,6 +272,17 @@ pub fn evaluate_once(
     now_ms: i64,
 ) -> DryRunReport {
     let terminal_name = host.label_for(tm);
+    let needs_cwd = rule.graph.action.as_ref().is_some_and(|action| {
+        action.substitute && subst::names_token(&action.message, "terminal.cwd")
+    }) || rule.graph.webhook.as_ref().is_some_and(|webhook| {
+        webhook.substitute && subst::names_token(&webhook.body, "terminal.cwd")
+    });
+    let reserved = subst::Reserved {
+        terminal_id: tm.to_string(),
+        terminal_title: terminal_name.clone(),
+        terminal_cwd: if needs_cwd { host.cwd_for(tm) } else { None },
+        time: subst::Reserved::time_from_ms(now_ms),
+    };
 
     let finish = |verdict: &str, steps: Vec<StepTrace>| -> DryRunReport {
         let report = DryRunReport {
@@ -364,8 +384,8 @@ pub fn evaluate_once(
             );
         };
         let mut steps = vec![timer_step];
-        if let Some(action_step) = action_trace(rule.graph.action.as_ref(), None, terminal_name.as_deref()) { steps.push(action_step); }
-        if let Some(webhook_step) = webhook_trace(rule.graph.webhook.as_ref(), None) { steps.push(webhook_step); }
+        if let Some(action_step) = action_trace(rule.graph.action.as_ref(), None, terminal_name.as_deref(), &reserved) { steps.push(action_step); }
+        if let Some(webhook_step) = webhook_trace(rule.graph.webhook.as_ref(), None, &reserved) { steps.push(webhook_step); }
         return finish(WOULD_FIRE, steps);
     }
 
@@ -550,12 +570,12 @@ pub fn evaluate_once(
 
     let would_fire = ev.condition == Truth::True;
     let action = if would_fire {
-        action_trace(rule.graph.action.as_ref(), ev.captures.as_ref(), terminal_name.as_deref())
+        action_trace(rule.graph.action.as_ref(), ev.captures.as_ref(), terminal_name.as_deref(), &reserved)
     } else {
         rule.graph.action.as_ref().map(|_| step(ACTION, "skipped", "nothing would be sent".to_string()))
     };
     let webhook = if would_fire {
-        webhook_trace(rule.graph.webhook.as_ref(), ev.captures.as_ref())
+        webhook_trace(rule.graph.webhook.as_ref(), ev.captures.as_ref(), &reserved)
     } else {
         rule.graph.webhook.as_ref().map(|_| step(WEBHOOK, "skipped", "nothing would be sent".to_string()))
     };
@@ -595,8 +615,9 @@ pub fn preview_message(
     message: &str,
     substitute: bool,
     caps: Option<&eval::Captures>,
+    reserved: &subst::Reserved,
 ) -> Result<String, subst::SubstError> {
-    if substitute { subst::substitute(message, caps) } else { Ok(message.to_string()) }
+    if substitute { subst::substitute(message, caps, reserved) } else { Ok(message.to_string()) }
 }
 
 #[cfg(test)]
@@ -1172,15 +1193,16 @@ mod tests {
             named: Default::default(),
         };
         let msg = "Fix the $1 failing tests in $2";
-        let sent = subst::substitute(msg, Some(&caps)).unwrap();
-        let previewed = preview_message(msg, true, Some(&caps)).unwrap();
+        let reserved = subst::Reserved::sample();
+        let sent = subst::substitute(msg, Some(&caps), &reserved).unwrap();
+        let previewed = preview_message(msg, true, Some(&caps), &reserved).unwrap();
         assert_eq!(previewed, sent);
     }
 
     #[test]
     fn the_preview_says_it_would_send_nothing_when_a_token_is_unresolvable() {
         let caps = Captures { groups: vec![Some("x".into())], named: Default::default() };
-        assert!(preview_message("Fix $3", true, Some(&caps)).is_err());
+        assert!(preview_message("Fix $3", true, Some(&caps), &subst::Reserved::sample()).is_err());
     }
 
     /// The call site, not just the helper: with substitution on and every token resolvable, the
@@ -1225,6 +1247,30 @@ mod tests {
         assert_eq!(statuses(&report), vec!["ok", "ok", "ok", "failed"]);
         let action = detail(&report, "action");
         assert!(action.contains("$3"), "the failure row must name the token: {action}");
+    }
+
+    #[test]
+    fn a_test_run_renders_reserved_tokens() {
+        let (engine, fake, host) = wire(vec![]);
+        fake.roster.lock().unwrap()[0].cwd = Some("/w".into());
+        let mut rule = ctx_rule("au-dry-reserved");
+        rule.graph.cond_mut().finds = Finds::Event;
+        rule.graph.action_mut().message = "${terminal.title}@${terminal.cwd} ${time}".into();
+        rule.graph.action_mut().substitute = true;
+        fake.say("pc-1", "ctx:63%\n");
+
+        let report = evaluate_once(&engine, host.as_ref(), &rule, "tm-1", 1_000);
+        let action = detail(&report, "action");
+
+        assert!(action.starts_with("would type `codex · core@/w "), "{action}");
+        assert!(action.ends_with("` into codex · core"), "{action}");
+        let rendered_time = action
+            .strip_prefix("would type `codex · core@/w ")
+            .and_then(|text| text.strip_suffix("` into codex · core"))
+            .expect("the dry-run detail should contain only the rendered time after the cwd");
+        assert!(regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+            .unwrap()
+            .is_match(rendered_time));
     }
 
     /// **The same defect, at the site the clause fix did not cover.**

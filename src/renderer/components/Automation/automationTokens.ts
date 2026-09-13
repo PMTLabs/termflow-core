@@ -30,6 +30,14 @@ export type Token =
     | { kind: 'group'; n: number; text: string }
     | { kind: 'named'; name: string; text: string };
 
+/** Names supplied by the terminal that fired an automation, rather than by its pattern. */
+export const RESERVED_TOKENS = ['terminal.id', 'terminal.title', 'terminal.cwd', 'time'] as const;
+
+export function isReservedToken(t: Token | string): boolean {
+    const name = typeof t === 'string' ? t : t.kind === 'named' ? t.name : null;
+    return name !== null && (RESERVED_TOKENS as readonly string[]).includes(name);
+}
+
 const isAllDigits = (s: string): boolean => s.length > 0 && /^[0-9]+$/.test(s);
 
 interface ScanSegment {
@@ -167,15 +175,26 @@ export function previewSubstitute(
         text += seg.lit;
         const { token } = seg;
         if (!token) continue;
-        const inRange = token.kind === 'group' ? token.n <= groups.count : groups.names.has(token.name);
+        const declared = token.kind === 'named' && groups.names.has(token.name);
+        const reserved = isReservedToken(token);
+        const inRange = token.kind === 'group' ? token.n <= groups.count : declared || reserved;
         if (!inRange) return { ok: false, badToken: token.text };
         if (sample === null) {
             flushText();
             parts.push({ kind: 'placeholder', token: token.text });
             continue;
         }
-        const key = token.kind === 'group' ? String(token.n) : token.name;
-        text += captureText(sample, key) ?? '';
+        if (token.kind === 'named' && reserved && !declared) {
+            if (token.name in sample) {
+                text += sample[token.name];
+            } else {
+                flushText();
+                parts.push({ kind: 'placeholder', token: token.text });
+            }
+        } else {
+            const key = token.kind === 'group' ? String(token.n) : token.name;
+            text += captureText(sample, key) ?? '';
+        }
     }
     flushText();
     if (parts.length === 0) parts.push({ kind: 'text', text: '' });

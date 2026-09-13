@@ -12,6 +12,60 @@
 use crate::automation_engine::eval::Captures;
 use std::fmt;
 
+pub const RESERVED_NAMES: [&str; 4] = [
+    "terminal.id",
+    "terminal.title",
+    "terminal.cwd",
+    "time",
+];
+
+/// Values available to message substitutions independently of regex captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reserved {
+    pub terminal_id: String,
+    pub terminal_title: Option<String>,
+    pub terminal_cwd: Option<String>,
+    pub time: String,
+}
+
+impl Reserved {
+    /// Build the display value for a millisecond Unix timestamp in the user's local timezone.
+    pub fn time_from_ms(ms: i64) -> String {
+        use chrono::TimeZone;
+
+        chrono::Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .unwrap_or_else(chrono::Local::now)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    /// Fixed values for shared validation and substitution fixtures.
+    pub fn sample() -> Self {
+        Self {
+            terminal_id: "tm-sample".into(),
+            terminal_title: Some("[terminal.title]".into()),
+            terminal_cwd: Some("[terminal.cwd]".into()),
+            time: "[time]".into(),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        match name {
+            "terminal.id" => Some(&self.terminal_id),
+            "terminal.title" => Some(self.terminal_title.as_deref().unwrap_or("")),
+            "terminal.cwd" => Some(self.terminal_cwd.as_deref().unwrap_or("")),
+            "time" => Some(&self.time),
+            _ => None,
+        }
+    }
+}
+
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Whole,
@@ -95,6 +149,13 @@ pub fn tokens_used(message: &str) -> Vec<Token> {
     scan(message).into_iter().filter_map(|(_, t)| t).collect()
 }
 
+/// Whether the message names the given token after applying the grammar's escape rules.
+pub fn names_token(message: &str, name: &str) -> bool {
+    tokens_used(message)
+        .iter()
+        .any(|token| matches!(token, Token::Named(token_name) if token_name == name))
+}
+
 /// Resolve every token, or name the first one that cannot be resolved.
 ///
 /// A group that EXISTS in the pattern but did not participate resolves to the empty string —
@@ -103,25 +164,41 @@ pub fn tokens_used(message: &str) -> Vec<Token> {
 /// `has_name(k)` is `count()`'s counterpart, so `${retry}` on a declared-but-absent named group
 /// substitutes `""` exactly like an in-range `$3` that did not participate, while `${nope}` on an
 /// undeclared name errors exactly like an out-of-range `$5`.
-pub fn substitute(message: &str, caps: Option<&Captures>) -> Result<String, SubstError> {
+pub fn substitute(
+    message: &str,
+    caps: Option<&Captures>,
+    reserved: &Reserved,
+) -> Result<String, SubstError> {
     let mut out = String::new();
     for (lit, tok) in scan(message) {
         out.push_str(&lit);
         let Some(tok) = tok else { continue };
-        let caps = caps.ok_or_else(|| SubstError(tok.clone()))?;
         let resolved = match &tok {
-            Token::Whole => caps.group(0).unwrap_or(""),
+            Token::Whole => caps
+                .ok_or_else(|| SubstError(tok.clone()))?
+                .group(0)
+                .unwrap_or(""),
             Token::Group(n) => {
+                let caps = caps.ok_or_else(|| SubstError(tok.clone()))?;
                 if *n > caps.count() {
                     return Err(SubstError(tok.clone()));
                 }
                 caps.group(*n).unwrap_or("")
             }
             Token::Named(k) => {
-                if !caps.has_name(k) {
+                if let Some(caps) = caps {
+                    if caps.has_name(k) {
+                        caps.name(k).unwrap_or("")
+                    } else if let Some(value) = reserved.get(k) {
+                        value
+                    } else {
+                        return Err(SubstError(tok.clone()));
+                    }
+                } else if let Some(value) = reserved.get(k) {
+                    value
+                } else {
                     return Err(SubstError(tok.clone()));
                 }
-                caps.name(k).unwrap_or("")
             }
         };
         out.push_str(resolved);
@@ -174,6 +251,15 @@ mod tests {
         }
     }
 
+    fn fixture_reserved() -> Reserved {
+        Reserved {
+            terminal_id: "tm-fx".into(),
+            terminal_title: Some("fx-title".into()),
+            terminal_cwd: Some("/fx".into()),
+            time: "2026-01-02 03:04:05".into(),
+        }
+    }
+
     #[test]
     fn the_shared_token_fixture_agrees_with_the_scanner() {
         #[derive(serde::Deserialize)]
@@ -212,7 +298,8 @@ mod tests {
                 .collect();
             assert_eq!(tokens_used(&case.input), want, "input was {:?}", case.input);
             assert_eq!(
-                substitute(&case.input, Some(&fixture_caps())).expect("fixture captures resolve every token"),
+                substitute(&case.input, Some(&fixture_caps()), &fixture_reserved())
+                    .expect("fixture captures resolve every token"),
                 case.rendered,
                 "input was {:?}",
                 case.input,
@@ -224,13 +311,18 @@ mod tests {
     fn a_token_beyond_the_pattern_is_an_error_not_a_literal() {
         // §4.4's last row: refuse the send. Typing "Fix the $5 failing tests" into a
         // live agent is the "misleading message" the brief forbids.
-        let err = substitute("cost $5", Some(&caps())).unwrap_err();
+        let err = substitute("cost $5", Some(&caps()), &Reserved::sample()).unwrap_err();
         assert_eq!(err.to_string(), "$5");
     }
 
     #[test]
     fn an_unknown_named_group_is_an_error() {
-        assert_eq!(substitute("${nope}", Some(&caps())).unwrap_err().to_string(), "${nope}");
+        assert_eq!(
+            substitute("${nope}", Some(&caps()), &Reserved::sample())
+                .unwrap_err()
+                .to_string(),
+            "${nope}"
+        );
     }
 
     #[test]
@@ -238,7 +330,10 @@ mod tests {
         // §4.4 row 3, named side: a legitimate optional group such as `(?<retry>\d+)?` that did
         // not match must not refuse the send — it substitutes "", exactly like the positional
         // "$3" case above, not like "${nope}".
-        assert_eq!(substitute("retries: ${retry}", Some(&caps())).unwrap(), "retries: ");
+        assert_eq!(
+            substitute("retries: ${retry}", Some(&caps()), &Reserved::sample()).unwrap(),
+            "retries: "
+        );
     }
 
     #[test]
@@ -247,30 +342,93 @@ mod tests {
         while c.groups.len() < 13 {
             c.groups.push(Some(format!("g{}", c.groups.len())));
         }
-        assert_eq!(substitute("${12}", Some(&c)).unwrap(), "g12");
+        assert_eq!(substitute("${12}", Some(&c), &Reserved::sample()).unwrap(), "g12");
         // "$12" is group 1 followed by a literal 2 — the standard regex-replacement reading,
         // and the reason ${} exists at all.
-        assert_eq!(substitute("$12", Some(&c)).unwrap(), "172");
+        assert_eq!(substitute("$12", Some(&c), &Reserved::sample()).unwrap(), "172");
     }
 
     #[test]
     fn with_no_captures_every_token_is_an_error() {
         // A schedule rule has no parse step. Validation blocks this (T6), but if it is
         // ever reached the send must be refused, not sent with "$1" in it.
-        assert_eq!(substitute("hi $1", None).unwrap_err().to_string(), "$1");
+        assert_eq!(
+            substitute("hi $1", None, &Reserved::sample())
+                .unwrap_err()
+                .to_string(),
+            "$1"
+        );
     }
 
     #[test]
     fn empty_braces_are_literal_text() {
         // `${}` names nothing; the brief's table never says what this does. Decided: literal
         // text, same family as "$x" and a trailing "$" — not an error, since nothing was named.
-        assert_eq!(substitute("cost ${} here", Some(&caps())).unwrap(), "cost ${} here");
+        assert_eq!(
+            substitute("cost ${} here", Some(&caps()), &Reserved::sample()).unwrap(),
+            "cost ${} here"
+        );
     }
 
     #[test]
     fn brace_content_that_is_not_purely_digits_is_a_named_lookup() {
         // "${1x}" is not all-digit, so it scans as Named("1x") rather than Group(1) — and since
         // the pattern declares no such name, it errors like any other unknown name.
-        assert_eq!(substitute("${1x}", Some(&caps())).unwrap_err().to_string(), "${1x}");
+        assert_eq!(
+            substitute("${1x}", Some(&caps()), &Reserved::sample())
+                .unwrap_err()
+                .to_string(),
+            "${1x}"
+        );
+    }
+
+    #[test]
+    fn reserved_resolve_without_captures() {
+        let reserved = Reserved {
+            terminal_id: "tm-1".into(),
+            terminal_title: None,
+            terminal_cwd: Some("/work".into()),
+            time: "2026-01-02 03:04:05".into(),
+        };
+        assert_eq!(
+            substitute(
+                "${terminal.id}|${terminal.title}|${terminal.cwd}|${time}",
+                None,
+                &reserved,
+            )
+            .unwrap(),
+            "tm-1||/work|2026-01-02 03:04:05"
+        );
+    }
+
+    #[test]
+    fn a_declared_group_shadows_a_reserved_name() {
+        let captures = Captures {
+            groups: vec![Some("whole".into()), Some("42".into())],
+            named: BTreeMap::from([(String::from("time"), Some(String::from("42")))]),
+        };
+        assert_eq!(
+            substitute("${time}", Some(&captures), &Reserved::sample()).unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn escaped_reserved_token_is_literal_text() {
+        assert_eq!(
+            substitute("$${time}", None, &Reserved::sample()).unwrap(),
+            "${time}"
+        );
+    }
+
+    #[test]
+    fn time_from_ms_has_the_documented_shape() {
+        let time = Reserved::time_from_ms(1_609_459_445_000);
+        assert!(
+            regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+                .unwrap()
+                .is_match(&time),
+            "unexpected local timestamp format: {time}"
+        );
     }
 }

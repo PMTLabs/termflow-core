@@ -33,7 +33,7 @@ import type {
     AutomationRule,
     AutomationSource,
 } from '../../types/electron';
-import { previewSubstitute, tokensUsed } from './automationTokens';
+import { isReservedToken, previewSubstitute, tokensUsed } from './automationTokens';
 import type { Token } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
@@ -227,12 +227,15 @@ function tokenSupplied(
  * `parse.empty` / `parse.uncompilable` are already saying so on the step that owns it.
  */
 export function resolvableTokens(message: string, find: string): Token[] {
-    if (find.trim().length === 0 || compilePattern(find) === null) return [];
+    const tokens = tokensUsed(message);
+    if (find.trim().length === 0 || compilePattern(find) === null) {
+        return tokens.filter((token) => isReservedToken(token));
+    }
     const groups = groupsOf(find);
-    return tokensUsed(message).filter((token) => (
-        token.kind === 'group'
+    return tokens.filter((token) => (
+        isReservedToken(token) || (token.kind === 'group'
             ? tokenSupplied(groups, token.n, null)
-            : tokenSupplied(groups, null, token.name)
+            : tokenSupplied(groups, null, token.name))
     ));
 }
 
@@ -932,7 +935,7 @@ export function problems(rule: AutomationRule): Problem[] {
             // which point every schedule rule — which has no parse step by construction (§6.3) —
             // would have opened blocked by a switch nobody touched. A message naming no token
             // substitutes to itself, so there is nothing to report.
-            if (tokensUsed(destination.message).length === 0) continue;
+            if (tokensUsed(destination.message).every((token) => isReservedToken(token))) continue;
             out.push(
                 problem(
                     'blocks',
@@ -944,7 +947,7 @@ export function problems(rule: AutomationRule): Problem[] {
         } else if (compilePattern(sourcing.find) !== null) {
             const groups = groupsOf(sourcing.find);
             for (const t of tokensUsed(destination.message)) {
-                const bad = t.kind === 'group'
+                const bad = isReservedToken(t) ? false : t.kind === 'group'
                     ? !tokenSupplied(groups, t.n, null)
                     : !tokenSupplied(groups, null, t.name);
                 if (!bad) continue;

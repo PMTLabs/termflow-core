@@ -184,6 +184,7 @@ interface ContextMenuProps {
   y: number;
   items: ContextMenuItem[];
   onClose: () => void;
+  className?: string;
   /**
    * Show every `title` at once, skipping the dwell.
    *
@@ -871,6 +872,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   y,
   items,
   onClose,
+  className,
   instantTitles = false,
   standaloneSubmenu,
   suppressDismiss = false,
@@ -984,7 +986,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   return createPortal(
     <div
       ref={menuRef}
-      className={`context-menu${bare ? ' is-bare' : ''}`}
+      className={`context-menu${bare ? ' is-bare' : ''}${className ? ` ${className}` : ''}`}
       style={{ left: x, top: y }}
     >
       {items.map((item, index) => {
