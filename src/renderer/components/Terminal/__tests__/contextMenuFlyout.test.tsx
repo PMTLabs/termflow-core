@@ -1879,8 +1879,12 @@ describe('snippet row context actions', () => {
                     contextActions: [{ id: 'copy', label: 'Copy', onSelect: jest.fn() }],
                 })],
             }));
-            expect(actions.style.top).toBe(`${expectedTop}px`);
-            expect(actions.style.left).toBe(`${expectedLeft}px`);
+            // Re-query rather than reuse `actions`: a remounted panel would leave the old,
+            // detached element holding the expected style while the live one sat at 0/0.
+            const after = document.querySelector<HTMLElement>('.context-menu-flyout-row-actions')!;
+            expect(after.isConnected).toBe(true);
+            expect(after.style.top).toBe(`${expectedTop}px`);
+            expect(after.style.left).toBe(`${expectedLeft}px`);
         } finally {
             Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
             Object.defineProperty(window, 'innerHeight', { configurable: true, value: previousHeight });
