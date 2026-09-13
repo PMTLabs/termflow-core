@@ -1,5 +1,5 @@
 # GEMINI.MD - Gemini-Specific Instructions
-## Auto-Terminal Project
+## TermFlow Project
 
-> **⚠️ IMPORTANT: Read `agent.md` first for shared project instructions.**
+> **⚠️ IMPORTANT: Read `AGENTS.md` first for shared project instructions.**
 >
