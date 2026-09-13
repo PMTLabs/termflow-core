@@ -154,7 +154,14 @@ fn rendered_webhook_body(webhook: &crate::automation_store::WebhookStep, parse: 
     let Ok(compiled) = compile(&parse.find) else {
         return webhook.body.clone();
     };
-    match subst::substitute(&webhook.body, Some(&sample_webhook_captures(&compiled))) {
+    let reserved = subst::Reserved::sample();
+    let captures = sample_webhook_captures(&compiled);
+    match subst::substitute_escaped(
+        &webhook.body,
+        Some(&captures),
+        &reserved,
+        crate::automation_webhook::value_escape(webhook.provider),
+    ) {
         Ok(body) => body,
         Err(_) => webhook.body.clone(),
     }
@@ -774,7 +781,9 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             // would have opened blocked by a switch nobody touched. A message naming no token
             // substitutes to itself: `subst::substitute` returns it unchanged for a `None` capture
             // set, so there is nothing to report.
-            None if !subst::tokens_used(message).is_empty() => out.push(Problem::new(
+            None if subst::tokens_used(message)
+                .iter()
+                .any(|token| !matches!(token, subst::Token::Named(name) if subst::is_reserved(name))) => out.push(Problem::new(
                 Severity::Blocks,
                 field,
                 "action.tokenWithoutParse",
@@ -789,7 +798,8 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                             subst::Token::Whole => false,
                             subst::Token::Group(n) => !token_supplied(&compiled, Some(*n), None),
                             subst::Token::Named(name) => {
-                                !token_supplied(&compiled, None, Some(name.as_str()))
+                                !subst::is_reserved(name)
+                                    && !token_supplied(&compiled, None, Some(name.as_str()))
                             }
                         };
                         if !bad {

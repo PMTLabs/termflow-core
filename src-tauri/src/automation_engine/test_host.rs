@@ -86,6 +86,16 @@ impl FakeHost {
     }
 
     pub(crate) fn with_terminal(self, tm: &str, pc: &str, label: &str) -> Self {
+        self.with_terminal_cwd(tm, pc, Some(label), None)
+    }
+
+    pub(crate) fn with_terminal_cwd(
+        self,
+        tm: &str,
+        pc: &str,
+        label: Option<&str>,
+        cwd: Option<&str>,
+    ) -> Self {
         self.leaves.lock().unwrap().insert(tm.into(), pc.into());
         self.roster.lock().unwrap().push(RosterRow {
             terminal_id: Some(tm.into()),
@@ -93,8 +103,8 @@ impl FakeHost {
             name: "Terminal-powershell".into(),
             shell: "powershell".into(),
             pid: 100,
-            display_label: Some(label.into()),
-            cwd: None,
+            display_label: label.map(Into::into),
+            cwd: cwd.map(Into::into),
             command_lines: Vec::new(),
         });
         self
@@ -204,6 +214,14 @@ impl EngineHost for FakeHost {
             .iter()
             .find(|r| r.terminal_id.as_deref() == Some(tm))
             .and_then(|r| r.display_label.clone())
+    }
+    fn cwd_for(&self, pc: &str) -> Option<String> {
+        self.roster
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.process_id == pc)
+            .and_then(|r| r.cwd.clone())
     }
     fn store(&self) -> &Arc<AutomationStore> {
         &self.store

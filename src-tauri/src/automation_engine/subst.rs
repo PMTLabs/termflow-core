@@ -12,6 +12,121 @@
 use crate::automation_engine::eval::Captures;
 use std::fmt;
 
+pub const RESERVED_NAMES: [&str; 4] = [
+    "terminal.id",
+    "terminal.title",
+    "terminal.cwd",
+    "time",
+];
+
+/// Values available to message substitutions independently of regex captures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reserved {
+    pub terminal_id: String,
+    pub terminal_title: Option<String>,
+    pub terminal_cwd: Option<String>,
+    pub time: String,
+}
+
+impl Reserved {
+    /// The bag for one send: the id, the DECIDE-time title, the FIRE-time cwd and the clock.
+    ///
+    /// **Title and cwd are scrubbed of control characters here, once, for both builders.** They are
+    /// the two values a person or a filesystem can spell: a pane can be renamed through the API to
+    /// anything, and a directory on Linux/macOS may be called `\x1b[201~\r…`. Both are about to be
+    /// typed into a pty inside a bracketed paste (`automation::send::deliver`), and an ESC or CR
+    /// inside them would close the paste early and submit the rest — a wider exposure than `$1`,
+    /// which is bounded to screen text xterm has already stripped of C0/ESC. The id is ours and the
+    /// time is formatted here, so neither needs it.
+    pub fn for_send(
+        terminal_id: &str,
+        terminal_title: Option<String>,
+        terminal_cwd: Option<String>,
+        at_ms: i64,
+    ) -> Self {
+        Self {
+            terminal_id: terminal_id.to_string(),
+            terminal_title: terminal_title.map(scrub_control_chars),
+            terminal_cwd: terminal_cwd.map(scrub_control_chars),
+            time: Self::time_from_ms(at_ms),
+        }
+    }
+
+    /// `${time}` for a millisecond Unix timestamp, as local wall-clock `YYYY-MM-DD HH:MM:SS`.
+    ///
+    /// The same UTC-then-`with_timezone` conversion as `schedule::local_now`, for the same reason it
+    /// gives: UTC→local is total (DST ambiguity only exists the other way), and an out-of-range
+    /// `ms` — which `now_ms()` cannot produce — falls to the epoch rather than to a SECOND read of
+    /// the clock, so a crossing's `${time}` is always its own `at_ms`.
+    pub fn time_from_ms(ms: i64) -> String {
+        use chrono::{DateTime, Local, Utc};
+
+        DateTime::from_timestamp_millis(ms)
+            .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    }
+
+    /// Fixed values for the save-time validator (`automation_validation::rendered_webhook_body`)
+    /// and its tests. Mirrored by `webhookSampleValues` in `automationValidation.ts`.
+    ///
+    /// The title carries a `"` and the cwd a `\` on purpose: they are the two characters
+    /// `ValueEscape::JsonString` exists for, so a Custom body's JSON check can only pass on a
+    /// rendering that substituted AND escaped — a raw rendering, or a validator that never
+    /// substituted, is told apart by the value, not by the placeholder's own quotes.
+    pub fn sample() -> Self {
+        Self {
+            terminal_id: "tm-sample".into(),
+            terminal_title: Some("[terminal.title] \"quoted\"".into()),
+            terminal_cwd: Some("[terminal.cwd]\\sub".into()),
+            time: "[time]".into(),
+        }
+    }
+
+    fn get(&self, name: &str) -> Option<&str> {
+        match name {
+            "terminal.id" => Some(&self.terminal_id),
+            "terminal.title" => Some(self.terminal_title.as_deref().unwrap_or("")),
+            "terminal.cwd" => Some(self.terminal_cwd.as_deref().unwrap_or("")),
+            "time" => Some(&self.time),
+            _ => None,
+        }
+    }
+}
+
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED_NAMES.contains(&name)
+}
+
+/// How a resolved VALUE is written into the message. The literal text around it is never touched.
+///
+/// `JsonString` is for a body the sender posts byte-for-byte as JSON (`WebhookProvider::Custom`):
+/// every value lands inside a JSON string the user wrote, so a Windows path (`D:\\src`) or a
+/// title with a quote must arrive as a JSON string FRAGMENT — `D:\\\\src`, `\\"` — or the whole
+/// body is malformed. The preset providers serialise the finished message themselves, so `Raw`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueEscape {
+    Raw,
+    JsonString,
+}
+
+/// `serde_json`'s own escaping of `value`, minus the quotes it wraps a string in.
+fn json_string_fragment(value: &str) -> String {
+    let quoted = serde_json::to_string(value).expect("a &str is always serialisable as JSON");
+    quoted[1..quoted.len() - 1].to_string()
+}
+
+/// Drop every C0/C1/ESC character. Printable text — including spaces and every non-ASCII letter —
+/// passes through untouched, so a title or path that never carried one is returned as it was.
+fn scrub_control_chars(value: String) -> String {
+    if value.chars().any(char::is_control) {
+        value.chars().filter(|c| !c.is_control()).collect()
+    } else {
+        value
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Token {
     Whole,
@@ -95,6 +210,13 @@ pub fn tokens_used(message: &str) -> Vec<Token> {
     scan(message).into_iter().filter_map(|(_, t)| t).collect()
 }
 
+/// Whether the message names the given token after applying the grammar's escape rules.
+pub fn names_token(message: &str, name: &str) -> bool {
+    tokens_used(message)
+        .iter()
+        .any(|token| matches!(token, Token::Named(token_name) if token_name == name))
+}
+
 /// Resolve every token, or name the first one that cannot be resolved.
 ///
 /// A group that EXISTS in the pattern but did not participate resolves to the empty string —
@@ -103,28 +225,57 @@ pub fn tokens_used(message: &str) -> Vec<Token> {
 /// `has_name(k)` is `count()`'s counterpart, so `${retry}` on a declared-but-absent named group
 /// substitutes `""` exactly like an in-range `$3` that did not participate, while `${nope}` on an
 /// undeclared name errors exactly like an out-of-range `$5`.
-pub fn substitute(message: &str, caps: Option<&Captures>) -> Result<String, SubstError> {
+pub fn substitute(
+    message: &str,
+    caps: Option<&Captures>,
+    reserved: &Reserved,
+) -> Result<String, SubstError> {
+    substitute_escaped(message, caps, reserved, ValueEscape::Raw)
+}
+
+/// [`substitute`], with every resolved value written through `escape` — see [`ValueEscape`].
+pub fn substitute_escaped(
+    message: &str,
+    caps: Option<&Captures>,
+    reserved: &Reserved,
+    escape: ValueEscape,
+) -> Result<String, SubstError> {
     let mut out = String::new();
     for (lit, tok) in scan(message) {
         out.push_str(&lit);
         let Some(tok) = tok else { continue };
-        let caps = caps.ok_or_else(|| SubstError(tok.clone()))?;
         let resolved = match &tok {
-            Token::Whole => caps.group(0).unwrap_or(""),
+            Token::Whole => caps
+                .ok_or_else(|| SubstError(tok.clone()))?
+                .group(0)
+                .unwrap_or(""),
             Token::Group(n) => {
+                let caps = caps.ok_or_else(|| SubstError(tok.clone()))?;
                 if *n > caps.count() {
                     return Err(SubstError(tok.clone()));
                 }
                 caps.group(*n).unwrap_or("")
             }
             Token::Named(k) => {
-                if !caps.has_name(k) {
+                if let Some(caps) = caps {
+                    if caps.has_name(k) {
+                        caps.name(k).unwrap_or("")
+                    } else if let Some(value) = reserved.get(k) {
+                        value
+                    } else {
+                        return Err(SubstError(tok.clone()));
+                    }
+                } else if let Some(value) = reserved.get(k) {
+                    value
+                } else {
                     return Err(SubstError(tok.clone()));
                 }
-                caps.name(k).unwrap_or("")
             }
         };
-        out.push_str(resolved);
+        match escape {
+            ValueEscape::Raw => out.push_str(resolved),
+            ValueEscape::JsonString => out.push_str(&json_string_fragment(resolved)),
+        }
     }
     Ok(out)
 }
@@ -174,6 +325,15 @@ mod tests {
         }
     }
 
+    fn fixture_reserved() -> Reserved {
+        Reserved {
+            terminal_id: "tm-fx".into(),
+            terminal_title: Some("fx-title".into()),
+            terminal_cwd: Some("/fx".into()),
+            time: "2026-01-02 03:04:05".into(),
+        }
+    }
+
     #[test]
     fn the_shared_token_fixture_agrees_with_the_scanner() {
         #[derive(serde::Deserialize)]
@@ -184,7 +344,9 @@ mod tests {
         struct Case {
             input: String,
             tokens: Vec<FixtureToken>,
-            rendered: String,
+            /// `null`: the scanner recognises the token but nothing resolves it — a dotted name
+            /// is accepted by the grammar, and only the reserved spellings have a value.
+            rendered: Option<String>,
         }
         #[derive(serde::Deserialize)]
         #[serde(tag = "kind", rename_all = "lowercase")]
@@ -211,12 +373,16 @@ mod tests {
                 })
                 .collect();
             assert_eq!(tokens_used(&case.input), want, "input was {:?}", case.input);
-            assert_eq!(
-                substitute(&case.input, Some(&fixture_caps())).expect("fixture captures resolve every token"),
-                case.rendered,
-                "input was {:?}",
-                case.input,
-            );
+            let result = substitute(&case.input, Some(&fixture_caps()), &fixture_reserved());
+            match case.rendered {
+                Some(rendered) => assert_eq!(
+                    result.expect("fixture captures resolve every token"),
+                    rendered,
+                    "input was {:?}",
+                    case.input,
+                ),
+                None => assert!(result.is_err(), "{:?} should not resolve", case.input),
+            }
         }
     }
 
@@ -224,13 +390,18 @@ mod tests {
     fn a_token_beyond_the_pattern_is_an_error_not_a_literal() {
         // §4.4's last row: refuse the send. Typing "Fix the $5 failing tests" into a
         // live agent is the "misleading message" the brief forbids.
-        let err = substitute("cost $5", Some(&caps())).unwrap_err();
+        let err = substitute("cost $5", Some(&caps()), &Reserved::sample()).unwrap_err();
         assert_eq!(err.to_string(), "$5");
     }
 
     #[test]
     fn an_unknown_named_group_is_an_error() {
-        assert_eq!(substitute("${nope}", Some(&caps())).unwrap_err().to_string(), "${nope}");
+        assert_eq!(
+            substitute("${nope}", Some(&caps()), &Reserved::sample())
+                .unwrap_err()
+                .to_string(),
+            "${nope}"
+        );
     }
 
     #[test]
@@ -238,7 +409,10 @@ mod tests {
         // §4.4 row 3, named side: a legitimate optional group such as `(?<retry>\d+)?` that did
         // not match must not refuse the send — it substitutes "", exactly like the positional
         // "$3" case above, not like "${nope}".
-        assert_eq!(substitute("retries: ${retry}", Some(&caps())).unwrap(), "retries: ");
+        assert_eq!(
+            substitute("retries: ${retry}", Some(&caps()), &Reserved::sample()).unwrap(),
+            "retries: "
+        );
     }
 
     #[test]
@@ -247,30 +421,178 @@ mod tests {
         while c.groups.len() < 13 {
             c.groups.push(Some(format!("g{}", c.groups.len())));
         }
-        assert_eq!(substitute("${12}", Some(&c)).unwrap(), "g12");
+        assert_eq!(substitute("${12}", Some(&c), &Reserved::sample()).unwrap(), "g12");
         // "$12" is group 1 followed by a literal 2 — the standard regex-replacement reading,
         // and the reason ${} exists at all.
-        assert_eq!(substitute("$12", Some(&c)).unwrap(), "172");
+        assert_eq!(substitute("$12", Some(&c), &Reserved::sample()).unwrap(), "172");
     }
 
     #[test]
     fn with_no_captures_every_token_is_an_error() {
         // A schedule rule has no parse step. Validation blocks this (T6), but if it is
         // ever reached the send must be refused, not sent with "$1" in it.
-        assert_eq!(substitute("hi $1", None).unwrap_err().to_string(), "$1");
+        assert_eq!(
+            substitute("hi $1", None, &Reserved::sample())
+                .unwrap_err()
+                .to_string(),
+            "$1"
+        );
     }
 
     #[test]
     fn empty_braces_are_literal_text() {
         // `${}` names nothing; the brief's table never says what this does. Decided: literal
         // text, same family as "$x" and a trailing "$" — not an error, since nothing was named.
-        assert_eq!(substitute("cost ${} here", Some(&caps())).unwrap(), "cost ${} here");
+        assert_eq!(
+            substitute("cost ${} here", Some(&caps()), &Reserved::sample()).unwrap(),
+            "cost ${} here"
+        );
     }
 
     #[test]
     fn brace_content_that_is_not_purely_digits_is_a_named_lookup() {
         // "${1x}" is not all-digit, so it scans as Named("1x") rather than Group(1) — and since
         // the pattern declares no such name, it errors like any other unknown name.
-        assert_eq!(substitute("${1x}", Some(&caps())).unwrap_err().to_string(), "${1x}");
+        assert_eq!(
+            substitute("${1x}", Some(&caps()), &Reserved::sample())
+                .unwrap_err()
+                .to_string(),
+            "${1x}"
+        );
+    }
+
+    #[test]
+    fn reserved_resolve_without_captures() {
+        let reserved = Reserved {
+            terminal_id: "tm-1".into(),
+            terminal_title: None,
+            terminal_cwd: Some("/work".into()),
+            time: "2026-01-02 03:04:05".into(),
+        };
+        assert_eq!(
+            substitute(
+                "${terminal.id}|${terminal.title}|${terminal.cwd}|${time}",
+                None,
+                &reserved,
+            )
+            .unwrap(),
+            "tm-1||/work|2026-01-02 03:04:05"
+        );
+    }
+
+    #[test]
+    fn a_declared_group_shadows_a_reserved_name() {
+        let captures = Captures {
+            groups: vec![Some("whole".into()), Some("42".into())],
+            named: BTreeMap::from([(String::from("time"), Some(String::from("42")))]),
+        };
+        assert_eq!(
+            substitute("${time}", Some(&captures), &Reserved::sample()).unwrap(),
+            "42"
+        );
+    }
+
+    #[test]
+    fn escaped_reserved_token_is_literal_text() {
+        assert_eq!(
+            substitute("$${time}", None, &Reserved::sample()).unwrap(),
+            "${time}"
+        );
+    }
+
+    /// The paste-breaking bytes: ESC (a bracketed-paste end), CR (a submit) and LF, in both of the
+    /// values a person or a filesystem can spell. The id is left alone — it is ours.
+    #[test]
+    fn a_title_or_cwd_with_control_characters_is_scrubbed_for_the_paste() {
+        let reserved = Reserved::for_send(
+            "tm-1",
+            Some("x\x1b[201~\ry".into()),
+            Some("/repo\n\x07b".into()),
+            0,
+        );
+        assert_eq!(reserved.terminal_title.as_deref(), Some("x[201~y"));
+        assert_eq!(reserved.terminal_cwd.as_deref(), Some("/repob"));
+        assert_eq!(reserved.terminal_id, "tm-1");
+    }
+
+    /// The negative control: a value with nothing to scrub is returned exactly as it was, spaces
+    /// and non-ASCII included.
+    #[test]
+    fn a_clean_title_and_cwd_pass_through_the_scrub_untouched() {
+        let reserved = Reserved::for_send("tm-1", Some("codex · core".into()), Some("D:\\src core".into()), 0);
+        assert_eq!(reserved.terminal_title.as_deref(), Some("codex · core"));
+        assert_eq!(reserved.terminal_cwd.as_deref(), Some("D:\\src core"));
+    }
+
+    /// `JsonString` escapes the VALUES and only the values: the braces and quotes the user wrote
+    /// around `$1` and `${terminal.cwd}` are literal text and go out as they are.
+    #[test]
+    fn json_string_escape_touches_values_and_never_the_literal_text() {
+        let reserved = Reserved::for_send("tm-1", Some("say \"hi\"".into()), Some("D:\\src\\core".into()), 0);
+        let body = r#"{"cwd":"${terminal.cwd}","t":"${terminal.title}","n":"$2"}"#;
+        let rendered = substitute_escaped(body, Some(&caps()), &reserved, ValueEscape::JsonString).unwrap();
+        assert_eq!(rendered, r#"{"cwd":"D:\\src\\core","t":"say \"hi\"","n":"a.ts"}"#);
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["cwd"], "D:\\src\\core");
+        assert_eq!(parsed["t"], "say \"hi\"");
+    }
+
+    /// The negative control: `Raw` is what every other caller gets, and it leaves the value alone.
+    #[test]
+    fn raw_escape_writes_the_value_verbatim() {
+        let reserved = Reserved::for_send("tm-1", None, Some("D:\\src".into()), 0);
+        assert_eq!(
+            substitute_escaped("in ${terminal.cwd}", None, &reserved, ValueEscape::Raw).unwrap(),
+            "in D:\\src"
+        );
+    }
+
+    /// The value, not only the shape: a fixed string of the right shape must fail here, so the
+    /// engine tests that bracket `${time}` between two clock reads have something to lean on.
+    /// The expected value comes from chrono's OTHER local-time path (`Local.timestamp_millis_opt`)
+    /// rather than the UTC-then-`with_timezone` one the function uses.
+    #[test]
+    fn time_from_ms_renders_that_instant_in_local_time() {
+        use chrono::{Local, TimeZone};
+        let ms = 1_609_459_445_000;
+        let expected = Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .expect("a real instant has one local rendering")
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        assert_eq!(Reserved::time_from_ms(ms), expected);
+        assert_ne!(
+            Reserved::time_from_ms(ms + 1_000),
+            expected,
+            "one second later must render differently"
+        );
+        assert!(
+            regex::Regex::new(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+                .unwrap()
+                .is_match(&expected),
+            "unexpected local timestamp format: {expected}"
+        );
+    }
+
+    /// `RESERVED_NAMES` (what the validators exempt) and `Reserved::get` (what a send resolves)
+    /// are two lists; a name in one and not the other is a message that saves and then fails to
+    /// send, or the reverse. The four names are spelled out here rather than read from the
+    /// constant, so a constant that lost one fails instead of shrinking the loop.
+    #[test]
+    fn every_reserved_name_is_exempt_and_resolves() {
+        assert_eq!(RESERVED_NAMES, ["terminal.id", "terminal.title", "terminal.cwd", "time"]);
+        let reserved = Reserved::sample();
+        for name in ["terminal.id", "terminal.title", "terminal.cwd", "time"] {
+            assert!(is_reserved(name), "{name} is not exempt");
+            assert!(reserved.get(name).is_some(), "{name} does not resolve");
+            assert_eq!(
+                substitute(&format!("${{{name}}}"), None, &reserved).unwrap(),
+                reserved.get(name).unwrap(),
+                "{name} did not substitute to its own value"
+            );
+        }
+        assert!(!is_reserved("terminal.nope"));
+        assert!(reserved.get("terminal.nope").is_none());
     }
 }

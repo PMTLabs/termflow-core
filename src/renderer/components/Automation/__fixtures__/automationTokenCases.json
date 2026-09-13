@@ -16,6 +16,14 @@
     { "input": "${1x}", "tokens": [{ "kind": "named", "name": "1x" }], "rendered": "one-x" },
     { "input": "$12", "tokens": [{ "kind": "group", "n": 1 }], "rendered": "[g1]2" },
     { "input": "${12}", "tokens": [{ "kind": "group", "n": 12 }], "rendered": "[g12]" },
-    { "input": "fix $1 in ${file}, not $$1 and not $x", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "file" }], "rendered": "fix [g1] in file, not $1 and not $x" }
+    { "input": "fix $1 in ${file}, not $$1 and not $x", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "file" }], "rendered": "fix [g1] in file, not $1 and not $x" },
+    { "input": "${terminal.id}", "tokens": [{ "kind": "named", "name": "terminal.id" }], "rendered": "tm-fx" },
+    { "input": "${terminal.title}", "tokens": [{ "kind": "named", "name": "terminal.title" }], "rendered": "fx-title" },
+    { "input": "${terminal.cwd}", "tokens": [{ "kind": "named", "name": "terminal.cwd" }], "rendered": "/fx" },
+    { "input": "${time}", "tokens": [{ "kind": "named", "name": "time" }], "rendered": "2026-01-02 03:04:05" },
+    { "input": "$${time}", "tokens": [], "rendered": "${time}" },
+    { "input": "$1 in ${terminal.cwd} at ${time}", "tokens": [{ "kind": "group", "n": 1 }, { "kind": "named", "name": "terminal.cwd" }, { "kind": "named", "name": "time" }], "rendered": "[g1] in /fx at 2026-01-02 03:04:05" },
+    { "input": "${unfinished", "tokens": [], "rendered": "${unfinished" },
+    { "input": "${terminal.nope}", "tokens": [{ "kind": "named", "name": "terminal.nope" }], "rendered": null }
   ]
 }

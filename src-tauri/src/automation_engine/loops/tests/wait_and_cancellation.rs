@@ -57,6 +57,31 @@ async fn a_delay_holds_the_send_then_fires_it() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn an_after_match_send_keeps_the_source_terminal_label() {
+    let (engine, fake, host) = rig_with_rule(|g| {
+        g.parse_mut().find = "API error".into();
+        g.cond_mut().finds = Finds::Event;
+        g.action_mut().message = "from ${terminal.title}".into();
+        g.action_mut().substitute = true;
+        g.timer = Some(TimerStep { mode: TimerMode::AfterMatch { delay_ms: 30_000 } });
+    });
+    engine.runtime.set_arm("au-1", "tm-1", ArmState::armed());
+    engine.runtime.mark_dirty("pc-1");
+    fake.say("pc-1", "API error");
+
+    evaluate_tick(&engine, &host, 0, 1_000).await;
+    assert_eq!(engine.runtime.parked_at("au-1", "tm-1"), Some(31_000));
+    fake.roster.lock().unwrap()[0].display_label = Some("later label".into());
+
+    evaluate_tick(&engine, &host, 0, 31_001).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    let written = fake.written().join("\n");
+    assert!(written.contains("from codex · core"), "the carried source label was lost: {written}");
+    assert!(!written.contains("later label"), "the delayed send re-resolved its label: {written}");
+}
+
 /// **The crossing is SPENT at decide time, and the park does not give it back.**
 ///
 /// `set_arm` writes `Fired` before the park, which is the whole of "no double-park" (§6.2). The

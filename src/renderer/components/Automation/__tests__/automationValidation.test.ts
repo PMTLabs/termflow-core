@@ -23,6 +23,7 @@ import {
     blockingProblems,
     patternProblems,
     problems,
+    renderWebhookBodyForValidation,
 } from '../automationValidation';
 import type { Problem, ProblemCode } from '../automationValidation';
 import { AUTOMATION_TEMPLATES, draftFromTemplate } from '../../Settings/Automations/automationTemplates';
@@ -69,6 +70,87 @@ describe('automationValidation — the shared fixture', () => {
         // silently — it forces a look at whether the fixture actually covers it.
         expect(all.length).toBe(29);
         expect(all.filter((code) => !covered.has(code))).toEqual([]);
+    });
+});
+
+describe('automationValidation — reserved message tokens', () => {
+    const scheduleWith = (message: string, body?: string): AutomationRule => {
+        const source = cases[0].rule;
+        return {
+            ...source,
+            graph: {
+                ...source.graph,
+                monitor: undefined,
+                parse: undefined,
+                cond: undefined,
+                timer: { mode: { dailyAt: { minuteOfDay: 540, days: 0b0001_1111 } } },
+                action: { ...source.graph.action!, message, substitute: true },
+                webhook: body === undefined
+                    ? undefined
+                    : { provider: 'custom', url: 'https://example.test/hook', body, substitute: true },
+            },
+        };
+    };
+
+    /**
+     * All four names, at BOTH destinations: an exemption list that lost a name would still pass a
+     * `${terminal.id}`-only probe (and a loop over `RESERVED_TOKENS` would shrink with it), and
+     * the webhook body goes through the same loop as the message but is a different field.
+     */
+    it.each(['terminal.id', 'terminal.title', 'terminal.cwd', 'time'])('allows a schedule rule to use ${%s} without a pattern', (name) => {
+        const rule = scheduleWith(`\${${name}}`, `{"v":"\${${name}}"}`);
+        expect(problems(rule).map((problem) => problem.code)).toEqual([]);
+    });
+
+    it('still rejects an unknown named token', () => {
+        const source = cases[0].rule;
+        const rule = {
+            ...source,
+            graph: {
+                ...source.graph,
+                action: { ...source.graph.action!, message: '${nope}', substitute: true },
+            },
+        };
+        expect(problems(rule).map((problem) => problem.code)).toContain('action.unknownToken');
+    });
+
+    it('lets a declared time capture shadow the reserved token', () => {
+        const source = cases[0].rule;
+        const rule = {
+            ...source,
+            graph: {
+                ...source.graph,
+                parse: { ...source.graph.parse!, find: String.raw`(?<time>\d+)` },
+                action: { ...source.graph.action!, message: '${time}', substitute: true },
+            },
+        };
+        expect(problems(rule).map((problem) => problem.code)).not.toContain('action.unknownToken');
+    });
+
+    /**
+     * The rendering the Custom JSON check parses, not only its verdict: the untouched body is
+     * valid JSON too, so "no bodyNotJson" alone cannot tell a validator that substituted from one
+     * that did not. The sample title carries a `"` and the cwd a `\`, so a raw rendering is
+     * invalid JSON and only substituted-and-escaped parses back to the sample values — and every
+     * reserved name must render, or the token's own text would survive into the body.
+     */
+    it('renders every reserved token, JSON-escaped, into a Custom body before the JSON check', () => {
+        const source = cases[0].rule;
+        const body = '{"t":"${terminal.title}","cwd":"${terminal.cwd}","id":"${terminal.id}","at":"${time}","g":"$1"}';
+        const webhook = { provider: 'custom' as const, url: 'https://example.test/hook', body, substitute: true };
+        const rendered = renderWebhookBodyForValidation(webhook, source.graph.parse!);
+        expect(rendered).toBe(
+            '{"t":"[terminal.title] \\"quoted\\"","cwd":"[terminal.cwd]\\\\sub","id":"tm-sample","at":"[time]","g":"[g1]"}',
+        );
+        expect(JSON.parse(rendered)).toEqual({
+            t: '[terminal.title] "quoted"',
+            cwd: '[terminal.cwd]\\sub',
+            id: 'tm-sample',
+            at: '[time]',
+            g: '[g1]',
+        });
+        const rule = { ...source, graph: { ...source.graph, webhook } };
+        expect(problems(rule).map((problem) => problem.code)).not.toContain('webhook.bodyNotJson');
     });
 });
 

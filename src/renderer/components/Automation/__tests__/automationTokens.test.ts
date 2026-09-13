@@ -18,7 +18,8 @@ const named = (name: string): Token => ({ kind: 'named', name, text: `\${${name}
 interface FixtureCase {
     input: string;
     tokens: Array<{ kind: 'group'; n: number } | { kind: 'named'; name: string }>;
-    rendered: string;
+    /** `null`: recognised by the scanner, resolved by nothing (an unknown dotted name). */
+    rendered: string | null;
 }
 
 const cases = (fixture as unknown as { cases: FixtureCase[] }).cases;
@@ -31,6 +32,10 @@ const fixtureSample: Record<string, string> = {
     ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [String(i + 1), `[g${i + 1}]`])),
     file: 'file',
     '1x': 'one-x',
+    'terminal.id': 'tm-fx',
+    'terminal.title': 'fx-title',
+    'terminal.cwd': '/fx',
+    time: '2026-01-02 03:04:05',
 };
 
 describe('tokensUsed — the shared grammar fixture', () => {
@@ -45,7 +50,9 @@ describe('tokensUsed — the shared grammar fixture', () => {
         expect(tokensUsed(testCase.input)).toEqual(want);
 
         const preview = previewSubstitute(testCase.input, fixtureGroups, fixtureSample);
-        expect(preview).toEqual({ ok: true, parts: [{ kind: 'text', text: testCase.rendered }] });
+        expect(preview).toEqual(testCase.rendered === null
+            ? { ok: false, badToken: testCase.input }
+            : { ok: true, parts: [{ kind: 'text', text: testCase.rendered }] });
     });
 });
 
@@ -107,6 +114,70 @@ describe('previewSubstitute — absent prototype-named captures', () => {
         expect(previewSubstitute('send ${toString}', { count: 1, names: new Set(['toString']) }, {})).toEqual({
             ok: true,
             parts: [{ kind: 'text', text: 'send ' }],
+        });
+    });
+});
+
+describe('previewSubstitute — reserved terminal values', () => {
+    /**
+     * The sample map is flat, so a declared `time` group and the reserved clock share one key and
+     * a value alone cannot say which path resolved it (`{ time: '42' }` reads `42` either way).
+     * The observable difference is an ABSENT key: a declared group that did not participate is
+     * empty text, exactly like any optional capture; a reserved name with no sample is a
+     * placeholder. A resolver that always takes the reserved path for `${time}` fails the first.
+     */
+    it('lets a declared time group shadow the reserved clock value', () => {
+        const declared = { count: 1, names: new Set(['time']) };
+        expect(previewSubstitute('${time}', declared, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: '' }],
+        });
+        expect(previewSubstitute('${time}', { count: 0, names: new Set() }, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'placeholder', token: '${time}' }],
+        });
+        expect(previewSubstitute('${time}', declared, { time: '42' })).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: '42' }],
+        });
+    });
+
+    it('shows an undeclared reserved token as a placeholder without a sample', () => {
+        expect(previewSubstitute('${time}', { count: 0, names: new Set() }, null)).toEqual({
+            ok: true,
+            parts: [{ kind: 'placeholder', token: '${time}' }],
+        });
+    });
+
+    it('shows a placeholder when a real sample has no reserved value', () => {
+        expect(previewSubstitute('at ${time}', { count: 0, names: new Set() }, {})).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: 'at ' }, { kind: 'placeholder', token: '${time}' }],
+        });
+    });
+});
+
+describe('previewSubstitute — JSON-string escaping for a Custom webhook body', () => {
+    const groups = { count: 1, names: new Set<string>() };
+    const sample = { '1': 'D:\\src "x"', 'terminal.cwd': 'D:\\core' };
+
+    /** Values are escaped as JSON string fragments; the braces and quotes the user wrote are not. */
+    it('escapes the values and never the literal text', () => {
+        const result = previewSubstitute('{"a":"$1","cwd":"${terminal.cwd}"}', groups, sample, 'json-string');
+        expect(result).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: '{"a":"D:\\\\src \\"x\\"","cwd":"D:\\\\core"}' }],
+        });
+        // What the recipient parses back is the raw path — the whole point of the escape.
+        const rendered = (result as { parts: { kind: 'text'; text: string }[] }).parts[0].text;
+        expect(JSON.parse(rendered)).toEqual({ a: 'D:\\src "x"', cwd: 'D:\\core' });
+    });
+
+    /** The negative control: the default is raw, exactly what the terminal message gets. */
+    it('writes the value verbatim by default', () => {
+        expect(previewSubstitute('in $1', groups, sample)).toEqual({
+            ok: true,
+            parts: [{ kind: 'text', text: 'in D:\\src "x"' }],
         });
     });
 });

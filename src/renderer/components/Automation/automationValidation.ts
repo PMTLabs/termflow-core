@@ -32,9 +32,10 @@ import type {
     AutomationParseStep,
     AutomationRule,
     AutomationSource,
+    AutomationWebhookProvider,
 } from '../../types/electron';
-import { previewSubstitute, tokensUsed } from './automationTokens';
-import type { Token } from './automationTokens';
+import { isReservedToken, previewSubstitute, tokensUsed } from './automationTokens';
+import type { Token, ValueEscape } from './automationTokens';
 
 export type Severity = 'blocks' | 'warns';
 
@@ -227,12 +228,15 @@ function tokenSupplied(
  * `parse.empty` / `parse.uncompilable` are already saying so on the step that owns it.
  */
 export function resolvableTokens(message: string, find: string): Token[] {
-    if (find.trim().length === 0 || compilePattern(find) === null) return [];
+    const tokens = tokensUsed(message);
+    if (find.trim().length === 0 || compilePattern(find) === null) {
+        return tokens.filter((token) => isReservedToken(token));
+    }
     const groups = groupsOf(find);
-    return tokensUsed(message).filter((token) => (
-        token.kind === 'group'
+    return tokens.filter((token) => (
+        isReservedToken(token) || (token.kind === 'group'
             ? tokenSupplied(groups, token.n, null)
-            : tokenSupplied(groups, null, token.name)
+            : tokenSupplied(groups, null, token.name))
     ));
 }
 
@@ -264,8 +268,27 @@ function parseStep(graph: AutomationGraph): AutomationParseStep | null {
     return parse && parse.find.trim().length > 0 ? parse : null;
 }
 
+/**
+ * The one rule for how a substituted value is written into a webhook body — the mirror of
+ * `automation_webhook::value_escape`, read by the panel's preview and by the JSON check below so the
+ * two cannot disagree about a `"`. Preset providers serialise the finished message as a JSON value;
+ * a Custom body is posted byte-for-byte and must be JSON, so its values are JSON string fragments.
+ */
+export function webhookValueEscape(provider: AutomationWebhookProvider): ValueEscape {
+    return provider === 'custom' ? 'json-string' : 'raw';
+}
+
 function webhookSampleValues(groups: { count: number; names: Set<string> }): Record<string, string> {
-    const sample: Record<string, string> = {};
+    // The same shapes `automation_validation.rs`'s `sample_webhook_captures` and `Reserved::sample`
+    // render, so a body that saves here is one the Rust check accepts too. The title carries a `"`
+    // and the cwd a `\` on purpose: they are the two characters `'json-string'` exists for, so a
+    // Custom body's JSON check can only pass on a rendering that substituted AND escaped.
+    const sample: Record<string, string> = {
+        'terminal.id': 'tm-sample',
+        'terminal.title': '[terminal.title] "quoted"',
+        'terminal.cwd': '[terminal.cwd]\\sub',
+        time: '[time]',
+    };
     for (let index = 0; index <= groups.count; index += 1) {
         sample[String(index)] = `[g${index}]`;
     }
@@ -275,7 +298,12 @@ function webhookSampleValues(groups: { count: number; names: Set<string> }): Rec
     return sample;
 }
 
-function renderWebhookBodyForValidation(
+/**
+ * The body the Custom-provider JSON check below parses. Exported for its own test only: the
+ * check's verdict cannot tell a validator that substituted from one that did not (the untouched
+ * body is valid JSON too), so the test reads the rendering itself.
+ */
+export function renderWebhookBodyForValidation(
     webhook: NonNullable<AutomationGraph['webhook']>,
     parse: AutomationParseStep | null,
 ): string {
@@ -289,7 +317,7 @@ function renderWebhookBodyForValidation(
     }
 
     const sample = webhookSampleValues(groups);
-    const rendered = previewSubstitute(webhook.body, groups, sample);
+    const rendered = previewSubstitute(webhook.body, groups, sample, webhookValueEscape(webhook.provider));
     if (!rendered.ok) {
         return webhook.body;
     }
@@ -932,7 +960,7 @@ export function problems(rule: AutomationRule): Problem[] {
             // which point every schedule rule — which has no parse step by construction (§6.3) —
             // would have opened blocked by a switch nobody touched. A message naming no token
             // substitutes to itself, so there is nothing to report.
-            if (tokensUsed(destination.message).length === 0) continue;
+            if (tokensUsed(destination.message).every((token) => isReservedToken(token))) continue;
             out.push(
                 problem(
                     'blocks',
@@ -944,7 +972,7 @@ export function problems(rule: AutomationRule): Problem[] {
         } else if (compilePattern(sourcing.find) !== null) {
             const groups = groupsOf(sourcing.find);
             for (const t of tokensUsed(destination.message)) {
-                const bad = t.kind === 'group'
+                const bad = isReservedToken(t) ? false : t.kind === 'group'
                     ? !tokenSupplied(groups, t.n, null)
                     : !tokenSupplied(groups, null, t.name);
                 if (!bad) continue;

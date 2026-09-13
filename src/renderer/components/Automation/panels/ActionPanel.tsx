@@ -20,10 +20,12 @@ import type { AutomationDraft, DraftAction } from '../automationDraft';
 import type { PanelModel } from '../automationDerive';
 import { SEND_PHRASES } from '../automationDerive';
 import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
-import { previewSubstitute, tokensUsed } from '../automationTokens';
+import { isReservedToken, previewSubstitute, tokensUsed } from '../automationTokens';
 import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
+import { SnippetPickerButton } from './SnippetPickerButton';
+import { restoreCaret, spliceAtCaret } from './caretInsert';
 
 export interface ActionPanelProps {
     draft: AutomationDraft;
@@ -40,7 +42,7 @@ export interface ActionPanelProps {
     sample?: Record<string, string>;
 }
 
-type ChipInfo = { text: string; dead: boolean };
+type ChipInfo = { text: string; dead: boolean; title?: string };
 
 /** The scanner reads bare `$N` as one digit, so group 10 and above need braces everywhere. */
 const groupToken = (n: number): string => (n < 10 ? `$${n}` : `\${${n}}`);
@@ -105,6 +107,7 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     // *"Nothing would be sent — there is no pattern yet"* about a send that is perfectly fine.
     // The same narrowing `action.tokenWithoutParse` took, for the same reason.
     const usesTokens = tokensUsed(action.message).length > 0;
+    const usesPatternTokens = tokensUsed(action.message).some((token) => !isReservedToken(token));
 
     const preview = !substitute || !usesTokens
         ? {
@@ -114,7 +117,7 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
             // not a bare `> ⏎` a second source of truth would draw.
             parts: [{ kind: 'text', text: model.values.message.text }] as PreviewPart[],
         }
-        : !patternReady
+        : !patternReady && usesPatternTokens
             ? {
                 blocked: true as const,
                 text: 'Nothing would be sent — there is no pattern yet to capture values from.',
@@ -141,6 +144,10 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
         ...Array.from({ length: groups.count }, (_, i): ChipInfo => ({ text: groupToken(i + 1), dead: false })),
         { text: groupToken(groups.count + 1), dead: true },
         { text: '$$', dead: false },
+        { text: '${terminal.id}', dead: false, title: 'The id of the terminal that fired this rule' },
+        { text: '${terminal.title}', dead: false, title: 'The title of the terminal that fired this rule' },
+        { text: '${terminal.cwd}', dead: false, title: 'The working directory of the terminal that fired this rule' },
+        { text: '${time}', dead: false, title: 'When the message was sent, YYYY-MM-DD HH:mm:ss' },
     ];
     // The tokens typed into the message that this pattern COULD fill in — see `resolvableTokens`.
     // Only asked while substitution is off, the one state they can go out literal in.
@@ -151,24 +158,12 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
      * the mismatch was reported. The chips and the toggle disagreed: clicking `$1` inserted a
      * reference into a message sent verbatim, so the rule typed the characters `$1`.
      */
-    function insertToken(token: string) {
+    function insert(text: string, extraPatch: Record<string, unknown>) {
         const el = messageRef.current;
         const value = action?.message ?? '';
-        const start = el?.selectionStart ?? value.length;
-        const end = el?.selectionEnd ?? value.length;
-        const next = value.slice(0, start) + token + value.slice(end);
-        dispatch({ type: 'action', patch: { message: next, substitute: true } });
-        const restoreCaret = () => {
-            const input = messageRef.current;
-            if (!input) return;
-            const pos = start + token.length;
-            input.focus();
-            input.setSelectionRange(pos, pos);
-        };
-        // Best-effort only: restoring the caret is a convenience for the NEXT keystroke, not
-        // something any assertion depends on, so an environment without rAF just runs it inline.
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreCaret);
-        else restoreCaret();
+        const { next, caret } = spliceAtCaret(el, value, text);
+        dispatch({ type: 'action', patch: { message: next, ...extraPatch } });
+        restoreCaret(messageRef, caret);
     }
 
     return (
@@ -189,22 +184,28 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                             type="button"
                             key={chip.text}
                             className={`au-token${chip.dead ? ' dead' : ''}`}
-                            title={chip.dead ? `${chip.text} has nothing to stand for yet` : undefined}
-                            onClick={() => insertToken(chip.text)}
+                            title={chip.title ?? (chip.dead ? `${chip.text} has nothing to stand for yet` : undefined)}
+                            onClick={() => insert(chip.text, { substitute: true })}
                         >
                             {chip.text}
                         </button>
                     ))}
+                    <SnippetPickerButton onInsert={(text) => insert(text, {})} />
                 </div>
                 <AuHelp>
                     {substitute ? (
                         <>
                             Click a token to insert it. <code>$$</code> types a real dollar sign.
+                            <br />
+                            <code>${'{terminal.*}'}</code> describes the terminal that fired this rule;
+                            <code>${'{time}'}</code> is when it was sent.
                         </>
                     ) : (
                         <>
                             Click a token to insert it — that also turns on <b>Insert captured
-                            values</b> below, which is what resolves it.
+                            values</b> below, which is what resolves it. <code>${'{terminal.*}'}</code>
+                            describes the terminal that fired this rule and <code>${'{time}'}</code>
+                            is when it was sent.
                         </>
                     )}
                 </AuHelp>

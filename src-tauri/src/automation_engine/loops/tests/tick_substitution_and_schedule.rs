@@ -221,6 +221,91 @@ async fn a_crossing_types_the_resolved_message() {
     );
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_crossing_uses_the_source_terminal_reserved_values() {
+    let fake = Arc::new(
+        FakeHost::new()
+            .with_terminal_cwd("tm-1", "pc-1", Some("one"), Some("/one"))
+            .with_terminal_cwd("tm-2", "pc-2", Some("two"), Some("/two")),
+    );
+    let mut rule = ctx_rule("au-reserved");
+    rule.graph.cond_mut().finds = Finds::Event;
+    rule.graph.action_mut().message = "${terminal.title}|${terminal.id}|${terminal.cwd}|".into();
+    rule.graph.action_mut().substitute = true;
+    fake.store.save_rule(&rule).unwrap();
+    let engine = Arc::new(AutomationEngine::new(0));
+    engine.reload(&fake.store, 0).unwrap();
+    engine.runtime.set_watched("au-reserved", ["tm-1", "tm-2"].into_iter().map(String::from).collect());
+    engine.runtime.set_arm("au-reserved", "tm-1", ArmState::armed());
+    let host: Arc<dyn EngineHost> = fake.clone();
+    fake.say("pc-1", "ctx:63%\n");
+    engine.runtime.mark_dirty("pc-1");
+
+    evaluate_tick(&engine, &host, 0, 1_000).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    let written = fake.written().join("\n");
+    assert!(written.contains("one|tm-1|/one|"), "source values were not sent: {written}");
+    assert!(!written.contains("two"), "a sibling terminal leaked into the message: {written}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_schedule_send_resolves_reserved_tokens_without_captures() {
+    let mut rule = schedule_only_rule("au-schedule-reserved");
+    rule.graph.action_mut().message = "${terminal.id}|${time}".into();
+    rule.graph.action_mut().substitute = true;
+    let (engine, fake, host) = wire_targets(
+        vec![rule],
+        &[("tm-1", "pc-1")],
+        &[("au-schedule-reserved", &["tm-1"])],
+    );
+    engine.runtime.set_watched("au-schedule-reserved", ["tm-1".to_string()].into());
+
+    // `${time}` is the wall clock when the send runs (`now_ms()`), not the synthetic tick that
+    // fired the schedule — so it is bracketed between two real clock reads rather than matched
+    // by shape, which a fixed timestamp of the right shape would also satisfy. The bounds are
+    // formatted by chrono directly, not by `time_from_ms`, so they do not move with a mutant.
+    let before = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    evaluate_tick(&engine, &host, 0, at_local(2026, 9, 7, Weekday::Mon, 9, 0)).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let after = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+    let written = fake.written().join("\n");
+    // The write is wrapped in bracketed-paste sequences, so take the value by its length.
+    let rendered = written
+        .split("tm-1|")
+        .nth(1)
+        .map(|rest| rest.chars().take(before.chars().count()).collect::<String>())
+        .unwrap_or_else(|| panic!("the reserved-only schedule send did not resolve: {written}"));
+    assert!(
+        before <= rendered && rendered <= after,
+        "the send's time {rendered} is not between {before} and {after}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_blank_source_title_resolves_to_empty_text() {
+    let fake = Arc::new(FakeHost::new().with_terminal_cwd("tm-1", "pc-1", None, None));
+    let mut rule = ctx_rule("au-blank-title");
+    rule.graph.cond_mut().finds = Finds::Event;
+    rule.graph.action_mut().message = "before|${terminal.title}|after".into();
+    rule.graph.action_mut().substitute = true;
+    fake.store.save_rule(&rule).unwrap();
+    let engine = Arc::new(AutomationEngine::new(0));
+    engine.reload(&fake.store, 0).unwrap();
+    engine.runtime.set_watched("au-blank-title", ["tm-1".to_string()].into());
+    engine.runtime.set_arm("au-blank-title", "tm-1", ArmState::armed());
+    let host: Arc<dyn EngineHost> = fake.clone();
+    fake.say("pc-1", "ctx:63%\n");
+    engine.runtime.mark_dirty("pc-1");
+
+    evaluate_tick(&engine, &host, 0, 1_000).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    let written = fake.written().join("\n");
+    assert!(written.contains("before||after"), "blank title was not rendered as empty: {written}");
+}
+
 /// **A schedule rule reads nothing, sends nothing, and logs nothing** — plan 032 §6.3, §6.4.
 ///
 /// **Admission is not the property that protects the user.** `reload` admitting a patternless

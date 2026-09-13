@@ -8,18 +8,20 @@
 import React from 'react';
 import type { AutomationWebhookProvider } from '../../../types/electron';
 import type { AutomationDraft, DraftAction } from '../automationDraft';
-import { compilePattern, groupsOf, resolvableTokens } from '../automationValidation';
-import { previewSubstitute, tokensUsed } from '../automationTokens';
+import { compilePattern, groupsOf, resolvableTokens, webhookValueEscape } from '../automationValidation';
+import { isReservedToken, previewSubstitute, tokensUsed } from '../automationTokens';
 import { sampleFromPattern } from './ActionPanel';
 import { AuCheck, AuField, AuHelp } from './AuFields';
 import { AuSelect } from '../AuSelect';
+import { SnippetPickerButton } from './SnippetPickerButton';
+import { restoreCaret, spliceAtCaret } from './caretInsert';
 
 export interface WebhookPanelProps {
     draft: AutomationDraft;
     dispatch: (action: DraftAction) => void;
 }
 
-type ChipInfo = { text: string; dead: boolean };
+type ChipInfo = { text: string; dead: boolean; title?: string };
 
 const groupToken = (n: number): string => (n < 10 ? `$${n}` : `\${${n}}`);
 
@@ -61,14 +63,15 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
     // See `ActionPanel`'s twin: the flag being on is not a claim that the body names a token, and
     // since the flag became the default it is not even a choice the user made.
     const usesTokens = tokensUsed(webhook.body).length > 0;
-    const rendered = substitute && usesTokens && patternReady
-        ? previewSubstitute(webhook.body, groups, sample)
+    const usesPatternTokens = tokensUsed(webhook.body).some((token) => !isReservedToken(token));
+    const rendered = substitute && usesTokens
+        ? previewSubstitute(webhook.body, groups, sample, webhookValueEscape(webhook.provider))
         : null;
     const previewMessage = rendered && rendered.ok
         ? rendered.parts.map((part) => part.kind === 'text' ? part.text : `⟨${part.token}⟩`).join('')
         : webhook.body;
-    const blocked = substitute && usesTokens && (!patternReady || (rendered !== null && !rendered.ok));
-    const blockedText = !patternReady
+    const blocked = substitute && usesTokens && (usesPatternTokens && (!patternReady || (rendered !== null && !rendered.ok)));
+    const blockedText = !patternReady && usesPatternTokens
         ? 'Nothing would be posted — there is no pattern yet to capture values from.'
         : rendered && !rendered.ok
             ? `Nothing would be posted — ${rendered.badToken} has nothing to stand for.`
@@ -79,6 +82,10 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
         ...Array.from({ length: groups.count }, (_, i): ChipInfo => ({ text: groupToken(i + 1), dead: false })),
         { text: groupToken(groups.count + 1), dead: true },
         { text: '$$', dead: false },
+        { text: '${terminal.id}', dead: false, title: 'The id of the terminal that fired this rule' },
+        { text: '${terminal.title}', dead: false, title: 'The title of the terminal that fired this rule' },
+        { text: '${terminal.cwd}', dead: false, title: 'The working directory of the terminal that fired this rule' },
+        { text: '${time}', dead: false, title: 'When the message was sent, YYYY-MM-DD HH:mm:ss' },
     ];
     const body = webhook.body;
     // The tokens written in the body that this pattern COULD fill in — see `resolvableTokens`.
@@ -97,15 +104,15 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
      * directly below and visibly moves, so this is not a hidden change of state; the off position
      * is still one click away for a body that wants a literal `$`.
      */
-    function insertToken(token: string) {
+    function insert(text: string, extraPatch: Record<string, unknown>) {
         const el = bodyRef.current;
         const value = body;
-        const start = el?.selectionStart ?? value.length;
-        const end = el?.selectionEnd ?? value.length;
+        const { next, caret } = spliceAtCaret(el, value, text);
         dispatch({
             type: 'webhook',
-            patch: { body: value.slice(0, start) + token + value.slice(end), substitute: true },
+            patch: { body: next, ...extraPatch },
         });
+        restoreCaret(bodyRef, caret);
     }
 
     return (
@@ -165,22 +172,28 @@ export const WebhookPanel: React.FC<WebhookPanelProps> = ({ draft, dispatch }) =
                             type="button"
                             key={chip.text}
                             className={`au-token${chip.dead ? ' dead' : ''}`}
-                            title={chip.dead ? `${chip.text} has nothing to stand for yet` : undefined}
-                            onClick={() => insertToken(chip.text)}
+                            title={chip.title ?? (chip.dead ? `${chip.text} has nothing to stand for yet` : undefined)}
+                            onClick={() => insert(chip.text, { substitute: true })}
                         >
                             {chip.text}
                         </button>
                     ))}
+                    <SnippetPickerButton onInsert={(text) => insert(text, {})} />
                 </div>
                 <AuHelp>
                     {substitute ? (
                         <>
                             Click a token to insert it. <code>$$</code> writes a dollar sign.
+                            <br />
+                            <code>${'{terminal.*}'}</code> describes the terminal that fired this rule;
+                            <code>${'{time}'}</code> is when it was sent.
                         </>
                     ) : (
                         <>
                             Click a token to insert it — that also turns on <b>Insert captured
-                            values</b> below, which is what resolves it.
+                            values</b> below, which is what resolves it. <code>${'{terminal.*}'}</code>
+                            describes the terminal that fired this rule and <code>${'{time}'}</code>
+                            is when it was sent.
                         </>
                     )}
                 </AuHelp>

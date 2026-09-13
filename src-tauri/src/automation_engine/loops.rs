@@ -763,19 +763,26 @@ async fn run_crossing(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>, 
         return;
     }
 
+    // **`began` is taken BEFORE the bag, not inside `run_send`.** §2.6's settle window is set from
+    // `send.at_ms + began.elapsed()`, so everything between the decision and the write must be
+    // inside `elapsed()` — and `build_reserved` can spend a process scan there. Started after it,
+    // the window would open early by exactly that scan, the same shape as the round-1 defect
+    // `run_send`'s own comment describes, one step further back again.
+    let began = tokio::time::Instant::now();
+    let reserved = build_reserved(&host, &send, now_ms()).await;
     let has_action = rule.graph.action.is_some();
     let has_webhook = rule.graph.webhook.is_some();
     let (terminal, webhook) = tokio::join!(
         async {
             if has_action {
-                Some(run_send(&engine, &host, &send).await)
+                Some(run_send(&engine, &host, &send, &reserved, began).await)
             } else {
                 None
             }
         },
         async {
             if has_webhook {
-                Some(run_webhook(&engine, &send).await)
+                Some(run_webhook(&engine, &send, &reserved).await)
             } else {
                 None
             }
@@ -860,6 +867,48 @@ async fn run_crossing(engine: Arc<AutomationEngine>, host: Arc<dyn EngineHost>, 
     engine.mark_state_dirty();
 }
 
+/// Build the values shared by every destination of one crossing.
+///
+/// The clock is read once here, before the concurrent destination tasks start, so both
+/// destinations render one `${time}`. The title is the DECIDE-time label the crossing already
+/// carries (`PendingSend::label`, resolved before a parked wait, when the terminal may still have
+/// had one); the cwd is resolved NOW, at fire time, for the crossing's own process (`pair.pc`,
+/// see `EngineHost::cwd_for`) — a parked send therefore reads the directory that process is in
+/// when the send runs, not the one it printed the match from, and a leaf restarted in between
+/// yields `""` rather than the new shell's directory. It is the one potentially blocking value,
+/// so it is fetched only when a substituting destination names it and never on the evaluator's
+/// thread.
+async fn build_reserved(
+    host: &Arc<dyn EngineHost>,
+    send: &PendingSend,
+    at_ms: i64,
+) -> subst::Reserved {
+    let rule = &send.pair.rule.rule;
+    let needs_cwd = rule.graph.action.as_ref().is_some_and(|action| {
+        action.substitute && subst::names_token(&action.message, "terminal.cwd")
+    }) || rule.graph.webhook.as_ref().is_some_and(|webhook| {
+        webhook.substitute && subst::names_token(&webhook.body, "terminal.cwd")
+    });
+    let terminal_cwd = if needs_cwd {
+        let host = Arc::clone(host);
+        // `pair.pc`, never `pair.tm`: see `EngineHost::cwd_for`.
+        let pc = send.pair.pc.clone();
+        match tokio::task::spawn_blocking(move || host.cwd_for(&pc)).await {
+            Ok(cwd) => cwd,
+            // A panic inside the scan, or a runtime already shutting down. `""` is the honest
+            // value either way; the log line is what tells them apart from "the shell never said".
+            Err(e) => {
+                log::warn!("automations: the cwd lookup for {} did not complete: {e}", send.pair.tm);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    subst::Reserved::for_send(&send.pair.tm, send.label.clone(), terminal_cwd, at_ms)
+}
+
 /// Take the terminal's queue, re-check it is still there, and write its destination.
 ///
 /// This function has no crossing bookkeeping: `run_crossing` aggregates its result with the webhook
@@ -868,18 +917,21 @@ async fn run_send(
     engine: &Arc<AutomationEngine>,
     host: &Arc<dyn EngineHost>,
     send: &PendingSend,
+    reserved: &subst::Reserved,
+    // **Taken by `run_crossing` before the bag, and before the queue.** §2.6 layer 2 runs for
+    // `ECHO_SETTLE_MS` after the WRITE, and the wait for this terminal's lock is up to
+    // `SEND_QUEUE_TIMEOUT_MS` of the distance between the decision and that write. Started after
+    // the lock, this measured only `deliver` — so the second and later sends of a queue set a
+    // window that had already been running for the whole of their wait, which is the same defect
+    // the round-1 fix was for, one step further back. Started here, after `build_reserved`, it
+    // would miss the cwd scan the same way — hence the parameter.
+    began: tokio::time::Instant,
 ) -> DestinationOutcome {
     let rule = &send.pair.rule.rule;
     let tm = send.pair.tm.clone();
     let Some(action) = rule.graph.action.as_ref() else {
         return DestinationOutcome::Failed("the rule has no terminal destination".into());
     };
-    // **Before the queue.** §2.6 layer 2 runs for `ECHO_SETTLE_MS` after the WRITE, and the wait for
-    // this terminal's lock is up to `SEND_QUEUE_TIMEOUT_MS` of the distance between the decision and
-    // that write. Started after the lock, this measured only `deliver` — so the second and later
-    // sends of a queue set a window that had already been running for the whole of their wait, which
-    // is the same defect the round-1 fix was for, one step further back.
-    let began = tokio::time::Instant::now();
     let lock = engine.runtime.send_lock(&tm);
 
     let _guard =
@@ -939,7 +991,7 @@ async fn run_send(
     }
 
     let body = if action.substitute {
-        match subst::substitute(&action.message, send.captures.as_ref()) {
+        match subst::substitute(&action.message, send.captures.as_ref(), reserved) {
             Ok(s) => s,
             // §4.4: refuse. A message with a live `$3` still in it typed into a running agent is
             // the "unintended content" this whole feature exists to prevent, and a refusal that is
@@ -992,7 +1044,11 @@ async fn run_send(
 /// Post the webhook destination for this crossing. It intentionally never reaches the terminal
 /// queue lock: a slow endpoint must not serialise terminal writes, and a terminal failure must not
 /// suppress an already-decided webhook.
-async fn run_webhook(engine: &Arc<AutomationEngine>, send: &PendingSend) -> DestinationOutcome {
+async fn run_webhook(
+    engine: &Arc<AutomationEngine>,
+    send: &PendingSend,
+    reserved: &subst::Reserved,
+) -> DestinationOutcome {
     let rule = &send.pair.rule.rule;
     let Some(webhook) = rule.graph.webhook.as_ref() else {
         return DestinationOutcome::Failed("the rule has no webhook destination".into());
@@ -1006,7 +1062,12 @@ async fn run_webhook(engine: &Arc<AutomationEngine>, send: &PendingSend) -> Dest
         );
     }
     let body = if webhook.substitute {
-        match subst::substitute(&webhook.body, send.captures.as_ref()) {
+        match subst::substitute_escaped(
+            &webhook.body,
+            send.captures.as_ref(),
+            reserved,
+            crate::automation_webhook::value_escape(webhook.provider),
+        ) {
             Ok(body) => body,
             Err(e) => {
                 return DestinationOutcome::Failed(format!(

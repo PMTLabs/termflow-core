@@ -1376,6 +1376,12 @@
     cursor: pointer;
 }
 
+.au-editor .au-snippet-btn {
+    color: #b9c4cf;
+    border-style: dashed;
+    background: #202329;
+}
+
 .au-editor .au-token.on {
     color: #fff;
     background: #2c2f37;

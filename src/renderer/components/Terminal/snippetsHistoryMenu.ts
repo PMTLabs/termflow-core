@@ -36,6 +36,29 @@ function leafDetailTitle(s: Snippet, showFolder: boolean): string | undefined {
   return lines.join('\n');
 }
 
+/** The per-row management affordances (Copy / Edit / Delete); `null` for a pick-only menu. */
+interface RowManagement {
+  onCopy: (snippet: Snippet) => void;
+  onEdit: (snippet: Snippet) => void;
+  onDelete: (snippet: Snippet) => void;
+}
+
+/**
+ * Either the terminal menu's full management surface, or a pick-only menu that has none of it
+ * (plan 042: the automation editor's *Insert snippet…*). A discriminated union rather than four
+ * optional callbacks, so the pick-only caller cannot be handed an `Edit` row that would throw,
+ * and the full caller cannot forget one — TypeScript refuses both shapes.
+ */
+type SnippetsMenuManagement =
+  | { pickOnly: true; onCopy?: never; onEdit?: never; onDelete?: never; onAddNew?: never }
+  | {
+      pickOnly?: false;
+      onCopy: (snippet: Snippet) => void;
+      onEdit: (snippet: Snippet) => void;
+      onDelete: (snippet: Snippet) => void;
+      onAddNew: (seedText?: string) => void;
+    };
+
 /** One snippet as a leaf flyout row, carrying TWO tooltips: `title` is the full,
  *  untruncated snippet text (§4.3), so a long or multi-line snippet is inspectable on
  *  hover, and `detailTitle` expands the folder/tag chip that shares the row with it.
@@ -46,9 +69,7 @@ function buildSnippetLeafRow(
   insert: (text: string) => void,
   onUse: (id: string) => void,
   showFolder: boolean,
-  onCopy: (snippet: Snippet) => void,
-  onEdit: (snippet: Snippet) => void,
-  onDelete: (snippet: Snippet) => void,
+  manage: RowManagement | null,
 ): ContextMenuFlyoutRow {
   return {
     id: `snippet-${s.id}`,
@@ -57,14 +78,17 @@ function buildSnippetLeafRow(
     detailTitle: leafDetailTitle(s, showFolder),
     title: s.text,
     onSelect: () => { onUse(s.id); insert(s.text); },
-    contextActions: [
-      { id: 'copy', label: 'Copy', onSelect: () => onCopy(s) },
+    // A pick-only menu (plan 042) has no row actions at all: its one job is handing the text
+    // back, and `Edit`/`Delete` would need the dialog hosting the terminal menu has and the
+    // automation editor deliberately does not.
+    ...(manage ? { contextActions: [
+      { id: 'copy', label: 'Copy', onSelect: () => manage.onCopy(s) },
       { id: 'insert', label: 'Insert', onSelect: () => { onUse(s.id); insert(s.text); } },
       // The menu stays up under the edit dialog (`keepMenuOpen`), exactly as the footer's
       // Add-New-Snippet does, so the edited row is one click away when the dialog closes.
-      { id: 'edit', label: 'Edit', onSelect: () => onEdit(s), keepMenuOpen: true },
-      { id: 'delete', label: 'Delete', onSelect: () => onDelete(s) },
-    ],
+      { id: 'edit', label: 'Edit', onSelect: () => manage.onEdit(s), keepMenuOpen: true },
+      { id: 'delete', label: 'Delete', onSelect: () => manage.onDelete(s) },
+    ] } : {}),
     closeMenuOnSelect: true,
   };
 }
@@ -75,9 +99,7 @@ function buildGroupedRows(
   snippets: Snippet[],
   insert: (text: string) => void,
   onUse: (id: string) => void,
-  onCopy: (snippet: Snippet) => void,
-  onEdit: (snippet: Snippet) => void,
-  onDelete: (snippet: Snippet) => void,
+  manage: RowManagement | null,
 ): ContextMenuFlyoutRow[] {
   const folders = snippetFolders(snippets);
   const rows: ContextMenuFlyoutRow[] = folders.map((folder) => ({
@@ -86,10 +108,10 @@ function buildGroupedRows(
     icon: '📁',
     children: snippets
       .filter((s) => (s.folder?.trim() || undefined) === folder)
-      .map((s) => buildSnippetLeafRow(s, insert, onUse, false, onCopy, onEdit, onDelete)),
+      .map((s) => buildSnippetLeafRow(s, insert, onUse, false, manage)),
   }));
   const unfiled = snippets.filter((s) => !s.folder?.trim());
-  rows.push(...unfiled.map((s) => buildSnippetLeafRow(s, insert, onUse, false, onCopy, onEdit, onDelete)));
+  rows.push(...unfiled.map((s) => buildSnippetLeafRow(s, insert, onUse, false, manage)));
   return rows;
 }
 
@@ -100,11 +122,9 @@ function buildFlatRows(
   snippets: Snippet[],
   insert: (text: string) => void,
   onUse: (id: string) => void,
-  onCopy: (snippet: Snippet) => void,
-  onEdit: (snippet: Snippet) => void,
-  onDelete: (snippet: Snippet) => void,
+  manage: RowManagement | null,
 ): ContextMenuFlyoutRow[] {
-  return snippets.map((s) => buildSnippetLeafRow(s, insert, onUse, true, onCopy, onEdit, onDelete));
+  return snippets.map((s) => buildSnippetLeafRow(s, insert, onUse, true, manage));
 }
 
 /**
@@ -127,18 +147,20 @@ export function buildSnippetsMenuItem(opts: {
   sortMode: SnippetSortMode;
   insert: (text: string) => void;
   onUse: (id: string) => void;
-  onCopy: (snippet: Snippet) => void;
-  onEdit: (snippet: Snippet) => void;
-  onDelete: (snippet: Snippet) => void;
-  onAddNew: (seedText?: string) => void;
   onToggleViewMode: () => void;
   onCycleSortMode: () => void;
   onOpenSettings: () => void;
   selectionText?: string;
-}): ContextMenuItem {
-  const { snippets, viewMode, sortMode, insert, onUse, onCopy, onEdit, onDelete, onAddNew, onToggleViewMode, onCycleSortMode, onOpenSettings, selectionText } = opts;
+} & SnippetsMenuManagement): ContextMenuItem {
+  const { snippets, viewMode, sortMode, insert, onUse, onToggleViewMode, onCycleSortMode, onOpenSettings, selectionText } = opts;
+  const pickOnly = opts.pickOnly === true;
+  // Narrowed ONCE, here, so no row builder has to ask again — and no `!` has to promise a
+  // callback the pick-only caller never passed.
+  const manage: RowManagement | null = opts.pickOnly
+    ? null
+    : { onCopy: opts.onCopy, onEdit: opts.onEdit, onDelete: opts.onDelete };
+  const onAddNew = opts.pickOnly ? null : opts.onAddNew;
   const flat = viewMode === 'flat';
-
   return {
     label: 'Snippets',
     icon: '✂️',
@@ -146,9 +168,13 @@ export function buildSnippetsMenuItem(opts: {
     // the initials of the words in the name or body, and a capability nobody is told
     // about is a capability nobody uses.
     title:
-      'Insert a saved snippet of text into this terminal. Search by name, text, tag, or initials — "ch" finds "context handoff".',
+      pickOnly
+        ? 'Insert a saved snippet of text into this message. Search by name, text, tag, or initials — "ch" finds "context handoff".'
+        : 'Insert a saved snippet of text into this terminal. Search by name, text, tag, or initials — "ch" finds "context handoff".',
     submenu: {
-      searchPlaceholder: 'Search name, text, tag, or initials…  (#tag to filter)',
+      searchPlaceholder: pickOnly
+        ? 'Search snippets to insert into this message…  (#tag to filter)'
+        : 'Search name, text, tag, or initials…  (#tag to filter)',
       // Folder mode's root panel lists folder NAMES, which are short; flat mode's lists
       // snippets with their chips, which are not. The folder panel this opens keeps the
       // full width — `narrow` is depth-0 only.
@@ -160,7 +186,7 @@ export function buildSnippetsMenuItem(opts: {
         { id: 'view-mode', icon: flat ? '☰' : '📁', pressed: flat,
           title: flat ? 'Flat list. Click to group snippets by folder.' : 'Grouped by folder. Click to show every snippet in one flat list.', onSelect: onToggleViewMode },
         { id: 'sort-mode', icon: '⇅', title: `Sorted by: ${SNIPPET_SORT_LABELS[sortMode]}. Click to sort by ${SNIPPET_SORT_LABELS[nextSnippetSortMode(sortMode)]}.`, flash: `Sorted by: ${SNIPPET_SORT_LABELS[sortMode]}`, onSelect: onCycleSortMode },
-        { id: 'add-snippet', icon: '➕', title: selectionText ? 'Add a new snippet from the selected text.' : 'Add a new snippet.', onSelect: () => onAddNew(selectionText) },
+        ...(onAddNew ? [{ id: 'add-snippet', icon: '➕', title: selectionText ? 'Add a new snippet from the selected text.' : 'Add a new snippet.', onSelect: () => onAddNew(selectionText) }] : []),
         { id: 'open-settings', icon: '⚙️', title: 'Manage snippets in Settings.', onSelect: onOpenSettings },
       ],
       // Function form (not an array) so #tag filtering and the flatten-on-search
@@ -172,17 +198,17 @@ export function buildSnippetsMenuItem(opts: {
         if (!q) {
           const sorted = sortSnippets(snippets, sortMode);
           return flat
-            ? buildFlatRows(sorted, insert, onUse, onCopy, onEdit, onDelete)
-            : buildGroupedRows(sorted, insert, onUse, onCopy, onEdit, onDelete);
+            ? buildFlatRows(sorted, insert, onUse, manage)
+            : buildGroupedRows(sorted, insert, onUse, manage);
         }
         // Search already ranks relevance; sorting it again would bury the best match.
-        return filterSnippets(snippets, q).map((s) => buildSnippetLeafRow(s, insert, onUse, true, onCopy, onEdit, onDelete));
+        return filterSnippets(snippets, q).map((s) => buildSnippetLeafRow(s, insert, onUse, true, manage));
       },
       emptyRow: (query: string): ContextMenuFlyoutRow =>
         snippets.length === 0
           ? { id: 'no-snippets', label: 'No snippets yet', disabled: true }
           : { id: 'no-snippet-matches', label: `No snippets match '${query.trim()}'`, disabled: true },
-      footerRows: [
+      ...(onAddNew ? { footerRows: [
         {
           id: 'add-new-snippet',
           label: 'Add New Snippet',
@@ -192,7 +218,7 @@ export function buildSnippetsMenuItem(opts: {
           // closing it here would discard the surface whose newly-created row they need.
           closeMenuOnSelect: false,
         },
-      ],
+      ] } : {}),
     },
   };
 }

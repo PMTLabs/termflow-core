@@ -17,6 +17,10 @@
   overflow: visible;
 }
 
+.context-menu.au-snippet-picker {
+  z-index: 9995;
+}
+
 .context-menu-item {
   display: flex;
   align-items: center;

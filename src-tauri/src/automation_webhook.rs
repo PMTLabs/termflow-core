@@ -65,6 +65,20 @@ impl std::fmt::Display for WebhookError {
 
 impl std::error::Error for WebhookError {}
 
+/// How a substituted value must be written into this provider's body — the one rule, read by the
+/// live send, the dry run and save-time validation, so the three cannot disagree about a `"`.
+///
+/// The preset providers get the finished message as a JSON VALUE (`payload` serialises it), so a
+/// raw value is right. A Custom body is posted byte-for-byte and is required to be JSON, so every
+/// substituted value sits inside a JSON string the user wrote and must be escaped as one.
+pub(crate) fn value_escape(provider: WebhookProvider) -> crate::automation_engine::subst::ValueEscape {
+    use crate::automation_engine::subst::ValueEscape;
+    match provider {
+        WebhookProvider::Custom => ValueEscape::JsonString,
+        WebhookProvider::Discord | WebhookProvider::Slack | WebhookProvider::Teams => ValueEscape::Raw,
+    }
+}
+
 /// Send a configured webhook body to its destination.
 pub async fn send(webhook: &WebhookStep) -> Result<(), WebhookError> {
     send_body(webhook, &webhook.body).await
