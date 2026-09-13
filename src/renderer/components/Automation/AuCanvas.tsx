@@ -15,7 +15,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Viewport } from '../Canvas/canvasGeometry';
 import { Z_MIN, clampZoom, panBy, screenToWorld, zoomAt } from '../Canvas/canvasGeometry';
-import { shouldArmSpacePan, shouldDisarmSpacePan, wheelAction } from '../Canvas/canvasGestures';
+import {
+    exceedsDragSlop,
+    shouldArmSpacePan,
+    shouldDisarmSpacePan,
+    wheelAction,
+} from '../Canvas/canvasGestures';
 import { boundsOf, fitViewport, gridStyle, rasterStyle, worldStyle } from '../Canvas/viewportStyles';
 import type { AutomationDraft, NodePos } from './automationDraft';
 import { AU_NODE_H, AU_NODE_W, portSides } from './automationDraft';
@@ -75,6 +80,7 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
     // Where the right-click menu is, and which card it was aimed at. `null` is closed.
     const [menu, setMenu] = useState<{ step: StepKind; x: number; y: number } | null>(null);
     const panning = useRef<{ x: number; y: number } | null>(null);
+    const backgroundPress = useRef<{ x: number; y: number; moved: boolean } | null>(null);
 
     const toWorldOrNull = useCallback((clientX: number, clientY: number): NodePos | null => {
         const host = hostRef.current;
@@ -189,16 +195,12 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             return;
         }
         if (e.target === e.currentTarget) {
-            onSelect(null);
             // Dragging the BACKGROUND pans, alongside Space+drag and the middle button. The three
             // arm the same `panning` ref, so they share one move/up path and cannot drift apart.
             //
-            // It is armed on the same branch that deselects rather than above it, and that is the
-            // whole of the correctness argument: `e.target === e.currentTarget` is true only for the
-            // canvas host itself, so a press that begins on a node, a port, a wire chip or any
-            // control still reaches its own handler untouched. A press with no movement deselects
-            // exactly as before — `panning` is armed but every move handler is a no-op until the
-            // pointer actually moves, and `up` clears it.
+            // A background press is also a click candidate. It stays one until the pointer crosses
+            // the shared drag slop, so a real pan never clears the selected step while it starts.
+            backgroundPress.current = { x: e.clientX, y: e.clientY, moved: false };
             panning.current = { x: e.clientX, y: e.clientY };
         }
     };
@@ -214,8 +216,15 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             // delegated listener to the portal container (`document.body`), and a native event
             // stopped at `body` never reaches `window`.
             if (e.buttons === 0) {
-                up();
+                up(e);
                 return;
+            }
+            const background = backgroundPress.current;
+            if (background && !background.moved) {
+                background.moved = exceedsDragSlop(
+                    e.clientX - background.x,
+                    e.clientY - background.y,
+                );
             }
             panning.current = { x: e.clientX, y: e.clientY };
             // NEGATED, and that is the whole point. `panBy` takes the WHEEL/ARROW-KEY convention —
@@ -228,8 +237,17 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             // a 600px drag to the right moved the world 600px to the LEFT.
             setVp((v) => panBy(v, start.x - e.clientX, start.y - e.clientY));
         };
-        const up = () => {
+        const up = (e?: PointerEvent) => {
+            const background = backgroundPress.current;
+            if (background && e && !background.moved) {
+                background.moved = exceedsDragSlop(
+                    e.clientX - background.x,
+                    e.clientY - background.y,
+                );
+            }
             panning.current = null;
+            backgroundPress.current = null;
+            if (background && !background.moved) onSelect(null);
         };
         window.addEventListener('pointermove', move);
         // CAPTURE, so a `stopPropagation()` on the way up cannot leave the world panning. Nothing
@@ -240,7 +258,7 @@ export const AuCanvas: React.FC<AuCanvasProps> = ({
             window.removeEventListener('pointermove', move);
             window.removeEventListener('pointerup', up, true);
         };
-    }, []);
+    }, [onSelect]);
 
     // ONE computation of which edge each port uses, handed to both the cards and the wires. Two
     // callers deriving it separately is how the dot and the line end up on opposite edges.
