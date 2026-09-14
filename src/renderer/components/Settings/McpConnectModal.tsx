@@ -1,6 +1,6 @@
 import React, { useId, useRef, useState } from 'react';
 import { NetworkInterfaceInfo } from '../../types/electron';
-import { buildMcpConfig, McpClient } from './mcpConfig';
+import { buildMcpConfig, McpClient, CLIENT_LABELS } from './mcpConfig';
 import { useDialogA11y, Mnemonic as MnemonicType } from '../UI/useDialogA11y';
 import { Mnemonic } from '../UI/Mnemonic';
 
@@ -16,17 +16,21 @@ interface McpConnectModalProps {
  * agent to this app's MCP server. The interface picker rewrites the host IP so
  * the copied block targets whichever NIC the user wants. The token rides an
  * HTTP `Authorization: Bearer` header (an `env` map is ignored by HTTP MCP
- * clients); the agent picker switches between the Claude Code, Codex, and Gemini
- * CLI config shapes, which differ.
+ * clients); the agent picker switches between the Claude Code, Codex, Antigravity
+ * CLI, and GitHub Copilot CLI config shapes, which differ (see `mcpConfig.ts`).
  *
  * The block also wires the `X-Termflow-Terminal-Id` header (env-expanding the
  * per-terminal `TERMFLOW_TERMINAL_ID` var) so the agent's `get_my_terminal` /
- * `"me"` resolves to its own terminal. Gemini omits it (Gemini doesn't expand env
- * vars inside `headers`); Gemini users pass the id explicitly instead.
+ * `"me"` resolves to its own terminal, for all four clients — see `mcpConfig.ts`
+ * for the caveat on Antigravity/Copilot, whose docs don't confirm `${VAR}`
+ * expansion inside `headers`.
  */
 export const McpConnectModal: React.FC<McpConnectModalProps> = ({ interfaces, mcpPort, token, onClose }) => {
     const options = interfaces.length > 0 ? interfaces : [{ name: 'lo0', label: 'loopback', ip: '127.0.0.1' }];
-    const [selectedIp, setSelectedIp] = useState<string>(options[0].ip);
+    // Default to the loopback interface: sorted last by list_network_interfaces (LAN addresses
+    // lead), but it's the safest choice for a locally-run agent, so pre-select it over options[0].
+    const loopbackOption = options.find((iface) => iface.label === 'loopback' || iface.ip.startsWith('127.'));
+    const [selectedIp, setSelectedIp] = useState<string>((loopbackOption ?? options[0]).ip);
     const [client, setClient] = useState<McpClient>('claude');
     const [copied, setCopied] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -95,9 +99,9 @@ export const McpConnectModal: React.FC<McpConnectModalProps> = ({ interfaces, mc
                         value={client}
                         onChange={(e) => setClient(e.target.value as McpClient)}
                     >
-                        <option value="claude">Claude Code</option>
-                        <option value="codex">Codex</option>
-                        <option value="gemini">Gemini CLI</option>
+                        {(Object.keys(CLIENT_LABELS) as McpClient[]).map((c) => (
+                            <option key={c} value={c}>{CLIENT_LABELS[c]}</option>
+                        ))}
                     </select>
 
                     <div className="mcp-config-header">
@@ -117,9 +121,6 @@ export const McpConnectModal: React.FC<McpConnectModalProps> = ({ interfaces, mc
                         The <code>X-Termflow-Terminal-Id</code> header lets the agent identify its own
                         terminal (<code>get_my_terminal</code> / <code>"me"</code>) by expanding the
                         <code> TERMFLOW_TERMINAL_ID</code> env var that's injected into every terminal.
-                        {client === 'gemini'
-                            ? ' Gemini CLI does not expand env vars in headers, so it\'s omitted here — pass $TERMFLOW_TERMINAL_ID explicitly as the terminalId instead.'
-                            : ''}
                     </p>
                 </div>
 

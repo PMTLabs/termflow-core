@@ -97,7 +97,7 @@ app.get("/health", (_req: Request, res: Response) => {
     const activeSessions = Object.keys(transports).length;
     res.json({
         status: "healthy",
-        server: "auto-terminal-mcp",
+        server: "termflow-mcp",
         version: "0.2.0",
         activeSessions,
         apiBackend: API_BASE,

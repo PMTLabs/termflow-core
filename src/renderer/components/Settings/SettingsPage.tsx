@@ -1905,7 +1905,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
                 {showMcpModal && (
                     // This modal WRITES an agent's MCP config, so it must name the port this
-                    // instance actually serves: the configured one sends Claude/Codex/Gemini
+                    // instance actually serves: the configured one sends Claude/Codex/Antigravity
                     // to whichever instance owns 42032, which on a second profile is not us.
                     <McpConnectModal
                         interfaces={interfaces}

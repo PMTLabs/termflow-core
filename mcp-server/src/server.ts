@@ -25,7 +25,7 @@ const ME_HINT = 'Use "me" for your own terminal, or pass an explicit id (e.g. $T
  */
 export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer {
     const server = new McpServer({
-        name: "auto-terminal-mcp",
+        name: "termflow-mcp",
         version: "0.2.0",
     });
 

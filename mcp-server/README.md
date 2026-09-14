@@ -86,7 +86,7 @@ Add this to your `.mcp.json`:
 ```json
 {
   "mcpServers": {
-    "auto-terminal": {
+    "termflow": {
       "type": "http",
       "url": "http://localhost:42032/mcp",
       "headers": { "Authorization": "Bearer <AUTO_TERMINAL_TOKEN>" }
@@ -105,7 +105,7 @@ Gemini CLI uses `httpUrl` (not `type`+`url`) in `~/.gemini/settings.json`:
 ```json
 {
   "mcpServers": {
-    "auto-terminal": {
+    "termflow": {
       "httpUrl": "http://localhost:42032/mcp",
       "headers": { "Authorization": "Bearer <AUTO_TERMINAL_TOKEN>" }
     }
@@ -123,7 +123,7 @@ For clients that only support stdio transport:
 ```json
 {
   "mcpServers": {
-    "auto-terminal": {
+    "termflow": {
       "command": "node",
       "args": [
         "D:\\sources\\demo\\auto-terminal\\mcp-server\\build\\index.js"
