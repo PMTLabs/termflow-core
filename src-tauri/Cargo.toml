@@ -68,7 +68,10 @@ portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
-jsonwebtoken = "10"
+# v10 ships NO crypto backend by default (v9 bundled `ring`); without exactly one
+# of `rust_crypto`/`aws_lc_rs`, `encode()` panics at runtime and the API drops
+# the connection on POST /api/auth/token.
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 dashmap = "5"
 uuid = { version = "1", features = ["v4", "serde"] }
 # Integrity hash for the update-stable host binary install (RP-1): the host is
