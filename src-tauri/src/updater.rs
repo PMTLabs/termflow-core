@@ -225,7 +225,10 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
 /// sibling instance, none of which exist in a unit-test process.
 #[cfg(test)]
 mod arm_lifecycle_wiring_tests {
-    /// The body of `fn <name>`, found by counting braces from its opening `{`.
+    /// The body of `fn <name>`, found by counting braces from its opening `{`,
+    /// with `//` line comments stripped. Without stripping, prose that
+    /// mentions real code tokens out of order (e.g. explaining what a fix
+    /// changed) reads as if it WERE the code, to a naive substring search.
     fn fn_body(src: &str, signature: &str) -> String {
         let start = src.find(signature).unwrap_or_else(|| {
             panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously")
@@ -239,13 +242,20 @@ mod arm_lifecycle_wiring_tests {
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        return rest[open..open + i + 1].to_string();
+                        return strip_line_comments(&rest[open..open + i + 1]);
                     }
                 }
                 _ => {}
             }
         }
         panic!("unbalanced braces after `{signature}`");
+    }
+
+    fn strip_line_comments(src: &str) -> String {
+        src.lines()
+            .map(|line| line.find("//").map_or(line, |i| &line[..i]))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn source() -> String {
