@@ -4,20 +4,25 @@
 
 This is the **open-core** repository (Apache-2.0). The optional multi-machine **peering** capability is provided by a separate, privately-licensed sidecar (`termflow-fabric`) and is **not** required to build or run the app — see [Open core](#-open-core).
 
-> Status: pre-release (`0.1.0`). Platforms: Windows, macOS, Linux.
+> Status: early access (`0.2.0`). Signed installers for Windows (x64 + ARM64) and macOS (Apple Silicon), plus a Linux AppImage — see [Releases](https://github.com/PMTLabs/termflow-core/releases).
 
 ---
 
 ## ✨ Features
 
+- **🗺️ Canvas Mode** — a graph view of your terminals and their connections, with in-canvas search, node context menus, and zoom-anchored pan/zoom
+- **⚙️ Automations** — a visual editor for matching rules, timers, captures, and conditions, with webhook action providers and reserved `${terminal.*}` tokens
+- **📋 Snippets** — reusable commands and text, searchable, with cross-product import/export and quick copy/insert from any pane
+- **🔔 Activity notifications** — native toasts with click-to-focus routing, mutable by tab or pane
 - **🔄 Multi-tab & split panes** — multiple sessions, resizable panes, drag-and-drop tabs, multi-window detach, per-tab/pane maximize (zoom)
+- **🪟 Multiple profiles side-by-side** — run several TermFlow instances at once, with shells surviving an in-place update
 - **🐚 Multi-shell** — CMD, PowerShell, Git Bash, WSL, bash/zsh/fish, and custom profiles
 - **💾 Session & layout persistence** — tabs, panes, and scrollback are saved and restored on restart (SQLite-backed history)
 - **🔎 In-terminal search**, **🎨 color schemes**, and a modern keyboard protocol (Kitty / `modifyOtherKeys`) for correct key handling in agentic CLIs
 - **⚡ Performance** — xterm.js with WebGL rendering and terminal caching
 - **🔌 Developer API** — REST + WebSocket server for automation (see [API](#-developer-api))
 - **🤖 MCP server** — a Model Context Protocol sidecar exposing terminal tools to AI clients
-- **🖥️ Cross-platform** — Windows, macOS, and Linux
+- **🖥️ Cross-platform, signed & auto-updating** — native installers for Windows, macOS, and Linux; new versions install seamlessly from signed GitHub releases
 
 Also included in this repo as companion tooling:
 - **`terminal-monitor/`** — a React web dashboard for remotely viewing/controlling terminals over the API.
