@@ -124,4 +124,321 @@ describe('findPathLinks', () => {
     expect(findPathLinks('cd ~ now')).toHaveLength(0);
     expect(findPathLinks('roughly ~5 items changed')).toHaveLength(0);
   });
+
+  it('matches the Claude Update parenthesized bare filename', () => {
+    const text = 'Update(015-x.html)';
+    const [m] = findPathLinks(text);
+    expect(text.slice(m.start, m.end)).toBe('015-x.html');
+    expect(m.path).toBe('015-x.html');
+  });
+
+  it('matches the Claude Read parenthesized bare filename', () => {
+    const text = 'Read(README.md)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('README.md');
+    expect(text.slice(m.start, m.end)).toBe('README.md');
+  });
+
+  it('matches the Claude Write parenthesized bare filename', () => {
+    const text = 'Write(a.md)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('a.md');
+    expect(text.slice(m.start, m.end)).toBe('a.md');
+  });
+
+  it('matches the Claude Edit parenthesized bare filename', () => {
+    const text = 'Edit(b.ts)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('b.ts');
+    expect(text.slice(m.start, m.end)).toBe('b.ts');
+  });
+
+  it('matches the Claude MultiEdit parenthesized bare filename', () => {
+    const text = 'MultiEdit(c.py)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('c.py');
+    expect(text.slice(m.start, m.end)).toBe('c.py');
+  });
+
+  it('matches the Claude NotebookEdit parenthesized bare filename', () => {
+    const text = 'NotebookEdit(d.ipynb)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('d.ipynb');
+    expect(text.slice(m.start, m.end)).toBe('d.ipynb');
+  });
+
+  it('matches the Claude Create parenthesized bare filename', () => {
+    const text = 'Create(e.rs)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('e.rs');
+    expect(text.slice(m.start, m.end)).toBe('e.rs');
+  });
+
+  it('matches the Claude Delete parenthesized bare filename', () => {
+    const text = 'Delete(f.go)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('f.go');
+    expect(text.slice(m.start, m.end)).toBe('f.go');
+  });
+
+  it('matches the Claude Remove parenthesized bare filename', () => {
+    const text = 'Remove(g.cs)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('g.cs');
+    expect(text.slice(m.start, m.end)).toBe('g.cs');
+  });
+
+  it('matches lower-case opencode read()', () => {
+    const text = 'read(app.tsx)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('app.tsx');
+    expect(text.slice(m.start, m.end)).toBe('app.tsx');
+  });
+
+  it('matches lower-case opencode write()', () => {
+    const text = 'write(x.md)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('x.md');
+    expect(text.slice(m.start, m.end)).toBe('x.md');
+  });
+
+  it('matches lower-case opencode edit()', () => {
+    const text = 'edit(y.js)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('y.js');
+    expect(text.slice(m.start, m.end)).toBe('y.js');
+  });
+
+  it('matches a Codex Read space-prefixed bare filename', () => {
+    const text = 'Read foo.ts';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('foo.ts');
+    expect(text.slice(m.start, m.end)).toBe('foo.ts');
+  });
+
+  it('matches a Codex Edited space-prefixed bare filename', () => {
+    const text = 'Edited main.rs (+3 -1)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('main.rs');
+    expect(text.slice(m.start, m.end)).toBe('main.rs');
+  });
+
+  it('matches a Gemini ReadFile space-prefixed bare filename', () => {
+    const text = '✓ ReadFile config.yaml';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('config.yaml');
+    expect(text.slice(m.start, m.end)).toBe('config.yaml');
+  });
+
+  it('matches a Gemini WriteFile space-prefixed bare filename', () => {
+    const text = 'WriteFile out.json';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('out.json');
+    expect(text.slice(m.start, m.end)).toBe('out.json');
+  });
+
+  it('matches a Gemini ReadFile colon-prefixed bare filename', () => {
+    const text = 'ReadFile: a.md';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('a.md');
+    expect(text.slice(m.start, m.end)).toBe('a.md');
+  });
+
+  it('keeps the :line:col suffix on a verb-prefixed bare filename', () => {
+    const text = 'Write(notes.md:12:3)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('notes.md');
+    expect(m.line).toBe(12);
+    expect(m.col).toBe(3);
+    expect(text.slice(m.start, m.end)).toBe('notes.md');
+  });
+
+  it('keeps a full separator path in Update(docs/015-x.html)', () => {
+    const text = 'Update(docs/015-x.html)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('docs/015-x.html');
+    expect(text.slice(m.start, m.end)).toBe('docs/015-x.html');
+  });
+
+  it('keeps a dotted-directory separator path in Update(src.v2/main.rs)', () => {
+    const text = 'Update(src.v2/main.rs)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('src.v2/main.rs');
+    expect(text.slice(m.start, m.end)).toBe('src.v2/main.rs');
+    // Before branch 6 had its right-boundary lookahead this case ALSO pinned alternation
+    // order (branch 6 first linked `src.v2`). The lookahead now rejects `src.v2` because a
+    // `/` follows, so swapping the branches is an equivalent mutant — this test pins the
+    // behaviour (the full path links), not the source order.
+  });
+
+  it('does not match a version string after Update', () => {
+    // The final extension must start with a letter, so v1.2.3 stays ordinary text.
+    expect(findPathLinks('Update v1.2.3')).toHaveLength(0);
+  });
+
+  it('does not link a digit-first extension after a verb (the documented .7z tradeoff)', () => {
+    // Same letter-first rule as above, seen from the other side: this is the cost
+    // PATH_RE's branch-6 comment names. Pinned so a later widening is deliberate.
+    expect(findPathLinks('Read(archive.7z)')).toHaveLength(0);
+  });
+
+  it('does not link a prefix before a digit-first final extension', () => {
+    expect(findPathLinks('Read(archive.tar.7z)')).toHaveLength(0);
+  });
+
+  it('does not link a prefix before a separator continuation', () => {
+    expect(findPathLinks('Read foo.ts/bar')).toHaveLength(0);
+    expect(findPathLinks('Read foo.ts\\bar')).toHaveLength(0);
+  });
+
+  it('does not link a prefix before a dot-run that continues the token', () => {
+    // Review round 2: a lookahead that only forbade `.`+word let `foo.ts` through here,
+    // because the char after the first dot was another dot. The token must END at the
+    // filename — a dot-run counts as continuation whenever something token-ish follows it.
+    expect(findPathLinks('Read foo.ts..bar')).toHaveLength(0);
+    expect(findPathLinks('Read foo.ts...bar')).toHaveLength(0);
+  });
+
+  it('still links a filename followed by an ellipsis', () => {
+    // The dot-run rule must not eat the common spinner/ellipsis suffix.
+    const text = 'Edited main.rs...';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('main.rs');
+    expect(text.slice(m.start, m.end)).toBe('main.rs');
+  });
+
+  it('links a multi-dot filename through its final letter-first extension', () => {
+    const text = 'Read foo.ts.bak';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('foo.ts.bak');
+    expect(text.slice(m.start, m.end)).toBe('foo.ts.bak');
+  });
+
+  it('still links a verb-prefixed filename before a sentence-final period', () => {
+    // The right-boundary lookahead rejects `.`+word (so `archive.tar` in `archive.tar.7z`
+    // is not a match) but must allow a bare `.` at the end of a sentence.
+    const text = 'please read config.json.';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('config.json');
+    expect(text.slice(m.start, m.end)).toBe('config.json');
+  });
+
+  it('scans a long run of whitespace after a verb without linking anything', () => {
+    // Smoke only. The BOUND on the separator (the thing that keeps this scan linear — an
+    // unbounded `[ \t]+` inside the per-position lookbehind was O(N²)) is pinned
+    // deterministically by the 8-space / 9-space pair below, not by a wall-clock limit that
+    // would flake on a loaded CI runner.
+    expect(findPathLinks('Read' + ' '.repeat(20000))).toHaveLength(0);
+  });
+
+  it('does not link a long word without a filename extension', () => {
+    expect(findPathLinks('Read ' + 'a'.repeat(5000) + '!')).toHaveLength(0);
+  });
+
+  it('accepts the maximum bounded row separator', () => {
+    const text = 'Read' + ' '.repeat(8) + 'foo.ts';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('foo.ts');
+    expect(text.slice(m.start, m.end)).toBe('foo.ts');
+  });
+
+  it('rejects a row separator beyond the documented bound', () => {
+    expect(findPathLinks('Read' + ' '.repeat(9) + 'foo.ts')).toHaveLength(0);
+  });
+
+  it('does not treat Open prose as a file row', () => {
+    expect(findPathLinks('Open example.com in your browser')).toHaveLength(0);
+  });
+
+  it('does not treat Create prose as a file row', () => {
+    expect(findPathLinks('Create Node.js project')).toHaveLength(0);
+  });
+
+  it('matches an Open parenthesized bare filename', () => {
+    const text = 'Open(a.md)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('a.md');
+    expect(text.slice(m.start, m.end)).toBe('a.md');
+  });
+
+  it('matches a View parenthesized bare filename', () => {
+    const text = 'View(b.md)';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('b.md');
+    expect(text.slice(m.start, m.end)).toBe('b.md');
+  });
+
+  it('matches a Created row bare filename', () => {
+    const text = 'Created e.rs';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('e.rs');
+    expect(text.slice(m.start, m.end)).toBe('e.rs');
+  });
+
+  it('admits every FILE_VERB in the paren form, past tense included', () => {
+    // Review round 2: the paren and row allowlists were two hand-copied lists and the paren
+    // copy had lost the past-tense verbs. Both forms now derive from ONE list; this pins that
+    // the paren form is the whole list.
+    for (const verb of ['Edited', 'Created', 'Deleted', 'Removed', 'Updated', 'Wrote', 'Open', 'View', 'Create']) {
+      const text = `${verb}(z.md)`;
+      const [m] = findPathLinks(text);
+      expect(m?.path).toBe('z.md');
+      expect(text.slice(m.start, m.end)).toBe('z.md');
+    }
+  });
+
+  it('drops only the prose starters from the row form', () => {
+    for (const verb of ['Open', 'View', 'Create']) {
+      expect(findPathLinks(`${verb} z.md`)).toHaveLength(0);
+    }
+    for (const verb of ['Delete', 'Remove', 'Deleted', 'Wrote']) {
+      const text = `${verb} z.md`;
+      expect(findPathLinks(text).map((m) => text.slice(m.start, m.end))).toEqual(['z.md']);
+    }
+  });
+
+  it('parses :line:col after a Read row filename', () => {
+    const text = 'Read foo.ts:12:3';
+    const [m] = findPathLinks(text);
+    expect(m.path).toBe('foo.ts');
+    expect(m.line).toBe(12);
+    expect(m.col).toBe(3);
+    expect(text.slice(m.start, m.end)).toBe('foo.ts');
+  });
+
+  it('does not match a non-file Bash tool row', () => {
+    expect(findPathLinks('Bash(git status)')).toHaveLength(0);
+  });
+
+  it('does not match a non-file Glob tool row', () => {
+    expect(findPathLinks('Glob(**/*.ts)')).toHaveLength(0);
+  });
+
+  it('does not match a non-file Grep tool row', () => {
+    expect(findPathLinks('Grep(foo.bar)')).toHaveLength(0);
+  });
+
+  it('does not match a non-file Search tool row', () => {
+    expect(findPathLinks('Search(x.y)')).toHaveLength(0);
+  });
+
+  it('does not match Read followed by a line count', () => {
+    expect(findPathLinks('⎿  Read 120 lines')).toHaveLength(0);
+  });
+
+  it('does not match Updated followed by a file count', () => {
+    expect(findPathLinks('Updated 3 files')).toHaveLength(0);
+  });
+
+  it('does not match a bare filename in FAILED output without a file verb', () => {
+    expect(findPathLinks('FAILED 17 tests in automationSteps.test.ts')).toHaveLength(0);
+  });
+
+  it('does not match Unread because the verb must start at a word boundary', () => {
+    expect(findPathLinks('Unread foo.ts')).toHaveLength(0);
+  });
+
+  it('does not match package.json in plain prose', () => {
+    expect(findPathLinks('package.json')).toHaveLength(0);
+  });
 });

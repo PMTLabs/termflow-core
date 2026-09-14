@@ -44,6 +44,20 @@ describe('linkAtIndex picks the link covering a character', () => {
     expect(linkAtIndex(LINE, pathStart + 2)).toEqual({ kind: 'path', text: './x/y.txt' });
   });
 
+  it('hits only the filename in a verb-prefixed bare path', () => {
+    const text = 'Update(015-x.html)';
+    const openParen = text.indexOf('(');
+    const firstFilename = text.indexOf('015-x.html');
+    const lastFilename = firstFilename + '015-x.html'.length - 1;
+    const closeParen = text.indexOf(')');
+    expect(linkAtIndex(text, openParen)).toBeNull();
+    expect(linkAtIndex(text, firstFilename))
+      .toEqual({ kind: 'path', text: '015-x.html' });
+    expect(linkAtIndex(text, lastFilename))
+      .toEqual({ kind: 'path', text: '015-x.html' });
+    expect(linkAtIndex(text, closeParen)).toBeNull();
+  });
+
   it('finds nothing at all in ordinary output', () => {
     expect(linkAtIndex('$ git status', 4)).toBeNull();
   });
@@ -410,6 +424,20 @@ describe('a wrapped link is hit on every row it occupies', () => {
     // really is being used rather than the whole line being treated as one match.
     expect(hitAt(0, 1)).toBeNull();
   });
+});
+
+it('hit-tests a bare filename through the getLinkAt composition', () => {
+  const cols = 13;
+  const buf = wrapBuffer([
+    { text: 'Update(015-x.' },
+    { text: 'html)', isWrapped: true },
+  ], cols);
+
+  expect(hitLink(buf, 0, 7, cols)).toEqual({ kind: 'path', text: '015-x.html' });
+  expect(hitLink(buf, 0, 6, cols)).toBeNull();
+  // The continuation row: the `h` of `html` is part of the same link, the `)` is not.
+  expect(hitLink(buf, 1, 0, cols)).toEqual({ kind: 'path', text: '015-x.html' });
+  expect(hitLink(buf, 1, 4, cols)).toBeNull();
 });
 
 /**

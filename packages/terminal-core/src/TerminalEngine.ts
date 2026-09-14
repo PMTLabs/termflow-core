@@ -358,7 +358,7 @@ export interface PathLinkMatch {
 }
 
 // Bounded, ReDoS-safe matcher for file paths in terminal output (backlog 003).
-// Five alternatives, each with an optional :line(:col) suffix:
+// Six alternatives, each with an optional :line(:col) suffix:
 //   1. Windows-abs: C:\foo\bar OR C:/foo/bar (tools/agent logs print either
 //      separator). The `(?<![A-Za-z])` guard keeps a URL scheme's single letter
 //      before `://` (the `p` in `http://`) from being read as a `p:` drive.
@@ -377,9 +377,48 @@ export interface PathLinkMatch {
 //      (feature/audit-x, origin/develop) AND range expressions (a...b) — none of
 //      which form a real filename — are NOT mistaken for files. Folder-only paths
 //      need the anchored form (./folder) to be detected.
-// Negated/anchored char classes keep every branch free of unbounded backtracking.
-const PATH_RE =
-  /(?:(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+)(?::(\d+)(?::(\d+))?)?/g;
+//   6. Verb-prefixed bare relative: `name.ext` with NO separator, admitted only when an
+//      agent-CLI file verb introduces it — `Update(015-x.html)`, `read(app.tsx)`, `Read foo.ts`,
+//      `ReadFile: a.md`, `Edited main.rs`. The verb sits in a positive lookbehind, so the match
+//      (and with it the underline, the hit-test and Copy Path) covers only the filename. Two
+//      forms, both derived from FILE_VERBS below so they cannot drift apart: `Verb(` admits every
+//      verb (tool syntax is unambiguous); `Verb ` / `Verb: ` drops PROSE_STARTERS. The ASCII `\b`
+//      before the verb keeps `Unread foo.ts` out. The final extension starts with a letter, so
+//      `v1.2.3` is not a file — at the cost of digit-first extensions such as `.7z` after a
+//      verb. The trailing lookahead makes the token END there: not followed by a word char, a
+//      separator, or a dot-run that leads to one — so `Read(archive.tar.7z)` does not link
+//      `archive.tar` and `Read foo.ts..bar` does not link `foo.ts`, while `read config.json.`
+//      and `Edited a.rs...` still link. The row form stays ambiguous for prose such as
+//      `Remove example.com from the hosts file` (accepted: the cost is a "File not found" toast).
+// Negated/anchored char classes keep branches 1-5 free of unbounded backtracking. Branch 6's
+// lookbehind is evaluated at every scan position, so its separator is bounded (`{1,8}` — nine
+// spaces do not link) and its tail is right-anchored.
+
+// Verbs an agent CLI prints in front of a file it touched. ONE list; the two branch-6 forms are
+// derived from it, so a verb added here is admitted by both (minus PROSE_STARTERS for the row form).
+const FILE_VERBS = [
+  'Read', 'Write', 'Edit', 'Update', 'Create', 'Delete', 'Remove', 'MultiEdit', 'NotebookEdit',
+  'ReadFile', 'WriteFile', 'Open', 'View',
+  'Edited', 'Created', 'Deleted', 'Removed', 'Updated', 'Wrote',
+];
+// Imperatives that open ordinary prose too often to trust without `Verb(` tool syntax:
+// `Open example.com in your browser`, `Create Node.js project`, `View ...`.
+const PROSE_STARTERS = new Set(['Open', 'View', 'Create']);
+/** `ReadFile` → `[Rr]ead[Ff]ile`: each capital may also be lower-case (opencode prints `edit(`). */
+const verbAlternation = (verbs: string[]): string =>
+  verbs.map((v) => v.replace(/[A-Z]/g, (c) => `[${c}${c.toLowerCase()}]`)).join('|');
+const VERB_PAREN = `\\b(?:${verbAlternation(FILE_VERBS)})\\(`;
+const VERB_ROW = `\\b(?:${verbAlternation(FILE_VERBS.filter((v) => !PROSE_STARTERS.has(v)))}):?[ \\t]{1,8}`;
+
+const PATH_RE = new RegExp(
+  '(?:' +
+    // Branches 1-5, kept as a literal so their escaping is exactly what the notes above describe.
+    /(?<![A-Za-z])[A-Za-z]:[\\/][^\s:*?"<>|]+|\.{1,2}[\\/][^\s:*?"<>|]+|(?<![\w.:/\\~-])~[\\/][^\s:*?"<>|]+|(?<![\w.:/\\-])\/[^\s:*?"<>|]+|[\w.-]+(?:[\\/][\w.-]+)*[\\/][\w-]+(?:\.[\w-]+)+/.source +
+    // Branch 6.
+    `|(?<=${VERB_PAREN}|${VERB_ROW})[\\w-]+(?:\\.[\\w-]+)*\\.[A-Za-z][\\w-]*(?![\\w\\\\/-]|\\.+[\\w\\\\/-])` +
+    ')(?::(\\d+)(?::(\\d+))?)?',
+  'g',
+);
 
 // Strip trailing punctuation that terminals / markdown / tool logs place right
 // AFTER a path but that isn't part of it — e.g. the `)` in `Write(C:\a\b.md)` or

@@ -90,6 +90,19 @@ describe('collectWrappedLine', () => {
     expect(m.line).toBe(42);
   });
 
+  it('joins a verb-prefixed bare filename that soft-wraps after Update(', () => {
+    const row0 = 'Update(015-x.';
+    expect(findPathLinks(row0)).toHaveLength(0); // The extension is split across rows.
+    const buf = fakeBuffer([
+      { text: row0 },
+      { text: 'html)', isWrapped: true },
+    ], row0.length);
+    const info = collectWrappedLine(buf, 0, row0.length)!;
+    const [m] = findPathLinks(info.text);
+    expect(m.path).toBe('015-x.html');
+    expect(info.text.slice(m.start, m.end)).toBe('015-x.html');
+  });
+
   it('finds the logical-line start when queried at a CONTINUATION row', () => {
     const buf = fakeBuffer([
       { text: 'unrelated previous line' },
