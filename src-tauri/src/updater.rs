@@ -93,7 +93,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // shells only die if it never armed. Refusing outright (the old behaviour)
     // was a coordination gap, not a safety floor (design 014 §B1).
     let own = crate::profile::current().key();
-    let siblings = crate::net_ports::live_siblings_now(&own);
+    let siblings = crate::net_ports::live_siblings_now(&own)
+        .map_err(|e| format!("cannot enumerate sibling instances: {e}"))?;
     if let Some(reason) = crate::sibling_coord::describe_unarmable(&siblings) {
         log::warn!("[UPDATE] refused: {reason}");
         return Err(reason);
@@ -122,8 +123,11 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // and a profile launched during it would not be in that snapshot — so it
     // would never be armed, and the apply would kill its GUI with an unarmed
     // host, destroying exactly the shells this mechanism exists to save. The
-    // earlier list is a fail-fast courtesy; THIS one is the one we act on.
-    let siblings = crate::net_ports::live_siblings_now(&own);
+    // earlier list is a fail-fast courtesy; THIS one is the one we act on —
+    // and it fails closed the same way: the download is left unapplied rather
+    // than applied over a sibling nobody could read.
+    let siblings = crate::net_ports::live_siblings_now(&own)
+        .map_err(|e| format!("cannot enumerate sibling instances: {e}"))?;
     let armed_siblings =
         crate::sibling_coord::arm_siblings(&siblings, crate::sibling_coord::http_call).await?;
     if !armed_siblings.is_empty() {

@@ -432,6 +432,7 @@ pub async fn create_detached_window(
     let reserved = reserve_window_id(&app_handle, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
+    crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
         record_new_window(&app_handle, &window, id, (900, 600));
     }
@@ -489,6 +490,7 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
     let reserved = reserve_window_id(app, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::context_menu::install(&window);
+    crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
         record_new_window(app, &window, id, (1280, 800));
     }
@@ -583,17 +585,92 @@ mod quit_teardown_wiring_tests {
         panic!("unbalanced braces after `{signature}`");
     }
 
-    /// Drop `//` line comments. Without this the guards read our own prose: this
+    /// Drop `//` line comments AND `/* ... */` block comments (non-nested,
+    /// may span lines). Without this the guards read our own prose: this
     /// module and the code it guards both *describe* exiting and disarming, and a
-    /// sentence must never stand in for — or trip — an assertion about code.
+    /// sentence must never stand in for — or trip — an assertion about code. A
+    /// call wrapped in a block comment (disabling it) must also read as absent,
+    /// not merely as a line-commented one would.
     fn strip_line_comments(code: &str) -> String {
-        code.lines()
+        let mut without_block = String::with_capacity(code.len());
+        let mut rest = code;
+        while let Some(start) = rest.find("/*") {
+            without_block.push_str(&rest[..start]);
+            match rest[start + 2..].find("*/") {
+                Some(end) => rest = &rest[start + 2 + end + 2..],
+                None => {
+                    // Unterminated block comment: drop the remainder.
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        without_block.push_str(rest);
+
+        without_block
+            .lines()
             .map(|l| match l.find("//") {
                 Some(i) => &l[..i],
                 None => l,
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The `(start, end)` byte range of the `{ ... }` block whose opening
+    /// brace is the first one at-or-after byte offset `at` (`start` is the
+    /// position of `{`; `end` is one past the matching `}`), found by
+    /// counting brace depth (not a naive next-`}`) so a nested block inside
+    /// does not truncate the match early. Returns plain indices — rather
+    /// than a borrowed `&str` — so callers that need the block's absolute
+    /// end offset are not tempted to reconstruct it via pointer arithmetic
+    /// against an owned copy (which is a dangling-pointer bug: a `.to_string()`
+    /// of the slice lives in a different allocation than the original).
+    fn block_range_at(src: &str, at: usize) -> (usize, usize) {
+        let open = src[at..]
+            .find('{')
+            .map(|i| at + i)
+            .unwrap_or_else(|| panic!("no `{{` at-or-after byte {at}"));
+        let mut depth = 0i32;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (open, open + i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced braces starting at byte {open}");
+    }
+
+    /// The `{ ... }` block text itself; see `block_range_at`.
+    fn block_at(src: &str, at: usize) -> &str {
+        let (start, end) = block_range_at(src, at);
+        &src[start..end]
+    }
+
+    /// Remove `if false { ... }` and `#[cfg(any())] { ... }` dead blocks
+    /// (including their condition/attribute) so a call placed inside one
+    /// cannot satisfy an ordering check that only ever looked at textual
+    /// position, never reachability.
+    fn strip_dead_blocks(src: &str) -> String {
+        let mut out = src.to_string();
+        loop {
+            let at = match (out.find("if false"), out.find("#[cfg(any())]")) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let Some(at) = at else { break };
+            let (_, block_end) = block_range_at(&out, at);
+            out.replace_range(at..block_end, "");
+        }
+        out
     }
 
     /// Whether `code` terminates the process by ANY spelling used in this repo.
@@ -748,6 +825,202 @@ mod quit_teardown_wiring_tests {
             "flush_all_windows must not exit the process itself — callers that \
              need to stay armed (restart_for_update, update_and_restart) would \
              inherit an exit they never asked for. Body:\n{body}"
+        );
+    }
+
+    /// `restart_keeping_terminals` (plan 044 T1) reuses the same arm step
+    /// `restart_for_update` does, then — unlike offload — actually relaunches.
+    /// The order is load-bearing: arming before flushing means a refused arm
+    /// never touches the renderer, flushing before spawning means a tab's cwd
+    /// is persisted before anything about the successor happens, and spawning
+    /// before exit means we never terminate without a successor spawned.
+    /// Also assert `.exit(` is reachable only via the spawn match's success
+    /// path — after the match resolves, since the Err arm returns early —
+    /// and that no anchor lives inside dead code (`if false { }` /
+    /// `#[cfg(any())] { }`) that would otherwise still satisfy a purely
+    /// textual/offset ordering check.
+    #[test]
+    fn restart_keeping_terminals_arms_flushes_spawns_then_exits() {
+        let body = fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        );
+        let stripped = strip_line_comments(&body);
+        let live = strip_dead_blocks(&stripped);
+
+        let pos = |needle: &str| {
+            live.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` not found in reachable body:\n{live}"))
+        };
+        let offload_at = pos("offload_preflight");
+        let arm_at = pos("arm_detach");
+        let flush_at = pos("flush_all_windows");
+        let spawn_at = pos("spawn_relaunch");
+        let exit_at = pos(".exit(");
+        assert!(
+            offload_at < arm_at && arm_at < flush_at && flush_at < spawn_at && spawn_at < exit_at,
+            "restart_keeping_terminals must offload_preflight -> arm_detach -> \
+             flush_all_windows -> spawn_relaunch -> exit, in that order, reachably. Body:\n{live}"
+        );
+
+        let match_at = pos("match crate::relaunch::spawn_relaunch()");
+        let (_, match_end) = block_range_at(&live, match_at);
+        assert!(
+            exit_at >= match_end,
+            "`.exit(` must sit after the spawn match resolves — reachable only once \
+             spawn_relaunch succeeded, since the Err arm returns early — not merely \
+             somewhere lexically after the text `spawn_relaunch`. Body:\n{live}"
+        );
+    }
+
+    /// The spawn-failure path must disarm (releasing the hold) and must be the
+    /// ONLY place this function disarms — the success path exits deliberately
+    /// armed, same as `restart_for_update`, so the pty-host keeps holding.
+    ///
+    /// Checks BLOCK containment (the disarm call must live inside the `Err(`
+    /// arm's own block), not textual order — a disarm sitting between
+    /// `spawn_relaunch` and `.exit(` purely by offset could still actually be
+    /// inside the `Ok(` arm.
+    #[test]
+    fn restart_keeping_terminals_disarms_only_on_spawn_failure() {
+        let body = fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        );
+        let stripped = strip_line_comments(&body);
+
+        // Count CALLS (`.disarm(`), not the word: the spawn-failure branch also
+        // logs a sentence about the disarm going unacknowledged.
+        let disarm_positions: Vec<_> = stripped.match_indices(".disarm(").collect();
+        assert_eq!(
+            disarm_positions.len(),
+            1,
+            "expected exactly one `.disarm(` call — only on the spawn-failure path. Body:\n{body}"
+        );
+
+        let match_at = stripped
+            .find("match crate::relaunch::spawn_relaunch()")
+            .expect("spawn_relaunch match not found");
+        let match_block = block_at(&stripped, match_at);
+        let err_at = match_block
+            .find("Err(")
+            .expect("spawn match must have an Err( arm");
+        let err_arm = block_at(match_block, err_at);
+        assert!(
+            err_arm.contains(".disarm("),
+            "`.disarm(` must be inside the Err( arm's own block of the spawn_relaunch \
+             match — not merely textually between spawn_relaunch and exit. Err arm:\n{err_arm}"
+        );
+    }
+
+    /// `PtyHostClient::disarm` returns whether the host ACKED. A spawn failure
+    /// that then loses the disarm leaves the host holding a 15-minute window
+    /// under a fully connected GUI; the least this path can do is say so.
+    ///
+    /// Requires the ack to actually be CHECKED — an `if !client.disarm().await`
+    /// condition whose block logs the failure — not merely evaluated and
+    /// discarded (`let _ = !client.disarm().await;`).
+    #[test]
+    fn restart_keeping_terminals_checks_the_disarm_ack() {
+        let body = strip_line_comments(&fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        ));
+        let if_at = body.find("if !client.disarm().await").unwrap_or_else(|| {
+            panic!("the disarm ack must be checked via `if !client.disarm().await`. Body:\n{body}")
+        });
+        let arm = block_at(&body, if_at);
+        assert!(
+            arm.contains("log::error!"),
+            "a spawn-failure disarm that goes unacknowledged must be logged. Block:\n{arm}"
+        );
+    }
+
+    /// Auto-recovery and the tray item can both call this for one death. The
+    /// latch must be taken BEFORE any side effect (the preflight is the first
+    /// one), and kept only on the success path — a failure that left it set
+    /// would wedge the tray item for the life of the process.
+    ///
+    /// `keep = true` must sit at-or-after the END of the spawn match's block
+    /// (block containment, not offset order): the Err arm returns early, so
+    /// anything after the match's closing brace is reachable only via a
+    /// successful spawn. A caller that sets `keep = true` BEFORE even
+    /// attempting the spawn (so a failure leaves it set) would satisfy a
+    /// purely textual "after spawn_relaunch, before exit" check while still
+    /// being wrong.
+    #[test]
+    fn restart_keeping_terminals_is_single_flight() {
+        let body = strip_line_comments(&fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        ));
+        let pos = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("`{needle}` not found in body:\n{body}"))
+        };
+        let latch_at = pos("restart_in_flight.swap(true");
+        let preflight_at = pos("offload_preflight");
+        assert!(
+            latch_at < preflight_at,
+            "the in-flight latch must be taken before the preflight. Body:\n{body}"
+        );
+        assert!(
+            pos("RESTART_IN_FLIGHT") < preflight_at,
+            "a second caller must be refused with RESTART_IN_FLIGHT before any side effect"
+        );
+
+        let match_at = pos("match crate::relaunch::spawn_relaunch()");
+        let match_block = block_at(&body, match_at);
+        let (_, match_end) = block_range_at(&body, match_at);
+        let err_at = match_block
+            .find("Err(")
+            .expect("spawn match must have an Err( arm");
+        let err_arm = block_at(match_block, err_at);
+        assert!(
+            err_arm.contains("return Err("),
+            "the Err( arm of the spawn match must return early, so nothing after the \
+             match runs on a failed spawn. Err arm:\n{err_arm}"
+        );
+
+        let keep_at = pos("keep = true");
+        assert!(
+            keep_at >= match_end,
+            "`keep = true` must sit at-or-after the end of the spawn match — reachable \
+             only via its Ok arm, since the Err arm returns early — found at byte \
+             {keep_at}, match ends at byte {match_end}. Body:\n{body}"
+        );
+        assert!(
+            keep_at < pos(".exit("),
+            "the latch must be kept before exit. Body:\n{body}"
+        );
+    }
+
+    /// `FlushPolicy::Skip` exists so the automatic path does not wait 1.5 s on
+    /// a dead renderer (plan 044 R3). The order test above cannot see the
+    /// guard; this one pins that `flush_all_windows` sits inside its block,
+    /// and appears nowhere else in the body — an `if flush == ... {}` guard
+    /// with an unconditional `flush_all_windows` call right after it would
+    /// otherwise satisfy a proximity-only check.
+    #[test]
+    fn restart_keeping_terminals_flushes_only_for_the_renderer_policy() {
+        let body = strip_line_comments(&fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        ));
+        let guard_at = body
+            .find("if flush == FlushPolicy::Renderer")
+            .expect("the Renderer guard must exist");
+        let guard_block = block_at(&body, guard_at);
+        assert!(
+            guard_block.contains("flush_all_windows"),
+            "flush_all_windows must sit INSIDE the FlushPolicy::Renderer guard's block. \
+             Guard block:\n{guard_block}"
+        );
+        let flush_count = body.matches("flush_all_windows").count();
+        assert_eq!(
+            flush_count, 1,
+            "flush_all_windows must be called exactly once in the body (inside the \
+             guard); found {flush_count}. Body:\n{body}"
         );
     }
 

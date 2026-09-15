@@ -358,6 +358,118 @@ pub fn show_activity_notification(
     notifier.Show(&toast).map_err(|e| e.to_string())
 }
 
+/// A toast that routes nowhere. Recovery (`webview_recovery`, plan 044) fires
+/// this when the renderer's WebView2 process itself is dead — unlike
+/// `show_activity_notification`, whose whole reason for existing is routing a
+/// click back to a tab, there is no live tab to focus here: the DOM that tab
+/// lived in is gone along with the browser process. Clicking this toast just
+/// dismisses it.
+#[cfg(windows)]
+fn info_toast_xml(title: &str, body: &str) -> String {
+    format!(
+        r#"<toast><visual><binding template="ToastGeneric"><text>{}</text><text>{}</text></binding></visual></toast>"#,
+        escape_xml_text(title),
+        escape_xml_text(body),
+    )
+}
+
+#[cfg(windows)]
+pub fn show_info_toast(_app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), String> {
+    use windows::core::{IInspectable, HSTRING};
+    use windows::Data::Xml::Dom::XmlDocument;
+    use windows::Foundation::TypedEventHandler;
+    use windows::UI::Notifications::{ToastFailedEventArgs, ToastNotification, ToastNotificationManager};
+
+    let xml = info_toast_xml(title, body);
+
+    let document = XmlDocument::new().map_err(|e| e.to_string())?;
+    document
+        .LoadXml(&HSTRING::from(xml))
+        .map_err(|e| e.to_string())?;
+    let toast = ToastNotification::CreateToastNotification(&document).map_err(|e| e.to_string())?;
+
+    // Subscribed on purpose even though a click has nowhere to route: with no
+    // in-process handler Windows falls back to activating the app through its
+    // AUMID, which for a desktop app means a fresh launch that relays through
+    // the instance lock. A handler that only logs keeps the click inert.
+    let activated = TypedEventHandler::<ToastNotification, IInspectable>::new(|_, _| {
+        log::info!("[NOTIFY] info toast clicked (no action)");
+        Ok(())
+    });
+    toast.Activated(&activated).map_err(|e| e.to_string())?;
+
+    let failed =
+        TypedEventHandler::<ToastNotification, ToastFailedEventArgs>::new(move |_, args| {
+            match args.as_ref().and_then(|args| args.ErrorCode().ok()) {
+                Some(error_code) => {
+                    log::error!("Windows toast delivery failed: {error_code:?}")
+                }
+                None => log::error!("Windows toast delivery failed without an error code"),
+            }
+            Ok(())
+        });
+    toast.Failed(&failed).map_err(|e| e.to_string())?;
+
+    let notifier = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(
+        shell_identity(is_velopack_install()).0,
+    ))
+    .map_err(|e| e.to_string())?;
+    notifier.Show(&toast).map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+pub fn show_info_toast(_app: &tauri::AppHandle, title: &str, body: &str) -> Result<(), String> {
+    log::info!("[NOTIFY] {title}: {body}");
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod info_toast_tests {
+    use super::info_toast_xml;
+
+    #[test]
+    fn info_toast_xml_has_no_launch_attribute() {
+        let xml = info_toast_xml("TermFlow", "restoring now");
+        for forbidden in ["launch=", "<action", "activationType", "<actions"] {
+            assert!(
+                !xml.contains(forbidden),
+                "an info toast must not carry a launch route or activation actions — \
+                 there is no tab to activate (found `{forbidden}`): {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn info_toast_xml_escapes_the_body() {
+        let xml = info_toast_xml("A & <B>", "5 < 6 & done");
+        assert!(
+            xml.contains("A &amp; &lt;B&gt;"),
+            "title text must be XML-escaped: {xml}"
+        );
+        assert!(
+            xml.contains("5 &lt; 6 &amp; done"),
+            "body text must be XML-escaped: {xml}"
+        );
+
+        // Also confirm the RAW (unescaped) forms never sneak into either
+        // <text> element — a title left unescaped would otherwise slip past
+        // a check that only ever asserts the body's escaped form is present.
+        let texts: Vec<&str> = xml
+            .match_indices("<text>")
+            .map(|(i, _)| {
+                let rest = &xml[i + "<text>".len()..];
+                let end = rest.find("</text>").expect("unterminated <text> element");
+                &rest[..end]
+            })
+            .collect();
+        assert_eq!(texts.len(), 2, "expected exactly two <text> elements: {xml}");
+        for t in &texts {
+            assert!(!t.contains("<B>"), "raw unescaped title leaked into XML: {xml}");
+            assert!(!t.contains("& "), "raw unescaped ampersand leaked into XML: {xml}");
+        }
+    }
+}
+
 /// Bounds how many OS threads may sit parked waiting for a notification click.
 ///
 /// macOS and Linux both surface the click by *blocking* a thread for the notification's

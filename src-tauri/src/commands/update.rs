@@ -70,7 +70,10 @@ pub fn offload_preflight(state: &AppState) -> Result<(), String> {
 pub fn update_preflight(state: &AppState) -> Result<(), String> {
     hotswap_preflight(state)?;
     let own = crate::profile::current().key();
-    let siblings = crate::net_ports::live_siblings_now(&own);
+    // Fail closed: a sibling this cannot SEE is a sibling the apply would kill
+    // unarmed, so an unreadable record store refuses the update outright.
+    let siblings = crate::net_ports::live_siblings_now(&own)
+        .map_err(|e| format!("cannot enumerate sibling instances: {e}"))?;
     crate::sibling_coord::describe_unarmable(&siblings).map_or(Ok(()), Err)
 }
 
@@ -265,6 +268,114 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     Ok(())
 }
 
+/// Which windows get a chance to persist before the process goes away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushPolicy {
+    /// Ask every renderer to persist (tray item / healthy app).
+    Renderer,
+    /// The renderer is dead (WebView2 browser process gone) — waiting 1.5 s
+    /// for an ack that can never come only delays the recovery.
+    Skip,
+}
+
+/// Restart THIS process while the pty-host keeps every terminal alive
+/// (plan 044): arm the same local hold `restart_for_update` uses (so a bad
+/// arm refuses exactly like an offload would) → optional flush → spawn a
+/// successor (`termflow.exe … --relaunch-after <our pid>`) → exit. Unlike
+/// `restart_for_update`, this always relaunches — offload leaves the user to
+/// reopen the app by hand, which is fine for a deliberate update but not for
+/// an unplanned webview death or an impatient tray click.
+///
+/// If the spawn fails we must NOT exit: doing so would leave the user with no
+/// process at all, armed or otherwise. The hold is *asked* to release (a
+/// disarm that goes unacknowledged is logged as an error — the host may then
+/// keep its 15-minute window, exactly as `disarm_then_exit` warns) and the
+/// error is returned for the caller to log/toast while the (still hollow,
+/// still tray-operable) process stays alive.
+///
+/// Single-flight: the automatic recovery and the tray item can both reach
+/// here for the same death (the window is hollow but the tray still works,
+/// and a user who sees nothing happen clicks). Two concurrent runs would each
+/// spawn a successor and race to exit; the second caller gets
+/// [`RESTART_IN_FLIGHT`] instead. The latch is released on every failure and
+/// deliberately kept on success — the process is exiting.
+pub async fn restart_keeping_terminals(
+    app: tauri::AppHandle,
+    flush: FlushPolicy,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Manager as _;
+
+    let state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "AppState not managed".to_string())?;
+    if state.restart_in_flight.swap(true, Ordering::SeqCst) {
+        return Err(RESTART_IN_FLIGHT.to_string());
+    }
+    let mut in_flight = InFlight {
+        flag: state.restart_in_flight.clone(),
+        keep: false,
+    };
+
+    offload_preflight(&state)?;
+    let client = state
+        .pty_host_clone()
+        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    let token = crate::pty_host_client::resolve_token();
+    let deadline_ms = client
+        .arm_detach(
+            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+            &token,
+            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        )
+        .await?;
+    log::info!("[RECOVERY] armed hot-swap hold (deadline_ms={deadline_ms})");
+
+    if flush == FlushPolicy::Renderer {
+        flush_all_windows(&app).await;
+    }
+
+    let pid = match crate::relaunch::spawn_relaunch() {
+        Ok(pid) => pid,
+        Err(e) => {
+            log::error!("[RECOVERY] relaunch spawn failed: {e}; releasing the hold");
+            if !client.disarm().await {
+                log::error!(
+                    "[RECOVERY] pty-host never acknowledged the disarm; it may keep \
+                     holding its detach window while this GUI is still connected"
+                );
+            }
+            return Err(e);
+        }
+    };
+    log::info!("[RECOVERY] relaunch spawned (pid {pid}); exiting");
+    in_flight.keep = true;
+    app.exit(0);
+    Ok(())
+}
+
+/// The error `restart_keeping_terminals` returns to a second concurrent caller.
+/// Callers compare against it to tell "busy" from "failed" — a toast saying the
+/// restore failed would be wrong while the first run is still going.
+pub const RESTART_IN_FLIGHT: &str = "a restart keeping terminals is already in progress";
+
+/// Releases `AppState::restart_in_flight` on every early return unless the run
+/// reached its exit. A guard rather than a reset at each `return`: the `?`
+/// operators above are the failure paths, and a forgotten reset on one of them
+/// would wedge the tray item for the life of the process.
+struct InFlight {
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    keep: bool,
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        if !self.keep {
+            self.flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// The offload/update preflight split (design 014 §B4).
 ///
 /// `AppState` needs a Tauri `AppHandle`, and the `tauri::test` feature crashes
@@ -393,24 +504,33 @@ mod preflight_wiring_tests {
     #[test]
     fn all_arm_call_sites_send_the_intended_purpose() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let read = |rel: &str| {
-            let args = arm_detach_args(&std::fs::read_to_string(root.join(rel)).unwrap());
-            assert_eq!(args.len(), 1, "{rel}: expected exactly one arm_detach call");
-            args.into_iter().next().unwrap()
-        };
+        let read_all =
+            |rel: &str| arm_detach_args(&std::fs::read_to_string(root.join(rel)).unwrap());
 
         // Both LOCAL sites label the arm, so a future deadline can apply to them.
+        // `commands/update.rs` carries TWO local sites since plan 044
+        // (`restart_for_update`'s offload and `restart_keeping_terminals`'s
+        // relaunch) — every one of them must be labelled the same way.
         for local in ["commands/update.rs", "updater.rs"] {
-            let args = read(local);
-            assert!(
-                args.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"),
-                "{local}: a local arm must be labelled Local, got: {args}"
-            );
+            let calls = read_all(local);
+            assert!(!calls.is_empty(), "{local}: expected at least one arm_detach call");
+            for args in &calls {
+                assert!(
+                    args.contains("Some(termflow_pty_protocol::ArmDetachPurpose::Local)"),
+                    "{local}: a local arm must be labelled Local, got: {args}"
+                );
+            }
         }
 
         // The sibling site must stay UNLABELLED — a different profile's update
         // must never install a deadline on terminals its user never touched.
-        let sibling = read("api_server/system.rs");
+        let sibling_calls = read_all("api_server/system.rs");
+        assert_eq!(
+            sibling_calls.len(),
+            1,
+            "api_server/system.rs: expected exactly one arm_detach call"
+        );
+        let sibling = &sibling_calls[0];
         assert!(
             !sibling.contains("ArmDetachPurpose"),
             "a sibling-armed hold must carry no purpose, got: {sibling}"

@@ -4,6 +4,7 @@ pub mod state;
 pub mod console_window;
 pub mod context_menu;
 pub mod webview_power;
+mod webview_recovery;
 pub mod session_notify;
 pub mod app_config;
 pub mod profile;
@@ -48,6 +49,7 @@ mod mcp_sidecar;
 mod output_pipeline;
 mod history_flush;
 mod tray;
+mod relaunch;
 mod window_restore;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
@@ -233,11 +235,40 @@ struct Args {
    /// Positional fallback used by file managers and command-line users.
    #[arg(value_name = "PATH")]
    positional_path: Option<String>,
+   /// Set by a self-relaunch: wait for this predecessor pid to exit (returns the
+   /// moment it is gone; 5-minute ceiling) before taking the single-instance
+   /// lock, so we do not relay to a process that is on its way out and vanish
+   /// with it.
+   #[arg(long = "relaunch-after")]
+   relaunch_after: Option<u32>,
+}
+
+/// What `on_second_launch` should do with a relayed second-launch argv:
+/// open a path in a new window, or just focus/raise the existing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayAction {
+    OpenPath(String),
+    Focus,
+}
+
+/// Pure decision extracted from `on_second_launch`'s closure body so it is
+/// unit-testable without a live `AppHandle` (the closure itself needs one).
+/// Implements EXACTLY the closure's own logic — a re-parse of the relayed
+/// argv, `path.or(positional_path)` — so a future edit to one cannot drift
+/// from the other unnoticed.
+fn relay_action(argv: Vec<String>) -> RelayAction {
+    match Args::try_parse_from(argv)
+        .ok()
+        .and_then(|args| args.path.or(args.positional_path))
+    {
+        Some(path) => RelayAction::OpenPath(path),
+        None => RelayAction::Focus,
+    }
 }
 
 #[cfg(test)]
 mod cli_args_tests {
-    use super::Args;
+    use super::{Args, RelayAction};
     use clap::Parser;
 
     #[test]
@@ -287,6 +318,84 @@ mod cli_args_tests {
         assert_eq!(d.path, None);
         assert_eq!(d.positional_path, None);
     }
+
+    #[test]
+    fn relaunch_after_parses_and_does_not_break_relay_reparse() {
+        let a = Args::try_parse_from(["app", "--relaunch-after", "123"]).unwrap();
+        assert_eq!(a.relaunch_after, Some(123));
+
+        // Combined with another flag, both survive.
+        let b = Args::try_parse_from([
+            "app",
+            "--profile",
+            "work",
+            "--relaunch-after",
+            "5",
+        ])
+        .unwrap();
+        assert_eq!(b.profile.as_deref(), Some("work"));
+        assert_eq!(b.relaunch_after, Some(5));
+
+        // Absent by default.
+        let c = Args::try_parse_from(["app"]).unwrap();
+        assert_eq!(c.relaunch_after, None);
+
+        // `on_second_launch`'s re-parse relies on `path`/`positional_path`
+        // staying `None` when only `--relaunch-after` is given, so a relayed
+        // argv carrying it is still treated as "focus only".
+        let d = Args::try_parse_from(["app", "--relaunch-after", "123"]).unwrap();
+        assert_eq!(d.path, None);
+        assert_eq!(d.positional_path, None);
+    }
+
+    /// `relay_action` is what `on_second_launch`'s closure actually calls to
+    /// decide "open path" vs "focus" (extracted so it is testable without a
+    /// live `AppHandle`). The test above only pins that `Args` parses these
+    /// argvs; it never exercises the DECISION the closure makes from the
+    /// parse result, so a mishandled decision (e.g. treating a path as
+    /// "focus", or vice versa) could regress unnoticed with every existing
+    /// test green.
+    #[test]
+    fn relay_action_matches_on_second_launchs_decision() {
+        use super::relay_action;
+
+        // relaunch-after alone: no path anywhere → Focus.
+        assert_eq!(
+            relay_action(vec!["app".into(), "--relaunch-after".into(), "123".into()]),
+            RelayAction::Focus
+        );
+
+        // relaunch-after combined with --path: the path still wins.
+        assert_eq!(
+            relay_action(vec![
+                "app".into(),
+                "--relaunch-after".into(),
+                "123".into(),
+                "--path".into(),
+                "X".into(),
+            ]),
+            RelayAction::OpenPath("X".into())
+        );
+
+        // A named profile plus a positional path: positional_path is used
+        // when --path is absent.
+        assert_eq!(
+            relay_action(vec![
+                "app".into(),
+                "--profile".into(),
+                "w".into(),
+                "Y".into(),
+            ]),
+            RelayAction::OpenPath("Y".into())
+        );
+
+        // An argv clap cannot parse (`try_parse_from` returns Err) must fail
+        // SAFE — Focus, not a panic and not a phantom path.
+        assert_eq!(
+            relay_action(vec!["app".into(), "--bogus".into()]),
+            RelayAction::Focus
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -296,6 +405,15 @@ pub fn run() {
   panic_hook::install();
 
   let args = Args::parse();
+
+  // A self-relaunch (plan 044): wait out our predecessor before anything else
+  // — including identity resolution — runs, so the single-instance lock (built
+  // into the identity-scoped plugin below) never contends with a process that
+  // is on its way out. Logged later via `relaunch::replay_outcome` once
+  // `tauri_plugin_log` is live; this runs long before that.
+  if let Some(pid) = args.relaunch_after {
+    relaunch::wait_for_predecessor(pid);
+  }
 
   // Resolve the instance identity BEFORE anything resolves a path. Every mutable
   // artifact name flows from it (app_config::dev_file), so a late resolution
@@ -344,20 +462,20 @@ pub fn run() {
     // its pipe; that is the accepted cost of each exemption.
     if !crate::app_config::is_dev() && !args.headless {
       let on_second_launch = |app: &tauri::AppHandle, argv: Vec<String>, _cwd: String| {
-        let path = Args::try_parse_from(argv)
-          .ok()
-          .and_then(|args| args.path.or(args.positional_path));
-        if let Some(path) = path {
-          if let Err(e) = commands::open_new_window(app, Some(path)) {
-            log::error!("Open in TermFlow failed: {}", e);
-          } else {
-            commands::refresh_menu(app);
+        match relay_action(argv) {
+          RelayAction::OpenPath(path) => {
+            if let Err(e) = commands::open_new_window(app, Some(path)) {
+              log::error!("Open in TermFlow failed: {}", e);
+            } else {
+              commands::refresh_menu(app);
+            }
           }
-        } else {
-          // No path → a plain relaunch while already running: focus/raise (or recreate)
-          // a window. Reuse the robust helper, which falls back to any real window and
-          // creates one if none exist (e.g. tray-only or the main window was detached).
-          show_or_focus_main_window(app);
+          RelayAction::Focus => {
+            // No path → a plain relaunch while already running: focus/raise (or recreate)
+            // a window. Reuse the robust helper, which falls back to any real window and
+            // creates one if none exist (e.g. tray-only or the main window was detached).
+            show_or_focus_main_window(app);
+          }
         }
       };
 
@@ -417,6 +535,7 @@ pub fn run() {
     .setup(move |app| {
         // Resolved before the builder ran, so it could not be logged then.
         gpu_preference::log_resolution();
+        relaunch::replay_outcome();
 
         // Unpackaged Windows apps need an AUMID registered before WinRT can
         // attribute and deliver native toast notifications. On macOS this claims the
@@ -542,6 +661,7 @@ pub fn run() {
             // Every later update goes through set_window_title, which decorates too.
             let _ = main.set_title(&crate::profile::decorate_title("TermFlow"));
             crate::context_menu::install(&main);
+            crate::webview_recovery::install(&main);
             // Detect RDP/console session switches (Windows) and tell the renderer to
             // suppress the resulting ConPTY repaint burst — otherwise the activity
             // bell rings on every tab when you return to the machine. The DOM

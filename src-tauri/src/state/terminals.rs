@@ -284,6 +284,9 @@ impl<R: Runtime> AppState<R> {
             host_stream_offsets: Arc::new(DashMap::new()),
             host_recovering: Arc::new(tokio::sync::Mutex::new(())),
             host_close_pending: Arc::new(DashMap::new()),
+            recovering: Arc::new(AtomicBool::new(false)),
+            restart_in_flight: Arc::new(AtomicBool::new(false)),
+            started_at: Arc::new(std::time::Instant::now()),
         }
     }
 

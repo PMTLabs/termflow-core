@@ -168,6 +168,7 @@ fn build_restored_window(
     }
 
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::webview_recovery::install(&window);
     if record.maximized {
         let _ = window.maximize();
     }
