@@ -621,6 +621,26 @@ pub struct AppState<R: Runtime = Wry> {
     // — otherwise the session lingers alive in the host as an adoptable zombie
     // the user explicitly closed (review 007 C-2).
     pub host_close_pending: Arc<DashMap<String, ()>>,
+    // Set true the moment a `webview_recovery` handler first claims a browser-
+    // process death, and NEVER cleared: every window shares ONE WebView2
+    // browser process, so one death fires N per-window `ProcessFailed`
+    // handlers (some still queued when the first one has already failed), and
+    // no webview survives to fail a second time. The tray's "Restart, keep
+    // terminals" does not consult it, so a failed automatic restore is still
+    // retryable from there (see `webview_recovery::report_restart_failure`).
+    pub recovering: Arc<AtomicBool>,
+    // Set while `restart_keeping_terminals` runs (auto-recovery OR the tray
+    // item), cleared by its failure paths, kept on success because the process
+    // is exiting. Two concurrent runs would each spawn a successor.
+    pub restart_in_flight: Arc<AtomicBool>,
+    // Monotonic instant taken when this `AppState` was built (Tauri `setup`,
+    // after the builder and plugins ran) — the process-uptime proxy
+    // `webview_recovery::decide` uses to tell "just launched and immediately
+    // died again" (a crash loop — hand off to the tray) from "ran fine for a
+    // while, then died" (worth an automatic relaunch). It undercounts true
+    // process uptime by the startup cost, which only makes the loop guard
+    // slightly more conservative.
+    pub started_at: Arc<std::time::Instant>,
 }
 
 impl<R: Runtime> Clone for AppState<R> {
@@ -690,6 +710,9 @@ impl<R: Runtime> Clone for AppState<R> {
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
             host_close_pending: self.host_close_pending.clone(),
+            recovering: self.recovering.clone(),
+            restart_in_flight: self.restart_in_flight.clone(),
+            started_at: self.started_at.clone(),
         }
     }
 }
