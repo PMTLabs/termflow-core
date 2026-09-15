@@ -1,0 +1,12 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "icon": [
+      "icons/rel-al/32x32.png",
+      "icons/rel-al/128x128.png",
+      "icons/rel-al/128x128@2x.png",
+      "icons/rel-al/icon.icns",
+      "icons/rel-al/icon.ico"
+    ]
+  }
+}
