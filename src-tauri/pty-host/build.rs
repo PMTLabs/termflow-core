@@ -4,9 +4,18 @@
 fn main() {
     #[cfg(windows)]
     {
+        // `TERMFLOW_ICON_PROFILE` is set by the package.json script that invoked
+        // this build (dev/rel-al/nightly), so the sidecar carries the same
+        // per-profile colour as the main app. Unset (default `rel`) build/dev
+        // scripts keep the original icon.
+        let icon = match std::env::var("TERMFLOW_ICON_PROFILE").ok().as_deref() {
+            Some("rel-al") => "../icons/rel-al/icon.ico",
+            Some("dev") => "../icons/dev/icon.ico",
+            Some("nightly") => "../icons/nightly/icon.ico",
+            _ => "../icons/icon.ico",
+        };
         let mut res = winresource::WindowsResource::new();
-        // Icon lives in the sibling Tauri icons dir (src-tauri/icons/icon.ico).
-        res.set_icon("../icons/icon.ico");
+        res.set_icon(icon);
         res.set("FileDescription", "TermFlow PTY Host");
         res.set("ProductName", "TermFlow");
         res.set("CompanyName", "TermFlow");
