@@ -134,6 +134,7 @@ export class Terminal {
   loadedAddons: unknown[] = [];
   resetCount = 0;
   clearCount = 0;
+  refreshCalls: Array<[number, number]> = [];
   selectAllCount = 0;
   focusCount = 0;
   selection = '';
@@ -293,7 +294,7 @@ export class Terminal {
   /** Test hook: model the alt-buffer / disposed-marker case. */
   __failDecorations(v: boolean): void { this.__decorationsFail = v; }
 
-  write(data: string): void {
+  write(data: string, callback?: () => void): void {
     this.written.push(data);
     if (data.includes('\x1b[?1003h')) {
       this.mouseTrackingMode = 'any';
@@ -316,6 +317,7 @@ export class Terminal {
     } else if (data.includes('\x1b[?1004l')) {
       this.sendFocusMode = false;
     }
+    callback?.();
   }
 
   // Real xterm routes pasted text OUT through the onData event (after bracketed-paste
@@ -347,7 +349,9 @@ export class Terminal {
     this.focusCount += 1;
   }
 
-  refresh(_start: number, _end: number): void {}
+  refresh(start: number, end: number): void {
+    this.refreshCalls.push([start, end]);
+  }
 
   getSelection(): string {
     return this.selection;

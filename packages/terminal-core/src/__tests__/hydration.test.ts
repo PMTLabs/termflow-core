@@ -170,6 +170,7 @@ test('snapshot present: reset+write(snapshot); mid-await chunk dropped', async (
   expect(term.written).toEqual(['SNAP']);
   // The buffered chunk was dropped (already reflected in snapshot).
   expect(term.written).not.toContain('LIVE-DURING-AWAIT');
+  expect(term.refreshCalls).toContainEqual([0, term.rows - 1]);
   expect(terminalCache.get('h1')!.pendingOutput).toEqual([]);
   expect(terminalCache.get('h1')!.lastHydratedProcessId).toBe('p1');
   expect(terminalCache.get('h1')!.hydrating).toBe(false);
@@ -229,6 +230,7 @@ test('getSnapshot throws: history replayed then pending appended', async () => {
   expect(term.resetCount).toBe(1);
   // After reset() the written array is cleared, so it should contain raw then pending.
   expect(term.written).toEqual(['HISTORY', 'PENDING']);
+  expect(term.refreshCalls).toContainEqual([0, term.rows - 1]);
   expect(terminalCache.get('h3')!.hydrating).toBe(false);
   expect(terminalCache.get('h3')!.lastHydratedProcessId).toBe('p1');
 });
