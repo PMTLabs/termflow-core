@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { store, RootState } from '../../store';
 import { detachTabToNewWindow } from '../Panes/dnd/detach';
@@ -14,27 +14,40 @@ import { setTabColorSchema, setTabTitleColor, setTabMuted } from '../../store/sl
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { BellIcon } from '../UI/BellIcon';
 import { titleColorStyle } from '../../store/titleColor';
+import { NewPaneRow } from '../UI/NewPaneRow';
+import { SubmenuFlyoutHost } from '../UI/SubmenuFlyoutHost';
+import { HOVER_CLOSE_DELAY_MS, SUBMENU_HOVER_OPEN_DELAY_MS } from '../Terminal/ContextMenu';
 import './TabContextMenu.css';
+
+/** The three items with a flyout submenu, single-slot like `ContextMenu`'s `openSubmenu`. */
+type TabSubmenuKey = 'schema' | 'color' | 'admin';
 
 // Fixed quick-pick colors for the tab name. NOT derived from the active color
 // schema: the tab strip itself always renders on its own fixed dark
 // background (TabManager.css .tab-item, independent of any terminal
 // schema), so a schema-derived swatch (e.g. a light theme's dark text color)
 // could be unreadable there. These are hand-picked for contrast against that
-// fixed background.
+// fixed background, and chosen so that any two stay distinguishable as 13px
+// TITLE TEXT (not just as swatches — thin glyphs wash out small hue steps,
+// which is why there is one red, one blue, etc. and no near-neighbours like
+// rose/red or indigo/violet). Deliberately no white (that is the default title
+// color, reachable via "Reset to Default") and no greys: a grey title reads
+// as a DISABLED tab, not a colored one.
 const TAB_NAME_COLORS: { name: string; hex: string }[] = [
-  { name: 'Red', hex: '#F14C4C' },
-  { name: 'Orange', hex: '#FF8C42' },
-  { name: 'Yellow', hex: '#F5F543' },
-  { name: 'Green', hex: '#23D18B' },
-  { name: 'Teal', hex: '#29B8DB' },
-  { name: 'Cyan', hex: '#61D6D6' },
-  { name: 'Blue', hex: '#3B8EEA' },
-  { name: 'Purple', hex: '#B48EAD' },
-  { name: 'Magenta', hex: '#D670D6' },
-  { name: 'Pink', hex: '#FF79C6' },
-  { name: 'White', hex: '#E5E5E5' },
-  { name: 'Gray', hex: '#969696' },
+  { name: 'Red', hex: '#FF3B3B' },
+  { name: 'Orange', hex: '#FF8C1A' },
+  { name: 'Yellow', hex: '#FFE81A' },
+  { name: 'Lime', hex: '#9CF52A' },
+  { name: 'Green', hex: '#22C94E' },
+  { name: 'Teal', hex: '#19B39B' },
+  { name: 'Cyan', hex: '#22E5FF' },
+  { name: 'Sky', hex: '#8FCBFF' },
+  { name: 'Blue', hex: '#3F6DFF' },
+  { name: 'Purple', hex: '#A85CFF' },
+  { name: 'Magenta', hex: '#FF3DE0' },
+  { name: 'Pink', hex: '#FFA0D2' },
+  { name: 'Brown', hex: '#C9925A' },
+  { name: 'Olive', hex: '#B8B84A' },
 ];
 
 interface TabContextMenuProps {
@@ -74,8 +87,59 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
   const dispatch = useDispatch();
   const tab = useSelector((s: RootState) => s.tabs.tabs.find((t) => t.id === tabId));
   const globalSchemaId = useSelector((s: RootState) => s.settings.colorSchemaId);
-  const [expanded, setExpanded] = useState<'schema' | 'color' | 'admin' | null>(null);
   const adminSupport = adminTabSupport();
+
+  // Flyout submenus (Color Schema / Tab Color / Open admin Tab), consistent with the
+  // terminal's right-click menu: a single-slot `openSubmenu`, a hover-open debounce so a
+  // quick sweep across the row does not pop its panel, and a hover-close grace so crossing
+  // a neighbouring row on the way into the panel does not tear it down mid-reach. The two
+  // delays are imported rather than restated so both menus can only ever agree.
+  const [openSubmenu, setOpenSubmenu] = useState<TabSubmenuKey | null>(null);
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const cancelPendingOpen = useCallback(() => {
+    if (openTimer.current !== null) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+  }, []);
+  const cancelPendingClose = useCallback(() => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+  /** Click — opens immediately, and never toggles shut (hover may already have opened it). */
+  const openSubmenuNow = useCallback((key: TabSubmenuKey) => {
+    cancelPendingOpen();
+    cancelPendingClose();
+    setOpenSubmenu(key);
+  }, [cancelPendingClose, cancelPendingOpen]);
+  /** Hover — debounced, and idempotent on an already-open parent. */
+  const scheduleSubmenuOpen = useCallback((key: TabSubmenuKey) => {
+    cancelPendingClose();
+    cancelPendingOpen();
+    if (openSubmenu === key) return;
+    openTimer.current = window.setTimeout(() => {
+      openTimer.current = null;
+      openSubmenuNow(key);
+    }, SUBMENU_HOVER_OPEN_DELAY_MS);
+  }, [cancelPendingClose, cancelPendingOpen, openSubmenu, openSubmenuNow]);
+  /** Hovering a row that is not a submenu parent retires whatever flyout is open. */
+  const scheduleSubmenuClose = useCallback(() => {
+    cancelPendingOpen();
+    cancelPendingClose();
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      setOpenSubmenu(null);
+    }, HOVER_CLOSE_DELAY_MS);
+  }, [cancelPendingClose, cancelPendingOpen]);
+
+  useEffect(() => () => {
+    cancelPendingOpen();
+    cancelPendingClose();
+  }, [cancelPendingOpen, cancelPendingClose]);
 
   // Disabled states for the browser-style close items, from the current tab order.
   const orderedTabIds = store.getState().tabs.tabs.map((t) => t.id);
@@ -95,14 +159,22 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       }
     };
 
-    // Esc closes the menu; the bare-letter mnemonics (C/R/L/O) fire the matching
-    // close action — recomputing the disabled state from the store at press time
-    // so the listener never holds a stale edge case.
+    // Esc closes an open FLYOUT first (matching the terminal menu's own Escape, which
+    // retires a submenu panel before it ever reaches the menu), and only closes the whole
+    // menu once none is open; the bare-letter mnemonics (C/R/L/O) fire the matching close
+    // action — recomputing the disabled state from the store at press time so the listener
+    // never holds a stale edge case.
     const handleKeydown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
-        onClose();
+        if (openSubmenu !== null) {
+          cancelPendingOpen();
+          cancelPendingClose();
+          setOpenSubmenu(null);
+        } else {
+          onClose();
+        }
         return;
       }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -140,7 +212,7 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeydown);
     };
-  }, [onClose, onCloseKind, tabId]);
+  }, [onClose, onCloseKind, tabId, openSubmenu, cancelPendingOpen, cancelPendingClose]);
 
   // Edge-aware: after mount, shift the menu left/up so it never spills past the
   // right/bottom edge when opened near a corner.
@@ -204,124 +276,138 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
         ))}
       </div>
       <div className="context-menu-divider" />
-      <button
-        className="context-menu-item"
-        onClick={() => setExpanded(expanded === 'schema' ? null : 'schema')}
-      >
-        <span className="menu-icon">🎨</span>
-        Color Schema
-        <span className="context-menu-expand-arrow">{expanded === 'schema' ? '▾' : '▸'}</span>
-      </button>
-      {expanded === 'schema' && (
-        <div className="context-menu-subpanel">
-          <ColorSchemaGrid
-            activeId={tab?.colorSchemaId}
-            defaultSwatchSchemaId={globalSchemaId}
-            onPick={(id) => dispatch(setTabColorSchema({ id: tabId, colorSchemaId: id }))}
-          />
-        </div>
-      )}
-      <button
-        className="context-menu-item"
-        onClick={() => setExpanded(expanded === 'color' ? null : 'color')}
-      >
-        <span className="menu-icon">🏷️</span>
-        Tab Color
-        <span className="context-menu-expand-arrow">{expanded === 'color' ? '▾' : '▸'}</span>
-      </button>
-      {expanded === 'color' && (
-        <div className="context-menu-subpanel">
-          <div className="tab-color-swatches">
-            {TAB_NAME_COLORS.map(({ name, hex }) => (
-              <button
-                key={hex}
-                type="button"
-                title={name}
-                className={`tab-color-dot${tab?.titleColor === hex ? ' active' : ''}`}
-                style={{ background: hex }}
-                onClick={() => dispatch(setTabTitleColor({ id: tabId, titleColor: hex }))}
-              />
-            ))}
-          </div>
+      <SubmenuFlyoutHost
+        open={openSubmenu === 'schema'}
+        panelClassName="submenu-flyout-panel--wide"
+        onMouseEnter={cancelPendingClose}
+        onMouseLeave={scheduleSubmenuClose}
+        trigger={
           <button
-            type="button"
-            className="tab-color-reset"
-            onClick={() => dispatch(setTabTitleColor({ id: tabId, titleColor: undefined }))}
+            className={`context-menu-item${openSubmenu === 'schema' ? ' is-submenu-open' : ''}`}
+            onMouseEnter={() => scheduleSubmenuOpen('schema')}
+            onClick={() => openSubmenuNow('schema')}
           >
-            Reset to Default
+            <span className="menu-icon">🎨</span>
+            Color Schema
+            <span className="context-menu-expand-arrow">▸</span>
           </button>
+        }
+      >
+        <ColorSchemaGrid
+          activeId={tab?.colorSchemaId}
+          defaultSwatchSchemaId={globalSchemaId}
+          onPick={(id) => dispatch(setTabColorSchema({ id: tabId, colorSchemaId: id }))}
+        />
+      </SubmenuFlyoutHost>
+      <SubmenuFlyoutHost
+        open={openSubmenu === 'color'}
+        onMouseEnter={cancelPendingClose}
+        onMouseLeave={scheduleSubmenuClose}
+        trigger={
+          <button
+            className={`context-menu-item${openSubmenu === 'color' ? ' is-submenu-open' : ''}`}
+            onMouseEnter={() => scheduleSubmenuOpen('color')}
+            onClick={() => openSubmenuNow('color')}
+          >
+            <span className="menu-icon">🏷️</span>
+            Tab Color
+            <span className="context-menu-expand-arrow">▸</span>
+          </button>
+        }
+      >
+        <div className="tab-color-swatches">
+          {TAB_NAME_COLORS.map(({ name, hex }) => (
+            <button
+              key={hex}
+              type="button"
+              title={name}
+              className={`tab-color-dot${tab?.titleColor === hex ? ' active' : ''}`}
+              style={{ background: hex }}
+              onClick={() => dispatch(setTabTitleColor({ id: tabId, titleColor: hex }))}
+            />
+          ))}
         </div>
-      )}
+        <button
+          type="button"
+          className="tab-color-reset"
+          onClick={() => dispatch(setTabTitleColor({ id: tabId, titleColor: undefined }))}
+        >
+          Reset to Default
+        </button>
+      </SubmenuFlyoutHost>
       <button
         className="context-menu-item"
+        onMouseEnter={scheduleSubmenuClose}
         onClick={() => runAndClose(() => dispatch(setTabMuted({ id: tabId, muted: !tab?.notifyMuted })))}
       >
         <span className="menu-icon"><BellIcon muted={!!tab?.notifyMuted} /></span>
         {tab?.notifyMuted ? 'Unmute Notifications' : 'Mute Notifications'}
       </button>
       <div className="context-menu-divider" />
-      <button className="context-menu-item" onClick={() => runAndClose(() => openNewTabWithDefaultProfile(tabId))}>
+      <button
+        className="context-menu-item"
+        onMouseEnter={scheduleSubmenuClose}
+        onClick={() => runAndClose(() => openNewTabWithDefaultProfile(tabId))}
+      >
         <span className="menu-icon">➕</span>
         Open New Tab
       </button>
       {/* Plan 045. Toggle itself always shown (O2) — disabled with a tooltip when
-          unsupported, so unavailability is visible without expanding the subpanel. */}
+          unsupported, so unavailability is visible without opening the flyout. */}
+      <SubmenuFlyoutHost
+        open={openSubmenu === 'admin'}
+        onMouseEnter={cancelPendingClose}
+        onMouseLeave={scheduleSubmenuClose}
+        trigger={
+          <button
+            className={`context-menu-item${openSubmenu === 'admin' ? ' is-submenu-open' : ''}`}
+            disabled={!adminSupport.supported}
+            title={adminSupport.supported ? undefined : adminTabTooltip(adminSupport.reason)}
+            onMouseEnter={() => scheduleSubmenuOpen('admin')}
+            onClick={() => openSubmenuNow('admin')}
+          >
+            <span className="menu-icon">🛡️</span>
+            Open admin Tab
+            <span className="context-menu-expand-arrow">▸</span>
+          </button>
+        }
+      >
+        <AdminProfileList variant="menu" afterTabId={tabId} onPick={onClose} />
+      </SubmenuFlyoutHost>
       <button
         className="context-menu-item"
-        disabled={!adminSupport.supported}
-        title={adminSupport.supported ? undefined : adminTabTooltip(adminSupport.reason)}
-        onClick={() => setExpanded(expanded === 'admin' ? null : 'admin')}
+        onMouseEnter={scheduleSubmenuClose}
+        onClick={() => runAndClose(() => { void openNewWindow(); })}
       >
-        <span className="menu-icon">🛡️</span>
-        Open admin Tab
-        <span className="context-menu-expand-arrow">{expanded === 'admin' ? '▾' : '▸'}</span>
-      </button>
-      {expanded === 'admin' && adminSupport.supported && (
-        <div className="context-menu-subpanel">
-          <AdminProfileList variant="menu" afterTabId={tabId} onPick={onClose} />
-        </div>
-      )}
-      <button className="context-menu-item" onClick={() => runAndClose(() => { void openNewWindow(); })}>
         <span className="menu-icon">🪟</span>
         Open New Window
       </button>
       {hasPanes && (
-        <>
-          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'vertical', 'after'))}>
-            <span className="menu-icon">➡️</span>
-            Open New Pane Right
-          </button>
-          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'vertical', 'before'))}>
-            <span className="menu-icon">⬅️</span>
-            Open New Pane Left
-          </button>
-          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'horizontal', 'before'))}>
-            <span className="menu-icon">⬆️</span>
-            Open New Pane Up
-          </button>
-          <button className="context-menu-item" onClick={() => runAndClose(() => splitTabPane(tabId, 'horizontal', 'after'))}>
-            <span className="menu-icon">⬇️</span>
-            Open New Pane Down
-          </button>
-        </>
+        <NewPaneRow
+          title="Split this tab's focused pane with a new terminal."
+          onSplit={(direction, position) => splitTabPane(tabId, direction, position)}
+          onDone={onClose}
+          onMouseEnter={scheduleSubmenuClose}
+        />
       )}
       {canDetach && (
         <>
           <div className="context-menu-divider" />
-          <button className="context-menu-item" onClick={handleMoveToNewWindow}>
+          <button className="context-menu-item" onMouseEnter={scheduleSubmenuClose} onClick={handleMoveToNewWindow}>
             <span className="menu-icon">⧉</span>
             Move to New Window
           </button>
         </>
       )}
       <div className="context-menu-divider" />
-      <button className="context-menu-item close-item" onClick={() => closeWith('single')}>
+      <button className="context-menu-item close-item" onMouseEnter={scheduleSubmenuClose} onClick={() => closeWith('single')}>
         <span className="menu-icon">✕</span>
         <Mnemonic label="Close Tab" char="C" />
       </button>
       <button
         className="context-menu-item close-item"
         disabled={!canCloseRight}
+        onMouseEnter={scheduleSubmenuClose}
         onClick={() => closeWith('right')}
       >
         <span className="menu-icon">▸</span>
@@ -330,6 +416,7 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       <button
         className="context-menu-item close-item"
         disabled={!canCloseLeft}
+        onMouseEnter={scheduleSubmenuClose}
         onClick={() => closeWith('left')}
       >
         <span className="menu-icon">◂</span>
@@ -338,13 +425,14 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       <button
         className="context-menu-item close-item"
         disabled={!canCloseOthers}
+        onMouseEnter={scheduleSubmenuClose}
         onClick={() => closeWith('others')}
       >
         <span className="menu-icon">⊗</span>
         <Mnemonic label="Close Other Tabs" char="O" />
       </button>
       <div className="context-menu-divider" />
-      <button className="context-menu-item" onClick={handleCopyInfo}>
+      <button className="context-menu-item" onMouseEnter={scheduleSubmenuClose} onClick={handleCopyInfo}>
         <span className="menu-icon">📄</span>
         Copy All Info
       </button>

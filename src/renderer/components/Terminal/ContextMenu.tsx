@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTooltipDwell } from '../../hooks/useTooltipDwell';
+import { useSubmenuEdgeFlip } from '../../hooks/useSubmenuEdgeFlip';
 import { NewPaneRow, type NewPaneRowProps } from '../UI/NewPaneRow';
 // Re-exported because the dwell is part of THIS menu's observable contract even though the hook
 // that implements it is shared — the tests that tick it, and any caller reasoning about how long a
@@ -166,6 +167,25 @@ export interface ContextMenuFlyout {
   onOpen?: () => void;
 }
 
+/**
+ * An alternative to `submenu` for a submenu-parent item whose panel isn't a filterable
+ * row list — a swatch grid, say. Participates in exactly the same single-slot `openSubmenu`
+ * state, hover-open debounce, and hover-close grace `submenu` does; the panel itself is just
+ * handed content instead of built from rows.
+ */
+export interface ContextMenuCustomFlyout {
+  /** Arbitrary content, re-rendered by the caller like any other JSX — there is no dedicated
+   *  re-render hook here the way `ContextMenuFlyout.rows` gets one on every keystroke. */
+  content: React.ReactNode;
+  /** Extra class(es) on the panel, replacing `.context-menu-flyout`'s own width/padding
+   *  rather than adding to them — for a panel styled like `SubmenuFlyoutHost`'s instead
+   *  (e.g. `submenu-flyout-panel submenu-flyout-panel--wide`, for visual parity with the
+   *  tab strip's own Color Schema flyout). */
+  panelClassName: string;
+  /** Fired each time the flyout opens, mirroring `ContextMenuFlyout.onOpen`. */
+  onOpen?: () => void;
+}
+
 export interface ContextMenuItem {
   label?: string;
   icon?: string;
@@ -179,6 +199,9 @@ export interface ContextMenuItem {
   /** Turns the item into a submenu parent: clicking it toggles a flyout instead of
    *  running `click` and closing the menu. `click` is never called for such an item. */
   submenu?: ContextMenuFlyout;
+  /** The non-row-list alternative to `submenu` — see `ContextMenuCustomFlyout`. An item
+   *  carries at most one of the two; `submenu` wins if both are somehow set. */
+  customFlyout?: ContextMenuCustomFlyout;
 }
 
 interface ContextMenuProps {
@@ -243,7 +266,19 @@ const EDGE_MARGIN = 5;
  * that host, so entering the panel from outside fires the host's own mouseenter), which is
  * what makes the delay a backstop rather than the whole mechanism.
  */
-const HOVER_CLOSE_DELAY_MS = 260;
+export const HOVER_CLOSE_DELAY_MS = 260;
+
+/**
+ * Debounce before a flyout opened by HOVER actually opens, in ms.
+ *
+ * The mirror image of `HOVER_CLOSE_DELAY_MS`: a menu is swept top to bottom on the way to the
+ * row the user actually wants, and every submenu parent on that path fires `mouseenter` for
+ * however long the pointer happens to cross it. Opening immediately would pop a panel for
+ * every one of those, on a row nobody meant to stop at. Requiring the pointer to have rested
+ * on the parent for this long before the panel appears is what tells "passing over" apart
+ * from "aiming at". A click still opens instantly — this delay applies to hover alone.
+ */
+export const SUBMENU_HOVER_OPEN_DELAY_MS = 300;
 
 /**
  * Default filter for the array form of `flyout.rows`.
@@ -869,6 +904,31 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   );
 };
 
+/**
+ * The `customFlyout` sibling of `FlyoutPanel` — same anchoring contract (a sibling of the
+ * `.context-menu-submenu-host` button, positioned `absolute; left: 100%` of it, flipped by
+ * `useSubmenuEdgeFlip` exactly as `FlyoutPanel` flips itself), but no search box, no row
+ * list: just the caller's own content, in its own hook instance (a `.map()` callback may not
+ * call hooks directly — this component exists so each open custom flyout gets one).
+ */
+const CustomFlyoutPanel: React.FC<{ flyout: ContextMenuCustomFlyout }> = ({ flyout }) => {
+  const { panelRef, flip } = useSubmenuEdgeFlip(true, [flyout.content]);
+  return (
+    <div
+      ref={panelRef}
+      className={`${flyout.panelClassName}${flip.left ? ' flip-left' : ''}`}
+      style={flip.shiftY ? { top: flip.shiftY } : undefined}
+      // Same right-click swallow `FlyoutPanel` applies — see its own comment.
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+    >
+      {flyout.content}
+    </div>
+  );
+};
+
 export const ContextMenu: React.FC<ContextMenuProps> = ({
   x,
   y,
@@ -885,6 +945,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   /** Index of the item whose flyout is open — a single slot, so opening one closes any other. */
   const [openSubmenu, setOpenSubmenu] = useState<number | null>(standaloneSubmenu ?? null);
   const closeTimer = useRef<number | null>(null);
+  const openTimer = useRef<number | null>(null);
 
   const cancelPendingClose = useCallback(() => {
     if (closeTimer.current !== null) {
@@ -893,36 +954,68 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
     }
   }, []);
 
+  const cancelPendingOpen = useCallback(() => {
+    if (openTimer.current !== null) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+  }, []);
+
   /**
-   * Hovering a submenu parent opens it.
+   * Opens a submenu parent's flyout immediately — used by a CLICK, which must never carry the
+   * hover debounce below (§ the ask: a click means "open this", not "start deciding whether to").
    *
    * Idempotent on purpose: the host's mouseenter fires again every time the pointer comes
    * back from a neighbouring item, and `onOpen` is a cache warm, not a render hook — so
    * the already-open check lives here rather than at the call sites, where a new caller
    * would have to remember it.
    */
-  const openSubmenuAt = useCallback((index: number, item: ContextMenuItem) => {
+  const openSubmenuNow = useCallback((index: number, item: ContextMenuItem) => {
+    cancelPendingOpen();
     cancelPendingClose();
     setOpenSubmenu((prev) => {
       if (prev === index) return prev;
-      item.submenu?.onOpen?.();
+      (item.submenu?.onOpen ?? item.customFlyout?.onOpen)?.();
       return index;
     });
-  }, [cancelPendingClose]);
+  }, [cancelPendingClose, cancelPendingOpen]);
+
+  /**
+   * Hovering a submenu parent arms a delayed open rather than opening at once.
+   *
+   * A quick sweep across the row on the way to another item must not pop its panel — see
+   * `SUBMENU_HOVER_OPEN_DELAY_MS`. Re-arming on every re-entry would be harmless but wasteful;
+   * the already-open check (mirroring `openSubmenuNow`'s) also means resting back on an
+   * already-open parent never restarts a delay over its own visible panel.
+   */
+  const scheduleSubmenuOpen = useCallback((index: number, item: ContextMenuItem) => {
+    cancelPendingClose();
+    cancelPendingOpen();
+    if (openSubmenu === index) return;
+    openTimer.current = window.setTimeout(() => {
+      openTimer.current = null;
+      openSubmenuNow(index, item);
+    }, SUBMENU_HOVER_OPEN_DELAY_MS);
+  }, [cancelPendingClose, cancelPendingOpen, openSubmenu, openSubmenuNow]);
 
   /** Hovering an item that is NOT a submenu parent retires the open flyout, after the
-   *  grace period above. */
+   *  grace period above — and cancels a pending HOVER-OPEN outright, since the pointer has
+   *  already left the parent that armed it and the delayed open must not fire behind it. */
   const scheduleCloseSubmenu = useCallback(() => {
+    cancelPendingOpen();
     cancelPendingClose();
     closeTimer.current = window.setTimeout(() => {
       closeTimer.current = null;
       setOpenSubmenu(null);
     }, HOVER_CLOSE_DELAY_MS);
-  }, [cancelPendingClose]);
+  }, [cancelPendingClose, cancelPendingOpen]);
 
   // A timer that outlives the menu would set state on an unmounted component, and keep a
   // closure over `items` alive for a menu the user has already dismissed.
-  useEffect(() => cancelPendingClose, [cancelPendingClose]);
+  useEffect(() => () => {
+    cancelPendingClose();
+    cancelPendingOpen();
+  }, [cancelPendingClose, cancelPendingOpen]);
 
   // The items' tooltips. The flyout panels hold their own — see `useTooltipDwell`.
   //
@@ -938,12 +1031,15 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   // one round; it moved the moment the accordion needed the same exemption.
   const tip = useTooltipDwell();
 
-  // `standaloneSubmenu` bypasses `openSubmenuAt`, so its `onOpen` has to be fired here or
+  // `standaloneSubmenu` bypasses `openSubmenuNow`/`scheduleSubmenuOpen`, so its `onOpen` has to be fired here or
   // a shortcut-opened Command History would never warm its directory cache. Mount only:
   // re-firing it whenever `items` is rebuilt — which is every render of the owner — would
   // turn a once-per-open hook into a per-keystroke one.
   useEffect(() => {
-    if (standaloneSubmenu != null) items[standaloneSubmenu]?.submenu?.onOpen?.();
+    if (standaloneSubmenu != null) {
+      const item = items[standaloneSubmenu];
+      (item?.submenu?.onOpen ?? item?.customFlyout?.onOpen)?.();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -1037,6 +1133,12 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           );
         }
 
+        // `customFlyout` is `submenu`'s non-row-list twin — see its own doc comment. Both make
+        // an item a submenu PARENT: hover-debounced open, click-open-now-and-never-toggle,
+        // never closes the menu on click. Everything below treats the two identically except
+        // which kind of panel eventually gets rendered.
+        const hasFlyout = !!(item.submenu || item.customFlyout);
+
         const button = (
           <button
             key={index}
@@ -1047,15 +1149,15 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             // tooltip is the only thing saying why it is dimmed). The third — an item reached by
             // the keyboard — is inside `titleFor`, fed by the focus handlers below.
             title={instantTitles || disabled ? item.title : tip.titleFor(tipKey, item.title)}
-            aria-haspopup={item.submenu ? 'menu' : undefined}
-            aria-expanded={item.submenu ? submenuOpen : undefined}
+            aria-haspopup={hasFlyout ? 'menu' : undefined}
+            aria-expanded={hasFlyout ? submenuOpen : undefined}
             onMouseEnter={() => {
               if (disabled) return;
               tip.onEnter(tipKey);
               // A plain item retires whatever flyout is open; a submenu parent opens its
               // own. Both live on the ITEM rather than on the host below, so a menu with
               // no submenus at all is untouched by any of this.
-              if (item.submenu) openSubmenuAt(index, item);
+              if (hasFlyout) scheduleSubmenuOpen(index, item);
               else scheduleCloseSubmenu();
             }}
             onMouseLeave={tip.onLeave}
@@ -1066,12 +1168,14 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               // the menu — the branch has to come before `onClose()` or the menu would be
               // gone before the flyout could ever be seen (§4.2).
               //
-              // Open, not toggle. Hover has already opened it by the time any click can
-              // land, so a toggle here would mean clicking the thing you are pointing at
-              // closes it — making the one instinctive reaction to a surprising hover-open
-              // the reaction that removes the panel.
-              if (item.submenu) {
-                openSubmenuAt(index, item);
+              // Open, not toggle — and NOW, not debounced: a click is a deliberate aim at
+              // this row, not a sweep past it, so it must never wait out the hover delay.
+              // Hover may already have opened it by the time the click lands, so a toggle
+              // here would mean clicking the thing you are pointing at closes it — making
+              // the one instinctive reaction to a surprising hover-open the reaction that
+              // removes the panel.
+              if (hasFlyout) {
+                openSubmenuNow(index, item);
                 return;
               }
               item.click?.();
@@ -1083,13 +1187,13 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
             {item.accelerator && (
               <span className="context-menu-accelerator">{item.accelerator}</span>
             )}
-            {item.submenu && <span className="context-menu-submenu-arrow">▸</span>}
+            {hasFlyout && <span className="context-menu-submenu-arrow">▸</span>}
           </button>
         );
 
         // A `standaloneSubmenu` pointing at an item with no flyout has nothing to show;
         // returning the button would put a lone menu row where a panel was asked for.
-        if (!item.submenu) return bare ? null : button;
+        if (!hasFlyout) return bare ? null : button;
 
         // The flyout is a sibling of the button inside a positioned host, not a child
         // of it: a <button> may not contain an <input> or another <button>.
@@ -1104,17 +1208,21 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           >
             {!bare && button}
             {submenuOpen && !disabled && (
-              <FlyoutPanel
-                flyout={item.submenu}
-                depth={0}
-                instantTitles={instantTitles}
-                // With no menu behind it, retiring the panel alone would leave an empty
-                // box on screen still swallowing the next outside click. Escape and Tab
-                // therefore mean "dismiss", which is what they already meant to the user.
-                onCloseSelf={bare ? onClose : () => setOpenSubmenu(null)}
-                onCloseMenu={onClose}
-                suppressDismiss={suppressDismiss}
-              />
+              item.customFlyout ? (
+                <CustomFlyoutPanel flyout={item.customFlyout} />
+              ) : (
+                <FlyoutPanel
+                  flyout={item.submenu!}
+                  depth={0}
+                  instantTitles={instantTitles}
+                  // With no menu behind it, retiring the panel alone would leave an empty
+                  // box on screen still swallowing the next outside click. Escape and Tab
+                  // therefore mean "dismiss", which is what they already meant to the user.
+                  onCloseSelf={bare ? onClose : () => setOpenSubmenu(null)}
+                  onCloseMenu={onClose}
+                  suppressDismiss={suppressDismiss}
+                />
+              )
             )}
           </div>
         );

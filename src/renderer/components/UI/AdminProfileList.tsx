@@ -12,9 +12,10 @@ import { profileEmoji } from '../../services/shellProfileIcon';
 
 interface AdminProfileListProps {
   /** `'menu'` renders `<button class="context-menu-item">` rows, the idiom
-   *  `PaneContextMenu` and `TabContextMenu` already use inside their
-   *  `context-menu-subpanel`. `'dropdown'` renders `<div class="dropdown-item">`
-   *  rows, `NewTabDropdown`'s own idiom (its rows are not buttons). */
+   *  `PaneContextMenu`'s accordion `context-menu-subpanel` and `TabContextMenu`'s
+   *  own flyout (`SubmenuFlyoutHost`) both already use. `'dropdown'` renders
+   *  `<div class="dropdown-item">` rows, `NewTabDropdown`'s own idiom (its rows
+   *  are not buttons). */
   variant: 'menu' | 'dropdown';
   /** Forwarded to `openAdminTabWithProfile` — the new tab lands immediately
    *  after this one (tab-strip menu only; absent elsewhere). */

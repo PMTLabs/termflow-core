@@ -200,7 +200,9 @@ describe('TerminalDisplay relocation wiring', () => {
     const body = blockBodyAt(start);
     expect(body).toContain('setContextMenu(null)');
     expect(body).toContain('setPathPicker(null)');
-    expect(body).toContain('setSchemaPicker(null)');
+    // `setSchemaPicker` is gone (2026-09-16): the agent color-scheme picker is a submenu
+    // INSIDE `contextMenu` now (`customFlyout`), so clearing `contextMenu` already takes it.
+    expect(body).not.toContain('setSchemaPicker');
     expect(body).toContain('suggestRef.current.close()');
     // The search bar is still left alone. UPDATED DELIBERATELY for `plan/027` §1.3: the
     // state moved out of `TerminalSearchBar` into `useTerminalSearch`, so `setSearchOpen`

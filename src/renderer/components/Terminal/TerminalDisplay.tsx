@@ -12,6 +12,7 @@ import { CommandSuggestPopup } from './CommandSuggestPopup';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { SnippetDialog } from '../UI/SnippetDialog';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
+import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { useCommandSuggest } from './useCommandSuggest';
 import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
@@ -34,7 +35,7 @@ import { createMainBridge } from './MainBridge';
 import { getWindowsBuildNumber } from '../../api/tauri-bridge';
 import { store, RootState } from '../../store';
 import { setSurfaceChrome, clearSurfaceChrome } from '../../services/surfaceChrome';
-import { getSchemaTheme, COLOR_SCHEMAS } from '../../store/colorSchemas';
+import { getSchemaTheme } from '../../store/colorSchemas';
 import { resolveSchemaId, setPaneBackgroundVar } from '../../store/terminalTheme';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { blendEndedTint, endedRailColor } from '../../store/endedTint';
@@ -180,11 +181,20 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   const [pathPicker, setPathPicker] = useState<{
     x: number; y: number; candidates: string[]; base?: string; line?: number; col?: number;
   } | null>(null);
-  // Backlog 007: per-agent color scheme. `agentForMenu` is the coding agent
-  // detected in this pane when the right-click menu opened (null if none);
-  // `schemaPicker` is the secondary schema-list menu it opens.
+  // Backlog 007: per-agent color scheme. `agentForMenu` is the coding agent detected in
+  // this pane when the right-click menu opened (null if none); it drives the "Color scheme
+  // for X" submenu built into the menu's own items below (`customFlyout`, 2026-09-16) — a
+  // real submenu now, not a separate popup, so opening it no longer closes the menu behind
+  // it (it used to: the old picker was a plain `click` item that opened a second, standalone
+  // `ContextMenu`, which — per ContextMenu.tsx's own contract that every plain item closes
+  // the menu — always tore the first one down first).
   const [agentForMenu, setAgentForMenu] = useState<string | null>(null);
-  const [schemaPicker, setSchemaPicker] = useState<{ x: number; y: number; agent: string } | null>(null);
+  // Reactive (unlike a one-shot `store.getState()` read) so the submenu's active-swatch
+  // highlight updates live as the user clicks through schemes without the panel closing —
+  // the same reason `TabContextMenu`'s own Color Schema flyout reads its active id this way.
+  const agentSchemaActiveId = useSelector((s: RootState) =>
+    agentForMenu ? s.settings.agentColorSchemes[agentForMenu] : undefined);
+  const globalSchemaId = useSelector((s: RootState) => s.settings.colorSchemaId);
 
   // Open a fully-resolved path via the configured editor (with line/col) or the OS
   // default handler; surface any failure as a toast. Stable identity (deps: dispatch)
@@ -283,10 +293,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   }, [refocusTerminal]);
   const closePathPicker = useCallback(() => {
     setPathPicker(null);
-    refocusTerminal();
-  }, [refocusTerminal]);
-  const closeSchemaPicker = useCallback(() => {
-    setSchemaPicker(null);
     refocusTerminal();
   }, [refocusTerminal]);
   const openSnippetDialog = useCallback((seedText?: string) => {
@@ -465,11 +471,12 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       if (toCanvas) suggestRef.current.close();
       // ContextMenu portals to <body> with position: fixed at literal x/y
       // (ContextMenu.tsx:63, :67), so a menu opened before the move floats at a
-      // viewport point unrelated to the terminal. Same for both pickers.
+      // viewport point unrelated to the terminal. Same for the other picker (the
+      // agent color-scheme picker is a submenu INSIDE `contextMenu` now, not a
+      // separate popup, so closing that menu already takes it with it).
       setContextMenu(null);
       setSnippetsMenu(null);
       setPathPicker(null);
-      setSchemaPicker(null);
       // The SEARCH BAR is deliberately left open with its state intact (§8): it
       // holds user-typed query/caseSensitive/wholeWord/regex (now in
       // useTerminalSearch, `plan/027` §1.3) and the SearchAddon's highlights live on
@@ -772,7 +779,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   /**
    * A menu belongs to the tab it was opened in.
    *
-   * All four of these render through `ContextMenu`, which portals to `document.body` at
+   * All three of these render through `ContextMenu`, which portals to `document.body` at
    * `position: fixed`; `.tab-content`'s `visibility/opacity/content-visibility` hide only that
    * tab's own subtree, and a background tab stays mounted — so a menu opened here kept painting
    * over whichever tab the user switched to, where it reads as that tab's menu while acting on
@@ -781,8 +788,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * EDGE into inactive rather than the state, which is what keeps the Canvas overlay's menu (this
    * component, `isActive` false throughout) working.
    *
-   * The same four slots `onRelocated` clears, for the same reason and deliberately in the same
-   * order — a fifth floating surface added to this component has two places to be listed, and
+   * The agent color-scheme picker needs no slot of its own here: it is a submenu INSIDE
+   * `contextMenu` (`customFlyout`, 2026-09-16), so clearing `contextMenu` already takes it.
+   *
+   * The same three slots `onRelocated` clears, for the same reason and deliberately in the same
+   * order — a fourth floating surface added to this component has two places to be listed, and
    * they are the two closest things to each other in this file that both mean "this menu can no
    * longer be where it thinks it is".
    *
@@ -795,7 +805,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     setContextMenu(null);
     setSnippetsMenu(null);
     setPathPicker(null);
-    setSchemaPicker(null);
   });
 
   // Restore keyboard focus to this terminal when it becomes the active pane of
@@ -902,13 +911,29 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         title: 'Open a new, empty application window.',
         click: () => { void openNewWindow(); },
       },
-      // Backlog 007: color scheme for the coding agent running in this pane.
-      // Only shown when an agent is detected; opens a secondary schema list.
+      // Backlog 007: color scheme for the coding agent running in this pane. Only shown
+      // when an agent is detected; a real submenu (2026-09-16) rather than a separate
+      // popup, so opening it leaves this menu open behind it — the same as Admin Tab and
+      // Snippets, and (visually) the same wide swatch-card grid as the tab strip's own
+      // Color Schema flyout (`submenu-flyout-panel--wide`, `TabContextMenu.tsx`).
       ...(agentForMenu ? [{
         label: `Color scheme for "${agentForMenu}"`,
         icon: '🎨',
         title: `Pick a terminal color scheme for the "${agentForMenu}" agent. Applies whenever this agent runs in any pane, overriding the tab/default scheme.`,
-        click: () => setSchemaPicker({ x: contextMenu?.x ?? 0, y: contextMenu?.y ?? 0, agent: agentForMenu }),
+        customFlyout: {
+          panelClassName: 'submenu-flyout-panel submenu-flyout-panel--wide',
+          content: (
+            <ColorSchemaGrid
+              activeId={agentSchemaActiveId}
+              defaultSwatchSchemaId={globalSchemaId}
+              defaultLabel="Use tab / default"
+              onPick={(id) => {
+                if (id) dispatch(setAgentColorScheme({ agent: agentForMenu, colorSchemaId: id }));
+                else dispatch(removeAgentColorScheme({ agent: agentForMenu }));
+              }}
+            />
+          ),
+        },
       }] : []),
       { type: 'separator' as const },
       /**
@@ -1130,27 +1155,6 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
             click: () => { void openResolved(c, pathPicker.line, pathPicker.col); },
           }))}
           onClose={closePathPicker}
-        />
-      )}
-      {schemaPicker && (
-        <ContextMenu
-          x={schemaPicker.x}
-          y={schemaPicker.y}
-          items={[
-            {
-              label: 'Use tab / default',
-              icon: '↩️',
-              title: `Remove the "${schemaPicker.agent}" agent color-scheme override.`,
-              click: () => dispatch(removeAgentColorScheme({ agent: schemaPicker.agent })),
-            },
-            ...COLOR_SCHEMAS.map((s) => ({
-              label: (store.getState().settings.agentColorSchemes[schemaPicker.agent] === s.id ? '✓ ' : '') + s.name,
-              icon: '🎨',
-              title: `Use ${s.name} while "${schemaPicker.agent}" is running.`,
-              click: () => dispatch(setAgentColorScheme({ agent: schemaPicker.agent, colorSchemaId: s.id })),
-            })),
-          ]}
-          onClose={closeSchemaPicker}
         />
       )}
       {/* plan/029 §6 — opened by the Snippets flyout's Add/Edit actions. Never dispatches
