@@ -122,6 +122,9 @@ class TerminalServiceClass {
      *  that session: the same trap design 011 6 called out for `owningTabId`,
      *  where assigning the Rust field without plumbing is a no-op. */
     sessionKey?: string,
+    /** Plan 045: spawn this pane against the UAC-elevated sidecar instead of
+     *  the primary one. Undefined/false for every ordinary pane. */
+    elevated?: boolean,
   ): Promise<string> {
     // Re-entrant call for the same leaf while a create is already pending:
     // return the SAME in-flight promise instead of starting a second spawn.
@@ -130,7 +133,15 @@ class TerminalServiceClass {
       console.log(`TerminalService: Create already in flight for ${terminalId}, reusing pending promise`);
       return pending;
     }
-    const createPromise = this.createTerminalInner(terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey);
+    // Keep the ordinary path explicit at the renderer/bridge boundary.  Leaving
+    // this as `undefined` relies on JSON serialization to omit the field and
+    // makes an old bridge/backend pair indistinguishable from an admin request
+    // that failed to carry its flag.  Every non-admin pane is deliberately
+    // routed as `false`; only the pane-tree marker can opt into elevation.
+    const createPromise = this.createTerminalInner(
+      terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey,
+      elevated === true,
+    );
     this.inFlightCreates.set(terminalId, createPromise);
     try {
       return await createPromise;
@@ -153,6 +164,7 @@ class TerminalServiceClass {
     rows?: number,
     owningTabId?: string,
     sessionKey?: string,
+    elevated: boolean = false,
   ): Promise<string> {
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
@@ -173,7 +185,7 @@ class TerminalServiceClass {
 
       // Call IPC to create actual PTY process
       console.log(`TerminalService: Calling electronAPI.createTerminal with profileId: "${shellType}", cwd: "${cwd}", tabId: "${terminalId}"`);
-      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey);
+      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
       // Store the mapping

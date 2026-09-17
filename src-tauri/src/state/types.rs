@@ -571,10 +571,19 @@ pub struct AppState<R: Runtime = Wry> {
     // The connected sidecar client, when the pty-host flag is enabled and a
     // connection has been established. None otherwise (in-process spawn path).
     pub pty_host: Arc<Mutex<Option<crate::pty_host_client::PtyHostClient>>>,
-    // Terminal ids (tab_id) whose PTY lives in the sidecar, not in `ptys`/
-    // `shell_writer_channels`. write/resize/close/repaint route to the client
-    // for these; everything else is unchanged.
-    pub host_terminals: Arc<DashMap<String, ()>>,
+    // Terminal ids (tab_id) whose PTY lives in a sidecar, not in `ptys`/
+    // `shell_writer_channels`. write/resize/close/repaint route to the
+    // relevant client for these; everything else is unchanged. The value
+    // says WHICH sidecar (plan 045): `Primary` (this field's original,
+    // always-on meaning) or `Elevated` (the admin-tab sidecar). Never
+    // inserted/removed directly outside `commands::terminal::spawn_routed`
+    // (insert) and `AppState::forget_host_terminal` (remove) — see that
+    // method's doc and its source-assertion test.
+    pub host_terminals: Arc<DashMap<String, crate::elevated_host::HostChannel>>,
+    /// The elevated ("Open admin Tab") sidecar's connection manager (plan
+    /// 045). Lazily connected on the first elevated spawn request; torn down
+    /// when the last `Elevated` `host_terminals` entry is removed.
+    pub elevated_host: Arc<crate::elevated_host::ElevatedHost>,
     /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
     /// type so it is unit-testable without a Tauri AppHandle.
     pub identity: crate::identity_index::IdentityIndex,
@@ -700,6 +709,7 @@ impl<R: Runtime> Clone for AppState<R> {
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
+            elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
             host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),

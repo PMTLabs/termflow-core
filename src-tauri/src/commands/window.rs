@@ -183,6 +183,13 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
                 );
             }
         }
+        // Plan 045 AC9: the elevated sidecar is never armed for detach and never
+        // restored elevated, so unlike the primary above it always tears down
+        // here rather than being disarmed. A no-op if no admin tab was ever
+        // opened this run.
+        if let Some(elevated) = app.try_state::<AppState>().map(|s| s.elevated_host.clone()) {
+            elevated.shutdown().await;
+        }
         app.exit(0);
     });
 }
@@ -766,6 +773,28 @@ mod quit_teardown_wiring_tests {
         );
     }
 
+    /// Plan 045 AC9: an elevated sidecar is never armed for detach and never
+    /// restored elevated, so a real quit must tear it down before exiting —
+    /// unlike the primary above, which is only disarmed. Order matters: after
+    /// `exit(0)` the process is already gone, so a shutdown placed after it
+    /// would never run.
+    #[test]
+    fn disarm_then_exit_shuts_down_the_elevated_host_before_exiting() {
+        let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
+        let stripped = strip_line_comments(&body);
+        assert!(
+            stripped.contains("elevated_host") && stripped.contains(".shutdown("),
+            "disarm_then_exit must tear down state.elevated_host. Body:\n{body}"
+        );
+        let shutdown_at = stripped.find(".shutdown(").expect("checked above");
+        let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
+        assert!(
+            shutdown_at < exit_at,
+            "elevated_host.shutdown() must be awaited BEFORE exit(0) — after would \
+             never run, the process is already gone. Body:\n{body}"
+        );
+    }
+
     /// The other half of the contract. `restart_for_update` arms ON PURPOSE and
     /// exits so the shells survive the swap; disarming there would defeat the
     /// feature. Pins that the new choke point was not applied indiscriminately.
@@ -803,6 +832,25 @@ mod quit_teardown_wiring_tests {
             flush_at < exit_at,
             "flush_all_windows must be awaited BEFORE exit(0) — after would persist \
              nothing, the process is already gone. Body:\n{body}"
+        );
+    }
+
+    /// Plan 045 AC9, the offload path's half: `restart_for_update` keeps the
+    /// PRIMARY host armed (tested above) but must still tear down the elevated
+    /// one — admin tabs are never restored elevated across the swap.
+    #[test]
+    fn the_offload_path_shuts_down_the_elevated_host_before_exiting() {
+        let body = fn_body(&source("commands/update.rs"), "pub async fn restart_for_update");
+        let stripped = strip_line_comments(&body);
+        assert!(
+            stripped.contains("elevated_host") && stripped.contains(".shutdown("),
+            "restart_for_update must tear down state.elevated_host. Body:\n{body}"
+        );
+        let shutdown_at = stripped.find(".shutdown(").expect("checked above");
+        let exit_at = stripped.find(".exit(").expect("restart_for_update must still exit");
+        assert!(
+            shutdown_at < exit_at,
+            "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{body}"
         );
     }
 
@@ -870,6 +918,30 @@ mod quit_teardown_wiring_tests {
             "`.exit(` must sit after the spawn match resolves — reachable only once \
              spawn_relaunch succeeded, since the Err arm returns early — not merely \
              somewhere lexically after the text `spawn_relaunch`. Body:\n{live}"
+        );
+    }
+
+    /// Plan 045 AC9, the hot-swap-restart path's half: same obligation as
+    /// `restart_for_update`, reachable only on the success path (a failed
+    /// spawn returns early with nothing to tear down — no admin tab survives
+    /// a process that never exits).
+    #[test]
+    fn restart_keeping_terminals_shuts_down_the_elevated_host_before_exiting() {
+        let body = fn_body(
+            &source("commands/update.rs"),
+            "pub async fn restart_keeping_terminals",
+        );
+        let stripped = strip_line_comments(&body);
+        let live = strip_dead_blocks(&stripped);
+        assert!(
+            live.contains("elevated_host") && live.contains(".shutdown("),
+            "restart_keeping_terminals must tear down state.elevated_host. Body:\n{live}"
+        );
+        let shutdown_at = live.find(".shutdown(").expect("checked above");
+        let exit_at = live.find(".exit(").expect("restart_keeping_terminals must still exit");
+        assert!(
+            shutdown_at < exit_at,
+            "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{live}"
         );
     }
 

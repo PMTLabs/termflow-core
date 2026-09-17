@@ -315,6 +315,13 @@
   line-height: 1;
 }
 
+/* A `ShellProfileIcon` row icon carries the tab strip's own 6px right margin
+   (`.tab-icon`/`.tab-icon-img`); this slot already spaces itself. */
+.context-menu-flyout-icon .shell-profile-icon {
+  margin-right: 0;
+  vertical-align: middle;
+}
+
 /* Unlike `.context-menu-label`, this one truncates instead of growing: a snippet
    row shows arbitrary user text, and the flyout is capped by `max-width`. */
 .context-menu-flyout-label {

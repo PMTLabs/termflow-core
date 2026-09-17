@@ -9,6 +9,7 @@ import { getCachedIcon, loadIcon } from '../services/binaryIcons';
 import { resolveDefaultProfile, buildNewTabFields } from '../services/newTabActions';
 // Shared with Canvas Mode's profile menu — see `services/shellProfileIcon`.
 import { profileEmoji } from '../services/shellProfileIcon';
+import { AdminProfileList } from './UI/AdminProfileList';
 
 interface NewTabDropdownProps {
   onNewTab?: () => void;
@@ -154,6 +155,16 @@ export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {
                 </div>
               ))
             )}
+          </div>
+
+          <div className="dropdown-divider" />
+
+          {/* Plan 045. Section header always rendered (O2) — AdminProfileList itself
+              renders a single disabled+tooltipped row in place of profiles when
+              admin tabs are unsupported, rather than the section disappearing. */}
+          <div className="dropdown-section">
+            <div className="dropdown-header">Open Admin Tab</div>
+            <AdminProfileList variant="dropdown" onPick={() => setIsOpen(false)} />
           </div>
 
           <div className="dropdown-divider" />

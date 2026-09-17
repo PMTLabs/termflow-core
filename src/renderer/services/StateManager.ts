@@ -1780,6 +1780,11 @@ class StateManagerClass {
         // Unseen-output bell is transient (recomputed at runtime from live output);
         // never restore it, or a loaded layout / restored session shows a stale bell.
         hasUnseenOutput: undefined,
+        // Plan 045 non-goal: an elevated tab is never recreated elevated across a
+        // restart. Clearing here (not just omitting from updateTabMeta's patch
+        // keys) covers a layout FILE that was saved with the flag set by an
+        // older build, or hand-edited.
+        elevated: undefined,
       };
     });
 
@@ -1802,6 +1807,11 @@ class StateManagerClass {
       }
 
       if (newNode.type === 'terminal') {
+        // Mirrors the tab-level clear above: an elevated pane is never restored
+        // elevated (plan 045 non-goal). Cleared unconditionally, not just left
+        // out of TERMINAL_BOUND_FIELDS' restore path, so a layout FILE saved by
+        // an older build or hand-edited can't smuggle it back in.
+        delete newNode.elevated;
         if (newNode.terminalId) {
           const oldTerminalId = newNode.terminalId;
           // DESIGN 014 MIGRATION — ONE rule: a live leaf is a `tm-`, so anything

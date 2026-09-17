@@ -796,14 +796,17 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(refocusBody).toContain('engineRef.current?.focus();');
 
     const onCloses = code.match(/onClose=\{[^}]*\}/g) ?? [];
-    expect(onCloses.length).toBeGreaterThanOrEqual(4);
+    // Three, not four (2026-09-16): the agent color-scheme picker (`closeSchemaPicker`) is
+    // gone — it is a submenu INSIDE `contextMenu` now (`customFlyout`), which closes and
+    // refocuses through `closeContextMenu` like the rest of that menu's own submenus.
+    expect(onCloses.length).toBeGreaterThanOrEqual(3);
     // No `onClose={() => setX(null)}` survivors: an inline clear is exactly the shape
-    // that drops the refocus, and it is the shape all four of these used to have.
+    // that drops the refocus, and it is the shape all three of these used to have.
     for (const handler of onCloses) {
       expect(handler).toMatch(/^onClose=\{close[A-Za-z]+\}$/);
     }
     // …and each named handler really does refocus.
-    for (const name of ['closeContextMenu', 'closeSnippetsMenu', 'closePathPicker', 'closeSchemaPicker']) {
+    for (const name of ['closeContextMenu', 'closeSnippetsMenu', 'closePathPicker']) {
       const re = new RegExp(`const ${name} = useCallback\\(\\(\\) => \\{[^}]*?refocusTerminal\\(\\);`, 's');
       expect(code).toMatch(re);
     }

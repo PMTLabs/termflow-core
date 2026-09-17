@@ -58,7 +58,7 @@ export const TerminalContainer: React.FC = () => {
     // a result holding a null TREE means "initialised and empty", which still has to be
     // written, so the two are not interchangeable.
     const [plan] = planSeeds(
-      [{ id: activeTabId, title: activeTab?.title, shellType: activeTab?.shellType }],
+      [{ id: activeTabId, title: activeTab?.title, shellType: activeTab?.shellType, elevated: activeTab?.elevated }],
       treesByTabId,
       tabPanes,
     );

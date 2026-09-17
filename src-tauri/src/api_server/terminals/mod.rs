@@ -363,6 +363,8 @@ pub(crate) async fn create_terminal(
             shell_args,
             cwd: shell_cwd,
             name: Some(terminal_name.clone()),
+            // Elevation via the REST/MCP path is out of scope (plan 045).
+            elevated: false,
         },
     )
     .await;

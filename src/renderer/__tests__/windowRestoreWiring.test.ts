@@ -55,6 +55,45 @@ describe('boot resolves the window scope before anything can save', () => {
   });
 });
 
+/**
+ * Plan 045 regression. `TerminalService`'s singleton registers the
+ * `terminal:data` / `terminal:exit` listeners in its CONSTRUCTOR and skips them
+ * when `window.electronAPI` is not yet set — and the DOMContentLoaded retry has
+ * already fired by the time the bootstrap's awaits resolve, so that skip is
+ * permanent. Requiring anything that reaches the store before the bridge
+ * (adminTabActions -> store -> layoutsSlice -> StateManager -> TerminalService)
+ * therefore boots a window whose every terminal spawns, accepts input, and
+ * never renders one byte of live output. Nothing errors.
+ */
+describe('boot installs the bridge before anything that can reach the store', () => {
+  const tauriBlock = () => {
+    const start = INDEX.indexOf('if (isTauri) {');
+    const bridgeAt = INDEX.indexOf("require('./api/tauri-bridge')");
+    expect(start).toBeGreaterThan(-1);
+    expect(bridgeAt).toBeGreaterThan(start);
+    return INDEX.slice(start, bridgeAt);
+  };
+
+  it('requires only the two scope resolvers ahead of the bridge', () => {
+    const before = tauriBlock();
+    const required = [...before.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
+    expect(required).toEqual([
+      '@tauri-apps/api/core',
+      './services/profileScope',
+      './services/windowScope',
+    ]);
+  });
+
+  it('resolves admin-tab support after the bridge and before App', () => {
+    const bridgeAt = INDEX.indexOf("require('./api/tauri-bridge')");
+    const adminAt = INDEX.indexOf("require('./services/adminTabActions')");
+    const appAt = INDEX.indexOf("require('./App')");
+    expect(adminAt).toBeGreaterThan(bridgeAt);
+    expect(adminAt).toBeLessThan(appAt);
+    expect(INDEX).toMatch(/await\s+initAdminTabSupport\(invoke\)/);
+  });
+});
+
 describe('a new window persists its own session', () => {
   it('does not short-circuit initializeApp on ?newWindow=1', () => {
     // The old shape was:

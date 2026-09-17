@@ -66,6 +66,10 @@ pub async fn create_terminal(
     // created on this build. Threaded through so a pane whose leaf the migration
     // rewrote still reattaches to its already-armed session.
     session_key: Option<String>,
+    // Plan 045: spawn this pane against the UAC-elevated sidecar instead of the
+    // primary one. `None` (an older renderer bundle) means false — this
+    // parameter is optional only so that build still invokes cleanly.
+    elevated: Option<bool>,
 ) -> Result<String, String> {
     let profiles = pty_manager::get_available_shells();
     let mut shell_name = "default".to_string();
@@ -162,6 +166,7 @@ pub async fn create_terminal(
                 // The renderer derives `Terminal-{shell}` itself; passing None
                 // keeps that one definition in `terminal_display_name`.
                 name: None,
+                elevated: elevated.unwrap_or(false),
             },
         )
         .await;
@@ -216,6 +221,13 @@ pub async fn report_host_restore_settled(
 /// The renderer calls this every time a terminal id is bound to a process, not
 /// just on spawn, so a pane dragged to another window re-owns against its new
 /// HWND rather than keeping a stale one.
+///
+/// Plan 045 R5: called unconditionally for an admin (elevated) tab's pane too,
+/// like any other. It is expected to fail there — UIPI blocks this medium-
+/// integrity call from reaching a High-integrity pseudo-console window — which
+/// would leave an `az login`-style dialog in an admin tab invisible behind
+/// TermFlow. See `console_window`'s module doc for the full account; not
+/// verified here (needs the manual runbook's real UAC round trip).
 #[tauri::command]
 pub fn adopt_console_window(
     window: tauri::Window,
@@ -342,6 +354,11 @@ pub(crate) struct SpawnRequest {
     pub cwd: Option<String>,
     /// Caller-supplied display name; `None` derives `Terminal-{shell_name}`.
     pub name: Option<String>,
+    /// Route this spawn to the UAC-elevated sidecar instead of the primary one
+    /// (plan 045). Plain `bool`, deliberately not `Option`/`#[serde(default)]`:
+    /// every construction site must state it explicitly. The API/MCP spawn
+    /// paths always pass `false` — elevation via REST/MCP is out of scope.
+    pub elevated: bool,
 }
 
 /// THE spawn decision, for every caller.
@@ -370,27 +387,45 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         shell_args,
         cwd,
         name,
+        elevated,
     } = req;
 
-    // Deliberately off (the `TERMFLOW_PTY_HOST=0` kill-switch — the only way to
-    // land here now that every supported OS is default-on): in-process is the
-    // intended behaviour, not a degraded one.
-    if !crate::pty_host_client::enabled() {
-        return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled");
-    }
-    // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
-    // to the in-process path immediately — no host state is registered.
-    if let Err(e) = state.ensure_pty_host().await {
-        return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e);
-    }
-    let client = match state.pty_host_clone() {
-        Some(c) => c,
-        None => {
-            return host_fallback(
-                state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd,
-                name.as_deref(),
-                "pty-host not connected",
-            )
+    // Which sidecar this spawn targets, and its connected client. The rest of
+    // this function (reattach-claim, registration, scrollback staging, the
+    // actual `Spawn` frame) is IDENTICAL for both — only how we get a client,
+    // and what happens if we can't, differs.
+    let (channel, client) = if elevated {
+        // Plan 045 R7: an elevated request never falls back in-process — that
+        // would put an unprivileged shell behind an "Administrator" badge, a
+        // lie the user cannot see. Every failure here returns `Err` directly.
+        // NOT wrapped: `ensure_elevated_host` returns the UAC-cancel sentinel
+        // verbatim so the renderer can recognise it and stay silent (AC6).
+        state.ensure_elevated_host().await?;
+        match state.elevated_host.client_clone() {
+            Some(c) => (crate::elevated_host::HostChannel::Elevated, c),
+            None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
+        }
+    } else {
+        // Deliberately off (the `TERMFLOW_PTY_HOST=0` kill-switch — the only way to
+        // land here now that every supported OS is default-on): in-process is the
+        // intended behaviour, not a degraded one.
+        if !crate::pty_host_client::enabled() {
+            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled");
+        }
+        // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
+        // to the in-process path immediately — no host state is registered.
+        if let Err(e) = state.ensure_pty_host().await {
+            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e);
+        }
+        match state.pty_host_clone() {
+            Some(c) => (crate::elevated_host::HostChannel::Primary, c),
+            None => {
+                return host_fallback(
+                    state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd,
+                    name.as_deref(),
+                    "pty-host not connected",
+                )
+            }
         }
     };
 
@@ -413,7 +448,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     if let Some(pid) = claimed_pid {
         let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
         let process_id = ident.process_id.clone();
-        register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+        register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
         state.host_session_registered(&session_key, &process_id);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
@@ -442,7 +477,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // consumer's "unknown id" gate.
     let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
     let process_id = ident.process_id.clone();
-    register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook);
+    register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
     state.host_session_registered(&session_key, &process_id);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
@@ -480,10 +515,16 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             Ok(process_id)
         }
         Err(e) => {
-            // Undo the provisional registration, then fall back in-process. Clean
-            // up by the PROCESS id — that is what was registered.
+            // Undo the provisional registration. Clean up by the PROCESS id —
+            // that is what was registered.
             state.cleanup_terminal_state(&process_id);
-            host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e)
+            if channel == crate::elevated_host::HostChannel::Elevated {
+                // Never host_fallback for an elevated request (R7): fail visibly
+                // instead of silently spawning an unprivileged shell.
+                Err(format!("elevated spawn failed: {e}"))
+            } else {
+                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e)
+            }
         }
     }
 }
@@ -579,12 +620,13 @@ fn register_host_terminal(
     cols: u16,
     rows: u16,
     prompt_hook: bool,
+    channel: crate::elevated_host::HostChannel,
 ) {
     let id = ident.process_id.as_str();
     let leaf = ident.leaf.clone();
     let owner = ident.owner.clone();
     state.init_screen(id, rows, cols);
-    state.host_terminals.insert(id.to_string(), ());
+    state.host_terminals.insert(id.to_string(), channel);
     // Index BEFORE the terminal becomes observable: the pty-host translates every
     // inbound frame through `process_for_session`, so a frame arriving between the
     // spawn and this call would be dropped as an unknown session.

@@ -709,6 +709,8 @@ pub(crate) async fn fleet_local_run(
                     shell_args,
                     cwd: shell_cwd,
                     name: Some(terminal_name.clone()),
+                    // Elevation via the fleet/API path is out of scope (plan 045).
+                    elevated: false,
                 },
             )
             .await

@@ -9,9 +9,7 @@
 #![cfg(windows)]
 
 use super::Endpoint;
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
-#[cfg(test)]
-use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions};
 
 /// The connected server end of one pipe instance. Implements
 /// `AsyncRead + AsyncWrite + Unpin + Send`, so the neutral serve loop drives it
@@ -19,10 +17,10 @@ use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 pub type Stream = NamedPipeServer;
 
 /// The client end (returned by `connect`). Distinct from `Stream` on Windows:
-/// a named pipe has separate server/client handle types. Test-only: the real
-/// GUI client (`app` crate) is a separate binary and dials the pipe itself
-/// rather than linking this crate.
-#[cfg(test)]
+/// a named pipe has separate server/client handle types. Used both by tests
+/// (the "GUI" side of a normal-mode roundtrip) and, since plan 045, by the
+/// dial-out transport (`transport::dial`), where THIS process is the real
+/// client dialing a GUI-hosted pipe.
 pub type ClientStream = NamedPipeClient;
 
 /// Owns the pipe NAME and mints a fresh secured instance per `accept()`.
@@ -47,8 +45,7 @@ impl Listener {
     }
 }
 
-/// Connect to the host as a client. Test-only, see `ClientStream`.
-#[cfg(test)]
+/// Connect to a pipe as a client. See `ClientStream` for the two callers.
 pub async fn connect(endpoint: &Endpoint) -> std::io::Result<ClientStream> {
     ClientOptions::new().open(&endpoint.0)
 }

@@ -160,10 +160,13 @@ fn deadline_expired(
 
 #[cfg(windows)]
 mod pipe_windows;
-#[cfg(all(windows, test))]
-pub use pipe_windows::{connect, ClientStream};
 #[cfg(windows)]
-pub use pipe_windows::{Listener, Stream};
+pub use pipe_windows::{connect, ClientStream, Listener, Stream};
+
+/// Dial-out mode (plan 045): the elevated sidecar dials OUT to a GUI-hosted
+/// pipe instead of binding its own listener. Windows-only — see module doc.
+#[cfg(windows)]
+pub mod dial;
 
 #[cfg(unix)]
 mod socket_unix;

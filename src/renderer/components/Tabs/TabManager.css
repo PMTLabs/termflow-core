@@ -249,6 +249,20 @@
   flex-shrink: 0;
 }
 
+/* Admin-tab badge (plan 045) — this tab's shell is running at High integrity
+   (Administrator). A dedicated element, not a swapped profile icon, since the
+   profile emoji is user-facing data the badge must not hide. Reused verbatim
+   on the pane header (TerminalPane.tsx). */
+.tab-admin-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 1;
+  flex-shrink: 0;
+  color: var(--tab-admin-badge, #e0a030);
+}
+
 /* Notifications-muted indicator — a dim, deliberately COLORLESS slashed bell so
    it reads as a passive status ("muted"), never as a notification the way the
    colored unseen 🔔 does. */

@@ -28,7 +28,7 @@ jest.mock('@termflow/terminal-core', () => ({
 }));
 
 import {
-  buildTabDetachPayload, applyDetachPayload, removeSourceTab, removeSourcePane,
+  buildTabDetachPayload, buildPaneDetachPayload, applyDetachPayload, removeSourceTab, removeSourcePane,
 } from '../detach';
 import { addTab } from '../../../../store/slices/tabsSlice';
 
@@ -42,7 +42,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
 
   const leaf = (id: string, terminalId: string): PaneNode => ({ id, type: 'terminal', terminalId });
 
-  it('carries the source tab icon, titleIsCustom, titleColor, colorSchemaId and notifyMuted into the payload', () => {
+  it('carries the source tab icon, titleIsCustom, titleColor, colorSchemaId, notifyMuted and elevated into the payload', () => {
     mockState.tabs.tabs = [{
       id: 'tab-1',
       title: 'rephlo-main',
@@ -52,6 +52,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       titleColor: '#ff0000',
       colorSchemaId: 'solarized',
       notifyMuted: true,
+      elevated: true,
     }];
     mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
 
@@ -63,10 +64,11 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       titleColor: '#ff0000',
       colorSchemaId: 'solarized',
       notifyMuted: true,
+      elevated: true,
     });
   });
 
-  it('reconstructs the tab in the destination window with those fields intact (incl. mute)', () => {
+  it('reconstructs the tab in the destination window with those fields intact (incl. mute and elevated)', () => {
     mockState.tabs.tabs = [{
       id: 'tab-1',
       title: 'rephlo-main',
@@ -74,6 +76,7 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       icon: '🖥️',
       titleIsCustom: true,
       notifyMuted: true,
+      elevated: true,
     }];
     mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
 
@@ -88,7 +91,45 @@ describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => 
       icon: '🖥️',
       titleIsCustom: true,
       notifyMuted: true,
+      elevated: true,
     });
+  });
+
+  /**
+   * Plan 045 R8: dragging a NON-admin tab must not spuriously badge the
+   * destination — `elevated` has to travel both ways, not just be forwarded
+   * whenever present.
+   */
+  it('omits elevated when the source tab was never an admin tab', () => {
+    mockState.tabs.tabs = [{ id: 'tab-1', title: 'rephlo-main', shellType: 'default' }];
+    mockState.panes.treesByTabId = { 'tab-1': leaf('p1', 'tab-1') };
+
+    const payload = buildTabDetachPayload('tab-1', 'rephlo-main');
+    expect(payload?.elevated).toBeUndefined();
+
+    dispatch.mockClear();
+    applyDetachPayload(payload!);
+    const addTabCall = dispatch.mock.calls.find((c) => c[0].type === addTab.type);
+    expect(addTabCall?.[0].payload.elevated).toBeUndefined();
+  });
+});
+
+describe('single-pane detach (buildPaneDetachPayload) carries the pane\'s own elevation', () => {
+  beforeEach(() => {
+    dispatch.mockClear();
+    mockState.tabs.tabs = [];
+    mockState.panes.treesByTabId = {};
+    mockState.zoom.levels = {};
+  });
+
+  it('reads elevated off the dragged pane node itself, not the source tab', () => {
+    const payload = buildPaneDetachPayload({ id: 'p1', type: 'terminal', terminalId: 'tm-1', elevated: true });
+    expect(payload.elevated).toBe(true);
+  });
+
+  it('omits elevated for a non-admin pane', () => {
+    const payload = buildPaneDetachPayload({ id: 'p1', type: 'terminal', terminalId: 'tm-1' });
+    expect(payload.elevated).toBeUndefined();
   });
 });
 

@@ -28,6 +28,30 @@
 //!     attached client. Adopting the shell's window therefore also covers every
 //!     descendant that later attaches to the same console.
 
+//! ## Plan 045 (R5) — behaviour for an elevated (admin) tab, not yet measured
+//!
+//! `adopt()` (called from `commands::terminal::adopt_console_window`) reparents a
+//! pseudo-console window with `SetWindowLongPtrW`, which is a same-process, same-
+//! desktop Win32 call from the GUI's own (medium-integrity) thread. For an admin
+//! tab the pseudo-console belongs to a HIGH-integrity `termflow-pty-host.exe`
+//! instead of the usual medium one, and Windows' UIPI (User Interface Privilege
+//! Isolation) blocks a lower-integrity process from sending window messages to —
+//! or otherwise manipulating — a higher-integrity one's windows. `SetWindowLongPtrW`
+//! reaching across that boundary is expected to fail (silently, or with
+//! `ERROR_ACCESS_DENIED` from `GetLastError`), which would leave an admin tab's
+//! `az login`-style dialog exactly where it is without this module: invisible,
+//! at (0,0), behind the window.
+//!
+//! This is the plan's documented, accepted limitation (§5 R5, §9 O5) — **not**
+//! verified here, because verifying it means actually opening an elevated tab and
+//! running a UIPI-triggering program, which needs the real UAC round trip the
+//! manual runbook (`docs/plan/045-open-admin-tab.md` §7, step 21) covers and this
+//! headless environment cannot. Record the ACTUAL observed result there — including
+//! the real error code if `adopt` fails — rather than assuming this note is correct.
+//! If it does fail, the identified (but unverified) direction is to perform the
+//! adopt from INSIDE the elevated host instead — high-to-low is not blocked by
+//! UIPI — via a new control frame; that is a follow-up, not implemented here.
+
 #[cfg(windows)]
 mod imp {
     use std::ffi::c_void;

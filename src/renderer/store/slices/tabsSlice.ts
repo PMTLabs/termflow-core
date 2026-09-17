@@ -47,6 +47,11 @@ export interface Tab {
   // suppresses at the source). Overrides any per-pane mute and covers panes added
   // later. Persisted across restart (an intentional user setting, like colorSchemaId).
   notifyMuted?: boolean;
+  // Is this tab's terminal running at High integrity (Administrator)? Set only by
+  // openAdminTabWithProfile (plan 045); drives the tab-strip admin badge. Deliberately
+  // NOT one of updateTabMeta's patch keys, so no restore path can ever set it — an
+  // elevated tab is never recreated elevated across an app restart.
+  elevated?: boolean;
 }
 
 interface TabsState {

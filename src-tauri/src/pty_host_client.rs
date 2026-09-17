@@ -1288,11 +1288,20 @@ pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> Con
 
 /// Locate the *bundled* sidecar binary (the source to install from), in
 /// priority order:
-/// 1. `TERMFLOW_PTY_HOST_BIN` explicit override.
+/// 1. `TERMFLOW_PTY_HOST_BIN` explicit override — **debug builds only**.
 /// 2. Next to the app executable (release / staged).
 /// 3. Dev build locations under `pty-host/target/{release,debug}` resolved
 ///    both relative to the exe (`src-tauri/target/debug/…`) and to the cwd —
 ///    so `bun run dev` finds it with no env var once the sidecar is built.
+///
+/// The override is gated to `cfg!(debug_assertions)` because this resolver is
+/// shared with `elevated_host::launch` (plan 045): a release build must never
+/// let a same-user, persistently-set env var (e.g. `HKCU\Environment`) pick
+/// which binary gets run, since for the elevated caller that binary is about
+/// to be silently UAC-elevated to High integrity — the UAC dialog gives the
+/// user no way to notice a substitution. A debug build's own `cfg!` gate is
+/// the whole mitigation; there is no runtime check that could substitute for
+/// it here without also breaking the dev workflow the override exists for.
 pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) {
         "termflow-pty-host.exe"
@@ -1300,11 +1309,13 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
         "termflow-pty-host"
     };
 
-    // 1. Explicit override.
-    if let Ok(p) = std::env::var("TERMFLOW_PTY_HOST_BIN") {
-        let pb = std::path::PathBuf::from(p);
-        if pb.exists() {
-            return Some(pb);
+    // 1. Explicit override, debug builds only — see the doc comment above.
+    if cfg!(debug_assertions) {
+        if let Ok(p) = std::env::var("TERMFLOW_PTY_HOST_BIN") {
+            let pb = std::path::PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
         }
     }
 
@@ -1352,6 +1363,9 @@ mod install_tests;
 
 #[cfg(test)]
 mod grace_tests;
+
+#[cfg(test)]
+mod resolve_bundled_host_tests;
 
 fn resp_req(r: &Response) -> u64 {
     match r {

@@ -215,6 +215,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // used to assume Tauri would still "flush tab/session state" on the way out,
     // but nothing actually asked the windows to; see `commands::flush_all_windows`.
     crate::commands::flush_all_windows(&state.app_handle).await;
+    // Plan 045 AC9: admin tabs are never restored elevated across an update.
+    state.elevated_host.shutdown().await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     state.app_handle.exit(0);
     Ok(())
@@ -322,6 +324,27 @@ mod arm_lifecycle_wiring_tests {
             flush_at < exit_at,
             "flush_all_windows must be awaited BEFORE exit(0) — after would persist \
              nothing, the process is already gone. Body:\n{body}"
+        );
+    }
+
+    /// Plan 045 AC9: admin tabs are never restored elevated across a real
+    /// Velopack update, so — unlike the primary host, which stays armed —
+    /// the elevated sidecar must be torn down before this exits.
+    #[test]
+    fn update_and_restart_shuts_down_the_elevated_host_before_exiting() {
+        let body = fn_body(&source(), "pub async fn update_and_restart");
+        let stripped = strip_line_comments(&body);
+        assert!(
+            stripped.contains("elevated_host") && stripped.contains(".shutdown("),
+            "update_and_restart must tear down state.elevated_host. Body:\n{body}"
+        );
+        let shutdown_at = stripped.find(".shutdown(").expect("checked above");
+        let exit_at = stripped
+            .find(".exit(")
+            .expect("update_and_restart must still exit");
+        assert!(
+            shutdown_at < exit_at,
+            "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{body}"
         );
     }
 }

@@ -50,6 +50,13 @@ export interface PaneNode {
    *  non-determinism that function exists to remove. Legacy trees have no value
    *  here and fall back to the id equality. */
   seededForTabId?: string;
+  /** Is this terminal's pty-host session running at High integrity (Administrator)?
+   *
+   *  Set only by `openAdminTabWithProfile` (plan 045) and read at both
+   *  `TerminalPane` spawn call sites (mount and restart-in-place) to route the
+   *  spawn to the elevated sidecar instead of the primary one. Never restored
+   *  across an app restart — an elevated tab comes back as a normal one. */
+  elevated?: boolean;
 }
 
 export type DropZone = EdgeZone | 'center';
@@ -176,6 +183,11 @@ function splitLeafInTree(
         terminalId: newTerminalId,
         name: name || `Terminal ${direction === 'horizontal' ? 'Bottom' : 'Right'}`,
         shellType,
+        // R8: a split of an admin pane must elevate BOTH panes, not just the
+        // surviving one `survivingLeaf` below already covers — otherwise the
+        // new sibling spawns Medium while the tab strip still badges it
+        // Administrator (plan 045 T8 / runbook step 23).
+        elevated: node.elevated,
       };
       const originalPane = survivingLeaf(
         node,
@@ -791,8 +803,11 @@ const panesSlice = createSlice({
             terminalId: newTerminalId,
             name: uniqueTitle,
             shellType: shellType,
+            // R8: see the matching comment in `splitLeafInTree` — the new
+            // sibling must inherit elevation too, not just the surviving pane.
+            elevated: node.elevated,
           };
-          
+
           // Convert current terminal pane to split pane. Goes through the SAME
           // helper `splitLeafInTree` uses — this reducer carried only `notifyMuted`
           // and dropped `seededForTabId`/`sessionKey`, which is how an ordinary UI

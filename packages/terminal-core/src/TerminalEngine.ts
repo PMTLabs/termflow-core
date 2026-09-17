@@ -3313,7 +3313,7 @@ export class TerminalEngine {
           else if (verdict === 'disable') this.win32State.disable();
         }
         term.reset();
-        term.write(snapshot);
+        this.writeHydratedScreen(term, snapshot);
         entry.pendingOutput = [];
         entry.pendingOutputBytes = 0;
         // Record what we painted so mirror resync() can diff against it.
@@ -3375,7 +3375,7 @@ export class TerminalEngine {
 
       if (historyText) {
         term.reset();
-        term.write(historyText);
+        this.writeHydratedScreen(term, historyText);
       }
       const pendingText = entry.pendingOutput.join('');
       entry.pendingOutput = [];
@@ -3432,6 +3432,25 @@ export class TerminalEngine {
     // no-op FitAddon.fit() would change a hot, well-tested path for no benefit.
     // Do not "fix" it.
     this.armActivationFit();
+  }
+
+  /**
+   * xterm parses `write` asynchronously.  A freshly mounted terminal can otherwise
+   * finish hydration with the backend screen in its write queue but no render pass
+   * requested for the newly attached canvas (most visibly after a renderer reload
+   * or GPU surface recreation).  Refresh only after the parser has committed the
+   * screen, so the first visible frame is the authoritative snapshot/history.
+   */
+  private writeHydratedScreen(term: Terminal, screen: string): void {
+    term.write(screen, () => {
+      try {
+        term.refresh(0, Math.max(0, term.rows - 1));
+      } catch (error) {
+        // A terminal can be disposed while its queued write is being parsed. The
+        // screen contents are still valid; simply leave its next mount to redraw.
+        console.debug('terminal-core/engine: hydration repaint skipped', error);
+      }
+    });
   }
 
   /**

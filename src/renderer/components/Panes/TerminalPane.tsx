@@ -5,7 +5,7 @@ import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
 import { removeTabTree, renamePanes } from '../../store/slices/panesSlice';
-import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId, findElevatedByTerminalId } from '../../store/slices/paneTreeOps';
 import { usePaneMuteState } from './usePaneMuteState';
 import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { clearTabExited, removeTab, setAutoTabTitle } from '../../store/slices/tabsSlice';
@@ -23,6 +23,7 @@ import { reattachPromptGate, takeArmProbePending } from '../../services/reattach
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
+import { isAdminUacCancelled } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminal } from '../Canvas/CanvasHiddenBadge';
@@ -100,6 +101,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const closedInfo = useSelector(
     (state: RootState) => (terminalId ? state.sessionExit.byTerminalId[terminalId] : undefined),
   ) ?? null;
+  // Plan 045 — read off the tree (same source both spawn call sites use, R8),
+  // not a prop, so the badge can never disagree with what actually got spawned.
+  const elevated = useSelector(
+    (state: RootState) => (terminalId ? findElevatedByTerminalId(state.panes.treesByTabId, terminalId) : false),
+  );
   // UI-level guard so the Restart button/Ctrl+R don't re-enter handleRestart
   // while a restart is already in flight. Belt-and-suspenders on top of
   // TerminalService's leaf-keyed single-flight (review 109 H1) — that is the
@@ -281,9 +287,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     // Create the promise and store it immediately
     const sessionKey = findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId);
+    // R8: read off the tree, not a prop, so this and the restart-in-place call
+    // site below can never disagree about whether this pane is elevated.
+    const elevated = findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId);
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
-      sessionKey,
+      sessionKey, elevated,
     );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
@@ -356,6 +365,22 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         terminalInitLock.delete(terminalId);
         const isProvisionalRecovery = takeProvisionalRecovery(terminalId);
         const state = store.getState();
+
+        // Plan 045 AC6: a denied UAC prompt is a normal user choice, not an
+        // error — undo the optimistic tab/pane `openAdminTabWithProfile`
+        // already created instead of leaving a permanently-broken
+        // "Administrator"-badged tab behind.
+        if (isAdminUacCancelled(error)) {
+          const cancelTabId = findTabIdByTerminalId(state.panes.treesByTabId, terminalId);
+          const cancelTree = cancelTabId ? state.panes.treesByTabId[cancelTabId] : null;
+          if (cancelTabId && cancelTree?.type === 'terminal' && cancelTree.terminalId === terminalId) {
+            console.info(`TerminalPane: UAC prompt cancelled for ${terminalId}; removing tab ${cancelTabId}`);
+            dispatch(removeTab(cancelTabId));
+            dispatch(removeTabTree(cancelTabId));
+          }
+          return;
+        }
+
         const tabId = isProvisionalRecovery && isHostSessionContended(error)
           ? findTabIdByTerminalId(state.panes.treesByTabId, terminalId)
           : null;
@@ -542,6 +567,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // A restart must reuse the MIGRATED session key, not mint one: the host
         // still knows this session by its old id (design 014 A2.1).
         findSessionKeyByTerminalId(store.getState().panes.treesByTabId, terminalId),
+        // R8: a restart-in-place that dropped this would silently downgrade an
+        // Administrator-badged tab to a medium shell — the plan's flagged
+        // "single most likely silent defect".
+        findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId),
       );
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
@@ -708,6 +737,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               >
                 {name || 'Terminal'}
               </span>
+            )}
+            {elevated && (
+              <span className="tab-admin-badge" title="Running as Administrator">🛡️</span>
             )}
             {/* Which automations are watching THIS terminal (`plan/028` item D). Inside the title
                 block rather than beside the controls: it describes the terminal, like the name it
