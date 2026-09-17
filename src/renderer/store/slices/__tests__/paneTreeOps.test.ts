@@ -9,6 +9,7 @@ import {
   findLeaf,
   findTabIdByTerminalId,
   findSessionKeyByTerminalId,
+  findElevatedByTerminalId,
   getAllTerminalIds,
   getSelectedPaneId,
   isTerminalMuted,
@@ -409,6 +410,26 @@ describe('findSessionKeyByTerminalId', () => {
 
   it('tolerates a null tree', () => {
     expect(findSessionKeyByTerminalId({ 'tb-a': null }, 'tm-a')).toBeUndefined();
+  });
+});
+
+describe('findElevatedByTerminalId', () => {
+  it('treats an unmarked ordinary pane as explicitly non-elevated', () => {
+    expect(findElevatedByTerminalId({ 'tb-normal': leaf('pn-normal', 'tm-normal') }, 'tm-normal'))
+      .toBe(false);
+  });
+
+  it('reads an admin pane marker from a nested split', () => {
+    const adminLeaf: PaneNode = { ...leaf('pn-admin', 'tm-admin'), elevated: true };
+    const trees = { 'tb-admin': hsplit('pn-root', leaf('pn-normal', 'tm-normal'), adminLeaf) };
+    expect(findElevatedByTerminalId(trees, 'tm-admin')).toBe(true);
+  });
+
+  it('does not borrow elevation from a duplicate leaf later in the tree', () => {
+    const ordinary: PaneNode = leaf('pn-first', 'tm-duplicate');
+    const adminDuplicate: PaneNode = { ...leaf('pn-second', 'tm-duplicate'), elevated: true };
+    const trees = { 'tb-malformed': hsplit('pn-root', ordinary, adminDuplicate) };
+    expect(findElevatedByTerminalId(trees, 'tm-duplicate')).toBe(false);
   });
 });
 

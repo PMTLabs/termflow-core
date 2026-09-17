@@ -69,7 +69,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-owner-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined,
+      'default', 'Terminal', undefined, 'tm-owner-leaf', 120, 40, 'tb-owner-tab', undefined, false,
     );
   });
 
@@ -78,7 +78,7 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
   it('omits the owner when the caller does not know one', async () => {
     await terminalService.createTerminal('tb-solo-1');
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined,
+      'default', undefined, undefined, 'tb-solo-1', undefined, undefined, undefined, undefined, false,
     );
   });
 
@@ -92,7 +92,18 @@ describe('TerminalService.createTerminal owning-tab plumbing', () => {
       'tm-migrated-leaf', 'default', 'Terminal', undefined, 120, 40, 'tb-owner-tab', 'tb-legacy01',
     );
     expect(createTerminal).toHaveBeenCalledWith(
-      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01',
+      'default', 'Terminal', undefined, 'tm-migrated-leaf', 120, 40, 'tb-owner-tab', 'tb-legacy01', false,
+    );
+  });
+
+  it('forwards true only when an admin pane explicitly requests elevation', async () => {
+    await terminalService.createTerminal(
+      'tm-admin-leaf', 'powershell', 'Admin', undefined, undefined, undefined,
+      'tb-admin-tab', undefined, true,
+    );
+    expect(createTerminal).toHaveBeenCalledWith(
+      'powershell', 'Admin', undefined, 'tm-admin-leaf', undefined, undefined,
+      'tb-admin-tab', undefined, true,
     );
   });
 
