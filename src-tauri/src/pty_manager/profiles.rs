@@ -17,6 +17,13 @@ pub struct ShellProfile {
     pub is_default: bool,
     #[serde(default)]
     pub is_custom: bool,
+    /// True only for an auto-detected WSL distro profile (plan 045). A
+    /// custom user profile that happens to launch `wsl.exe` is NOT flagged —
+    /// this covers detection, not the launch target. `#[serde(default)]` so
+    /// an existing `~/.auto-terminal/profiles.json` (which predates this
+    /// field) still loads.
+    #[serde(default)]
+    pub is_wsl: bool,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
@@ -131,6 +138,7 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
                         icon: Some("terminal-linux".to_string()),
                         is_default: false, // WSL default != terminal default profile
                         is_custom: false,
+                        is_wsl: true,
                     });
                 }
             }
@@ -236,6 +244,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-powershell".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
         } else {
             profiles.push(ShellProfile {
@@ -248,6 +257,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-powershell".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
         }
 
@@ -262,6 +272,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
             icon: Some("terminal-cmd".to_string()),
             is_default: false,
             is_custom: false,
+            is_wsl: false,
         });
         
         // 3. Git Bash (Check multiple locations)
@@ -285,11 +296,12 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                     icon: Some("terminal-bash".to_string()),
                     is_default: false,
                     is_custom: false,
+                    is_wsl: false,
                 });
                 break;
             }
         }
-        
+
         // 4. Cygwin
         let cygwin_path = r"C:\cygwin64\bin\bash.exe";
         if Path::new(cygwin_path).exists() {
@@ -303,9 +315,10 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-bash".to_string()),
                 is_default: false,
                 is_custom: false,
+                is_wsl: false,
             });
         }
-        
+
         // 5. WSL distributions
         profiles.extend(detect_wsl_distributions());
         
@@ -325,6 +338,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-zsh".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
             has_default = true;
         } else if Path::new("/usr/bin/zsh").exists() {
@@ -338,6 +352,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                 icon: Some("terminal-zsh".to_string()),
                 is_default: true,
                 is_custom: false,
+                is_wsl: false,
             });
             has_default = true;
         }
@@ -357,6 +372,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                     icon: Some("terminal-bash".to_string()),
                     is_default: !has_default,
                     is_custom: false,
+                    is_wsl: false,
                 });
                 break;
             }
@@ -375,6 +391,7 @@ fn compute_available_shells() -> Vec<ShellProfile> {
                     icon: Some("terminal-fish".to_string()),
                     is_default: false,
                     is_custom: false,
+                    is_wsl: false,
                 });
                 break;
             }

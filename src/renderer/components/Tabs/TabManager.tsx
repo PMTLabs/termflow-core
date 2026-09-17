@@ -248,6 +248,7 @@ interface TabItemProps {
     hasUnseenOutput?: boolean;
     titleColor?: string;
     notifyMuted?: boolean;
+    elevated?: boolean;
   };
   requestReorder: (draggedId: string, targetId: string) => void;
   /** Whether the context-menu "Move to New Window" is offered (only with >1 tab;
@@ -409,6 +410,11 @@ const TabItem: React.FC<TabItemProps> = ({
         {tab.exited
           ? <span className="tab-exited-icon" title="Process exited — kept open for review">⊘</span>
           : <ShellProfileIcon shellType={tab.shellType} emoji={tab.icon} />}
+        {/* Plan 045: distinct from the window-title "[Administrator]" suffix (profile.rs)
+            — that decorates a whole-instance elevation, this decorates one tab. */}
+        {tab.elevated && (
+          <span className="tab-admin-badge" title="Running as Administrator">🛡️</span>
+        )}
         <span
           key={tab.activityTick ?? 0}
           className="tab-title"

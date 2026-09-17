@@ -46,11 +46,115 @@ fn restore_ctrl_c_processing() {
 #[cfg(not(windows))]
 fn restore_ctrl_c_processing() {}
 
+/// Arguments for the elevated dial-out mode (plan 045). Hand-parsed, like the
+/// rest of this binary's configuration — `ShellExecuteExW` (the launcher for
+/// this mode) has no environment-block parameter, so these cannot ride on
+/// env vars the way `TERMFLOW_PTY_PIPE` et al. do for the normal path.
+struct DialArgs {
+    connect_pipe: String,
+    token: Option<String>,
+    log: Option<std::path::PathBuf>,
+}
+
+/// `None` when `--connect-pipe` is absent — every other flag is meaningless
+/// without it, and a missing `--connect-pipe` must mean today's behaviour,
+/// bit for bit (plan 045 §4.3).
+fn parse_dial_args() -> Option<DialArgs> {
+    let mut args = std::env::args().skip(1);
+    let mut connect_pipe = None;
+    let mut token = None;
+    let mut log = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--connect-pipe" => connect_pipe = args.next(),
+            "--token" => token = args.next(),
+            "--log" => log = args.next().map(std::path::PathBuf::from),
+            _ => {}
+        }
+    }
+    connect_pipe.map(|connect_pipe| DialArgs {
+        connect_pipe,
+        token,
+        log,
+    })
+}
+
+/// Open `path` and redirect this process's OWN stdout/stderr to it, so every
+/// existing `eprintln!`/`log::` call site keeps working unmodified.
+/// `ShellExecuteExW` cannot redirect a child's stdio the way `Command::spawn`
+/// does for the primary sidecar (`pty_host_client.rs`'s `host.log` capture) —
+/// there is no stdio-handle parameter on `SHELLEXECUTEINFOW` — so an elevated
+/// dial-out host must redirect itself, as early as possible, before anything
+/// has written a line that would otherwise vanish into the void.
+#[cfg(windows)]
+fn redirect_stdio_to(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{SetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    // SAFETY: `handle` is a valid, open file handle for the lifetime of this
+    // process (leaked deliberately below — closing it would sever the
+    // redirection every future `eprintln!`/`println!` relies on).
+    let ok_out = unsafe { SetStdHandle(STD_OUTPUT_HANDLE, handle) } != 0;
+    let ok_err = unsafe { SetStdHandle(STD_ERROR_HANDLE, handle) } != 0;
+    // The OS now owns this handle via the std-handle table; leaking the Rust
+    // `File` avoids a double-close when it would otherwise drop.
+    std::mem::forget(file);
+    if !ok_out || !ok_err {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn redirect_stdio_to(_path: &std::path::Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Dial-out mode entry point (plan 045): connect to the GUI-hosted pipe,
+/// serve exactly that one connection, then return so the process exits —
+/// never falls through to the normal listener path below.
+#[cfg(windows)]
+async fn run_dial_out_mode(args: DialArgs) {
+    if let Some(log_path) = &args.log {
+        if let Err(e) = redirect_stdio_to(log_path) {
+            eprintln!(
+                "termflow-pty-host: could not redirect output to {}: {e}",
+                log_path.display()
+            );
+        }
+    }
+    eprintln!(
+        "termflow-pty-host: [ADMIN] dial-out mode, connecting to {}",
+        args.connect_pipe
+    );
+    let endpoint = transport::Endpoint(args.connect_pipe);
+    match transport::dial::serve_dial(endpoint, args.token).await {
+        Ok(()) => eprintln!("termflow-pty-host: [ADMIN] dial-out connection ended, exiting"),
+        Err(e) => eprintln!("termflow-pty-host: [ADMIN] dial-out serve failed: {e}"),
+    }
+}
+
+#[cfg(not(windows))]
+async fn run_dial_out_mode(_args: DialArgs) {
+    eprintln!("termflow-pty-host: --connect-pipe is only supported on Windows");
+}
+
 #[tokio::main]
 async fn main() {
     // Must run BEFORE any session spawns: children inherit this process's
     // ignore-vs-process CTRL+C attribute at creation time.
     restore_ctrl_c_processing();
+
+    if let Some(dial_args) = parse_dial_args() {
+        run_dial_out_mode(dial_args).await;
+        return;
+    }
 
     // If we cannot outlive the GUI (Windows kill-on-close job / not a Unix
     // session leader), survival across GUI exit is not guaranteed. Log loudly

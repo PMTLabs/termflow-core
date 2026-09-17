@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use super::render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, tail_text_with};
 use super::reattach::plan_reattach;
 use super::types::*;
+use crate::elevated_host::HostChannel;
 
 fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> bool {
     pending_windows == 0 && !already_released
@@ -274,6 +275,7 @@ impl<R: Runtime> AppState<R> {
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
+            elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
             host_session_claims: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
@@ -513,9 +515,53 @@ impl<R: Runtime> AppState<R> {
     }
 
 
-    /// True if `id`'s PTY is hosted by the sidecar (not local `ptys`/writers).
+    /// True if `id`'s PTY is hosted by a sidecar (not local `ptys`/writers) —
+    /// either the primary or the elevated one.
     pub fn is_host_owned(&self, id: &str) -> bool {
         self.host_terminals.contains_key(id)
+    }
+
+    /// Which sidecar (if any) serves `id`'s PTY.
+    fn host_channel_for(&self, id: &str) -> Option<HostChannel> {
+        self.host_terminals.get(id).map(|e| *e.value())
+    }
+
+    /// The connected client actually serving `channel` — the primary sidecar
+    /// for `Primary`, the elevated sidecar for `Elevated`. `None` when that
+    /// sidecar is not currently connected (caller must surface the failure,
+    /// never silently fall back to the other one — plan 045 R7).
+    fn client_for_channel(&self, channel: HostChannel) -> Option<crate::pty_host_client::PtyHostClient> {
+        match channel {
+            HostChannel::Primary => self.pty_host_clone(),
+            HostChannel::Elevated => self.elevated_host.client_clone(),
+        }
+    }
+
+    /// The SINGLE place `host_terminals` entries are ever removed (plan 045
+    /// T4). Beyond removing, it derives the elevated sidecar's refcount: if
+    /// the removed entry was `Elevated` and none remain, it tears the
+    /// elevated connection down. A fifth call site that bypasses this and
+    /// removes directly would silently stop that teardown from ever firing —
+    /// `state::source_tests::host_terminals_is_only_removed_through_forget_host_terminal`
+    /// pins that nothing else does.
+    pub fn forget_host_terminal(&self, id: &str) {
+        let Some((_, channel)) = self.host_terminals.remove(id) else {
+            return;
+        };
+        if channel != HostChannel::Elevated {
+            return;
+        }
+        let still_elevated = self
+            .host_terminals
+            .iter()
+            .any(|e| *e.value() == HostChannel::Elevated);
+        if still_elevated {
+            return;
+        }
+        let elevated_host = self.elevated_host.clone();
+        tauri::async_runtime::spawn(async move {
+            elevated_host.shutdown().await;
+        });
     }
 
     /// Lazily connect (spawning if needed) the PTY-host sidecar client, wiring
@@ -639,7 +685,7 @@ impl<R: Runtime> AppState<R> {
                 // last moments never reach the history store. Takes the PROCESS id
                 // and derives the history key from the terminal's leaf itself.
                 st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
-                st_exit.host_terminals.remove(&process_id);
+                st_exit.forget_host_terminal(&process_id);
                 // Ring bookkeeping is keyed by the SESSION, not the process: it is
                 // the host's own offset and lives in the host's id space.
                 st_exit.host_stream_offsets.remove(&session_key);
@@ -779,6 +825,156 @@ impl<R: Runtime> AppState<R> {
         Ok(())
     }
 
+    /// Lazily connect the elevated sidecar (plan 045), launching it via UAC on
+    /// first use. Idempotent and single-flighted so two concurrent "Open admin
+    /// Tab" clicks produce exactly one UAC prompt (`ElevatedHost::connecting`
+    /// mirrors `pty_host_connecting`). Deliberately far simpler than
+    /// `ensure_pty_host_inner`: no discovery record, no adoption, no
+    /// `list_sessions` — the elevated sidecar is always freshly launched, never
+    /// a survivor from a prior run.
+    ///
+    /// Boxed for the same reason as `ensure_pty_host`: kept as a plain async fn
+    /// it would need to be `Send`, and nothing here builds a self-referential
+    /// future cycle, so this is a simpler box than that one's — but the crate
+    /// convention (`ensure_pty_host`) is to expose these as boxed futures, and
+    /// consistency here costs nothing.
+    pub fn ensure_elevated_host(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(self.ensure_elevated_host_inner())
+    }
+
+    #[cfg(windows)]
+    async fn ensure_elevated_host_inner(&self) -> Result<(), String> {
+        if self.elevated_host.is_connected() {
+            return Ok(());
+        }
+        let _connect_guard = self.elevated_host.connecting.lock().await;
+        if self.elevated_host.is_connected() {
+            return Ok(());
+        }
+
+        // Re-checked here (not just trusted from the renderer's cached
+        // `get_admin_tab_support` answer) so a stale or tampered renderer can
+        // never drive an elevated spawn past this gate.
+        let support = crate::commands::get_admin_tab_support();
+        if !support.supported {
+            return Err(format!("elevated tabs are not available ({})", support.reason));
+        }
+
+        let profile_key = crate::profile::current().info().key;
+        let listener = crate::elevated_host::pipe_server::AdminPipeListener::create(&profile_key)
+            .map_err(|e| format!("could not create the admin pipe: {e}"))?;
+
+        // Fresh per launch, never the persisted `%TEMP%` token
+        // (`pty_host_client::resolve_token`) and never written to disk — this
+        // is a separate credential scoped to exactly one elevated launch.
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let log_path = crate::pty_host_client::runtime_host_dir()
+            .map(|d| d.join("host-admin.log"))
+            .unwrap_or_else(|| std::env::temp_dir().join("termflow-host-admin.log"));
+        let parameters = crate::elevated_host::launch::build_dial_out_parameters(
+            &listener.name,
+            &token,
+            &log_path,
+        );
+
+        log::info!("[ADMIN] requesting elevation for the admin-tab sidecar");
+        let launched = match crate::elevated_host::launch::run_as(parameters).await {
+            crate::elevated_host::launch::LaunchOutcome::Cancelled => {
+                log::info!("[ADMIN] UAC prompt was denied; no admin tab will open");
+                return Err(crate::elevated_host::ADMIN_UAC_CANCELLED.to_string());
+            }
+            crate::elevated_host::launch::LaunchOutcome::Failed(code) => {
+                return Err(format!("could not launch the elevated pty-host (code {code})"));
+            }
+            crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
+        };
+        log::info!("[ADMIN] elevated pty-host launched (pid {})", launched.pid);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let stream = match listener.accept_verified(launched.pid, deadline).await {
+            Ok(s) => s,
+            Err(e) => return Err(format!("elevated pty-host did not connect: {e}")),
+        };
+        log::info!("[ADMIN] elevated pty-host connected and verified (pid {})", launched.pid);
+
+        let my_gen = self.elevated_host.bump_gen();
+        let (rd, wr) = tokio::io::split(stream);
+
+        let st_exit = self.clone();
+        let st_gap = self.clone();
+        let st_resolve = self.clone();
+        let st_disc = self.clone();
+        let deps = crate::pty_host_client::PtyHostDeps {
+            lifecycle_token: token.clone(),
+            output_tx: self.output_tx.clone(),
+            output_produced: self.output_produced.clone(),
+            // Structurally identical to the primary's on_exit (persist, forget,
+            // unindex, cleanup, emit) — kept as its own closure rather than
+            // shared, so a change to one sidecar's exit handling can never
+            // silently move the other's (see also `on_disconnect` below, which
+            // is NOT identical: elevated never reconnects).
+            on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
+                use tauri::Emitter;
+                let cwd = exit_cwd
+                    .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
+                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
+                st_exit.forget_host_terminal(&process_id);
+                st_exit.host_stream_offsets.remove(&session_key);
+                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
+                st_exit.identity.unindex(&process_id);
+                st_exit.cleanup_terminal_state(&process_id);
+                let _ = st_exit.app_handle.emit(
+                    "terminal:exit",
+                    serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
+                );
+                crate::console_window::unstick_all(&st_exit.app_handle);
+            }),
+            on_gap: Arc::new(move |process_id: String| {
+                st_gap.host_repaint(&process_id);
+            }),
+            resolve_process: Arc::new(move |k: &str| st_resolve.identity.process_for_session(k)),
+            // Plan 045 §5 / R6: the elevated channel is NEVER reconnected — a
+            // held session recovering into a re-prompted or nonexistent UAC
+            // flow would be worse than just ending it. Every terminal still
+            // registered as `Elevated` ends exactly like a normal pty exit.
+            on_disconnect: Arc::new(move || {
+                if st_disc.elevated_host.current_gen() != my_gen {
+                    return;
+                }
+                log::warn!(
+                    "[ADMIN] elevated pty-host pipe dropped; ending its session(s) \
+                     (no auto-relaunch, no re-prompt)"
+                );
+                st_disc.elevated_host.clear_client();
+                let elevated_ids: Vec<String> = st_disc
+                    .host_terminals
+                    .iter()
+                    .filter(|e| *e.value() == HostChannel::Elevated)
+                    .map(|e| e.key().clone())
+                    .collect();
+                for id in elevated_ids {
+                    st_disc.teardown_host_terminal(&id);
+                }
+            }),
+            // Shared with the primary sidecar: session keys are globally unique
+            // `tm-`/`tb-` ids, so there is no collision between the two hosts'
+            // entries in this map (plan 045 §4.1).
+            stream_offsets: self.host_stream_offsets.clone(),
+        };
+
+        let client = crate::pty_host_client::wire_client(rd, wr, deps);
+        self.elevated_host.publish(client, launched);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    async fn ensure_elevated_host_inner(&self) -> Result<(), String> {
+        Err("elevated tabs are only supported on Windows".to_string())
+    }
+
     /// Tear down one previously host-owned terminal that did NOT survive a pipe
     /// drop: persist its final parser state, clean up, and surface the closed-
     /// session banner. (Split out of the formerly-destructive on_disconnect.)
@@ -790,7 +986,7 @@ impl<R: Runtime> AppState<R> {
         // keyed by the session, not by our process id — removing it by `id` leaks
         // the entry (design 014 §A2).
         let session_key = self.session_key_for(id);
-        self.host_terminals.remove(id);
+        self.forget_host_terminal(id);
         if let Some(key) = session_key {
             self.host_stream_offsets.remove(&key);
             self.forget_host_session_claim_if_owner(&key, id);
@@ -1071,7 +1267,13 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Every host-owned terminal as `session_key -> process_id`.
+    /// Every terminal owned by the PRIMARY sidecar, as `session_key ->
+    /// process_id`. Used exclusively by `reconnect_after_pipe_drop`, which is
+    /// primary-only by design (plan 045 §5: an elevated session is never
+    /// reconnected — the elevated host self-exits on EOF instead). Without
+    /// the `Primary` filter, an elevated tab would appear in `tabs` here but
+    /// never in the primary's own `ListSessions` answer, so a primary pipe
+    /// drop would classify every open admin tab as "lost" and tear it down.
     ///
     /// **The pty-host speaks only session keys.** `host_terminals`,
     /// `terminals` and the screens are keyed by our per-run `pc-` id since
@@ -1082,6 +1284,7 @@ impl<R: Runtime> AppState<R> {
     pub fn host_sessions_by_key(&self) -> std::collections::HashMap<String, String> {
         self.host_terminals
             .iter()
+            .filter(|e| *e.value() == HostChannel::Primary)
             .filter_map(|e| {
                 let process_id = e.key().clone();
                 self.terminals
@@ -1132,11 +1335,9 @@ impl<R: Runtime> AppState<R> {
     /// return true. Returns false when disconnected so the caller surfaces the
     /// failure instead of reporting a false success for dropped input.
     pub fn host_write(&self, id: &str, bytes: &[u8]) -> bool {
-        if !self.is_host_owned(id) {
-            return false;
-        }
+        let Some(channel) = self.host_channel_for(id) else { return false };
         let Some(session_key) = self.session_key_for(id) else { return false };
-        match self.pty_host_client().as_ref() {
+        match self.client_for_channel(channel) {
             Some(c) => {
                 c.write_stdin(&session_key, bytes);
                 true
@@ -1147,11 +1348,9 @@ impl<R: Runtime> AppState<R> {
 
     /// If `id` is host-owned AND connected, forward the resize and return true.
     pub fn host_resize(&self, id: &str, cols: u16, rows: u16) -> bool {
-        if !self.is_host_owned(id) {
-            return false;
-        }
+        let Some(channel) = self.host_channel_for(id) else { return false };
         let Some(session_key) = self.session_key_for(id) else { return false };
-        match self.pty_host_client().as_ref() {
+        match self.client_for_channel(channel) {
             Some(c) => {
                 c.resize(&session_key, cols, rows);
                 true
@@ -1168,9 +1367,9 @@ impl<R: Runtime> AppState<R> {
     /// the session can't linger in the host as an adoptable zombie.
     pub fn host_close(&self, id: &str) -> bool {
         use tauri::Emitter;
-        if !self.is_host_owned(id) {
+        let Some(channel) = self.host_channel_for(id) else {
             return false;
-        }
+        };
         // Resolve BEFORE the removals below drop the record we read it from.
         let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
         // ...and the cwd for the same reason, one step further out: every caller runs
@@ -1178,15 +1377,19 @@ impl<R: Runtime> AppState<R> {
         // It is the directory the shell died in, which is what a restart-in-place resumes in
         // (spec 045 §3.3) — the pane survives an API close, so this is not dead weight.
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, id);
-        match self.pty_host_client().as_ref() {
+        match self.client_for_channel(channel) {
             Some(c) if c.is_alive() => c.close(&session_key),
-            _ => {
+            _ if channel == HostChannel::Primary => {
                 // Pending closes are replayed against the HOST later, so they
-                // must be recorded in the host id space.
+                // must be recorded in the host id space. The elevated channel
+                // has no such replay story — it is never reconnected (plan
+                // 045 §5); a close that can't reach it is simply dropped,
+                // same as the process being gone already.
                 self.host_close_pending.insert(session_key.clone(), ());
             }
+            _ => {}
         }
-        self.host_terminals.remove(id);
+        self.forget_host_terminal(id);
         self.host_stream_offsets.remove(&session_key);
         self.forget_host_session_claim_if_owner(&session_key, id);
 
@@ -1226,9 +1429,7 @@ impl<R: Runtime> AppState<R> {
     /// If `id` is host-owned, force a repaint via a sidecar resize-nudge (the
     /// local jiggle can't — there is no local master). Returns true if handled.
     pub fn host_repaint(&self, id: &str) -> bool {
-        if !self.is_host_owned(id) {
-            return false;
-        }
+        let Some(channel) = self.host_channel_for(id) else { return false };
         // `id` is the PROCESS id (our map key); the host only knows this terminal
         // by its session key, so the nudge must be addressed in the host's id
         // space (design 014 §A2). Reading both from the same record keeps them
@@ -1238,7 +1439,7 @@ impl<R: Runtime> AppState<R> {
             .get(id)
             .map(|t| (t.cols, t.rows, t.session_key.clone()));
         if let Some((cols, rows, session_key)) = info {
-            if let Some(c) = self.pty_host_client().as_ref() {
+            if let Some(c) = self.client_for_channel(channel) {
                 c.nudge_repaint(&session_key, cols, rows);
             }
         }
@@ -1378,8 +1579,9 @@ impl<R: Runtime> AppState<R> {
         // or_default; that's harmless — it then no-ops on the missing terminal).
         self.history_persist_locks.remove(id);
         // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
-        // in the routing set after its state is torn down.
-        self.host_terminals.remove(id);
+        // in the routing set after its state is torn down. Idempotent when a
+        // caller (`teardown_host_terminal`, `host_close`) already removed it.
+        self.forget_host_terminal(id);
         self.forget_host_session_claim_if_owner(&session_key, id);
     }
 }
@@ -1489,6 +1691,68 @@ mod automation_teardown_source_tests {
         assert!(
             !body.contains("forget_process(&leaf)"),
             "handing the leaf to the `pc-`keyed purge would leave the terminal permanently dirty"
+        );
+    }
+}
+
+/// Plan 045 T4: `host_terminals`'s value now says WHICH sidecar owns an entry,
+/// and the elevated sidecar's teardown is DERIVED from counting `Elevated`
+/// entries — a removal that bypasses `forget_host_terminal` silently stops
+/// that count (and therefore the teardown) from ever firing for that site,
+/// with no runtime symptom until someone notices an orphaned elevated
+/// process. Asserted from source, in the style of `automation_teardown_source_tests`
+/// above, since there is no way to enumerate "every call site" at runtime.
+#[cfg(test)]
+mod host_terminal_removal_source_tests {
+    /// Truncated to everything BEFORE this test module's own source: the
+    /// scan below looks for the literal substring `host_terminals.remove(`,
+    /// which this module's own assertions necessarily also contain — an
+    /// untruncated scan would flag itself as a second call site.
+    fn source() -> String {
+        let full = include_str!("terminals.rs").replace("\r\n", "\n");
+        let end = full
+            .find("mod host_terminal_removal_source_tests")
+            .unwrap_or(full.len());
+        full[..end].to_string()
+    }
+
+    /// `forget_host_terminal`'s body span (start, end byte offsets into `source()`).
+    fn forget_host_terminal_span() -> (usize, usize) {
+        let src = source();
+        let sig = "pub fn forget_host_terminal(&self, id: &str) {";
+        let start = src.find(sig).expect("forget_host_terminal must exist");
+        let rest = &src[start..];
+        let end = rest
+            .find("\n    }\n")
+            .expect("its body must be closed at method indentation")
+            + 7;
+        (start, start + end)
+    }
+
+    #[test]
+    fn host_terminals_is_only_removed_through_forget_host_terminal() {
+        let src = source();
+        let (body_start, body_end) = forget_host_terminal_span();
+        let needle = "host_terminals.remove(";
+        let mut offset = 0;
+        let mut found_in_chokepoint = false;
+        while let Some(rel) = src[offset..].find(needle) {
+            let at = offset + rel;
+            if (body_start..body_end).contains(&at) {
+                found_in_chokepoint = true;
+            } else {
+                panic!(
+                    "`host_terminals.remove(` found outside forget_host_terminal at byte {at} \
+                     — route it through forget_host_terminal instead, or the elevated \
+                     sidecar's derived refcount teardown silently stops firing for this site"
+                );
+            }
+            offset = at + needle.len();
+        }
+        assert!(
+            found_in_chokepoint,
+            "forget_host_terminal must itself call host_terminals.remove( — this guard is \
+             vacuous if that call was refactored away without updating this test"
         );
     }
 }

@@ -35,6 +35,20 @@ if (isTauri) {
 
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
+
+  // Plan 045: resolve once whether this window can offer "Open admin Tab" at
+  // all (Windows, not already elevated, sidecar enabled, not killed). Cached
+  // for every menu surface — see adminTabActions.ts.
+  //
+  // AFTER the bridge, never before. adminTabActions imports the store, and the
+  // store drags in StateManager -> TerminalService, whose singleton constructor
+  // registers the `terminal:data` / `terminal:exit` listeners on construction
+  // and SKIPS them when `window.electronAPI` is still undefined. Required ahead
+  // of the bridge, that skip is permanent (the DOMContentLoaded retry has
+  // already passed by the time the awaits above resolve), and every terminal
+  // in the window spawns fine but never renders a byte of live output.
+  const { initAdminTabSupport } = require('./services/adminTabActions');
+  await initAdminTabSupport(invoke);
 } else if (!(window as any).electronAPI) {
   console.log('Running in browser mode - loading Browser Bridge...');
   require('./api/browser-bridge');

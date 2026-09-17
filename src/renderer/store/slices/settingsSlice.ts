@@ -16,6 +16,7 @@ export interface ShellProfile {
   env: Record<string, string>;
   icon?: string;
   cwd?: string;
+  is_wsl?: boolean;
 }
 
 export interface Theme {

@@ -17,6 +17,7 @@ import { useTerminalSearch } from './useTerminalSearch';
 import { useSurfaceRelocation } from './useSurfaceRelocation';
 import { useOverlayChromeGate } from './useOverlayChromeGate';
 import { buildCommandHistoryMenuItem, buildSnippetsMenuItem } from './snippetsHistoryMenu';
+import { adminTabMenuItem } from './adminTabMenuItem';
 import { nextSnippetSortMode, snippetDisplayLabel } from '../../services/snippetSearch';
 import { openSettingsTab } from '../../services/openSettings';
 import { commandHistoryService } from '../../services/commandHistoryService';
@@ -128,6 +129,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // arrangement the toggle just persisted rather than the one it opened with.
   const snippetsViewMode = useSelector((s: RootState) => s.settings.snippetsViewMode);
   const snippetsSortMode = useSelector((s: RootState) => s.settings.snippetsSortMode);
+  // Plan 045 — same rule: a live store read, so the admin submenu reflects
+  // profiles as they're added/removed in Settings without a reopen.
+  const shellProfiles = useSelector((s: RootState) => s.settings.shellProfiles);
   const [snippetDialogOpen, setSnippetDialogOpen] = useState(false);
   const [snippetSeedText, setSnippetSeedText] = useState<string | undefined>(undefined);
   const [editingSnippet, setEditingSnippet] = useState<Snippet | null>(null);
@@ -888,6 +892,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
         title: 'Open a new tab using your default shell profile.',
         click: () => openNewTabWithDefaultProfile(),
       },
+      // Plan 045. Always present (O2) — disabled with a tooltip when unsupported,
+      // never hidden, so a stale renderer can't drive it into a backend that
+      // will refuse it anyway.
+      adminTabMenuItem(shellProfiles),
       {
         label: 'New Window',
         icon: '🪟',

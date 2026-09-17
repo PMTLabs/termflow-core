@@ -21,7 +21,9 @@ export interface ContextMenuFlyoutRow {
   id: string;
   /** Primary text. Truncated with an ellipsis rather than wrapped. */
   label: string;
-  icon?: string;
+  /** An emoji, or a node such as `<ShellProfileIcon>` when the row stands for a
+   *  real binary — the same glyph the tab strip shows for it. */
+  icon?: React.ReactNode;
   /** Dimmed secondary text on the right of the row (folder name, timestamp, …). */
   detail?: string;
   /**

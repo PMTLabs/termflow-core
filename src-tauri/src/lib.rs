@@ -26,6 +26,9 @@ pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;
 pub mod pty_host_client;
+// Elevated ("Open admin Tab") sidecar (plan 045). GUI-hosted reversed-dial
+// pipe + UAC launch — see the module doc for why the direction is inverted.
+pub mod elevated_host;
 pub mod commands;
 #[cfg(feature = "velopack-updates")]
 pub mod updater;
@@ -917,6 +920,7 @@ pub fn run() {
         commands::import_snippets_file,
         commands::quit_app,
         commands::get_profile,
+        commands::get_admin_tab_support,
         commands::save_config,
         commands::merge_config,
         commands::load_config,

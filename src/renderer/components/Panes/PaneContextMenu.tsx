@@ -9,6 +9,8 @@ import { BellIcon } from '../UI/BellIcon';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { detachPaneToNewWindow } from './dnd/detach';
 import { openNewTabWithDefaultProfile, openNewWindow, splitPaneById } from '../../services/paneActions';
+import { adminTabSupport, adminTabTooltip } from '../../services/adminTabActions';
+import { AdminProfileList } from '../UI/AdminProfileList';
 import { CopyableInfoRow } from '../UI/CopyableInfoRow';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
 import { usePaneMuteState } from './usePaneMuteState';
@@ -67,6 +69,8 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // owns their tooltips.
   const tip = useTooltipDwell();
   const [schemaExpanded, setSchemaExpanded] = useState(false);
+  const [adminExpanded, setAdminExpanded] = useState(false);
+  const adminSupport = adminTabSupport();
   // The coding agent detected in this pane (codex/claude/…), or null. Seeded
   // synchronously from the tracker, then refreshed once on open so a just-started
   // agent is offered without waiting for the next poll tick.
@@ -223,6 +227,23 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">➕</span>
         Open New Tab
       </button>
+      {/* Plan 045. Toggle itself always shown (O2) — disabled with a tooltip when
+          unsupported, so unavailability is visible without expanding the subpanel. */}
+      <button
+        className="context-menu-item"
+        disabled={!adminSupport.supported}
+        title={adminSupport.supported ? undefined : adminTabTooltip(adminSupport.reason)}
+        onClick={() => setAdminExpanded((v) => !v)}
+      >
+        <span className="menu-icon">🛡️</span>
+        Open admin Tab
+        <span className="context-menu-expand-arrow">{adminExpanded ? '▾' : '▸'}</span>
+      </button>
+      {adminExpanded && adminSupport.supported && (
+        <div className="context-menu-subpanel">
+          <AdminProfileList variant="menu" onPick={onClose} />
+        </div>
+      )}
       <button className="context-menu-item" onClick={() => runAndClose(() => { void openNewWindow(); })}>
         <span className="menu-icon">🪟</span>
         Open New Window

@@ -79,6 +79,88 @@ pub fn get_profile() -> crate::profile::ProfileInfo {
     crate::profile::current().info()
 }
 
+/// Whether "Open admin Tab" (plan 045) is available in this run, and why not
+/// when it isn't. `reason` is USER-FACING: the renderer maps each non-`"ok"`
+/// value to the one tooltip string every surface shows on its disabled menu
+/// item (§9 O2 — shown disabled with a tooltip, never hidden). Fetched once
+/// at boot and cached; the backend re-checks the same four terms on every
+/// actual elevated spawn (`AppState::ensure_elevated_host`), so a stale or
+/// tampered renderer cannot drive one past this gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminTabSupport {
+    pub supported: bool,
+    pub reason: &'static str,
+}
+
+#[tauri::command]
+pub fn get_admin_tab_support() -> AdminTabSupport {
+    admin_tab_support(
+        cfg!(windows),
+        crate::profile::current().info().elevated,
+        crate::pty_host_client::enabled(),
+        std::env::var("TERMFLOW_ADMIN_TABS").ok().as_deref(),
+    )
+}
+
+/// Pure decision core, split out so all four terms are independently testable
+/// (plan 045 T6) — a test that only drove the supported case would pass with
+/// every one of these gates deleted.
+fn admin_tab_support(
+    is_windows: bool,
+    already_elevated: bool,
+    sidecar_enabled: bool,
+    admin_tabs_env: Option<&str>,
+) -> AdminTabSupport {
+    let unsupported = |reason| AdminTabSupport { supported: false, reason };
+    if !is_windows {
+        return unsupported("not-windows");
+    }
+    if admin_tabs_env == Some("0") {
+        return unsupported("killed");
+    }
+    if already_elevated {
+        return unsupported("already-elevated");
+    }
+    if !sidecar_enabled {
+        return unsupported("sidecar-disabled");
+    }
+    AdminTabSupport { supported: true, reason: "ok" }
+}
+
+#[cfg(test)]
+mod admin_tab_support_tests {
+    use super::*;
+
+    #[test]
+    fn admin_tab_support_reports_each_unsupported_reason() {
+        assert_eq!(admin_tab_support(true, false, true, None).reason, "ok");
+        assert!(admin_tab_support(true, false, true, None).supported);
+
+        assert_eq!(admin_tab_support(false, false, true, None).reason, "not-windows");
+        assert_eq!(admin_tab_support(true, false, true, Some("0")).reason, "killed");
+        assert_eq!(admin_tab_support(true, true, true, None).reason, "already-elevated");
+        assert_eq!(admin_tab_support(true, false, false, None).reason, "sidecar-disabled");
+
+        for r in [
+            admin_tab_support(false, false, true, None),
+            admin_tab_support(true, false, true, Some("0")),
+            admin_tab_support(true, true, true, None),
+            admin_tab_support(true, false, false, None),
+        ] {
+            assert!(!r.supported, "reason {:?} must carry supported:false", r.reason);
+        }
+    }
+
+    #[test]
+    fn admin_tabs_1_does_not_force_on_past_a_real_gate() {
+        // Unlike TERMFLOW_PTY_HOST, TERMFLOW_ADMIN_TABS has no "=1 forces on"
+        // meaning — it is a kill switch only. A stray "=1" must not be read as
+        // an override of platform/elevation/sidecar facts.
+        assert_eq!(admin_tab_support(false, false, true, Some("1")).reason, "not-windows");
+    }
+}
+
 /// Stream 1: show an OS notification for background-tab activity, but ONLY when no
 /// TermFlow window is focused (app-wide check — a focused window already gets the
 /// in-app sound/toast, so notifying there too would be noisy/duplicate). `window_label`

@@ -101,6 +101,11 @@ export function buildPaneDetachPayload(
     terminals,
     cursor,
     titleColor: sourceTab?.titleColor,
+    // R8: the pane's OWN elevation, not the source tab's — a pane-only detach
+    // gets a new tab identity, and reading it off the node (not a prop passed
+    // down separately) is the same "can't disagree" guarantee TerminalPane's
+    // two spawn call sites already rely on.
+    elevated: paneNode.elevated,
   };
 }
 
@@ -170,6 +175,8 @@ export function buildTabDetachPayload(
     titleColor: sourceTab?.titleColor,
     colorSchemaId: sourceTab?.colorSchemaId,
     notifyMuted: sourceTab?.notifyMuted,
+    // R8: same tab, just relocated — the Administrator badge must travel with it.
+    elevated: sourceTab?.elevated,
   };
 }
 
@@ -310,6 +317,7 @@ export function applyDetachPayload(payload: DetachPayload): void {
     titleColor: payload.titleColor,
     colorSchemaId: payload.colorSchemaId,
     notifyMuted: payload.notifyMuted,
+    elevated: payload.elevated,
   }));
   store.dispatch(addTabTree({ tabId: payload.tabId, tree: payload.paneTree }));
   store.dispatch(setActiveTab(payload.tabId));

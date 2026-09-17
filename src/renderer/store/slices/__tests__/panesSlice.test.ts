@@ -833,6 +833,7 @@ describe('splitPane carries identity fields onto the surviving leaf', () => {
     terminalId: 'tm-original',
     seededForTabId: 'tb-a',
     sessionKey: 'tb-legacy01',
+    elevated: true,
   };
 
   /**
@@ -920,6 +921,27 @@ describe('splitPane carries identity fields onto the surviving leaf', () => {
       expect(fresh).toBeDefined();
       expect(fresh!.seededForTabId).toBeUndefined();
       expect(fresh!.sessionKey).toBeUndefined();
+    });
+
+    /**
+     * R8: unlike `seededForTabId`/`sessionKey` above, `elevated` must land on
+     * BOTH panes — a split of an admin pane spawns two elevated shells, not
+     * one elevated pane and one silently downgraded to Medium integrity
+     * behind a tab strip that still shows the Administrator badge (plan 045
+     * T8 / runbook step 23).
+     */
+    it('keeps elevated on the pane that keeps the terminal', () => {
+      const s = splitIt();
+      const original = findByTerminal(s.treesByTabId['tb-a'], 'tm-original');
+      expect(original!.elevated).toBe(true);
+    });
+
+    it('also copies elevated onto the NEW sibling (unlike seededForTabId/sessionKey)', () => {
+      const s = splitIt();
+      const tree = s.treesByTabId['tb-a']!;
+      const fresh = (tree.children ?? []).find((c) => c.terminalId !== 'tm-original');
+      expect(fresh).toBeDefined();
+      expect(fresh!.elevated).toBe(true);
     });
   });
 });

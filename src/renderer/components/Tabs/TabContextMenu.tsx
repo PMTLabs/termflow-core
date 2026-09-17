@@ -3,6 +3,8 @@ import { useSelector, useDispatch } from 'react-redux';
 import { store, RootState } from '../../store';
 import { detachTabToNewWindow } from '../Panes/dnd/detach';
 import { openNewTabWithDefaultProfile, openNewWindow, splitTabPane } from '../../services/paneActions';
+import { adminTabSupport, adminTabTooltip } from '../../services/adminTabActions';
+import { AdminProfileList } from '../UI/AdminProfileList';
 import { CopyableInfoRow } from '../UI/CopyableInfoRow';
 import { Mnemonic } from '../UI/Mnemonic';
 import { isTypingTarget } from '../UI/useDialogA11y';
@@ -72,7 +74,8 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
   const dispatch = useDispatch();
   const tab = useSelector((s: RootState) => s.tabs.tabs.find((t) => t.id === tabId));
   const globalSchemaId = useSelector((s: RootState) => s.settings.colorSchemaId);
-  const [expanded, setExpanded] = useState<'schema' | 'color' | null>(null);
+  const [expanded, setExpanded] = useState<'schema' | 'color' | 'admin' | null>(null);
+  const adminSupport = adminTabSupport();
 
   // Disabled states for the browser-style close items, from the current tab order.
   const orderedTabIds = store.getState().tabs.tabs.map((t) => t.id);
@@ -261,6 +264,23 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
         <span className="menu-icon">➕</span>
         Open New Tab
       </button>
+      {/* Plan 045. Toggle itself always shown (O2) — disabled with a tooltip when
+          unsupported, so unavailability is visible without expanding the subpanel. */}
+      <button
+        className="context-menu-item"
+        disabled={!adminSupport.supported}
+        title={adminSupport.supported ? undefined : adminTabTooltip(adminSupport.reason)}
+        onClick={() => setExpanded(expanded === 'admin' ? null : 'admin')}
+      >
+        <span className="menu-icon">🛡️</span>
+        Open admin Tab
+        <span className="context-menu-expand-arrow">{expanded === 'admin' ? '▾' : '▸'}</span>
+      </button>
+      {expanded === 'admin' && adminSupport.supported && (
+        <div className="context-menu-subpanel">
+          <AdminProfileList variant="menu" afterTabId={tabId} onPick={onClose} />
+        </div>
+      )}
       <button className="context-menu-item" onClick={() => runAndClose(() => { void openNewWindow(); })}>
         <span className="menu-icon">🪟</span>
         Open New Window

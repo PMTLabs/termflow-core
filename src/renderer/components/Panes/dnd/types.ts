@@ -79,4 +79,12 @@ export interface DetachPayload {
   // whole-tab move like the fields above. (Pane-level mute already rides along on
   // the PaneNode tree.) Only set for kind: 'tab'.
   notifyMuted?: boolean;
+  // Plan 045 R8: whether the destination tab should show the Administrator badge.
+  // Set for BOTH kinds like `titleColor` (it names a fact about the terminal, not
+  // an identity choice) — but derived differently per kind: `sourceTab?.elevated`
+  // for a whole-tab move (kind: 'tab'), the detached leaf's own `PaneNode.elevated`
+  // for a single-pane move (kind: 'pane'), since a pane's new tab has no source
+  // Tab record of its own to read. Dropping this on either path leaves a still-
+  // elevated terminal running in a tab whose strip no longer shows the badge.
+  elevated?: boolean;
 }
