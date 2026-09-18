@@ -297,19 +297,37 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             }));
         }
     }, [dispatch]);
-    // Re-check the preflight whenever the Updates panel is opened (and reset the
-    // arm state), so the caveat reflects the current terminals.
+    // Whenever the Updates category is entered: reset the arm state and refresh
+    // the things that do NOT depend on the pty-host (the GitHub update check is
+    // a network round-trip, so it runs on entry only, not on every tab switch).
     useEffect(() => {
         if (activeCategory === 'updates') {
             setOffloadArmed(false);
-            void refreshHotswapPreflight();
             void refreshUpdateStatus();
-            void window.electronAPI?.connectedHostRetention?.()
-                .then(setHostRetention)
-                .catch(() => setHostRetention({ state: 'unknown' }));
             void window.electronAPI?.getAppVersion?.().then((v) => setAppVersion(v)).catch(() => {});
         }
-    }, [activeCategory, refreshHotswapPreflight, refreshUpdateStatus]);
+    }, [activeCategory, refreshUpdateStatus]);
+    // The offload verdict and the retention copy are functions of the pty-host
+    // connection, and that connection is LAZY: the first terminal connects it,
+    // seconds after a restored Settings tab has mounted and rehydrated onto
+    // Updates (`settingsLastCategory`). Sampled at mount, the verdict was
+    // "pty-host not connected — nothing to keep alive" and it stayed — Offload
+    // disabled — until the category changed, which is exactly what a user who
+    // offloaded from this panel and reopened the app saw. So sample only while
+    // the panel is actually visible, and re-sample on every host-connection
+    // edge the backend reports (`pty-host:state`, bridged in tauri-bridge.ts).
+    const refreshHostVerdicts = useCallback(() => {
+        void refreshHotswapPreflight();
+        void window.electronAPI?.connectedHostRetention?.()
+            .then(setHostRetention)
+            .catch(() => setHostRetention({ state: 'unknown' }));
+    }, [refreshHotswapPreflight]);
+    useEffect(() => {
+        if (!isActive || activeCategory !== 'updates') return;
+        refreshHostVerdicts();
+        window.addEventListener('pty-host:state', refreshHostVerdicts);
+        return () => window.removeEventListener('pty-host:state', refreshHostVerdicts);
+    }, [isActive, activeCategory, refreshHostVerdicts]);
 
     const isDirty = useCallback((): boolean => {
         if (!isTracked(activeCategory) || !baseline) return false;

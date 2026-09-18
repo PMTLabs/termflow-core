@@ -1012,6 +1012,16 @@ if (typeof window !== 'undefined') {
     }));
   }));
 
+  // Host-connection edges. The pty-host connects lazily (first terminal) and can
+  // drop (sleep/wake); the Settings Updates panel caches an offload preflight
+  // that is a function of that connection and re-samples on these. Global: the
+  // connection is per process, not per window.
+  for (const name of ['pty-host:connected', 'pty-host:disconnected'] as const) {
+    trackUnlisten(listen(name, () => {
+      window.dispatchEvent(new CustomEvent('pty-host:state', { detail: name }));
+    }));
+  }
+
   // Tray "Peers…" menu item (Plan 010): open Settings → Peers. Global (the tray
   // isn't window-scoped), so it's intentionally not filtered by window.
   trackUnlisten(listen('tray:open-peers', () => {

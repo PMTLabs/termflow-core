@@ -728,6 +728,12 @@ impl<R: Runtime> AppState<R> {
                     "[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect"
                 );
                 *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                // The Settings Updates panel caches an offload verdict that is a
+                // function of this connection; tell it the answer changed.
+                {
+                    use tauri::Emitter;
+                    let _ = st_disc.app_handle.emit("pty-host:disconnected", ());
+                }
                 let st = st_disc.clone();
                 tauri::async_runtime::spawn(async move {
                     st.reconnect_after_pipe_drop().await;
@@ -806,6 +812,15 @@ impl<R: Runtime> AppState<R> {
         if !client.is_alive() {
             *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
             return Err("pty-host connection lost during setup".to_string());
+        }
+        // Connecting is LAZY (the first host terminal gets here) and the Settings
+        // Updates panel caches `hotswap_available`, so a Settings tab restored
+        // onto Updates sampled "pty-host not connected — nothing to keep alive"
+        // at mount — seconds before the reattach — and kept Offload disabled for
+        // as long as the panel stayed open. Every window re-samples on this.
+        {
+            use tauri::Emitter;
+            let _ = self.app_handle.emit("pty-host:connected", ());
         }
         // A host reaches here armed for one of two reasons: our OWN prior
         // launch armed it before an update/offload exit (`updater.rs`), or a
