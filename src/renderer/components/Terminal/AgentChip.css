@@ -1,9 +1,13 @@
 /* Floating agent-identity pill, top-right of the pane content. Purely
-   informational — pointer-events disabled so it never blocks the terminal. */
+   informational — pointer-events disabled so it never blocks the terminal.
+   `right` clears the scrollbar column — the 4px .terminal-display padding plus
+   xterm's 14px bar — with 4px to spare, so the pill never sits over the
+   scrollbar's ▲ button (plan 046), which lives in exactly this corner.
+   Pinned by rightEdgeChromeClearsScrollbar.test.ts. */
 .agent-chip {
   position: absolute;
   top: 6px;
-  right: 8px;
+  right: 22px;
   z-index: 5;
   display: inline-flex;
   align-items: center;
