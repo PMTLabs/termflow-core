@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
+import { wireScrollbarArrows } from '@termflow/terminal-core';
 import { PlaybackService } from '../../services/PlaybackService';
 import { PlaybackControls } from './PlaybackControls';
 import { TerminalRecording, PlaybackState } from '../../../types/recording';
@@ -58,6 +59,11 @@ export const PlaybackViewer: React.FC<PlaybackViewerProps> = ({ recording, onClo
     term.open(terminalRef.current);
     fitAddon.fit();
 
+    // This viewer opens its own xterm, outside TerminalEngine, so the engine's per-mount
+    // wiring does not cover it: the patched scrollbar's ▲/▼ buttons (plan 046) would render
+    // but do nothing. Same helper, same one-row-per-click behaviour.
+    const unwireScrollbarArrows = wireScrollbarArrows(term);
+
     // Create playback service
     const service = new PlaybackService();
     service.loadRecording(recording);
@@ -79,6 +85,7 @@ export const PlaybackViewer: React.FC<PlaybackViewerProps> = ({ recording, onClo
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      unwireScrollbarArrows();
       service.cleanup();
       term.dispose();
     };

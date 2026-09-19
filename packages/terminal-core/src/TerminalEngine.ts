@@ -24,6 +24,7 @@ import type {
   TerminalLinkHit,
 } from './types';
 import { terminalCache, HYDRATION_BUFFER_CAP_BYTES } from './cache';
+import { wireScrollbarArrows } from './scrollbarArrows';
 import type { TerminalCacheEntry } from './cache';
 import { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 import {
@@ -2311,6 +2312,14 @@ export class TerminalEngine {
       this.emitInputLine('');
     });
 
+    // Scrollbar ▲/▼ buttons (plan 046): the patched xterm scrollbar dispatches a bubbling
+    // event from inside term.element; this turns each one into scrollLines(±1). It lives in
+    // `disposables`, NOT `containerDisposables`: the listener is on term.element, which is
+    // the unit that MOVES on relocateTo() (design 012 D6), so it must survive a relocation
+    // and die only with the mount. Re-added on every mount() because beginMountWiring()
+    // resets `disposables` and unmount() runs them — one listener per live mount.
+    const scrollbarArrowsDispose = wireScrollbarArrows(boundTerm);
+
     // Track the live match count so refreshSearch can distinguish "user dismissed
     // an existing match" from "no match yet" (see lastSearchResultCount).
     const searchResultsDisposable = search.onDidChangeResults((e) => {
@@ -2884,6 +2893,7 @@ export class TerminalEngine {
       () => titleDisposable.dispose(),
       () => writeParsedDisposable.dispose(),
       () => scrollDisposable.dispose(),
+      scrollbarArrowsDispose,
       () => searchResultsDisposable.dispose(),
       () => selectionDisposable.dispose(),
       () => pathLinkDisposable.dispose(),

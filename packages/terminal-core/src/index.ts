@@ -26,6 +26,11 @@ export {
 export { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 export { isWebGLGloballyDisabled } from './webgl';
 export { redactSecrets } from './redactSecrets';
+/** Scrollbar ▲/▼ buttons (plan 046): the patched xterm scrollbar emits this event; the engine
+ *  wires it per mount, and any OTHER host that opens its own `Terminal` (PlaybackViewer) must
+ *  wire it too or its arrows are inert. */
+export { wireScrollbarArrows, SCROLLBAR_ARROW_EVENT } from './scrollbarArrows';
+export type { ScrollbarArrowTerminal } from './scrollbarArrows';
 export {
   HeuristicCapture,
   decideSuggestKey,
