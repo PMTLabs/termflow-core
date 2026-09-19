@@ -117,6 +117,42 @@
   background: var(--terminal-display-background, #000000);
 }
 
+/* Scrollbar ▲/▼ buttons (plan 046). xterm 6's scrollbar is VS Code's vendored
+   ScrollableElement, not the native one above; its end buttons are re-enabled by
+   patches/xterm-scrollbar-arrows-patch.js, which gives each an 11×11 `.scra` glyph
+   node inside the 14 px bar. VS Code draws the glyph with a codicon class that
+   xterm strips, so the node arrives EMPTY — the triangle is drawn here. `color`
+   is deliberately NOT set here: the patched Viewport injects
+   `.scra { color: <scheme foreground> }` next to the thumb colours, so the arrows
+   recolour with the scheme exactly when the thumb does. The bar fades in/out on
+   hover as a whole (xterm.css `.visible`/`.invisible`), arrows included. */
+.terminal-display .xterm .xterm-scrollable-element > .scrollbar > .scra {
+  opacity: 0.55;
+  transition: opacity 0.1s linear;
+}
+
+.terminal-display .xterm .xterm-scrollable-element > .scrollbar > .scra:hover {
+  opacity: 0.95;
+}
+
+.terminal-display .xterm .xterm-scrollable-element > .scrollbar > .scra::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+
+.terminal-display .xterm .xterm-scrollable-element > .scrollbar > .scra.scra-up::before {
+  border-bottom: 5px solid currentColor;
+}
+
+.terminal-display .xterm .xterm-scrollable-element > .scrollbar > .scra.scra-down::before {
+  border-top: 5px solid currentColor;
+}
+
 /* Selection styling */
 .terminal-display .xterm-selection {
   background-color: rgba(255, 255, 255, 0.3);

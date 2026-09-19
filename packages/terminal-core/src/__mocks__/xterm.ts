@@ -74,6 +74,7 @@ export class Terminal {
   scrollToBottomCount = 0;
   scrollToLineCalls: number[] = [];
   scrollPagesCalls: number[] = [];
+  scrollLinesCalls: number[] = [];
 
   scrollToBottom(): void {
     this.scrollToBottomCount++;
@@ -85,6 +86,15 @@ export class Terminal {
   scrollToLine(line: number): void {
     this.scrollToLineCalls.push(line);
     this.buffer.active.viewportY = line;
+  }
+
+  scrollLines(amount: number): void {
+    this.scrollLinesCalls.push(amount);
+    // Mirror real xterm: move by whole rows, clamped to the buffer.
+    this.buffer.active.viewportY = Math.max(
+      0,
+      Math.min(this.buffer.active.baseY, this.buffer.active.viewportY + amount),
+    );
   }
 
   scrollPages(pageCount: number): void {

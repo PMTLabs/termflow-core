@@ -47,12 +47,18 @@
    gets the full pane height. It floats back in only when the pointer is near the
    top (the `header-peek` class, toggled in TerminalPane.tsx), or while the header
    itself is hovered / the rename input is focused. The hidden header is
-   pointer-events:none, so it never blocks the terminal's top row. */
+   pointer-events:none, so it never blocks the terminal's top row.
+   `right` is NOT 0: the floating bar stops short of the terminal's scrollbar
+   column so the scrollbar's ▲ button (plan 046) — top-right, exactly where this
+   bar lands — stays visible and clickable while the bar is out. The column is
+   the `.terminal-display` padding (4px, TerminalDisplay.css) plus xterm's
+   14px scrollbar (DEFAULT_SCROLL_BAR_WIDTH); a split pane's header is in normal
+   flow above the terminal and needs no such gap. */
 .terminal-pane.solo .terminal-pane-header {
   position: absolute;
   top: 0;
   left: 0;
-  right: 0;
+  right: 18px;
   z-index: 8;
   transform: translateY(-100%);
   opacity: 0;
