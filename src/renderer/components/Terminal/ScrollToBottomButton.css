@@ -3,11 +3,15 @@
    Unlike AgentChip (purely informational, pointer-events:none), this must be
    clickable, so it stays a normal interactive element. z-index 6 sits above
    the ended-region rail (4) and agent chip (5), below the search bar (10),
-   suggest popup (30) and context menu (1000) — see TerminalPane.css. */
+   suggest popup (30) and context menu (1000) — see TerminalPane.css.
+   `right` clears the scrollbar column (4px display padding + 14px bar) with
+   4px to spare: this button is CLICKABLE and paints above the terminal, so any
+   overlap with the scrollbar's ▼ button (plan 046) would steal that corner of
+   its hit box. Pinned by rightEdgeChromeClearsScrollbar.test.ts. */
 .scroll-to-bottom-button {
   position: absolute;
   bottom: 12px;
-  right: 16px;
+  right: 22px;
   z-index: 6;
   display: flex;
   align-items: center;
