@@ -760,6 +760,40 @@ const FINISHED_SEGMENT_RE = /\.[A-Za-z0-9_]{1,8}[^A-Za-z0-9]*$/;
 const LINE_REFERENCE_TAIL_RE = /:\d+$/;
 
 /**
+ * How many cells short of the right edge a row may still end and be read as "ran out of
+ * columns" by guard G1. Used only there.
+ *
+ * An app that lays its text out in a box NARROWER than the terminal hard-wraps at the box edge,
+ * not the grid edge, so the row it left behind is never full. Measured on Claude Code 2.1 by
+ * replaying real ConPTY captures through xterm at 80, 100 and 120 columns: its tool-result
+ * block (`⎿  …`) is 5 cells narrower than the terminal at every width, its prompt echo 1 cell
+ * narrower, while its prose and `Tool(…)` rows fill the grid. That block is where every
+ * reported miss lived — a
+ * screenshot path in a Bash result, a `Reading 1 file…` path — and under a full-row-only G1
+ * none of them could ever join. 8 covers the measured 5 with room for a margin that moves,
+ * without reaching the rows word-wrap leaves behind (see G1 for what bounds the other side).
+ */
+const HARD_WRAP_EDGE_SLACK = 8;
+
+/**
+ * The cell column of the last cell in row `line` that holds content, looking no further left
+ * than `cols - 1 - HARD_WRAP_EDGE_SLACK`; `-1` when every cell in that window is blank.
+ *
+ * "Content" is any cell whose characters are not whitespace, PLUS a width-0 cell: that is the
+ * right half of a double-width glyph, which reports `''` for the same reason a blank does and
+ * means the opposite. An absent cell is a row shorter than the grid, i.e. blank. A PAINTED space
+ * (`' '`) is blank too: a path contains no whitespace, so a wrap never breaks across one.
+ */
+function lastContentCell(line: LinkableBufferLine, cols: number): number {
+  for (let x = cols - 1; x >= Math.max(0, cols - 1 - HARD_WRAP_EDGE_SLACK); x--) {
+    const cell = line.getCell(x);
+    if (!cell) continue;
+    if (cell.getWidth() === 0 || cell.getChars().trim() !== '') return x;
+  }
+  return -1;
+}
+
+/**
  * Does buffer row `prev` HARD-wrap into row `next`, and if so how many leading blanks of `next`
  * are the app's hanging indent? Returns the indent length, or `null` for "these are two
  * independent lines".
@@ -787,20 +821,32 @@ const LINE_REFERENCE_TAIL_RE = /:\d+$/;
  * | R2 bare-relative `docs/plan/027-canvas-sea` + `rch.md` | T  | T  | T  | T  | T  | T  |  ✔   |
  * | R3 posix-abs `/srv/app/util` + `s.ts`                  | T  | T  | T  | T  | T  | T  |  ✔   |
  * | R4 hard-wrapped URL `…/a/very/lo` + `ng/path/f.html`   | T  | T  | T  | T  | T  | T  |  ✔   |
+ * | R5 Claude Code result `⎿  shot C:\…\sc` + `ratchpad\…`| T* | T  | T  | T  | T  | T  |  ✔   |
  * | F3 `git status` two `modified:` rows                   | T  | T  | F  | —  | —  | —  |  ✘   |
  * | F4 cargo `--> src/main.rs:12:5`                        | T  | T  | F  | —  | —  | —  |  ✘   |
  * | F9 pytest `assert 1 == 2`                              | T  | T  | F  | —  | —  | —  |  ✘   |
  * | F10 indented listing `/etc/app` + `/etc/app/main.conf` | T  | T  | T  | F  | —  | —  |  ✘   |
  * | F2 `ls -R` heading ending in `/`                       | T  | T  | T  | T  | F  | —  |  ✘   |
  * | F11 `built with webpack/config.js` + `v5.91.0 warn`    | T  | T  | T  | T  | T  | F  |  ✘   |
+ * | F12 prose `…under the tests` (5 short) + `src/x.ts`     | F* | —  | —  | —  | —  | —  |  ✘   |
+ *
+ * R5 is the reported case (a Bash-result screenshot path, replayed from a real capture at 120
+ * columns): row `prev` is 115 cells because Claude Code's result block is 5 narrower than the
+ * grid, so the first G1 — "row is FULL" — refused it at every width. `T*` is G1's second tier:
+ * within HARD_WRAP_EDGE_SLACK of the edge AND the trailing token holds a separator. F12 is the
+ * shape that tier must keep out — word-wrapped prose ends near the edge as a matter of course,
+ * and the next row of an agent's answer is often an indented path — and it fails on the
+ * separator half of the test. The same prose row exactly FULL still joins (F12 with `F*`→`T`):
+ * that is the residue class below, unchanged.
  *
  * R4 moved from ✘ to ✔ when G5 narrowed to "rooted", and that is a fix rather than residue: a
  * URL really was hard-wrapped, so reconstructing it is what the user asked for. It is offered by
  * right-click but not underlined on hover, because `WebLinksAddon` does its own soft-wrap-only
  * walk (plan 027 §3.6).
  *
- * **Known residue, accepted rather than hidden.** A full row whose trailing token is path-shaped
- * but carries NO extension, followed by an indented path, still joins: `/var/log/app` +
+ * **Known residue, accepted rather than hidden.** A full row — or, since G1's second tier, a
+ * row within HARD_WRAP_EDGE_SLACK of the edge — whose trailing token is path-shaped but carries
+ * NO extension, followed by an indented path, still joins: `/var/log/app` +
  * `    src/index.ts` becomes `/var/log/appsrc/index.ts`. When that token was already a working
  * link, the join REPLACES it — the underline covers a path that does not exist, and Copy Path
  * yields the wrong string. G7 rejects the members whose trailing token reads as FINISHED — it
@@ -835,29 +881,33 @@ function hardWrapIndent(
   next: LinkableBufferLine,
   cols: number,
 ): number | null {
-  // G1 — row `prev` is FULL. A hard wrap happens because the text ran out of columns, so a row
-  // with room left in it ended for some other reason and continues nothing. This is also what
-  // keeps a painted TUI screen out: an alt-screen row is padded with blanks to the right edge,
-  // so almost every one of them fails here — which is why no `buffer.type === 'alternate'`
-  // bail-out is needed, and why adding one would delete the fix for ratatui/codex output.
-  const lastCell = prev.getCell(cols - 1);
-  // An absent cell is a row SHORTER than the grid, i.e. not full. `?.getChars() !== ''` would
-  // read `undefined !== ''` as "full" and join off the end of a stub row.
+  // G1 — row `prev` RAN OUT OF COLUMNS. A hard wrap happens because the text hit the edge of
+  // whatever box the app laid it out in, so a row with room left in it ended for some other
+  // reason and continues nothing. This is also what keeps a painted TUI screen out: an
+  // alt-screen row is padded with blanks to the right edge, so almost every one of them fails
+  // here — which is why no `buffer.type === 'alternate'` bail-out is needed, and why adding one
+  // would delete the fix for ratatui/codex output.
   //
-  // A width-0 cell IS full: it is the RIGHT HALF of a double-width glyph (CJK, emoji) whose
-  // characters are stored on the left half, so it reports `''` for the same reason a blank cell
-  // does and means the opposite. Reading it as blank made a row that ends in a wide glyph exactly
-  // at the right edge — every CJK path, at the widths where it wraps there — judged "not full",
-  // so it never joined.
-  // A WRITTEN SPACE at the right edge is not full either, and it has to be tested separately
-  // because it is a different value: an unwritten cell reports `''`, a painted one reports `' '`.
-  // A path contains no whitespace, so a wrap can never break across a space — a row ending in one
-  // finished on its own and the next row continues nothing. Two things followed from missing this.
-  // The pair `G6`/`G7` below both read `tail`, which is computed by slicing after the last space:
-  // on such a row that slice is EMPTY, so both guards tested `''` and passed vacuously. And the
-  // alt-screen argument above only holds now — a TUI that paints its padding (ratatui does) fills
-  // the edge with a real `' '`, which the `=== ''` test read as full.
-  if (!lastCell || (lastCell.getWidth() !== 0 && lastCell.getChars().trim() === '')) return null;
+  // "The edge" is NOT always the grid edge, and reading it that way is the defect this guard
+  // shipped with: an Ink app lays its blocks out narrower than the terminal (Claude Code's
+  // tool-result block by 5 cells — see HARD_WRAP_EDGE_SLACK for the measurement), so the row it
+  // hard-wrapped was never full and a full-row test refused every one of them. Two tiers, then:
+  //  - the row is FULL (content in the last cell): accepted as before, no further question;
+  //  - the row ends within HARD_WRAP_EDGE_SLACK of the edge: accepted only if its trailing
+  //    token already holds a path separator (checked below, once `tail` exists). Word-wrap
+  //    leaves prose rows anywhere in the last word-length of cells, and a prose row followed
+  //    by an indented path is common in agent output; requiring the tail to be a demonstrable
+  //    path fragment — not merely a word — keeps that shape out. A break inside a path's FIRST
+  //    segment (`doc` + `s/plan/x.md`) is therefore a miss on a narrow-box row; it never was
+  //    reachable on such rows, and it still joins on a full one.
+  // What `lastContentCell` counts as content, and why a painted `' '` is not, is documented on
+  // it. Both `G6` and `G7` below read `tail`, which is sliced from the right-TRIMMED row text:
+  // on a narrow-box row the unwritten cells beyond the content would otherwise put a run of
+  // blanks at the end, leaving the slice EMPTY and both guards testing `''` vacuously — the
+  // same failure a painted space at the edge used to cause.
+  const contentEnd = lastContentCell(prev, cols);
+  if (contentEnd < 0) return null;
+  const nearEdgeOnly = contentEnd < cols - 1;
 
   const nextText = next.translateToString(false);
 
@@ -886,8 +936,11 @@ function hardWrapIndent(
   // G6 — row `prev` does not end at a separator. A path that ends in `/` or `\` is complete as
   // written (an `ls -R` directory heading); joining the next row's filename onto it invents a
   // path nobody printed.
-  const prevText = prev.translateToString(false);
+  const prevText = prev.translateToString(true);
   const tail = prevText.slice(prevText.lastIndexOf(' ') + 1);
+  // G1, second tier (see above): a row that stopped short of the grid edge is trusted only when
+  // what it stopped in is visibly a path — a token that already crossed a separator.
+  if (nearEdgeOnly && !/[\\/]/.test(tail)) return null;
   if (tail.endsWith('/') || tail.endsWith('\\')) return null;
 
   // G7 — row `prev` does not already end in a FINISHED reference. A token that carries an
@@ -966,7 +1019,12 @@ export function collectWrappedLine(
     }
     const hard = next ? hardWrapIndent(line, next, cols) : null;
     if (hard !== null) {
-      text += line.translateToString(false).slice(indent);
+      // Right-TRIMMED, unlike the soft-wrap branch above: a hard-wrapped row that stopped short
+      // of the grid (G1's second tier) has unwritten cells after its content, which
+      // `translateToString(false)` renders as spaces — and a run of spaces inside the join hands
+      // the matcher a path that ends at the row edge, exactly the truncation the join exists to
+      // undo. A path contains no whitespace, so nothing real is lost.
+      text += line.translateToString(true).slice(indent);
       indent = hard;
       continue;
     }
@@ -4337,8 +4395,15 @@ export class TerminalEngine {
     // glyph on them, and clamping to the first real character would offer "Copy Path" for a
     // right-click on whitespace.
     if (inRow < rowIndent) return null;
+    // Nor past the row's content: a hard-wrapped row that stopped short of the grid (G1's second
+    // tier) has blank cells after its last character, and the stitched text does not carry them.
+    // Unclamped, a click on that blank run lands on the NEXT row's first characters — the head of
+    // the very path the join reconstructed — and offers Copy Path for a right-click on nothing.
+    const idx = rowStart + (inRow - rowIndent);
+    const nextStart = info.rowStarts[r + 1];
+    if (nextStart !== undefined && idx >= nextStart) return null;
 
-    return linkAtIndex(info.text, rowStart + (inRow - rowIndent));
+    return linkAtIndex(info.text, idx);
   }
 
   /**
