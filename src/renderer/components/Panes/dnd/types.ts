@@ -1,5 +1,5 @@
 import { PaneNode } from '../../../store/slices/panesSlice';
-import type { PromptGate } from '@termflow/terminal-core';
+import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
 
 /** Where, within a target pane, a drop will land. */
 export type DropZone = 'top' | 'bottom' | 'left' | 'right' | 'center';
@@ -44,6 +44,15 @@ export interface DetachTerminal {
   // wrongly captured into command history in the new window (no OSC 9;9/7 will
   // ever arrive there while the agent CLI owns the pty).
   promptGate?: PromptGate | null;
+  // Keyboard-protocol state the running app negotiated with the SOURCE window,
+  // carried for the same reason as promptGate: it is announced once per session
+  // and lives only in that renderer's heap. Without it the new window sends
+  // legacy bytes to a session expecting records — on Windows, ConPTY's
+  // Win32-Input-Mode (`?9001h`, asserted for every session) is what makes Escape
+  // reach an agent CLI at all; a TUI's Kitty flags (`CSI >u`) cover Shift+Enter /
+  // Ctrl+C on every platform. Both omitted when the source had nothing active.
+  win32InputMode?: true;
+  keyboardProtocol?: KeyboardProtocolStateData;
   // Last-known working directory (spec 045 §3.3), carried because the snapshot map
   // is module-local to a renderer — the destination window starts with an empty one.
   // Without this, a shell that reports no cwd via OSC (cmd/WSL/bash) and exits in the

@@ -20,15 +20,20 @@ jest.mock('../../../../services/TerminalService', () => ({
     getProcessId: (terminalId: string) => `proc-${terminalId}`,
     attachExistingTerminal: jest.fn(),
     detachTerminal: jest.fn(),
+    markReattachedSession: jest.fn(),
+    stashKeyboardProtocol: jest.fn(),
   },
 }));
 
+// The source window's live cache entries, keyed by terminalId. Empty = no entry.
+const mockCacheEntries: Record<string, Record<string, unknown>> = {};
 jest.mock('@termflow/terminal-core', () => ({
-  terminalCache: { get: () => undefined },
+  terminalCache: { get: (id: string) => mockCacheEntries[id] },
 }));
 
 import {
-  buildTabDetachPayload, buildPaneDetachPayload, applyDetachPayload, removeSourceTab, removeSourcePane,
+  buildTabDetachPayload, buildPaneDetachPayload, applyDetachPayload, applyCrossWindowPayload,
+  removeSourceTab, removeSourcePane,
 } from '../detach';
 import { addTab } from '../../../../store/slices/tabsSlice';
 
@@ -184,6 +189,87 @@ describe('detach carries the cwd snapshot across windows (spec 045 §3.3)', () =
     // Seeding a payload without a cwd must not throw or write a bogus entry.
     expect(() => applyDetachPayload(payload!)).not.toThrow();
     expect(getCwdSnapshot('tm-1')).toBeUndefined();
+  });
+});
+
+/**
+ * The bug this pins: detach a tab running an agent CLI to a new window, press
+ * Escape — nothing. The PTY had negotiated Win32-Input-Mode (ConPTY's one-shot
+ * `?9001h`) with the SOURCE window; the new window's fresh engine has no cache
+ * entry to adopt that from, so it sent a legacy `` to a ConPTY expecting
+ * records. A brand-new tab beside it worked because its session announced
+ * `?9001h` to THIS window. Same class for the Kitty flags a TUI pushes once.
+ */
+describe('detach carries the negotiated keyboard-protocol state across windows', () => {
+  const { terminalService } = jest.requireMock('../../../../services/TerminalService');
+  const tree: PaneNode = { id: 'p1', type: 'terminal', terminalId: 'tm-1' } as PaneNode;
+
+  beforeEach(() => {
+    dispatch.mockClear();
+    terminalService.markReattachedSession.mockClear();
+    terminalService.stashKeyboardProtocol.mockClear();
+    mockState.tabs.tabs = [{ id: 'tb-1', title: 'claude', shellType: 'pwsh' }];
+    mockState.panes.treesByTabId = { 'tb-1': tree };
+    mockState.zoom.levels = {};
+    for (const k of Object.keys(mockCacheEntries)) delete mockCacheEntries[k];
+  });
+
+  it('packs an active Win32-Input-Mode and re-seeds it for the destination mount', () => {
+    mockCacheEntries['tm-1'] = { win32State: { isActive: () => true } };
+
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0].win32InputMode).toBe(true);
+
+    applyDetachPayload(payload!);
+    expect(terminalService.markReattachedSession).toHaveBeenCalledWith('tm-1');
+  });
+
+  it('packs the Kitty state as plain data and stashes it for the destination mount', () => {
+    const data = { mainStack: [1], altStack: [], modifyOtherKeys: 0 };
+    mockCacheEntries['tm-1'] = { kbState: { serialize: () => data } };
+
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0].keyboardProtocol).toEqual(data);
+
+    applyDetachPayload(payload!);
+    expect(terminalService.stashKeyboardProtocol).toHaveBeenCalledWith('tm-1', data);
+    expect(terminalService.markReattachedSession).not.toHaveBeenCalled();
+  });
+
+  it('omits both when the source negotiated nothing, and seeds nothing', () => {
+    mockCacheEntries['tm-1'] = {
+      win32State: { isActive: () => false },
+      kbState: { serialize: () => ({ mainStack: [], altStack: [], modifyOtherKeys: 0 }) },
+    };
+
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0]).not.toHaveProperty('win32InputMode');
+    expect(payload?.terminals[0]).not.toHaveProperty('keyboardProtocol');
+
+    applyDetachPayload(payload!);
+    expect(terminalService.markReattachedSession).not.toHaveBeenCalled();
+    expect(terminalService.stashKeyboardProtocol).not.toHaveBeenCalled();
+  });
+
+  it('copes with a source pane that has no cache entry at all', () => {
+    const payload = buildTabDetachPayload('tb-1');
+    expect(payload?.terminals[0]).not.toHaveProperty('win32InputMode');
+    expect(payload?.terminals[0]).not.toHaveProperty('keyboardProtocol');
+    expect(() => applyDetachPayload(payload!)).not.toThrow();
+  });
+
+  it('seeds on the cross-window drop path too, not only the new-window path', () => {
+    mockCacheEntries['tm-1'] = {
+      win32State: { isActive: () => true },
+      kbState: { serialize: () => ({ mainStack: [3], altStack: [], modifyOtherKeys: 0 }) },
+    };
+    const payload = buildTabDetachPayload('tb-1');
+
+    applyCrossWindowPayload(payload!);
+    expect(terminalService.markReattachedSession).toHaveBeenCalledWith('tm-1');
+    expect(terminalService.stashKeyboardProtocol).toHaveBeenCalledWith(
+      'tm-1', { mainStack: [3], altStack: [], modifyOtherKeys: 0 },
+    );
   });
 });
 

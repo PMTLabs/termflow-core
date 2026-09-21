@@ -2198,6 +2198,12 @@ export class TerminalEngine {
     // path's CSI handlers read `this.kbState`/`this.win32State` at CALL time — no
     // byte can be parsed between their registration and this line.
     if (cached?.kbState) this.kbState = cached.kbState;
+    // …or, with no prior mount in THIS window because the pane arrived by
+    // cross-window detach, seed from the state the source window carried over
+    // (see initialKeyboardProtocol). Restored IN PLACE, honouring the
+    // mutate-never-replace rule the create path's handlers rely on. First-ever-
+    // mount fallback only — adopted state is first-hand and wins.
+    else if (this.opts.initialKeyboardProtocol) this.kbState.restore(this.opts.initialKeyboardProtocol);
     if (cached?.win32State) this.win32State = cached.win32State;
     // …and when there is NO prior mount to adopt from because the whole renderer
     // restarted (hot-swap update / webview reload) while the PTY session lived
