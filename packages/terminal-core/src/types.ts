@@ -160,6 +160,14 @@ export interface TerminalEngineOptions {
   // and a cache entry with its own tracked state always wins (that's first-hand
   // knowledge); self-heals from any later ?9001l / DECSTR.
   initialWin32InputMode?: boolean;
+  // Enhanced-keyboard-protocol (Kitty / modifyOtherKeys) state carried across a
+  // cross-window detach/reattach — the sibling of initialPromptGate. An app pushes
+  // its Kitty flags once per session and never repeats them, and the live state
+  // object exists only in the SOURCE window's heap, so the destination's fresh
+  // terminalCache entry would otherwise start empty and send legacy bytes to a TUI
+  // that negotiated CSI u. Only consulted on this cacheKey's first-ever mount in
+  // this window (a cache entry with its own tracked state always wins).
+  initialKeyboardProtocol?: import('./keyboardProtocol').KeyboardProtocolStateData | null;
   // Current prompt input changed (shell echo applied). '' means "no input /
   // submitted / suppressed" — the host closes the popup on it.
   onInputLineChanged?(text: string): void;

@@ -51,6 +51,7 @@ export type {
   TerminalLinkHit,
   PromptGate,
 } from './types';
+export type { KeyboardProtocolStateData } from './keyboardProtocol';
 export {
   EndedRegionTracker,
   setEndedRegionColorsFor,

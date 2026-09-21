@@ -81,7 +81,8 @@ jest.mock('../../../services/paneActions', () => ({
 jest.mock('../../../services/TerminalService', () => ({
   terminalService: {
     takePromptGateHandoff: jest.fn(), takeWin32InputModeHandoff: jest.fn(),
-    stashPromptGate: jest.fn(), markReattachedSession: jest.fn(),
+    takeKeyboardProtocolHandoff: jest.fn(),
+    stashPromptGate: jest.fn(), markReattachedSession: jest.fn(), stashKeyboardProtocol: jest.fn(),
     writeToTerminal: jest.fn(() => Promise.resolve()),
   },
 }));

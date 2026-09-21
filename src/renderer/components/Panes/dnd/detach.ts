@@ -39,7 +39,18 @@ function collectTerminals(node: PaneNode, acc: DetachTerminal[]): void {
       // not just at unmount — this pane hasn't unmounted yet at collect time) so an
       // agent CLI still running in the pty isn't miscaptured as command history
       // once reattached in a window with no cache entry of its own.
-      const promptGate = terminalCache.get(node.terminalId)?.promptGate;
+      const cached = terminalCache.get(node.terminalId);
+      const promptGate = cached?.promptGate;
+      // Carry the negotiated keyboard-protocol state the same way (see
+      // DetachTerminal): a fresh window has no cache entry to adopt it from and
+      // no stream will ever replay the handshake.
+      const win32InputMode = cached?.win32State?.isActive() === true;
+      const keyboardProtocol = cached?.kbState?.serialize();
+      const hasKeyboardProtocol = !!keyboardProtocol && (
+        keyboardProtocol.mainStack.length > 0
+        || keyboardProtocol.altStack.length > 0
+        || keyboardProtocol.modifyOtherKeys !== 0
+      );
       // Carry the last-known cwd: the snapshot map is module-local to this renderer,
       // so the destination window would otherwise start blind (spec 045 §3.3).
       const cwd = getCwdSnapshot(node.terminalId);
@@ -50,6 +61,8 @@ function collectTerminals(node: PaneNode, acc: DetachTerminal[]): void {
         name: node.name,
         ...(zoom !== undefined && zoom !== ZOOM_DEFAULT ? { zoom } : {}),
         ...(promptGate ? { promptGate } : {}),
+        ...(win32InputMode ? { win32InputMode: true as const } : {}),
+        ...(hasKeyboardProtocol ? { keyboardProtocol } : {}),
         ...(cwd ? { cwd } : {}),
       });
     } else {
@@ -281,6 +294,16 @@ async function closeWindowIfEmpty(): Promise<void> {
   }
 }
 
+/**
+ * Seed THIS window's single-use keyboard-protocol handoffs for a carried
+ * terminal, consumed by its first engine mount here. The PTY negotiated these
+ * with the source window and will not announce them again.
+ */
+function seedKeyboardProtocol(t: DetachTerminal): void {
+  if (t.win32InputMode) terminalService.markReattachedSession(t.terminalId);
+  if (t.keyboardProtocol) terminalService.stashKeyboardProtocol(t.terminalId, t.keyboardProtocol);
+}
+
 /** Target-window handler: take the stashed payload for `token` and add it as a tab. */
 export async function applyReattachByToken(token: string): Promise<void> {
   const api = window.electronAPI;
@@ -303,6 +326,7 @@ export async function applyReattachByToken(token: string): Promise<void> {
 export function applyDetachPayload(payload: DetachPayload): void {
   payload.terminals.forEach((t) => {
     terminalService.attachExistingTerminal(t.terminalId, t.processId, t.promptGate);
+    seedKeyboardProtocol(t);
     if (typeof t.zoom === 'number') store.dispatch(setZoom({ key: t.terminalId, level: t.zoom }));
     // Seed the last-known cwd into THIS renderer's snapshot map (spec 045 §3.3) —
     // it travelled with the payload because the map doesn't cross windows.
@@ -354,6 +378,7 @@ function resolveLocalTarget(x: number, y: number): { tabId: string; paneId: stri
 export function applyCrossWindowPayload(payload: DetachPayload, x?: number, y?: number): void {
   payload.terminals.forEach((t) => {
     terminalService.attachExistingTerminal(t.terminalId, t.processId, t.promptGate);
+    seedKeyboardProtocol(t);
     if (typeof t.zoom === 'number') store.dispatch(setZoom({ key: t.terminalId, level: t.zoom }));
     // Seed the last-known cwd into THIS renderer's snapshot map (spec 045 §3.3) —
     // it travelled with the payload because the map doesn't cross windows.

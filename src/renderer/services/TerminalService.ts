@@ -3,7 +3,7 @@ import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
 import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
-import type { PromptGate } from '@termflow/terminal-core';
+import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
 
 export interface TerminalProcess {
   id: string;
@@ -22,6 +22,10 @@ class TerminalServiceClass {
   // webview reload). Consumed once by TerminalDisplay as `initialWin32InputMode`;
   // see markReattachedSession.
   private win32InputModeHandoff: Set<string> = new Set();
+  // Kitty / modifyOtherKeys state carried by a cross-window attach (the live
+  // object stayed in the source window's heap). Consumed once by TerminalDisplay
+  // as `initialKeyboardProtocol`, same lifecycle as promptGateHandoff.
+  private keyboardProtocolHandoff: Map<string, KeyboardProtocolStateData> = new Map();
   // Single-flight guard keyed by leaf (terminalId): a re-entrant restart/create
   // for the same leaf (e.g. a double Restart click or Ctrl+R key-repeat while
   // `closedInfo` is still set — review 109 H1) must not reach the backend twice,
@@ -74,6 +78,7 @@ class TerminalServiceClass {
           // — since terminalId reuse is exactly what this cleanup enables below —
           // a later fresh session on the same id could wrongly inherit a stale gate.
           this.promptGateHandoff.delete(terminalId);
+          this.keyboardProtocolHandoff.delete(terminalId);
 
           // Also clean up from the global terminal init map (if available)
           // This allows re-creation if the same terminalId is used again
@@ -294,6 +299,7 @@ class TerminalServiceClass {
       // Same reasoning for a handoff gate that never got consumed — e.g. a
       // cross-window-attached pane closed again before its mount effect ran.
       this.promptGateHandoff.delete(terminalId);
+      this.keyboardProtocolHandoff.delete(terminalId);
       console.log(`TerminalService: Successfully closed and removed terminal ${terminalId} from process map`);
     } catch (error) {
       console.error('Failed to close terminal:', error);
@@ -389,6 +395,28 @@ class TerminalServiceClass {
   }
 
   /**
+   * Stash the Kitty / modifyOtherKeys state a cross-window detach carried for
+   * `terminalId`'s first-ever mount in this window. The app pushed its flags once
+   * in the SOURCE window and will not repeat them here; without this the pane
+   * sends legacy encodings to a TUI that negotiated CSI u. Null clears any stash.
+   */
+  stashKeyboardProtocol(terminalId: string, data: KeyboardProtocolStateData | null): void {
+    if (data) this.keyboardProtocolHandoff.set(terminalId, data);
+    else this.keyboardProtocolHandoff.delete(terminalId);
+  }
+
+  /**
+   * Single-use companion to stashKeyboardProtocol, consumed by TerminalDisplay as
+   * the engine's `initialKeyboardProtocol` — first-ever mount only, like the
+   * prompt gate; a same-window remount adopts the live cache entry instead.
+   */
+  takeKeyboardProtocolHandoff(terminalId: string): KeyboardProtocolStateData | undefined {
+    const data = this.keyboardProtocolHandoff.get(terminalId);
+    this.keyboardProtocolHandoff.delete(terminalId);
+    return data;
+  }
+
+  /**
    * Drop this window's mapping + init guards for a terminal WITHOUT closing the
    * PTY — used when a pane is moved out of this window (detach / cross-window
    * drop). The process keeps running in the shared backend for the new owner.
@@ -402,6 +430,7 @@ class TerminalServiceClass {
     // A pane attached-but-not-yet-mounted here, then detached again to a THIRD
     // window before it ever mounted, would otherwise leak this entry forever.
     this.promptGateHandoff.delete(terminalId);
+    this.keyboardProtocolHandoff.delete(terminalId);
     console.log(`TerminalService: Detached terminal ${terminalId} (PTY left running)`);
   }
 

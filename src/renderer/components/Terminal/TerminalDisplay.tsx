@@ -525,13 +525,13 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
 
     // SINGLE-USE HANDOFFS, TAKEN BEFORE THE MOUNT THAT CONSUMES THEM.
     //
-    // Both `take*` calls are DESTRUCTIVE (get-then-delete; Set.delete), and they run
-    // while the options object below is built — before `engine.mount()` can refuse.
+    // All three `take*` calls are DESTRUCTIVE (get-then-delete; Set.delete), and they
+    // run while the options object below is built — before `engine.mount()` can refuse.
     // Held in locals so the refusal path can hand them back.
     //
-    // Neither is recoverable if dropped: the cross-window prompt gate exists only in
-    // the source window, which has already let go of it, and ConPTY announced `?9001h`
-    // once at session start with no stream still replaying it. And a refusal is exactly
+    // None is recoverable if dropped: the cross-window prompt gate and Kitty state exist
+    // only in the source window, which has already let go of them, and ConPTY announced
+    // `?9001h` once at session start with no stream still replaying it. And a refusal is exactly
     // when they are non-empty — the create-branch refusal is a FIRST-EVER mount in this
     // window, i.e. the cross-window detach and the hot-swap reattach. This effect's deps
     // are `[terminalId]` only, so it does not re-run on its own; a later mount (tab
@@ -539,6 +539,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     // and permanent for the session.
     const promptGateHandoff = terminalService.takePromptGateHandoff(terminalId);
     const win32InputModeHandoff = terminalService.takeWin32InputModeHandoff(terminalId);
+    const keyboardProtocolHandoff = terminalService.takeKeyboardProtocolHandoff(terminalId);
 
     const engine = new TerminalEngine(bridge, {
       cacheKey: terminalId,
@@ -603,6 +604,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // engine ignores it off-Windows and whenever the cache entry already
       // tracks the session itself.
       initialWin32InputMode: win32InputModeHandoff,
+      // Cross-window detach handoff for the Kitty / modifyOtherKeys state the app
+      // negotiated in the source window (pushed once, never repeated). Single-use —
+      // undefined for a normal mount; a cache entry of this window's own always wins.
+      initialKeyboardProtocol: keyboardProtocolHandoff,
       onInputLineChanged: (text) => suggestRef.current.onInputLineChanged(text),
       onCommandSubmitted: (cmd) => commandHistoryService.record(cmd, getCwdSnapshot(terminalId)),
       onSuggestAction: (action) => suggestRef.current.onAction(action),
@@ -681,6 +686,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // caller's does not.
       if (promptGateHandoff) terminalService.stashPromptGate(terminalId, promptGateHandoff);
       if (win32InputModeHandoff) terminalService.markReattachedSession(terminalId);
+      if (keyboardProtocolHandoff) terminalService.stashKeyboardProtocol(terminalId, keyboardProtocolHandoff);
       engineRef.current = null;
       return () => {};
     }

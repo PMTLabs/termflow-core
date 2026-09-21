@@ -483,6 +483,78 @@ test('initialWin32InputMode never overrides a cache entry that tracked the sessi
   expect(calls.write).toEqual([]);
 });
 
+// ---------------------------------------------------------------------------
+// Kitty state across a CROSS-WINDOW detach
+//
+// A TUI pushes its Kitty flags once (CSI >1u) and never repeats them. Detaching
+// its tab into another window mounts the pane in a renderer whose terminalCache
+// has no entry for it, so the fresh engine would start with empty state and send
+// legacy bytes to an app that negotiated CSI u — Shift+Enter / Ctrl+C encodings
+// silently regress until the app restarts. The source window carries its live
+// state as plain data; the destination seeds its first-ever mount from it.
+// ---------------------------------------------------------------------------
+
+test('cross-window detach: initialKeyboardProtocol keeps Ctrl+C a CSI u sequence on a first-ever mount', () => {
+  const src = makeBridge();
+  const source = new TerminalEngine(src.bridge, { cacheKey: 'detach-src' });
+  source.mount(makeContainer());
+  source.attach('p1');
+  mockTerm('detach-src').csiHandlers['>u']([1]); // the app pushed kitty flag 1 in the SOURCE window
+  const carried = JSON.parse(JSON.stringify(terminalCache.get('detach-src')!.kbState!.serialize()));
+
+  // Destination renderer: a different cacheKey stands in for "no entry in THIS window".
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, { cacheKey: 'detach-dst', initialKeyboardProtocol: carried });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('detach-dst');
+
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(false);
+  expect(calls.write).toEqual([['p1', '\x1b[99;5u']]);
+});
+
+test('the seeded Kitty state is the one the cache-lifetime CSI handlers keep mutating (in-place restore)', () => {
+  const { bridge, calls } = makeBridge();
+  const engine = new TerminalEngine(bridge, {
+    cacheKey: 'detach-inplace',
+    initialKeyboardProtocol: { mainStack: [1], altStack: [], modifyOtherKeys: 0 },
+  });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('detach-inplace');
+
+  term.csiHandlers['<u']([1]); // the app pops its flag AFTER the move
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(true); // back to legacy — the pop reached the seeded object
+  expect(calls.write).toEqual([]);
+});
+
+test('initialKeyboardProtocol never overrides a cache entry that tracked the session itself', () => {
+  const { bridge, calls } = makeBridge();
+  const engine1 = new TerminalEngine(bridge, { cacheKey: 'kb-seed-nooverride' });
+  engine1.mount(makeContainer());
+  engine1.attach('p1');
+  const term = mockTerm('kb-seed-nooverride');
+  term.csiHandlers['>u']([1]);
+  term.csiHandlers['<u']([1]); // pushed, then popped — first-hand: nothing active
+  engine1.unmount();
+
+  const engine2 = new TerminalEngine(bridge, {
+    cacheKey: 'kb-seed-nooverride',
+    initialKeyboardProtocol: { mainStack: [1], altStack: [], modifyOtherKeys: 0 },
+  });
+  engine2.mount(makeContainer());
+  engine2.attach('p1');
+
+  const handled = term.keyHandler!(withKey({ key: 'c', ctrlKey: true }));
+
+  expect(handled).toBe(true);
+  expect(calls.write).toEqual([]);
+});
+
 test('initialWin32InputMode is inert off-Windows (no ConPTY, no records)', () => {
   const { bridge, calls } = makeBridge();
   const engine = new TerminalEngine(bridge, {
