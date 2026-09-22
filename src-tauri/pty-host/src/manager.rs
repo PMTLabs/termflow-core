@@ -971,11 +971,14 @@ mod tests {
         let (mut m, _e, _r) = mgr();
         m.set_teardown_grace(Duration::from_secs(120));
         let pid = insert_live_child(&mut m, "tab-crash-expire");
+        let done = m.sessions["tab-crash-expire"].kill_done_flag();
         assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+        assert!(!done.load(Ordering::Acquire), "the hold itself must not kill");
         let hold = m.begin_local_absence().expect("bounded");
 
         m.expire_local_hold(hold);
 
+        assert!(done.load(Ordering::Acquire), "expiry must run the kill before returning");
         assert!(m.sessions.is_empty());
         assert!(wait_dead(pid), "expiry of a crash hold must kill the child");
     }
@@ -1084,6 +1087,14 @@ mod tests {
     /// The bound only exists if expiry really kills. TWO children, for the same
     /// reason the unarmed-teardown test uses two: "killed the first one it
     /// found" is the shape this loop gets wrong.
+    ///
+    /// Same oracle split as the teardown test above, for the same reason: the
+    /// deterministic claim is that every kill RAN before expiry returned
+    /// (`kill_done`, joined); pid-death is the kernel's schedule — a SIGKILL'd
+    /// Unix child is a zombie that `kill(pid, 0)` still sees until its waiter
+    /// reaps it — so it is checked second, and bounded. Asserting pid-death
+    /// immediately is how this test failed on Linux CI twice on 2026-09-21
+    /// (develop `9f0ca3c` and PR #102) while every kill had in fact run.
     #[test]
     fn expiring_a_local_hold_kills_every_live_child() {
         let (mut m, _e, _r) = mgr();
@@ -1093,7 +1104,7 @@ mod tests {
             .begin_local_absence()
             .expect("a Local arm must open a bounded window");
 
-        let mut pids = Vec::new();
+        let mut watched = Vec::new();
         for tab in ["tab-expire-a", "tab-expire-b"] {
             let sess = Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
                 .expect("spawn a long-lived child");
@@ -1101,15 +1112,24 @@ mod tests {
             // Presence before absence: a "gone" oracle passes vacuously if the
             // child never started.
             assert!(pid_is_alive(pid), "{tab} must be alive before expiry");
+            let done = sess.kill_done_flag();
+            assert!(!done.load(Ordering::Acquire), "{tab} cannot be killed yet");
             m.sessions.insert(tab.into(), sess);
-            pids.push((tab, pid));
+            watched.push((tab, pid, done));
         }
 
         m.expire_local_hold(hold);
 
-        for (tab, pid) in pids {
+        for (tab, _pid, done) in &watched {
             assert!(
-                !pid_is_alive(pid),
+                done.load(Ordering::Acquire),
+                "expire_local_hold returned before {tab}'s kill finished"
+            );
+        }
+        assert!(m.sessions.is_empty(), "expiry ran the kills but kept the session records");
+        for (tab, pid, _done) in &watched {
+            assert!(
+                wait_dead(*pid),
                 "{tab} (pid {pid}) survived hold expiry — the bound is a promise the host does not keep"
             );
         }
