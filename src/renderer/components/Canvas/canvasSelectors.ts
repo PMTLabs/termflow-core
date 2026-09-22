@@ -57,7 +57,26 @@ export interface CanvasNodeModel {
    * canvas node IS a pane.
    */
   exited: boolean;
+  /** USER-hidden (`canvas.hidden`) — the eye toggle. Not the Main only filter; see `filtered`. */
   hidden: boolean;
+  /** `PaneNode.apiCreated` — an API/MCP call made this terminal (plan 048). Optional so an
+   *  absent value reads as "main", exactly as an unmarked pane does. */
+  apiCreated?: boolean;
+  /** The Main only toolbar filter is on AND this node is `apiCreated`. A paint filter only: the
+   *  node stays in the model and its terminal stays mounted. Deliberately separate from `hidden`
+   *  so turning the filter off never touches the user's own hidden set. */
+  filtered?: boolean;
+}
+
+/**
+ * Whether a node PAINTS on the canvas: not filtered out by Main only, and not user-hidden
+ * (unless Reveal is on). The one predicate every paint consumer uses (nodes, wires, group
+ * frames, minimap, snapshots, collapse, Close Ended), so the filter and the user's hidden set
+ * cannot disagree about which nodes are on screen (plan 048). Arrange and a sidebar regroup do
+ * NOT use it: they ignore Reveal and test `!n.hidden && !n.filtered` directly.
+ */
+export function isNodePainted(n: Pick<CanvasNodeModel, 'hidden' | 'filtered'>, revealHidden: boolean): boolean {
+  return !n.filtered && (revealHidden || !n.hidden);
 }
 
 export interface CanvasGroupModel {
@@ -199,6 +218,7 @@ function buildModel(
   revealHidden = false,
   runningTerminalIds: string[] = [],
   sessionExit: Record<string, { exitCode: number | null }> = {},
+  mainOnly = false,
 ): CanvasModel {
   const nodes: CanvasNodeModel[] = [];
   const groups: CanvasGroupModel[] = [];
@@ -324,6 +344,8 @@ function buildModel(
         // undefined, so every node in a tab still shares the tab's unseen flag.
         hasUnseenOutput: !!tab.hasUnseenOutput,
         hidden: !!hidden[id],
+        apiCreated: !!leaf.apiCreated,
+        filtered: mainOnly && !!leaf.apiCreated,
       });
     });
 
@@ -337,7 +359,11 @@ function buildModel(
     // erase the spatial memory this canvas exists to preserve.
     const occupancyFrame = fitGroupFrame(rects) ?? frame;
     // Frames describe what is currently shown. Reveal is a temporary shown state, not layout.
-    const drawnFrame = fitGroupFrame(rects.filter((_, i) => revealHidden || !hidden[paneLeaves[i].terminalId!])) ?? occupancyFrame;
+    // Main only (plan 048) is a shown state in the same sense, so a filtered node leaves it too.
+    const drawnFrame = fitGroupFrame(rects.filter((_, i) => isNodePainted(
+      { hidden: !!hidden[paneLeaves[i].terminalId!], filtered: mainOnly && !!paneLeaves[i].apiCreated },
+      revealHidden,
+    ))) ?? occupancyFrame;
     groups.push({
       tabId: tab.id,
       title: tab.title,
@@ -435,6 +461,7 @@ export const selectCanvasModel = createSelector(
     (s: RootState) => s.canvas.revealHidden,
     (s: RootState) => s.tabs.runningTerminalIds,
     (s: RootState) => s.sessionExit.byTerminalId,
+    (s: RootState) => s.canvas.mainOnly,
   ],
   buildModel,
 );
@@ -449,6 +476,7 @@ export function buildCanvasModel(state: RootState): CanvasModel {
     state.canvas.revealHidden,
     state.tabs.runningTerminalIds,
     state.sessionExit?.byTerminalId,
+    state.canvas.mainOnly,
   );
 }
 
@@ -523,7 +551,7 @@ export function allCollapsed(
   z: number,
   revealHidden = false,
 ): boolean {
-  const shown = nodes.filter((n) => !n.hidden || revealHidden);
+  const shown = nodes.filter((n) => isNodePainted(n, revealHidden));
   if (shown.length === 0) return false;
   const nodeLabelsLegible = chipLabelScreenPx(z) >= MIN_TITLE_PX;
   return shown.every((n) => {
@@ -562,7 +590,7 @@ export function snapshotNodeIds(
   // Nothing is showing a screen when the whole workspace is group chips.
   if (collapsed) return out;
   for (const n of nodes) {
-    if (n.hidden && !revealHidden) continue;
+    if (!isNodePainted(n, revealHidden)) continue;
     if (tiers[n.terminalId] === 'snapshot' && visible.has(n.terminalId)) out.add(n.terminalId);
   }
   return out;

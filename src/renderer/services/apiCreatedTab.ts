@@ -183,6 +183,7 @@ export interface ApiCreateMode0Result {
     name?: string;
     shellType?: string;
     sessionKey?: string;
+    apiCreated?: true;
   };
 }
 
@@ -252,6 +253,9 @@ export function runApiCreateMode0(
     shellType: profile || deps.defaultProfile || 'default',
     sessionKey: detail.sessionKey,
   };
+  // plan 048 — an API/MCP spawn, unless this is `surface_host_orphans` adopting a session whose
+  // tab was lost: that is RECOVERY of a terminal of unknown origin, which reads as main.
+  if (!detail.sessionKey) paneTree.apiCreated = true;
 
   // Only surface_host_orphans produces this event shape. Persisted/migrated
   // panes may also carry sessionKey, so record the event provenance separately.

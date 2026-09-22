@@ -53,8 +53,9 @@ export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = [
     // Hiding is a view decision, but Arrange is destructive to spatial memory: moving an
     // invisible node would make it reappear somewhere the user did not put it. Hidden nodes
     // therefore stay out of this pass; after unhiding they may occupy a slot, and the user can
-    // press Arrange again to include them.
-    const visibleNodes = latest.current.nodes.filter((n) => !n.hidden);
+    // press Arrange again to include them. Nodes filtered out by Main only (plan 048) are just as
+    // invisible, so they follow the same rule.
+    const visibleNodes = latest.current.nodes.filter((n) => !n.hidden && !n.filtered);
     const visibleIds = new Set(visibleNodes.map((n) => n.terminalId));
     const visibleGroups = latest.current.groups
       .map((g) => ({ ...g, nodeIds: g.nodeIds.filter((id) => visibleIds.has(id)) }))
@@ -83,7 +84,7 @@ export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = [
       const target = k < 1 ? interpolateArrange(from, to, easeOutCubic(k)) : to;
       // Hide can happen after `to` was frozen. Re-check on every frame, including completion,
       // so an in-flight Arrange never writes a newly hidden node's geometry.
-      const currentlyVisible = new Set(latest.current.nodes.filter((n) => !n.hidden).map((n) => n.terminalId));
+      const currentlyVisible = new Set(latest.current.nodes.filter((n) => !n.hidden && !n.filtered).map((n) => n.terminalId));
       dispatch(applyArrange({
         groups: target.groups,
         nodes: Object.fromEntries(Object.entries(target.nodes).filter(([id]) => currentlyVisible.has(id))),

@@ -1229,6 +1229,7 @@ const App: React.FC = () => {
           shellType: profile || defaultProfile || 'cmd',
           name: name,
           terminalId: leafId, // the tm- leaf the backend minted
+          apiCreated: true, // plan 048 — Canvas Mode's Main only filter
         }));
 
         // The new terminal will be created automatically by TerminalPane
@@ -1370,6 +1371,7 @@ const App: React.FC = () => {
             shellType: profile || tab.shellType || defaultProfile || 'cmd',
             name: name || tab.title,
             terminalId: newTerminalId,
+            apiCreated: true, // plan 048
           }));
 
           // Mirror to the legacy window map for persistence/readers.
@@ -1565,7 +1567,8 @@ const App: React.FC = () => {
           direction: autoDirection,
           shellType: profile || defaultProfile || 'cmd',
           name: name,
-          terminalId: leafId // the leaf the backend minted for this pane
+          terminalId: leafId, // the leaf the backend minted for this pane
+          apiCreated: true, // plan 048
         }));
 
         console.log('API: Dispatched splitPaneInTab action');
@@ -1758,7 +1761,8 @@ const App: React.FC = () => {
           type: 'terminal' as const,
           terminalId: newTabId,
           name: name || 'API Terminal', // Add name to the pane
-          shellType: profile || defaultProfile || 'cmd' // Include shell type
+          shellType: profile || defaultProfile || 'cmd', // Include shell type
+          apiCreated: true as const, // plan 048
         };
 
         (window as any).tabPanes[newTabId] = paneTree;

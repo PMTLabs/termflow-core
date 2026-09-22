@@ -8,7 +8,7 @@ import { RootState } from '../../store';
 import {
   CanvasEdge, addEdge, focusNode, panViewport, removeEdge, selectEdge, selectNode, setEdges,
   setNearestGroup, setNodeGeom, setOverlayNode, setSidebarOpen, setNodeHidden, setRevealHidden,
-  setDynamicSpacing,
+  setDynamicSpacing, setMainOnly,
 } from '../../store/slices/canvasSlice';
 import { addTabTree, focusPaneInTab } from '../../store/slices/panesSlice';
 import { addTab, setActiveTab } from '../../store/slices/tabsSlice';
@@ -54,7 +54,7 @@ import { effectiveCombo } from '../../services/shortcutActions';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
-  CanvasNodeModel,
+  CanvasNodeModel, isNodePainted,
   selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
@@ -157,6 +157,7 @@ export const CanvasMode: React.FC = () => {
   const edges = useSelector((s: RootState) => s.canvas.edges);
   const nearestGroupId = useSelector((s: RootState) => s.canvas.nearestGroupId);
   const revealHidden = useSelector((s: RootState) => s.canvas.revealHidden);
+  const mainOnly = useSelector((s: RootState) => s.canvas.mainOnly);
   // This predicate runs in several per-node loops during every pan frame; keep its membership
   // lookup constant-time instead of repeatedly scanning the model.
   const hiddenNodeIds = useMemo(
@@ -164,14 +165,23 @@ export const CanvasMode: React.FC = () => {
     [model.nodes],
   );
   const paintedNodes = useMemo(
-    () => revealHidden ? model.nodes : model.nodes.filter((n) => !n.hidden),
+    () => model.nodes.filter((n) => isNodePainted(n, revealHidden)),
     [model.nodes, revealHidden],
   );
+  // Every node that does NOT paint — user-hidden without Reveal, or filtered out by Main only
+  // (plan 048). Its own set, not `hiddenNodeIds`: that one feeds the render policy, which keeps
+  // treating a user-hidden node as hidden even while it is revealed.
+  const unpaintedNodeIds = useMemo(() => {
+    const painted = new Set(paintedNodes.map((n) => n.terminalId));
+    return new Set(model.nodes.filter((n) => !painted.has(n.terminalId)).map((n) => n.terminalId));
+  }, [model.nodes, paintedNodes]);
   // Presentation/targeting share this one eligibility list; the model stays complete for
   // membership, panes and hosts, while invisible frames cannot become phantom destinations.
+  // An emptied tab (no nodes) stays a drop target; any other group shows while one of its nodes
+  // paints — which is exactly `revealHidden || !allHidden` when Main only is off.
   const shownGroups = useMemo(
-    () => model.groups.filter((g) => revealHidden || !g.allHidden),
-    [model.groups, revealHidden],
+    () => model.groups.filter((g) => g.nodeIds.length === 0 || g.nodeIds.some((id) => !unpaintedNodeIds.has(id))),
+    [model.groups, unpaintedNodeIds],
   );
   const presentationModel = useMemo(() => ({ ...model, groups: shownGroups }), [model, shownGroups]);
   const flyTo = useFlyTo();
@@ -522,12 +532,12 @@ export const CanvasMode: React.FC = () => {
     [collapsed, spacedShownGroups, vp.z],
   );
 
-  /** USER-hidden alone — deliberately not `isHidden`, which is also true for a merely culled
-   *  or tier-demoted node. See `CanvasWiresProps.rects`: a wire to an off-screen node must
-   *  still draw, or connections blink in and out as the canvas pans. */
+  /** USER-hidden or Main-only-filtered — deliberately not `isHidden`, which is also true for a
+   *  merely culled or tier-demoted node. See `CanvasWiresProps.rects`: a wire to an off-screen
+   *  node must still draw, or connections blink in and out as the canvas pans. */
   const userHidden = useCallback(
-    (id: string) => hiddenNodeIds.has(id) && !revealHidden,
-    [hiddenNodeIds, revealHidden],
+    (id: string) => unpaintedNodeIds.has(id),
+    [unpaintedNodeIds],
   );
   // `tiers` is intentionally only the reveal-aware promotion budget. Policy reconciliation,
   // however, owns every mounted terminal, including re-hidden ones that must be explicitly
@@ -1013,22 +1023,31 @@ export const CanvasMode: React.FC = () => {
   const flyToNode = useCallback((terminalId: string) => {
     const n = model.nodes.find((x) => x.terminalId === terminalId);
     if (!n) return;
-    // The sidebar is the recovery path for a hidden terminal. Build precisely the model the
-    // unhide dispatch creates, rather than targeting against the pre-unhide shown set.
-    const postUnhideNodes = n.hidden && !revealHidden ? [...paintedNodes, n] : paintedNodes;
-    const postUnhideSpacingModel = n.hidden && !revealHidden
-      ? {
-        nodes: postUnhideNodes,
-        groups: model.groups
-          .filter((g) => !g.allHidden || g.tabId === n.tabId)
-          .map((g) => g.tabId !== n.tabId ? g : {
-            ...g,
-            // `drawnFrame` is fitted from the nodes now shown, not the old all-hidden frame.
-            rect: fitGroupFrame(postUnhideNodes.filter((x) => x.tabId === g.tabId).map((x) => x.rect)) ?? g.rect,
-            allHidden: false,
-          }),
-      }
-      : spacingModel;
+    // The sidebar is the recovery path for a hidden terminal — and for one filtered out by Main
+    // only, which it recovers by switching the filter OFF (plan 048 §8), so every API node comes
+    // back with it. Build precisely the model those dispatches create, rather than targeting
+    // against the pre-recovery shown set.
+    const liftsFilter = !!n.filtered;
+    const postPainted = (x: CanvasNodeModel) => x.terminalId === terminalId
+      || (liftsFilter ? (revealHidden || !x.hidden) : isNodePainted(x, revealHidden));
+    const postUnhideSpacingModel = isNodePainted(n, revealHidden)
+      ? spacingModel
+      : (() => {
+        const nodes = model.nodes.filter(postPainted);
+        const ids = new Set(nodes.map((x) => x.terminalId));
+        return {
+          nodes,
+          groups: model.groups
+            .filter((g) => g.nodeIds.length === 0 || g.nodeIds.some((id) => ids.has(id)))
+            .map((g) => g.nodeIds.length === 0 ? g : {
+              ...g,
+              // `drawnFrame` is fitted from the nodes now shown, not the old frame.
+              rect: fitGroupFrame(nodes.filter((x) => x.tabId === g.tabId).map((x) => x.rect)) ?? g.rect,
+              allHidden: g.tabId === n.tabId ? false : g.allHidden,
+            }),
+        };
+      })();
+    if (liftsFilter) dispatch(setMainOnly({ enabled: false }));
     if (n.hidden) dispatch(setNodeHidden({ id: terminalId, hidden: false }));
     dispatch(selectNode(terminalId));
     // The DESTINATION zoom, in both places: the drawn height is a function of the zoom the
@@ -1038,7 +1057,7 @@ export const CanvasMode: React.FC = () => {
       aimedNodeRect(targetRectAt(z, 'node', terminalId, n.rect, postUnhideSpacingModel), z),
       size.w, size.h, z, metrics.zMax,
     ));
-  }, [model.nodes, model.groups, paintedNodes, revealHidden, spacingModel, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
+  }, [model.nodes, model.groups, revealHidden, spacingModel, dispatch, flyTo, size, vp.z, metrics, targetRectAt]);
 
   /** The minimap projects DISPLAY geometry, so its picked world point is already a main-canvas
    * display-space destination. */
@@ -1068,7 +1087,7 @@ export const CanvasMode: React.FC = () => {
    * without re-reading live state between dispatches.
    */
   const closeAllEnded = useCallback(() => {
-    const ended = model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden));
+    const ended = model.nodes.filter((n) => n.exited && isNodePainted(n, revealHidden));
     const panesInTab = (tabId: string) => getAllLeafIds(treesByTabId[tabId] ?? null).length;
     closeEndedRequests(ended, panesInTab, isTerminalAlive).forEach((req) => {
       const { type, detail } = closeEventFor(req);
@@ -1241,8 +1260,12 @@ export const CanvasMode: React.FC = () => {
 
   // For the toolbar's Close Ended button — how many nodes it would close, and whether there is
   // anything for it to do.
-  const endedCount = model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden)).length;
+  const endedCount = model.nodes.filter((n) => n.exited && isNodePainted(n, revealHidden)).length;
   const hiddenCount = model.nodes.filter((n) => n.hidden).length;
+  // Every API/MCP-created node, whether or not the filter is on — the count the Main only
+  // button offers to hide (plan 048).
+  const apiNodeIds = model.nodes.filter((n) => n.apiCreated).map((n) => n.terminalId);
+  const apiCount = apiNodeIds.length;
 
   return (
     <CanvasMetricsContext.Provider value={metrics}>
@@ -1432,7 +1455,7 @@ export const CanvasMode: React.FC = () => {
           Hidden while a node is overlaid. The overlay's backdrop lives in world space, so a
           button here paints over it — and it would then be the one spot on screen where a click
           does not dismiss the overlay, acting on a layout the user cannot see. */}
-      {!overlayId && (model.groups.length > 0 || hiddenCount > 0) && (
+      {!overlayId && (model.groups.length > 0 || hiddenCount > 0 || apiCount > 0) && (
         <div className="canvas-toolbar">
           {/* `sidebarOpen` is in `canvasSlice` and persisted by Task 22; without a control it
               would be a stored field permanently stuck at its initial value. */}
@@ -1468,6 +1491,20 @@ export const CanvasMode: React.FC = () => {
             disabled={hiddenCount === 0} onClick={() => dispatch(setRevealHidden(!revealHidden))}
             title={hiddenCount > 0 ? `${revealHidden ? 'Re-hide' : 'Reveal'} ${hiddenCount} hidden terminal${hiddenCount === 1 ? '' : 's'}` : 'No hidden terminals'}>
             Hidden{hiddenCount > 0 ? ` (${hiddenCount})` : ''}
+          </button>
+          {/* plan 048. Disabled rather than hidden at zero, like Hidden and Close Ended. Stays
+              enabled while ON even if the last API terminal closes, so it can always be undone. */}
+          <button
+            type="button"
+            className="canvas-tbtn"
+            aria-pressed={mainOnly}
+            disabled={apiCount === 0 && !mainOnly}
+            onClick={() => dispatch(setMainOnly({ enabled: !mainOnly, apiTerminalIds: apiNodeIds }))}
+            title={apiCount > 0
+              ? `${mainOnly ? 'Show' : 'Hide'} ${apiCount} terminal${apiCount === 1 ? '' : 's'} opened by the API or MCP`
+              : 'No terminals opened by the API or MCP'}
+          >
+            Main only{apiCount > 0 ? ` (${apiCount})` : ''}
           </button>
           {/* Tam, 2026-08-24: a way to clear the "ended" tint in one press rather than closing
               each dead node by hand. Disabled rather than hidden at zero, matching the zoom

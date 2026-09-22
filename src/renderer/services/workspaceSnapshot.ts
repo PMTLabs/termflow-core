@@ -67,6 +67,7 @@ export function captureWorkspaceSnapshot(state: RootState, label: string): Works
       sidebarZoom: state.canvas.sidebarZoom,
       hidden: state.canvas.hidden,
       dynamicSpacing: state.canvas.dynamicSpacing,
+      mainOnly: state.canvas.mainOnly,
     },
     capturedAt: Date.now(),
     label,
