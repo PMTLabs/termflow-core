@@ -6,7 +6,12 @@
 //!   deadline (never a value recomputed from a later, differing request).
 //! - `timeout_secs` is bounded and the deadline uses checked arithmetic, so a
 //!   token-bearing peer cannot overflow-panic the sidecar.
-//! - On a GUI disconnect while NOT armed, all sessions are dropped → TearDown.
+//! - A GUI disconnect is NOT a quit. A crashed GUI and a quitting GUI look
+//!   identical on the wire (the pipe just closes), so an unarmed disconnect
+//!   with live children HOLDS them — bounded exactly like a Local arm — for a
+//!   relaunch to adopt. Only an authenticated `Shutdown` (the GUI's explicit
+//!   Exit) latches teardown; a disconnect with nothing live, an unsurvivable
+//!   host, or a latched shutdown → TearDown.
 //! - An arm is spent by the first frame received on a connection, so it can
 //!   never outlive the GUI-absence it was set for. Keyed on a frame rather than
 //!   on accept: a peer that connects and never speaks has adopted nothing.
@@ -76,6 +81,11 @@ pub struct SessionManager {
     /// a kill-on-close job; Unix: is a session leader). If false, arming is a
     /// lie — the OS would kill us with the GUI — so we refuse to ArmAck.
     survivable: bool,
+    /// Latched by an authenticated `Shutdown`: the GUI announced it is exiting
+    /// on purpose, so the disconnect that follows tears down instead of holding.
+    /// Cleared when a (new) GUI adopts this host — a Shutdown is for the
+    /// connection that sent it, never for a later one.
+    shutdown_requested: bool,
     events: Sender<Data>,
     responses: Sender<Response>,
     /// Teardown's kill-wait budget. A field rather than a bare constant so a
@@ -102,6 +112,7 @@ impl SessionManager {
             generation: 0,
             expected_token,
             survivable,
+            shutdown_requested: false,
             events,
             responses,
             teardown_grace: TEARDOWN_KILL_GRACE,
@@ -123,6 +134,11 @@ impl SessionManager {
     #[cfg(test)]
     fn armed_purpose(&self) -> Option<ArmDetachPurpose> {
         self.armed_purpose
+    }
+
+    #[cfg(test)]
+    pub fn shutdown_requested(&self) -> bool {
+        self.shutdown_requested
     }
 
     /// Number of hosted sessions whose child is still running. Drives the
@@ -264,6 +280,26 @@ impl SessionManager {
                 self.generation = self.generation.wrapping_add(1);
                 let _ = self.responses.try_send(Response::DisarmAck { req });
             }
+            Control::Shutdown { req, token } => {
+                if self.expected_token.as_deref() != Some(token.as_str()) {
+                    log::warn!("Shutdown rejected: token mismatch");
+                    return;
+                }
+                // Latch only; the kills run in `on_gui_disconnect` once the
+                // pipe has closed. Killing here would block this frame loop
+                // for the measured 4-5s per kill while the GUI is still
+                // waiting on the ack — and the ack is what lets it exit.
+                // An explicit quit also ends any hold that was armed earlier:
+                // the user said "exit everything", and that wins.
+                self.shutdown_requested = true;
+                self.armed_deadline = None;
+                self.armed_deadline_ms = None;
+                self.armed_purpose = None;
+                self.armed_at = None;
+                self.absence_started_at = None;
+                self.generation = self.generation.wrapping_add(1);
+                let _ = self.responses.try_send(Response::ShutdownAck { req });
+            }
         }
     }
 
@@ -300,6 +336,10 @@ impl SessionManager {
         if self.armed_deadline.is_some() {
             eprintln!("termflow-pty-host: GUI connected; releasing a pre-existing detach arm");
         }
+        if self.armed_purpose.is_some() && self.armed_deadline.is_none() {
+            eprintln!("termflow-pty-host: GUI connected; ending the crash hold");
+        }
+        self.shutdown_requested = false;
         self.armed_deadline = None;
         self.armed_deadline_ms = None;
         self.armed_purpose = None;
@@ -321,6 +361,10 @@ impl SessionManager {
             // failed authentication, so retain their lifecycle adoption path.
             Control::ListSessions { token: None, .. } => true,
             Control::ArmDetach { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
+            // A GUI whose first word is "I am exiting" is still a GUI that owns
+            // these sessions: it must adopt (clearing any stale hold) before its
+            // Shutdown is applied, or the latch is reset by the adoption.
+            Control::Shutdown { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
             _ => false,
         }
     }
@@ -398,17 +442,36 @@ impl SessionManager {
         }
     }
 
+    /// The pipe closed. Decide whether that was a quit or a crash.
+    ///
+    /// Armed → Hold (the arm's own semantics, unchanged). Otherwise a disconnect
+    /// is a quit only if the GUI SAID so (`Shutdown`), or there is nothing live
+    /// to preserve, or this host cannot outlive the GUI anyway. Every other
+    /// unarmed disconnect is indistinguishable from a crash — the 2026-09-21
+    /// incident was the GUI aborting on an allocation failure with a dozen
+    /// agent shells under it, torn down here as if the user had hit Exit — so
+    /// it becomes a *crash hold*: the same bounded Local absence an offload
+    /// arms (`LOCAL_HOLD_ACTIVE_SECS`), destructive on expiry, retired the
+    /// moment a GUI adopts. Labelled Local so `begin_local_absence` establishes
+    /// the deadline; the arm fields stay `None` because nothing armed it.
     pub fn on_gui_disconnect(&mut self) -> Disposition {
-        match self.armed_deadline {
-            Some(_) => {
-                self.detach_all();
-                Disposition::Hold
-            }
-            None => {
-                self.tear_down_sessions();
-                Disposition::TearDown
-            }
+        if self.armed_deadline.is_some() {
+            self.detach_all();
+            return Disposition::Hold;
         }
+        if self.shutdown_requested || !self.survivable || self.live_session_count() == 0 {
+            self.tear_down_sessions();
+            return Disposition::TearDown;
+        }
+        eprintln!(
+            "termflow-pty-host: GUI disconnected without Shutdown with {} live session(s); holding them for a relaunch",
+            self.live_session_count()
+        );
+        self.armed_purpose = Some(ArmDetachPurpose::Local);
+        self.armed_at = Some(Instant::now());
+        self.absence_started_at = None;
+        self.detach_all();
+        Disposition::Hold
     }
 }
 
@@ -542,8 +605,11 @@ mod tests {
     /// TWO sessions, because one cannot tell "kills every session" from "kills
     /// the first session it finds" — and the teardown loop is exactly the shape
     /// that gets that wrong.
+    ///
+    /// The disconnect is preceded by `Shutdown`: with live children, a bare
+    /// disconnect is a crash hold now, and this test is about the QUIT path.
     #[test]
-    fn unarmed_disconnect_waits_for_every_child_kill_before_returning() {
+    fn shutdown_then_disconnect_waits_for_every_child_kill_before_returning() {
         let (mut m, _e, _r) = mgr();
         // Generous budget so this asserts that teardown WAITS, not that this
         // machine's `taskkill` beats the production deadline. A measured kill is
@@ -582,6 +648,7 @@ mod tests {
             );
         }
 
+        shutdown(&mut m);
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
 
         // PRIMARY, deterministic: every kill ran to completion before the call
@@ -840,6 +907,173 @@ mod tests {
         assert!(m.is_armed());
     }
 
+    /// The GUI's explicit Exit, acked. Asserts the latch so a test can never
+    /// pass on a Shutdown the host silently rejected.
+    fn shutdown(m: &mut SessionManager) {
+        m.handle_control(Control::Shutdown {
+            req: 77,
+            token: "tok".into(),
+        });
+        assert!(m.shutdown_requested(), "fixture must actually latch shutdown");
+    }
+
+    /// Insert a real long-lived child so `live_session_count() > 0`.
+    fn insert_live_child(m: &mut SessionManager, tab: &str) -> u32 {
+        let sess = Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
+            .expect("spawn a long-lived child");
+        let pid = sess.pid();
+        assert!(pid_is_alive(pid), "{tab} must be alive for this test to mean anything");
+        m.sessions.insert(tab.into(), sess);
+        pid
+    }
+
+    fn wait_dead(pid: u32) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while pid_is_alive(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !pid_is_alive(pid)
+    }
+
+    /// The 2026-09-21 incident: the GUI aborted (allocation failure) with live
+    /// shells under it. On the wire that is a bare disconnect, and it used to
+    /// tear everything down. Now it must HOLD — and the hold must be the
+    /// bounded Local kind, so a GUI that never comes back cannot leave shells
+    /// running forever.
+    #[test]
+    fn unannounced_disconnect_with_live_child_holds_bounded() {
+        let (mut m, _e, _r) = mgr();
+        let pid = insert_live_child(&mut m, "tab-crash");
+        assert!(!m.is_armed(), "precondition: nothing armed this");
+
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+        assert!(pid_is_alive(pid), "the crash hold must not kill the child");
+        assert!(
+            !m.sessions.is_empty(),
+            "the crash hold must keep the session record for the relaunch to adopt"
+        );
+        let hold = m
+            .begin_local_absence()
+            .expect("a crash hold must open the BOUNDED window, never an indefinite one");
+        assert!(m.local_hold_is_current(hold));
+
+        // A relaunched GUI adopts → the hold is retired, nothing is killed.
+        m.on_gui_connect();
+        assert!(!m.local_hold_is_current(hold), "adoption must retire the crash hold");
+        assert!(pid_is_alive(pid));
+        m.sessions.clear(); // drop → kill; keep the test box clean
+    }
+
+    /// The other side of the same coin: a hold opened by a crash must still be
+    /// destructive on expiry (same primitive as the offload hold).
+    #[test]
+    fn expired_crash_hold_kills_the_child() {
+        let (mut m, _e, _r) = mgr();
+        m.set_teardown_grace(Duration::from_secs(120));
+        let pid = insert_live_child(&mut m, "tab-crash-expire");
+        let done = m.sessions["tab-crash-expire"].kill_done_flag();
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+        assert!(!done.load(Ordering::Acquire), "the hold itself must not kill");
+        let hold = m.begin_local_absence().expect("bounded");
+
+        m.expire_local_hold(hold);
+
+        assert!(done.load(Ordering::Acquire), "expiry must run the kill before returning");
+        assert!(m.sessions.is_empty());
+        assert!(wait_dead(pid), "expiry of a crash hold must kill the child");
+    }
+
+    /// An announced exit tears down even with live children. This is the pin
+    /// for the user's requirement: Exit means exit everything.
+    #[test]
+    fn shutdown_then_disconnect_tears_down_live_child() {
+        let (mut m, _e, mut r) = mgr();
+        m.set_teardown_grace(Duration::from_secs(120));
+        let pid = insert_live_child(&mut m, "tab-quit");
+
+        shutdown(&mut m);
+        assert!(
+            matches!(r.try_recv(), Ok(Response::ShutdownAck { req: 77 })),
+            "the GUI waits on this ack before it exits"
+        );
+        assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+        assert!(m.sessions.is_empty());
+        assert!(wait_dead(pid), "an announced exit must kill the child");
+    }
+
+    /// Exit wins over an earlier arm: a user who offloaded/armed and then
+    /// changed their mind and hit Exit must not find their shells held.
+    #[test]
+    fn shutdown_overrides_an_earlier_arm() {
+        let (mut m, _e, _r) = mgr();
+        arm_with(&mut m, Some(ArmDetachPurpose::Local));
+        shutdown(&mut m);
+        assert!(!m.is_armed(), "Shutdown must release the arm");
+        assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+    }
+
+    /// Shutdown is authenticated: a peer without the launch token cannot make
+    /// the host kill another GUI's shells.
+    #[test]
+    fn shutdown_with_bad_token_is_ignored() {
+        let (mut m, _e, mut r) = mgr();
+        let pid = insert_live_child(&mut m, "tab-badtok");
+        m.handle_control(Control::Shutdown {
+            req: 5,
+            token: "WRONG".into(),
+        });
+        assert!(!m.shutdown_requested());
+        assert!(r.try_recv().is_err(), "a rejected Shutdown must not be acked");
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+        assert!(pid_is_alive(pid));
+        m.sessions.clear();
+    }
+
+    /// A Shutdown belongs to the connection that sent it. If a NEW GUI adopts
+    /// the host after one announced exit (or the same one reconnects), that
+    /// adoption must clear the latch — otherwise the new GUI's first ordinary
+    /// disconnect kills everything it just adopted.
+    #[test]
+    fn a_new_gui_connection_clears_a_pending_shutdown() {
+        let (mut m, _e, _r) = mgr();
+        let pid = insert_live_child(&mut m, "tab-latch");
+        shutdown(&mut m);
+        m.on_gui_connect();
+        assert!(!m.shutdown_requested());
+        assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
+        assert!(pid_is_alive(pid));
+        m.sessions.clear();
+    }
+
+    /// A host that cannot outlive the GUI (job denied breakaway; the elevated
+    /// dial-out host) gains nothing from holding: the OS kills it with the GUI.
+    /// It must keep tearing down so the children are killed deliberately
+    /// rather than orphaned by the job.
+    #[test]
+    fn unsurvivable_host_tears_down_on_unannounced_disconnect() {
+        let (mut m, _e, _r) = mgr_unsurvivable();
+        m.set_teardown_grace(Duration::from_secs(120));
+        let pid = insert_live_child(&mut m, "tab-unsurvivable");
+        assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
+        assert!(wait_dead(pid));
+    }
+
+    /// Shutdown adopts like the other lifecycle frames (with the right token
+    /// only): a reconnecting GUI whose first word is Shutdown must end the hold
+    /// it found AND have its Shutdown honoured.
+    #[test]
+    fn shutdown_authenticates_lifecycle_only_with_the_right_token() {
+        let (m, _e, _r) = mgr();
+        assert!(m.authenticates_lifecycle(&Control::Shutdown {
+            req: 1,
+            token: "tok".into()
+        }));
+        assert!(!m.authenticates_lifecycle(&Control::Shutdown {
+            req: 1,
+            token: "WRONG".into()
+        }));
+    }
+
     fn arm_with(m: &mut SessionManager, purpose: Option<ArmDetachPurpose>) {
         m.handle_control(Control::ArmDetach {
             req: 1,
@@ -853,6 +1087,14 @@ mod tests {
     /// The bound only exists if expiry really kills. TWO children, for the same
     /// reason the unarmed-teardown test uses two: "killed the first one it
     /// found" is the shape this loop gets wrong.
+    ///
+    /// Same oracle split as the teardown test above, for the same reason: the
+    /// deterministic claim is that every kill RAN before expiry returned
+    /// (`kill_done`, joined); pid-death is the kernel's schedule — a SIGKILL'd
+    /// Unix child is a zombie that `kill(pid, 0)` still sees until its waiter
+    /// reaps it — so it is checked second, and bounded. Asserting pid-death
+    /// immediately is how this test failed on Linux CI twice on 2026-09-21
+    /// (develop `9f0ca3c` and PR #102) while every kill had in fact run.
     #[test]
     fn expiring_a_local_hold_kills_every_live_child() {
         let (mut m, _e, _r) = mgr();
@@ -862,7 +1104,7 @@ mod tests {
             .begin_local_absence()
             .expect("a Local arm must open a bounded window");
 
-        let mut pids = Vec::new();
+        let mut watched = Vec::new();
         for tab in ["tab-expire-a", "tab-expire-b"] {
             let sess = Session::spawn(tab.into(), &long_lived_spec(), 4096, m.events.clone(), true)
                 .expect("spawn a long-lived child");
@@ -870,15 +1112,24 @@ mod tests {
             // Presence before absence: a "gone" oracle passes vacuously if the
             // child never started.
             assert!(pid_is_alive(pid), "{tab} must be alive before expiry");
+            let done = sess.kill_done_flag();
+            assert!(!done.load(Ordering::Acquire), "{tab} cannot be killed yet");
             m.sessions.insert(tab.into(), sess);
-            pids.push((tab, pid));
+            watched.push((tab, pid, done));
         }
 
         m.expire_local_hold(hold);
 
-        for (tab, pid) in pids {
+        for (tab, _pid, done) in &watched {
             assert!(
-                !pid_is_alive(pid),
+                done.load(Ordering::Acquire),
+                "expire_local_hold returned before {tab}'s kill finished"
+            );
+        }
+        assert!(m.sessions.is_empty(), "expiry ran the kills but kept the session records");
+        for (tab, pid, _done) in &watched {
+            assert!(
+                wait_dead(*pid),
                 "{tab} (pid {pid}) survived hold expiry — the bound is a promise the host does not keep"
             );
         }

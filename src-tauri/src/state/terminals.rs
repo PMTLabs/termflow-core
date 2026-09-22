@@ -628,10 +628,20 @@ impl<R: Runtime> AppState<R> {
             ),
         }
         let connect_plan = crate::pty_host_client::plan_connection(record);
-        let (pipe, attach_acks) = match &connect_plan {
+        // `shutdown_control` decides whether Exit ANNOUNCES itself to the host
+        // (`Control::Shutdown`). The failure modes are asymmetric: announcing
+        // to a legacy host costs one undecodable frame, which drops the
+        // connection — teardown, for a legacy host — plus a bounded ack wait;
+        // NOT announcing to a host that needed it leaves every shell held for
+        // its retention window after the user pressed Exit. So this is false
+        // only when a record POSITIVELY says the host lacks the capability:
+        // no record (legacy, or a record lost after the host started) and a
+        // host we spawned ourselves (this build's bundled sidecar, installed
+        // under its own content hash by `resolve_host_launch`) both announce.
+        let (pipe, attach_acks, shutdown_control) = match &connect_plan {
             crate::pty_host_client::ConnectPlan::LegacyOrNone => {
                 log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
-                (pipe, false)
+                (pipe, false, true)
             }
             crate::pty_host_client::ConnectPlan::Bootstrap {
                 endpoint,
@@ -641,11 +651,14 @@ impl<R: Runtime> AppState<R> {
                 lifecycle: _,
             } => {
                 let acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
+                let shutdown_control =
+                    host_caps & termflow_pty_protocol::CAP_SHUTDOWN_CONTROL != 0;
                 log::info!(
                     "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
-                     caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks})"
+                     caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks}, \
+                     shutdown_control={shutdown_control})"
                 );
-                (endpoint.clone(), acks)
+                (endpoint.clone(), acks, shutdown_control)
             }
             crate::pty_host_client::ConnectPlan::Incompatible { instance_id } => {
                 // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
@@ -747,6 +760,9 @@ impl<R: Runtime> AppState<R> {
                 .await
                 .map_err(|e| e.to_string())?;
         client.set_attach_acks(attach_acks);
+        client.set_shutdown_control(
+            shutdown_control || origin == crate::pty_host_client::HostConnectionOrigin::SpawnedHere,
+        );
         client.set_lifecycle(connect_plan.retention_for(origin));
         // Record sessions that survived a hot-swap (tab_id -> pid) so
         // create_host_terminal reattaches instead of respawning. `None` means

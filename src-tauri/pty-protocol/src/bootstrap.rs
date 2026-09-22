@@ -52,6 +52,12 @@ pub const CAP_ATTACH_ACK: u32 = 1 << 1;
 /// in its discovery record. The bit carries no policy value; consumers require
 /// the accompanying record field before treating a policy as known.
 pub const CAP_LIFECYCLE_CONTRACT: u32 = 1 << 2;
+/// Host distinguishes an intentional quit from a GUI crash: a bare disconnect
+/// with live children HOLDS them (bounded by the advertised retention) instead
+/// of tearing down, and only `Control::Shutdown` tears down. A client that sees
+/// this bit MUST send `Shutdown` on an intentional exit, or its shells outlive
+/// it for the retention window. Absent ⇒ legacy host: disconnect is teardown.
+pub const CAP_SHUTDOWN_CONTROL: u32 = 1 << 3;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
