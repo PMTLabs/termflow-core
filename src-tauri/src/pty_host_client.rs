@@ -129,6 +129,13 @@ pub struct PtyHostClient {
     /// reattach can use the transactional `AttachAcked` (RP-3). A legacy host
     /// (no record) must only ever receive the fire-and-forget `Attach`.
     attach_acks: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the connected host advertised `CAP_SHUTDOWN_CONTROL`: it
+    /// HOLDS live sessions on a bare disconnect (a crash looks the same on the
+    /// wire) and tears down only on an explicit `Control::Shutdown`. The quit
+    /// path MUST send that frame to such a host, or Exit leaves the user's
+    /// shells running for the host's retention window. A legacy host tears
+    /// down on disconnect and would never ack, so it must not be asked.
+    shutdown_control: Arc<std::sync::atomic::AtomicBool>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -165,6 +172,17 @@ impl PtyHostClient {
     /// record's `CAP_ATTACH_ACK`; see field doc).
     pub fn set_attach_acks(&self, v: bool) {
         self.attach_acks.store(v, Ordering::Release);
+    }
+
+    /// Mark that the connected host holds on disconnect and needs an explicit
+    /// `Shutdown` to tear down (`CAP_SHUTDOWN_CONTROL`; see field doc).
+    pub fn set_shutdown_control(&self, v: bool) {
+        self.shutdown_control.store(v, Ordering::Release);
+    }
+
+    /// Whether an intentional exit must announce itself to this host.
+    pub fn shutdown_control(&self) -> bool {
+        self.shutdown_control.load(Ordering::Acquire)
     }
 
     /// False once the pipe closed (reader task ended). See `alive` field doc.
@@ -367,6 +385,40 @@ impl PtyHostClient {
         }
         false
     }
+
+    /// Tell the host this GUI is exiting ON PURPOSE, so the disconnect that
+    /// follows tears every session down instead of being held as a crash.
+    /// Returns whether the host acknowledged — or `true` when the host does
+    /// not distinguish the two (no `CAP_SHUTDOWN_CONTROL`): for it the
+    /// disconnect itself is the teardown, and there is nothing to send.
+    ///
+    /// Same shape as `disarm`: the ack matters because an unacknowledged
+    /// Shutdown is indistinguishable from one the host never received, and
+    /// exiting on that leaves shells held for the retention window. Bounded
+    /// per attempt because the user is waiting for the app to close; the host
+    /// only LATCHES on this frame (the kills run after the pipe closes), so a
+    /// healthy host answers in milliseconds.
+    pub async fn shutdown(&self) -> bool {
+        const ATTEMPT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+        const ATTEMPTS: usize = 2;
+
+        if !self.shutdown_control() {
+            return true;
+        }
+        log::info!("[HOTSWAP] announcing exit to the host (Shutdown)");
+        let token = self.lifecycle_token.to_string();
+        for attempt in 1..=ATTEMPTS {
+            let token = token.clone();
+            if let Some(Response::ShutdownAck { .. }) = self
+                .request_within(ATTEMPT_TIMEOUT, move |req| Control::Shutdown { req, token })
+                .await
+            {
+                return true;
+            }
+            log::warn!("[HOTSWAP] shutdown attempt {attempt}/{ATTEMPTS} got no ShutdownAck");
+        }
+        false
+    }
 }
 
 /// Build a client around already-connected pipe halves. Split out so tests can
@@ -454,6 +506,7 @@ where
         req_ctr,
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
@@ -1374,6 +1427,7 @@ fn resp_req(r: &Response) -> u64 {
         | Response::SessionList { req, .. }
         | Response::ArmAck { req, .. }
         | Response::DisarmAck { req }
+        | Response::ShutdownAck { req }
         | Response::AttachAck { req, .. } => *req,
     }
 }

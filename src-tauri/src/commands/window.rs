@@ -159,12 +159,15 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 /// `FLUSH_TIMEOUT` elapses.
 /// The ONLY route from a user-initiated quit to `exit(0)`.
 ///
-/// Releases the pty-host's detach arm before exiting. An armed host that loses
-/// its GUI *holds* its sessions instead of tearing them down (see the sidecar's
-/// `on_gui_disconnect`), so exiting while armed leaves the user's shells — and
-/// any agent CLI running under them — alive with no window and no tray to reach
-/// them. Users read "Exit" as "exit everything", so a quit must never leave that
-/// behind.
+/// Releases the pty-host's detach arm, then ANNOUNCES the exit, before exiting.
+/// A host that loses its GUI *holds* its sessions instead of tearing them down
+/// when it is armed — and, since the 2026-09-21 crash, also when the pipe just
+/// drops with live children (a crashed GUI is indistinguishable from a quitting
+/// one on the wire; see the sidecar's `on_gui_disconnect`). Exiting without
+/// saying so therefore leaves the user's shells — and any agent CLI running
+/// under them — alive with no window and no tray to reach them. Users read
+/// "Exit" as "exit everything", so a quit must never leave that behind:
+/// `disarm` ends the hold, `shutdown` tells the host this disconnect is final.
 ///
 /// Deliberately NOT used by `restart_for_update` or the updater: those arm on
 /// purpose and exit so terminals survive the swap.
@@ -180,6 +183,12 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
                 log::error!(
                     "quit: pty-host never acknowledged the disarm; it may keep \
                      holding sessions after we exit"
+                );
+            }
+            if !client.shutdown().await {
+                log::error!(
+                    "quit: pty-host never acknowledged the shutdown; it will hold \
+                     live sessions as a crash until its retention window expires"
                 );
             }
         }
@@ -783,15 +792,49 @@ mod quit_teardown_wiring_tests {
         let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
         let stripped = strip_line_comments(&body);
         assert!(
-            stripped.contains("elevated_host") && stripped.contains(".shutdown("),
+            stripped.contains("elevated_host") && stripped.contains("elevated.shutdown("),
             "disarm_then_exit must tear down state.elevated_host. Body:\n{body}"
         );
-        let shutdown_at = stripped.find(".shutdown(").expect("checked above");
+        // Named receiver: the primary host now has a `.shutdown(` of its own on
+        // this path, so the bare method name would match that call instead and
+        // pin nothing about the elevated host.
+        let shutdown_at = stripped.find("elevated.shutdown(").expect("checked above");
         let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
         assert!(
             shutdown_at < exit_at,
             "elevated_host.shutdown() must be awaited BEFORE exit(0) — after would \
              never run, the process is already gone. Body:\n{body}"
+        );
+    }
+
+    /// Since the 2026-09-21 crash the primary host HOLDS live sessions on a
+    /// bare disconnect (a crash and a quit look the same on the wire) and only
+    /// tears down on an explicit `Shutdown`. Disarming alone is no longer a
+    /// quit: a `disarm_then_exit` that forgets to announce the exit leaves the
+    /// user's shells and agent CLIs running, unreachable, for the host's whole
+    /// retention window — the exact orphan "Exit" must never produce.
+    ///
+    /// Requires the ack to be CHECKED (`if !client.shutdown().await` with a
+    /// logged failure), placed before `exit(0)`, and after the disarm — the
+    /// host clears its latch when a GUI adopts, and a stale arm released after
+    /// the announcement would be the wrong order to reason about.
+    #[test]
+    fn disarm_then_exit_announces_the_exit_to_the_primary_host() {
+        let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
+        let stripped = strip_line_comments(&body);
+        let if_at = stripped.find("if !client.shutdown().await").unwrap_or_else(|| {
+            panic!("the shutdown ack must be checked via `if !client.shutdown().await`. Body:\n{body}")
+        });
+        let arm = block_at(&stripped, if_at);
+        assert!(
+            arm.contains("log::error!"),
+            "an unacknowledged shutdown on the quit path must be logged. Block:\n{arm}"
+        );
+        let disarm_at = stripped.find("client.disarm(").expect("the disarm is still required");
+        let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
+        assert!(
+            disarm_at < if_at && if_at < exit_at,
+            "expected disarm, then shutdown, then exit(0). Body:\n{body}"
         );
     }
 

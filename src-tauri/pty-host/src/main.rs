@@ -187,9 +187,12 @@ async fn main() {
             endpoint: endpoint.0.clone(),
             // Drain/takeover is NOT implemented yet — do not advertise CAP_DRAIN.
             capabilities: termflow_pty_protocol::CAP_ATTACH_ACK
-                | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT,
-            // The bound applies only to an authenticated, purpose-labelled
-            // LOCAL hold. Legacy/unlabelled sibling holds remain indefinite.
+                | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
+                | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL,
+            // The bound applies to an authenticated, purpose-labelled LOCAL
+            // hold and to the crash hold an unannounced disconnect opens
+            // (`SessionManager::on_gui_disconnect`). Legacy/unlabelled sibling
+            // holds remain indefinite.
             lifecycle: Some(termflow_pty_protocol::LifecycleContract {
                 version: 1,
                 retention: termflow_pty_protocol::RetentionPolicy::Bounded {

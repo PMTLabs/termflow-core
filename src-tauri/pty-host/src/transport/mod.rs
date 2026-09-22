@@ -329,6 +329,7 @@ fn control_label(c: &termflow_pty_protocol::Control) -> &'static str {
         AttachAcked { .. } => "AttachAcked",
         ArmDetach { .. } => "ArmDetach",
         Disarm { .. } => "Disarm",
+        Shutdown { .. } => "Shutdown",
     }
 }
 
@@ -1138,14 +1139,115 @@ mod tests {
                 }
             })
             .await;
-            // Drop c2 → the user hits X and confirms Exit.
+            // The user hits X and confirms Exit: the GUI announces it, waits
+            // for the ack, then drops c2.
+            announce_exit(&mut c2, 4).await;
         }
 
         let ended = tokio::time::timeout(Duration::from_secs(10), srv).await;
         assert!(
             ended.is_ok(),
-            "host must tear down on a plain quit after a reconnect; it held \
+            "host must tear down on an announced quit after a reconnect; it held \
              instead, stranding a live shell with no GUI"
+        );
+    }
+
+    /// Send `Shutdown` and wait for its ack, the way `disarm_then_exit` does.
+    async fn announce_exit(c: &mut ClientStream, req: u64) {
+        write_frame(
+            c,
+            &Frame::Ctrl(Control::Shutdown {
+                req,
+                token: "tok".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let acked = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(f)) = read_frame(c).await {
+                if matches!(f, Frame::Resp(Response::ShutdownAck { req: r }) if r == req) {
+                    return true;
+                }
+            }
+            false
+        })
+        .await;
+        assert_eq!(acked, Ok(true), "Shutdown must be acked");
+    }
+
+    /// The 2026-09-21 crash, end to end over the real transport: the GUI dies
+    /// (no arm, no Shutdown) with a live shell; a relaunch finds the shell
+    /// still hosted and adopts it; the user then hits Exit and everything —
+    /// including the host process — goes away.
+    ///
+    /// Three assertions, each of which the pre-fix host fails or cannot reach:
+    /// 1. the host is still serving after the bare disconnect (old: exited);
+    /// 2. the adopting GUI sees `t1` alive (old: killed);
+    /// 3. an announced exit ends the host (new frame; old host had no way to
+    ///    tell the two disconnects apart).
+    #[tokio::test]
+    async fn crashed_gui_leaves_live_session_for_relaunch_and_exit_still_tears_down() {
+        let ep = test_endpoint("crash-hold");
+        let srv = tokio::spawn(serve(ep.clone(), Some("tok".into()), true, None));
+
+        {
+            let mut c1 = connect_with_retry(&ep).await;
+            write_frame(
+                &mut c1,
+                &Frame::Ctrl(Control::Spawn {
+                    req: 1,
+                    tab_id: "t1".into(),
+                    spec: persist_spec(true),
+                }),
+            )
+            .await
+            .unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(10), async {
+                while let Ok(Some(f)) = read_frame(&mut c1).await {
+                    if matches!(f, Frame::Resp(Response::Spawned { .. })) {
+                        break;
+                    }
+                }
+            })
+            .await;
+            // Drop c1 with NO arm and NO Shutdown: the GUI just died.
+        }
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !srv.is_finished(),
+            "host exited on the crash disconnect — the shell went with it"
+        );
+
+        let mut c2 = connect_with_retry(&ep).await;
+        write_frame(
+            &mut c2,
+            &Frame::Ctrl(Control::ListSessions {
+                req: 2,
+                token: Some("tok".into()),
+            }),
+        )
+        .await
+        .unwrap();
+        let mut t1_alive = false;
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(f)) = read_frame(&mut c2).await {
+                if let Frame::Resp(Response::SessionList { sessions, .. }) = f {
+                    t1_alive = sessions.iter().any(|m| m.tab_id == "t1" && m.alive);
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(t1_alive, "the relaunch must find the crashed GUI's shell alive and adoptable");
+
+        announce_exit(&mut c2, 3).await;
+        drop(c2);
+
+        let ended = tokio::time::timeout(Duration::from_secs(10), srv).await;
+        assert!(
+            ended.is_ok(),
+            "an announced Exit after adopting a crash hold must still end the host"
         );
     }
 

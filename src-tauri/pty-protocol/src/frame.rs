@@ -60,6 +60,17 @@ pub enum Control {
     /// to decode this variant and drops the connection. (Kept as a trailing
     /// additive variant so all shipped variant indices are unchanged.)
     AttachAcked { req: u64, tab_id: String, from_offset: u64 },
+    /// The GUI is exiting ON PURPOSE and wants every hosted session torn down.
+    /// A host advertising `CAP_SHUTDOWN_CONTROL` no longer treats a bare pipe
+    /// drop as a quit — a GUI that crashes looks identical on the wire to one
+    /// that quit, so the host HOLDS its live children (bounded) for a relaunch
+    /// to adopt. This frame is what distinguishes "Exit" from "died": the host
+    /// acks, then tears down on the disconnect that follows. `token` must match
+    /// the host's launch token. COMPATIBILITY: a legacy host fails to decode
+    /// this variant and drops the connection — which for it IS teardown — but
+    /// send it only when the capability was advertised so the ack wait is never
+    /// spent on a host that will not answer.
+    Shutdown { req: u64, token: String },
 }
 
 /// Sidecar → GUI replies to a `req`-bearing [`Control`].
@@ -76,6 +87,9 @@ pub enum Response {
     /// tab was unknown or its child already exited; `tail_offset` is the ring's
     /// next-write offset at ack time.
     AttachAck { req: u64, tab_id: String, alive: bool, tail_offset: u64 },
+    /// Reply to [`Control::Shutdown`]: the host has latched teardown and will
+    /// kill every session as soon as this connection closes.
+    ShutdownAck { req: u64 },
 }
 
 /// One surviving session as reported by `ListSessions`.
@@ -252,6 +266,24 @@ mod tests {
         let f = Frame::Ctrl(Control::Disarm { req: 1 });
         let buf = encode(&f);
         assert!(decode(99, &buf[5..]).is_err());
+    }
+
+    /// `Shutdown` / `ShutdownAck` are TRAILING variants: every index a shipped
+    /// peer already relies on must stay where it is. Pinned by roundtripping
+    /// the new frames AND by re-checking that a pre-existing variant still
+    /// decodes from its original wire index (the legacy-shape test below).
+    #[test]
+    fn shutdown_frames_roundtrip() {
+        for frame in [
+            Frame::Ctrl(Control::Shutdown {
+                req: 11,
+                token: "token".into(),
+            }),
+            Frame::Resp(Response::ShutdownAck { req: 11 }),
+        ] {
+            let encoded = encode(&frame);
+            assert_eq!(decode(encoded[0], &encoded[5..]).unwrap(), frame);
+        }
     }
 
     #[test]
