@@ -70,8 +70,10 @@ export interface CanvasNodeModel {
 
 /**
  * Whether a node PAINTS on the canvas: not filtered out by Main only, and not user-hidden
- * (unless Reveal is on). The one predicate every paint consumer uses, so the filter and the
- * user's hidden set cannot disagree about which nodes are on screen (plan 048).
+ * (unless Reveal is on). The one predicate every paint consumer uses (nodes, wires, group
+ * frames, minimap, snapshots, collapse, Close Ended), so the filter and the user's hidden set
+ * cannot disagree about which nodes are on screen (plan 048). Arrange and a sidebar regroup do
+ * NOT use it: they ignore Reveal and test `!n.hidden && !n.filtered` directly.
  */
 export function isNodePainted(n: Pick<CanvasNodeModel, 'hidden' | 'filtered'>, revealHidden: boolean): boolean {
   return !n.filtered && (revealHidden || !n.hidden);

@@ -39,9 +39,14 @@ describe('canvasSlice.mainOnly', () => {
   });
 
   it('leaves interaction on a MAIN node alone', () => {
-    let s = canvasReducer(initCanvas(), focusNode('tm-user'));
+    let s = initCanvas();
+    s = canvasReducer(s, selectNode('tm-user'));
+    s = canvasReducer(s, focusNode('tm-user'));
+    s = canvasReducer(s, setOverlayNode('tm-user'));
     s = canvasReducer(s, setMainOnly({ enabled: true, apiTerminalIds: ['tm-api'] }));
+    expect(s.selectedId).toBe('tm-user');
     expect(s.focusedId).toBe('tm-user');
+    expect(s.overlayId).toBe('tm-user');
   });
 
   it('hydrates a persisted boolean and ignores anything else', () => {
@@ -186,6 +191,10 @@ describe('CanvasMode wiring', () => {
   })();
 
   it('renders a Main only toggle that passes the nodes it will filter', () => {
+    // Counted from the MARKER, not from `filtered`: that is false for every node while the
+    // toggle is off, which would disable the button exactly when it has something to hide.
+    expect(MODE).toContain('const apiNodeIds = model.nodes.filter((n) => n.apiCreated).map((n) => n.terminalId);');
+    expect(MODE).toContain('const apiCount = apiNodeIds.length;');
     expect(MODE).toContain('aria-pressed={mainOnly}');
     expect(MODE).toContain('onClick={() => dispatch(setMainOnly({ enabled: !mainOnly, apiTerminalIds: apiNodeIds }))}');
     expect(MODE).toContain("Main only{apiCount > 0 ? ` (${apiCount})` : ''}");
@@ -208,5 +217,8 @@ describe('CanvasMode wiring', () => {
   it('a sidebar pick of a filtered node turns Main only off before flying to it', () => {
     expect(FLY_TO_NODE).toContain('if (liftsFilter) dispatch(setMainOnly({ enabled: false }));');
     expect(FLY_TO_NODE).toContain('const liftsFilter = !!n.filtered;');
+    // The spacing model it flies into must be the post-lift one — every API node back, not just
+    // the picked one — or the camera targets a layout that never appears.
+    expect(FLY_TO_NODE).toContain('|| (liftsFilter ? (revealHidden || !x.hidden) : isNodePainted(x, revealHidden));');
   });
 });
