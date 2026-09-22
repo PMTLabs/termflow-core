@@ -244,6 +244,7 @@ impl<R: Runtime> AppState<R> {
             fabric_process: Arc::new(Mutex::new(crate::state::GenerationSlot::new())),
             fabric_control_port: crate::app_config::resolve_fabric_control_port(),
             keep_running_in_background: Arc::new(AtomicBool::new(false)),
+            exempt_loopback_from_proxy: Arc::new(AtomicBool::new(true)),
             network: Arc::new(RwLock::new(network)),
             effective_endpoints: Arc::new(RwLock::new(Default::default())),
             api_shutdown: Arc::new(Mutex::new(None)),

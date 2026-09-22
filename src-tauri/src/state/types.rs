@@ -467,6 +467,11 @@ pub struct AppState<R: Runtime = Wry> {
     // When true, closing the last window hides to the tray instead of exiting, so
     // peering keeps running in the background (wired by the tray/background task).
     pub keep_running_in_background: Arc<AtomicBool>,
+    // Plan 047: when true (the default), a shell spawned while HTTP_PROXY/HTTPS_PROXY
+    // is set receives NO_PROXY with loopback appended, so an agent inside it reaches
+    // the MCP server on localhost instead of the corporate web gateway. Seeded from
+    // the instance config at startup; read at every spawn.
+    pub exempt_loopback_from_proxy: Arc<AtomicBool>,
     // Current resolved network settings (ports, expose flag, access token).
     pub network: Arc<RwLock<crate::app_config::NetworkConfig>>,
     // The ports this instance ACTUALLY serves on. Distinct from `network`, which
@@ -682,6 +687,7 @@ impl<R: Runtime> Clone for AppState<R> {
             fabric_process: self.fabric_process.clone(),
             fabric_control_port: self.fabric_control_port,
             keep_running_in_background: self.keep_running_in_background.clone(),
+            exempt_loopback_from_proxy: self.exempt_loopback_from_proxy.clone(),
             network: self.network.clone(),
             effective_endpoints: self.effective_endpoints.clone(),
             api_shutdown: self.api_shutdown.clone(),
