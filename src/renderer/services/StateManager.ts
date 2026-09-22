@@ -117,6 +117,7 @@ export function sanitizeCanvasState(
     // Off by default (plan/039 P0: must be explicitly enabled) — same fallback shape as
     // `sidebarOpen`, just the opposite default value.
     dynamicSpacing: typeof c.dynamicSpacing === 'boolean' ? c.dynamicSpacing : false,
+    mainOnly: typeof c.mainOnly === 'boolean' ? c.mainOnly : false,
   };
 }
 
@@ -343,6 +344,7 @@ class StateManagerClass {
           sidebarZoom: state.canvas.sidebarZoom,
           hidden: state.canvas.hidden,
           dynamicSpacing: state.canvas.dynamicSpacing,
+          mainOnly: state.canvas.mainOnly,
         },
       };
 

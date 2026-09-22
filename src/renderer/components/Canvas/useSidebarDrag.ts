@@ -177,7 +177,11 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
         // Hidden siblings move with a sidebar regroup and keep their relative layout: this is
         // translating/regridding a whole destination tab, not Arrange's deliberate skip rule.
         // Preserve them rather than letting them detach and reappear somewhere unrelated.
-        const visibleIds = to.nodeIds.filter((id) => !m.nodes.find((n) => n.terminalId === id)?.hidden);
+        // Main only's filtered nodes (plan 048) are off screen the same way, so they ride along too.
+        const visibleIds = to.nodeIds.filter((id) => {
+          const n = m.nodes.find((x) => x.terminalId === id);
+          return !n?.hidden && !n?.filtered;
+        });
         const hiddenIds = to.nodeIds.filter((id) => !visibleIds.includes(id));
         const r = regridGroup(to.rect, [...visibleIds, terminalId]);
         dispatch(setGroupGeom({ id: toTabId, rect: r.frame }));

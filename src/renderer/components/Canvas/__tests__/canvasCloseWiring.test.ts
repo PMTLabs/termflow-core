@@ -151,7 +151,9 @@ describe('CanvasMode routes the Close Ended button through closeEndedRequests', 
   /** Filters on the same `exited` field the "ended" tint reads — a different predicate here
    *  would close nodes the user cannot see are dead, or leave tinted ones behind. */
   it('feeds it only the nodes the ended tint marks', () => {
-    expect(CLOSE_ALL_ENDED).toContain('model.nodes.filter((n) => n.exited && (revealHidden || !n.hidden))');
+    // `isNodePainted` since plan 048: the same shown-set rule, now also excluding Main only's
+    // filtered nodes, which the user cannot see either.
+    expect(CLOSE_ALL_ENDED).toContain('model.nodes.filter((n) => n.exited && isNodePainted(n, revealHidden))');
   });
 
   it('dispatches through the same event path a single close uses, not a fourth copy', () => {

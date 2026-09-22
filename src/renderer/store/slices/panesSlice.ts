@@ -57,6 +57,13 @@ export interface PaneNode {
    *  spawn to the elevated sidecar instead of the primary one. Never restored
    *  across an app restart — an elevated tab comes back as a normal one. */
   elevated?: boolean;
+  /** Was this terminal created by an API/MCP call rather than by the user?
+   *
+   *  Set only by the API create paths in `App.tsx handleAPICreateTerminalTab` (Mode 0 via
+   *  `runApiCreateMode0`, Modes 1-3 and the auto-split) — never by a UI new tab/split, a canvas
+   *  spawn, or orphan recovery. Absent means "main" (plan 048), which is also what every pane
+   *  persisted before this field existed reads as. Read by Canvas Mode's Main only filter. */
+  apiCreated?: true;
 }
 
 export type DropZone = EdgeZone | 'center';
@@ -170,9 +177,9 @@ function survivingLeaf(node: PaneNode, fallbackName: string): PaneNode {
 function splitLeafInTree(
   tree: PaneNode,
   paneId: string,
-  opts: { direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string },
+  opts: { direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string; apiCreated?: boolean },
 ): string | null {
-  const { direction, shellType, name, terminalId } = opts;
+  const { direction, shellType, name, terminalId, apiCreated } = opts;
   const recurse = (node: PaneNode): string | null => {
     if (node.id === paneId && node.type === 'terminal') {
       const newPaneId = generateId('pn');
@@ -188,6 +195,9 @@ function splitLeafInTree(
         // new sibling spawns Medium while the tab strip still badges it
         // Administrator (plan 045 T8 / runbook step 23).
         elevated: node.elevated,
+        // The NEW pane only — the surviving one keeps its own origin via `survivingLeaf`
+        // (plan 048: origin belongs to whoever created that pane, not to its tab).
+        ...(apiCreated ? { apiCreated: true as const } : {}),
       };
       const originalPane = survivingLeaf(
         node,
@@ -202,6 +212,7 @@ function splitLeafInTree(
       // The node is now a split container, not a terminal leaf — drop the flag so
       // it isn't stranded where no tracker/UI lookup would ever read it.
       delete node.notifyMuted;
+      delete node.apiCreated;
       return newPaneId;
     }
     if (node.type === 'split' && node.children) {
@@ -279,8 +290,8 @@ const panesSlice = createSlice({
       syncActive(state);
     },
 
-    splitPaneInTab: (state, action: PayloadAction<{ tabId: string; paneId?: string; direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string }>) => {
-      const { tabId, paneId, direction, shellType, name, terminalId } = action.payload;
+    splitPaneInTab: (state, action: PayloadAction<{ tabId: string; paneId?: string; direction: 'horizontal' | 'vertical'; shellType?: string; name?: string; terminalId?: string; apiCreated?: boolean }>) => {
+      const { tabId, paneId, direction, shellType, name, terminalId, apiCreated } = action.payload;
       const tree = state.treesByTabId[tabId] ?? null;
       const hasTerminal = !!firstLeafId(tree);
 
@@ -293,6 +304,7 @@ const panesSlice = createSlice({
           terminalId: terminalId || generateId('tm'),
           name: name || 'Terminal',
           shellType,
+          ...(apiCreated ? { apiCreated: true as const } : {}),
         };
         state.treesByTabId[tabId] = seeded;
         state.activePaneByTabId[tabId] = pn;
@@ -302,7 +314,7 @@ const panesSlice = createSlice({
         // tab's first leaf so the requested terminal is still added rather than
         // silently dropped (which would make the API report a misleading success).
         const target = (paneId && findLeaf(tree, paneId)) ? paneId : firstLeafId(tree)!;
-        const newPaneId = splitLeafInTree(tree, target, { direction, shellType, name, terminalId });
+        const newPaneId = splitLeafInTree(tree, target, { direction, shellType, name, terminalId, apiCreated });
         if (newPaneId) {
           state.activePaneByTabId[tabId] = newPaneId;
           // Splitting reshapes the tab — exit maximize (avoid a stale split-node id).
@@ -821,6 +833,7 @@ const panesSlice = createSlice({
           node.children = position === 'before' ? [newPane, originalPane] : [originalPane, newPane];
           delete node.terminalId;
           delete node.notifyMuted; // node is a split container now, not a leaf
+          delete node.apiCreated;
 
           // Set the new pane as active
           state.activePaneId = newPaneId;

@@ -5,7 +5,7 @@ import {
   minimapTransform, minimapRect, minimapToWorld, minimapPanStep, minimapToScreen,
 } from './orientation';
 import { panShortcut, exceedsDragSlop } from './canvasGestures';
-import type { CanvasModel } from './canvasSelectors';
+import { isNodePainted, type CanvasModel } from './canvasSelectors';
 
 /**
  * The workspace, shrunk into a corner (`plan/013` Task 23, design 010 §10 "deep zoom out").
@@ -186,7 +186,7 @@ export const CanvasMinimap: React.FC<{
       {shownGroups.map((g) => (
         <div key={g.tabId} className="canvas-minigroup" style={box(g.rect)} />
       ))}
-      {model.nodes.filter((n) => revealHidden || !n.hidden).map((n) => (
+      {model.nodes.filter((n) => isNodePainted(n, revealHidden)).map((n) => (
         <div
           key={n.terminalId}
           className={`canvas-mininode${n.isRunning ? ' running' : ''}`}

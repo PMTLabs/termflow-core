@@ -25,6 +25,10 @@ export interface CanvasPersisted {
    *  in. Persisted like every other toolbar toggle, but never itself moves a node or group —
    *  see `canvasSpacing.applySpacing`. Off by default; must be explicitly enabled. */
   dynamicSpacing: boolean;
+  /** Toolbar toggle (plan 048): paint only "main" terminals — the ones the user opened, not
+   *  those an API/MCP call created (`PaneNode.apiCreated`). A paint filter like `hidden`, never
+   *  an unmount. Persisted like `dynamicSpacing`; off by default. */
+  mainOnly: boolean;
 }
 
 /**
@@ -105,6 +109,7 @@ const initialState: CanvasState = {
   sidebarZoom: 1,
   hidden: {},
   dynamicSpacing: false,
+  mainOnly: false,
   revealHidden: false,
   selectedId: null,
   selectedEdgeId: null,
@@ -293,6 +298,18 @@ const canvasSlice = createSlice({
     setDynamicSpacing: (state, action: PayloadAction<boolean>) => {
       state.dynamicSpacing = action.payload;
     },
+    /** `apiTerminalIds` are the nodes the filter is about to stop painting. The slice cannot
+     *  derive them — origin lives on `PaneNode`, in `panes` — so the caller passes them, and a
+     *  selection, keyboard focus or overlay on one of them is dropped exactly as hiding does. */
+    setMainOnly: (state, action: PayloadAction<{ enabled: boolean; apiTerminalIds?: string[] }>) => {
+      const { enabled, apiTerminalIds = [] } = action.payload;
+      state.mainOnly = enabled;
+      if (!enabled) return;
+      const filtered = new Set(apiTerminalIds);
+      if (state.selectedId && filtered.has(state.selectedId)) state.selectedId = null;
+      if (state.focusedId && filtered.has(state.focusedId)) state.focusedId = null;
+      if (state.overlayId && filtered.has(state.overlayId)) state.overlayId = null;
+    },
     setRevealHidden: (state, action: PayloadAction<boolean>) => {
       state.revealHidden = action.payload;
       if (!action.payload) reconcileHiddenInteraction(state);
@@ -337,6 +354,7 @@ const canvasSlice = createSlice({
         state.hidden = Object.fromEntries(Object.entries(p.hidden).filter(([, value]) => value === true)) as Record<string, true>;
       }
       if (typeof p.dynamicSpacing === 'boolean') state.dynamicSpacing = p.dynamicSpacing;
+      if (typeof p.mainOnly === 'boolean') state.mainOnly = p.mainOnly;
     },
   },
 });
@@ -346,7 +364,7 @@ export const {
   applyArrange, selectNode, selectEdge, focusNode, touchNode, setOverlayNode, setEdges, addEdge,
   removeEdge, updateEdge, setNearestGroup,
   setSidebarOpen, setSidebarWidth, setSidebarZoom, setNodeHidden, unhideAll, setRevealHidden,
-  setDynamicSpacing, pruneCanvasGeometry, hydrateCanvas,
+  setDynamicSpacing, setMainOnly, pruneCanvasGeometry, hydrateCanvas,
 } = canvasSlice.actions;
 
 export default canvasSlice.reducer;
