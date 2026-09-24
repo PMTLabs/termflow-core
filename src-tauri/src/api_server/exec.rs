@@ -24,6 +24,7 @@ pub(crate) fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static 
         // does not.
         "codex" | "codex-probe" => Some(("", "\r")),
         "opencode" | "opencode-probe" => Some(("", "\r")),
+        "pi" | "pi-probe" => Some(("", "\r")),
         "chatgpt" => Some(("", shell_enter)),
         "copilot" | "copilot-probe" => Some(("", "\x1b[B\r")), // Down Arrow + Enter for interactive menu bypass
         "default" | "shell" => {

@@ -314,6 +314,12 @@ fn derive_interpreted_label(cmd: &[String]) -> Option<String> {
         ("gemini-cli", "gemini"),
         ("@google/gemini", "gemini"),
         ("cursor-agent", "cursor-agent"),
+        ("pi-coding-agent", "pi"),
+        ("@earendil-works/pi", "pi"),
+        ("packages/coding-agent", "pi"),
+        ("packages\\coding-agent", "pi"),
+        ("node_modules/pi/", "pi"),
+        ("node_modules\\pi\\", "pi"),
     ];
     for (needle, label) in MARKERS {
         if joined.contains(needle) {
@@ -665,6 +671,11 @@ mod chain_tests {
         let gemini = vec!["node".into(), "/usr/lib/node_modules/@google/gemini-cli/dist/gemini.js".into()];
         assert_eq!(detect_agent("node", &gemini), Some("gemini".into()));
         assert_eq!(detect_agent("python", &["python".into(), "-m".into(), "aider".into()]), Some("aider".into()));
+        let pi = vec![
+            "node".into(),
+            r"C:\Users\x\AppData\Local\pi-node\current\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js".into(),
+        ];
+        assert_eq!(detect_agent("node", &pi), Some("pi".into()));
     }
 
     #[test]

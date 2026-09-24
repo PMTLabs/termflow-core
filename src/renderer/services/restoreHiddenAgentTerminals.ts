@@ -41,6 +41,7 @@ const AGENT_ICONS: Record<string, string> = {
   gemini: '♦',
   copilot: '➤',
   aider: '⚑',
+  pi: 'π',
 };
 
 export interface RestoreResult {
