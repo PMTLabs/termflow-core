@@ -572,6 +572,10 @@ class BrowserBridge implements ElectronAPI {
         // No tray / background process in the browser host.
     }
 
+    async setExemptLoopbackFromProxy(_enabled: boolean): Promise<void> {
+        // The browser host spawns no shells.
+    }
+
     // --- Terminal Automations (Plan 028) ---
     //
     // DELIBERATELY NOT IMPLEMENTED, and the absence is the interface. The rule store is SQLite

@@ -226,6 +226,7 @@ interface ElectronAPI {
   fabricStatus: () => Promise<FabricStatus>;
   // Background mode (Plan 010)
   setKeepRunningInBackground: (enabled: boolean) => Promise<void>;
+  setExemptLoopbackFromProxy: (enabled: boolean) => Promise<void>;
   // Terminal Automations (Plan 028)
   listAutomations: () => Promise<AutomationRule[]>;
   getAutomationRuntime: () => Promise<AutomationStatePayload>;
@@ -908,6 +909,11 @@ const tauriBridge: ElectronAPI = {
   // Background mode (Plan 010): persist + mirror into the Rust AppState atomic.
   setKeepRunningInBackground: async (enabled) => {
     await invoke('set_keep_running_in_background', { enabled });
+  },
+
+  // Loopback proxy exemption (Plan 047): persist + mirror into the Rust AppState atomic.
+  setExemptLoopbackFromProxy: async (enabled) => {
+    await invoke('set_exempt_loopback_from_proxy', { enabled });
   },
 
   // --- Terminal Automations (Plan 028) ---

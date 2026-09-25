@@ -24,3 +24,23 @@ test("a stalled backend aborts the request via the timeout instead of hanging", 
         server.stop(true);
     }
 });
+
+test("the loopback API client ignores a machine-wide HTTP_PROXY", () => {
+    // Bun caches NO_PROXY once parsed and createApiClient mutates it process-wide, so the
+    // corporate shape (proxy set, localhost absent from NO_PROXY) needs a fresh process.
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined && !/^(https?|all|no)_proxy$/i.test(k)) env[k] = v;
+    }
+    env.HTTP_PROXY = env.http_proxy = "http://127.0.0.1:9";
+    const child = Bun.spawnSync([process.execPath, "run", `${import.meta.dir}/proxyProbe.child.ts`], {
+        env,
+        stdout: "pipe",
+        stderr: "pipe",
+    });
+    const report = `${child.stdout.toString()}
+${child.stderr.toString()}`;
+    expect(report).toContain("control: proxied");
+    expect(report).toContain("client: direct");
+    expect(child.exitCode).toBe(0);
+});
