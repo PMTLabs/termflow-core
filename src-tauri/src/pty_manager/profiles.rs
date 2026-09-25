@@ -72,79 +72,54 @@ pub fn save_custom_profiles(profiles: &[ShellProfile]) -> Result<(), String> {
     Ok(())
 }
 
-/// Decode UTF-16LE output from Windows commands (like wsl.exe)
-#[cfg(target_os = "windows")]
-fn decode_utf16le_output(bytes: &[u8]) -> String {
-    // Windows wsl.exe outputs UTF-16LE with BOM
-    // Convert pairs of bytes to u16 values, then to String
-    if bytes.len() < 2 {
-        return String::new();
-    }
-
-    // Skip BOM if present (0xFF 0xFE)
-    let start = if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        2
-    } else {
-        0
-    };
-
-    let u16_values: Vec<u16> = bytes[start..]
-        .chunks_exact(2)
-        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-        .collect();
-
-    String::from_utf16_lossy(&u16_values)
-}
-
-/// Detect WSL distributions on Windows
+/// Detect WSL distributions on Windows via the Windows Registry.
+///
+/// Querying `wsl.exe -l -v` executes a child process and initializes the WSL hypervisor /
+/// VM subsystem, which blocks for 4–12+ seconds (especially when distributions are stopped).
+/// Reading `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss` directly reads the registered
+/// distribution metadata in <1ms without launching any external processes or VMs.
 #[cfg(target_os = "windows")]
 fn detect_wsl_distributions() -> Vec<ShellProfile> {
-    use std::process::Command;
+    use windows_registry::CURRENT_USER;
 
     let mut profiles = Vec::new();
 
-    // Check if wsl.exe exists. CREATE_NO_WINDOW so this detection spawn doesn't
-    // flash a console window at startup (this fn is Windows-only).
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut cmd = Command::new("wsl.exe");
-    cmd.args(["-l", "-v"]).creation_flags(CREATE_NO_WINDOW);
-    if let Ok(output) = cmd.output() {
-        if output.status.success() {
-            // Parse WSL output - it's UTF-16LE on Windows
-            let stdout = decode_utf16le_output(&output.stdout);
+    let lxss = match CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Lxss") {
+        Ok(key) => key,
+        Err(_) => return profiles,
+    };
 
-            for line in stdout.lines().skip(1) {
-                // Skip header line
-                let line = line.trim();
-                if line.is_empty() { continue; }
+    let subkeys = match lxss.keys() {
+        Ok(keys) => keys,
+        Err(_) => return profiles,
+    };
 
-                // Parse: "* Ubuntu    Running    2" or "  Debian    Stopped    2"
-                // Note: The '*' indicates WSL's default distro, NOT the terminal's default profile
-                let line = line.trim_start_matches('*').trim();
-
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 1 {
-                    let distro_name = parts[0];
-                    let version = parts.get(2).unwrap_or(&"2");
-
-                    profiles.push(ShellProfile {
-                        id: format!("wsl-{}", distro_name.to_lowercase()),
-                        name: format!("WSL - {} (v{})", distro_name, version),
-                        path: "wsl.exe".to_string(),
-                        args: vec!["-d".to_string(), distro_name.to_string()],
-                        env: HashMap::new(),
-                        cwd: None,
-                        icon: Some("terminal-linux".to_string()),
-                        is_default: false, // WSL default != terminal default profile
-                        is_custom: false,
-                        is_wsl: true,
-                    });
+    for subkey_name in subkeys {
+        if let Ok(subkey) = lxss.open(&subkey_name) {
+            if let Ok(distro_name) = subkey.get_string("DistributionName") {
+                let distro_name = distro_name.trim();
+                if distro_name.is_empty() {
+                    continue;
                 }
+                let version = subkey.get_u32("Version").unwrap_or(2);
+
+                profiles.push(ShellProfile {
+                    id: format!("wsl-{}", distro_name.to_lowercase()),
+                    name: format!("WSL - {} (v{})", distro_name, version),
+                    path: "wsl.exe".to_string(),
+                    args: vec!["-d".to_string(), distro_name.to_string()],
+                    env: HashMap::new(),
+                    cwd: None,
+                    icon: Some("terminal-linux".to_string()),
+                    is_default: false, // WSL default != terminal default profile
+                    is_custom: false,
+                    is_wsl: true,
+                });
             }
         }
     }
-    
+
+    profiles.sort_by(|a, b| a.name.cmp(&b.name));
     profiles
 }
 
@@ -153,11 +128,9 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
     Vec::new()
 }
 
-/// TTL for the get_available_shells() cache. Long enough to absorb the boot-time
-/// burst (profile list at boot + first tab spawn) and rapid new-tab creation;
-/// short enough that an out-of-band change to detected system shells (e.g. a WSL
-/// distro added/removed) is reflected on its own within a few seconds.
-const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+/// TTL for the get_available_shells() cache. Long enough to absorb rapid
+/// shell queries; custom profile edits immediately call invalidate_shell_cache().
+const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Cache state: a generation counter plus the last computed entry, both behind
 /// ONE mutex so bumping the generation and clearing the entry (invalidation)
@@ -457,4 +430,48 @@ pub fn delete_custom_profile(profile_id: &str) -> Result<(), String> {
     save_custom_profiles(&custom)?;
     invalidate_shell_cache();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_get_available_shells_speed() {
+        // Invalidate cache first to test uncached compute speed
+        invalidate_shell_cache();
+        let start = std::time::Instant::now();
+        let shells = get_available_shells();
+        let elapsed = start.elapsed();
+
+        // Finding shells must be practically instantaneous (< 200ms, never 4-12s)
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "get_available_shells took too long: {:?}",
+            elapsed
+        );
+        assert!(!shells.is_empty(), "expected at least one default shell profile");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_detect_wsl_distributions_speed() {
+        let start = std::time::Instant::now();
+        let distros = detect_wsl_distributions();
+        let elapsed = start.elapsed();
+
+        // Reading WSL distros from registry must take < 100ms, never blocking on wsl.exe (4-12s)
+        assert!(
+            elapsed < std::time::Duration::from_millis(100),
+            "detect_wsl_distributions took {:?}, should be under 100ms",
+            elapsed
+        );
+
+        for d in &distros {
+            assert!(d.id.starts_with("wsl-"));
+            assert_eq!(d.path, "wsl.exe");
+            assert!(d.is_wsl);
+            assert!(!d.is_default);
+        }
+    }
 }

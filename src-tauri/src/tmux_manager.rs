@@ -213,26 +213,48 @@ pub fn detect_tmux_availability() -> TmuxConfig {
 
 /// Detect available WSL distributions (Windows only).
 ///
-/// Returns a list of WSL distributions with their tmux availability status.
+/// Discovers WSL distributions via Windows Registry instead of invoking `wsl.exe --list --verbose`
+/// which can block for seconds or hang when distros are stopped.
 #[cfg(target_os = "windows")]
 pub fn detect_wsl_distros() -> Result<Vec<WslDistro>, TmuxError> {
-    let mut cmd = Command::new("wsl.exe");
-    cmd.args(["--list", "--verbose"]);
-    hide_console(&mut cmd);
-    let output = cmd
-        .output()
-        .map_err(|e| TmuxError::WslError(format!("Failed to run wsl.exe: {}", e)))?;
+    use windows_registry::CURRENT_USER;
 
-    if !output.status.success() {
-        return Err(TmuxError::WslError(format!(
-            "wsl --list --verbose failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+    let lxss = match CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Lxss") {
+        Ok(key) => key,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let default_guid = lxss.get_string("DefaultDistribution").unwrap_or_default();
+    let subkeys = match lxss.keys() {
+        Ok(keys) => keys,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    let mut distros = Vec::new();
+    for subkey_name in subkeys {
+        if let Ok(subkey) = lxss.open(&subkey_name) {
+            if let Ok(name) = subkey.get_string("DistributionName") {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    continue;
+                }
+                let version = subkey.get_u32("Version").unwrap_or(2) as u8;
+                let is_default = !default_guid.is_empty() && subkey_name.eq_ignore_ascii_case(&default_guid);
+
+                // Default has_tmux to false to avoid booting stopped WSL distros at startup.
+                // Callers can check specific running distros with `check_wsl_tmux` if needed.
+                distros.push(WslDistro {
+                    name,
+                    is_default,
+                    version,
+                    state: "Registered".to_string(),
+                    has_tmux: false,
+                });
+            }
+        }
     }
 
-    // WSL output is UTF-16LE encoded on Windows
-    let stdout = decode_wsl_output(&output.stdout);
-    parse_wsl_list_output(&stdout)
+    Ok(distros)
 }
 
 /// Detect available WSL distributions (stub for non-Windows platforms).
@@ -244,6 +266,7 @@ pub fn detect_wsl_distros() -> Result<Vec<WslDistro>, TmuxError> {
 
 /// Decode WSL command output from UTF-16LE to String.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn decode_wsl_output(bytes: &[u8]) -> String {
     // WSL outputs UTF-16LE on Windows
     let u16_iter = bytes
@@ -257,6 +280,7 @@ fn decode_wsl_output(bytes: &[u8]) -> String {
 
 /// Parse the output of `wsl --list --verbose`.
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn parse_wsl_list_output(output: &str) -> Result<Vec<WslDistro>, TmuxError> {
     let mut distros = Vec::new();
 
