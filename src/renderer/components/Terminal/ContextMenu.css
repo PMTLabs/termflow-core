@@ -379,3 +379,102 @@
   --menu-accelerator-color: #969696;
   --menu-separator: #454545;
 }
+
+/* Centered flyout / popup (e.g. Snippets popup opened via hotkey) */
+.context-menu.is-centered {
+  position: fixed;
+  top: 50% !important;
+  left: 50% !important;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  width: auto !important;
+  min-width: 0 !important;
+  z-index: 9900;
+}
+
+.context-menu.is-centered .context-menu-submenu-host {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.context-menu.is-centered .context-menu-submenu-host > .context-menu-flyout[data-flyout-depth="0"] {
+  position: relative;
+  top: auto;
+  left: auto;
+  margin: 0;
+}
+
+/* Terminal Snippets Popup (Ctrl+Shift+A hotkey): larger font size and spacious layout */
+.context-menu.terminal-snippets-popup .context-menu-flyout {
+  width: 680px;
+  min-width: 560px;
+  max-width: min(860px, 92vw);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px var(--menu-border, #454545);
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout.is-narrow {
+  width: 380px;
+  min-width: 300px;
+  max-width: 460px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-header {
+  margin: 6px 12px 10px;
+  gap: 8px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-search {
+  font-size: 16px;
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-search::placeholder {
+  font-size: 16px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-toggle {
+  width: 34px;
+  font-size: 16px;
+  border-radius: 4px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-list {
+  max-height: 420px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-row {
+  font-size: 15px;
+  padding: 8px 14px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-icon {
+  width: 22px;
+  margin-right: 8px;
+  font-size: 16px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-label {
+  font-size: 15px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-detail {
+  font-size: 13px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-submenu-arrow {
+  font-size: 13px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-row-action {
+  font-size: 14px;
+  padding: 7px 14px;
+}
+
+.context-menu.terminal-snippets-popup .context-menu-flyout-flash {
+  font-size: 12px;
+}
+

@@ -247,6 +247,8 @@ interface ContextMenuProps {
    * that dialog is open, and the listeners are simply not installed for its duration.
    */
   suppressDismiss?: boolean;
+  /** Center the menu or standalone submenu in the main window viewport. */
+  centered?: boolean;
 }
 
 /** Keep-on-screen margin, matching the menu's own 5px in the effect below. */
@@ -325,6 +327,8 @@ interface FlyoutPanelProps {
   onCloseMenu: () => void;
   /** Mirrors the host's dismissal suspension so focus returns when its modal closes. */
   suppressDismiss?: boolean;
+  /** When true at depth 0, panel is centered in window; bypass edge flip. */
+  centered?: boolean;
 }
 
 /**
@@ -376,6 +380,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   onCloseSelf,
   onCloseMenu,
   suppressDismiss = false,
+  centered = false,
 }) => {
   const uid = useId();
   // One per PANEL, not one shared down the cascade: each panel owns the rows it draws, and a
@@ -390,6 +395,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   const [activeIdx, setActiveIdx] = useState(0);
   const [openFolderId, setOpenFolderId] = useState<string | null>(null);
   const [openContextRowId, setOpenContextRowId] = useState<string | null>(null);
+  const [clickCoords, setClickCoords] = useState<{ x: number; y: number } | null>(null);
   const [contextActionPos, setContextActionPos] = useState<{ top: number; left: number } | null>(null);
   const [focusContextAction, setFocusContextAction] = useState(false);
   const [flashedActionId, setFlashedActionId] = useState<string | null>(null);
@@ -498,6 +504,28 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     const rowRect = anchor.getBoundingClientRect();
     const actionsW = actions.offsetWidth;
     const actionsH = actions.offsetHeight;
+
+    if (clickCoords && (clickCoords.x > 0 || clickCoords.y > 0)) {
+      const desiredViewportX = clickCoords.x;
+      const desiredViewportY = clickCoords.y;
+      const clampedViewportX = Math.min(
+        Math.max(desiredViewportX, EDGE_MARGIN),
+        Math.max(EDGE_MARGIN, window.innerWidth - actionsW - EDGE_MARGIN),
+      );
+      const clampedViewportY = Math.min(
+        Math.max(desiredViewportY, EDGE_MARGIN),
+        Math.max(EDGE_MARGIN, window.innerHeight - actionsH - EDGE_MARGIN),
+      );
+
+      const left = clampedViewportX - panelRect.left;
+      const top = clampedViewportY - panelRect.top;
+
+      setContextActionPos((prev) => (
+        prev && prev.top === top && prev.left === left ? prev : { top, left }
+      ));
+      return;
+    }
+
     const baseTop = rowRect.top - panelRect.top;
     const maxTop = (window.innerHeight - EDGE_MARGIN - actionsH) - panelRect.top;
     const top = Math.min(Math.max(baseTop, 0), Math.max(0, maxTop));
@@ -519,7 +547,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     setContextActionPos((prev) => (
       prev && prev.top === top && prev.left === left ? prev : { top, left }
     ));
-  }, [contextRow, visible]);
+  }, [contextRow, visible, clickCoords]);
 
   // Keep the active row in view as the arrows move past the `max-height` (§4.4).
   useEffect(() => {
@@ -529,6 +557,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
   // Edge-aware placement: flip to the left of the anchor when the panel would leave
   // the viewport on the right, and lift it when it would run off the bottom.
   useLayoutEffect(() => {
+    if (depth === 0 && centered) return;
     const panel = panelRef.current;
     // The anchor this panel is absolutely positioned against — `.context-menu-submenu-host`
     // at depth 0, the PARENT PANEL at depth 1+ (see the render, and the note on this
@@ -558,7 +587,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
       shiftY: overflowY > 0 ? -Math.min(overflowY, Math.max(0, h.top - EDGE_MARGIN)) : 0,
     };
     setFlip((prev) => (prev.left === next.left && prev.shiftY === next.shiftY ? prev : next));
-  }, [visible, parentFlippedLeft]);
+  }, [visible, parentFlippedLeft, depth, centered]);
 
   const activate = useCallback(
     (row: ContextMenuFlyoutRow) => {
@@ -602,6 +631,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
         e.preventDefault();
         e.stopPropagation();
         setOpenContextRowId(row.id);
+        setClickCoords(null);
         setContextActionPos((prev) => (openContextRowId === row.id ? prev : null));
         setFocusContextAction(true);
       }
@@ -692,6 +722,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
           onMouseEnter={() => {
             if (openContextRowId !== null && row.id !== openContextRowId) {
               setOpenContextRowId(null);
+              setClickCoords(null);
             }
             const i = navigable.indexOf(row);
             if (i >= 0) setActiveIdx(i);
@@ -704,6 +735,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             e.preventDefault();
             e.stopPropagation();
             setOpenContextRowId(row.id);
+            setClickCoords(e.clientX > 0 || e.clientY > 0 ? { x: e.clientX, y: e.clientY } : null);
             setContextActionPos((prev) => (openContextRowId === row.id ? prev : null));
             setKeyboardNav(false);
           }}
@@ -828,6 +860,7 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
             narrow: undefined,
           }}
           depth={depth + 1}
+          centered={false}
           parentFlippedLeft={flip.left}
           onCloseSelf={closeFolder}
           onCloseMenu={onCloseMenu}
@@ -938,6 +971,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   instantTitles = false,
   standaloneSubmenu,
   suppressDismiss = false,
+  centered = false,
 }) => {
   /** No menu chrome, no items — one flyout, at the requested point. */
   const bare = standaloneSubmenu != null;
@@ -1068,6 +1102,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
   // Adjust position to keep menu on screen
   useEffect(() => {
+    if (centered) return;
     if (menuRef.current) {
       const rect = menuRef.current.getBoundingClientRect();
       const adjustedX = Math.min(x, window.innerWidth - rect.width - 5);
@@ -1076,7 +1111,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
       menuRef.current.style.left = `${Math.max(5, adjustedX)}px`;
       menuRef.current.style.top = `${Math.max(5, adjustedY)}px`;
     }
-  }, [x, y]);
+  }, [x, y, centered]);
 
   // Portal to <body> so the menu floats above the terminal and is never clipped
   // by a pane ancestor's `overflow: hidden` / stacking context — and so
@@ -1084,8 +1119,8 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
   return createPortal(
     <div
       ref={menuRef}
-      className={`context-menu${bare ? ' is-bare' : ''}${className ? ` ${className}` : ''}`}
-      style={{ left: x, top: y }}
+      className={`context-menu${bare ? ' is-bare' : ''}${centered ? ' is-centered' : ''}${className ? ` ${className}` : ''}`}
+      style={centered ? undefined : { left: x, top: y }}
     >
       {items.map((item, index) => {
         // Everything except the one flyout is skipped — including the separators, which
@@ -1215,6 +1250,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                   flyout={item.submenu!}
                   depth={0}
                   instantTitles={instantTitles}
+                  centered={centered}
                   // With no menu behind it, retiring the panel alone would leave an empty
                   // box on screen still swallowing the next outside click. Escape and Tab
                   // therefore mean "dismiss", which is what they already meant to the user.

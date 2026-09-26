@@ -323,12 +323,15 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
     await openSnippetActions('term-b');
     await act(async () => action('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true })));
     expect(document.querySelector('.confirm-dialog')).not.toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
     await act(async () => document.querySelector<HTMLButtonElement>('.confirm-dialog [data-dialog-cancel]')!.click());
     expect(store.getState().settings.snippets).toEqual(seedSnippets);
+    expect(document.querySelector('.confirm-dialog')).toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
 
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent('keydown', {
-        key: 's', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
+        key: 'a', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true,
       }));
     });
     const standaloneRow = flyoutRows().find((candidate) => candidate.dataset.rowId === `snippet-${secondSnippet.id}`)!;
@@ -340,11 +343,15 @@ describe('mounted TerminalDisplay plan 041 hosts', () => {
 
     await openSnippetActions('term-b');
     await act(async () => action('Delete').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(document.querySelector('.confirm-dialog')).not.toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
     const confirmBefore = dispatchSpy.mock.calls.length;
     await act(async () => document.querySelector<HTMLButtonElement>('.confirm-dialog [data-dialog-confirm]')!.click());
     expect(dispatchSpy.mock.calls.length).toBeGreaterThan(confirmBefore);
     expect(dispatchSpy.mock.calls.some(([value]) => value.type === 'settings/removeSnippet' && value.payload === secondSnippet.id)).toBe(true);
     expect(store.getState().settings.snippets.map((snippet) => snippet.id)).toEqual([firstSnippet.id]);
     expect(store.getState().settings.snippets[0]).toEqual(firstSnippet);
+    expect(document.querySelector('.confirm-dialog')).toBeNull();
+    expect(document.querySelector('.context-menu')).not.toBeNull();
   });
 });

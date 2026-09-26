@@ -53,11 +53,10 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
    * is talking to" on both the pane and the canvas overlay, so one registration serves
    * both surfaces.
    *
-   * `Ctrl+Shift+S` is free app-wide — not in RESERVED_COMBOS, not held by any action above,
-   * and, being a Ctrl+SHIFT chord, not a control code any shell reads (Ctrl+S alone is
-   * XOFF and would freeze the terminal, which is exactly why the Shift is not optional).
+   * `Ctrl+Shift+A` is free app-wide — not in RESERVED_COMBOS, not held by any action above,
+   * and, being a Ctrl+SHIFT chord, not a control code any shell reads.
    */
-  { id: 'openSnippets', label: 'Open Snippets Menu', defaultCombo: 'Ctrl+Shift+S' },
+  { id: 'openSnippets', label: 'Open Snippets Menu', defaultCombo: 'Ctrl+Shift+A' },
   { id: 'toggleFullScreen', label: 'Toggle Fullscreen', defaultCombo: 'F11' },
   { id: 'toggleCanvasMode', label: 'Toggle Canvas Mode', defaultCombo: 'Ctrl+Shift+Alt+Space' },
 

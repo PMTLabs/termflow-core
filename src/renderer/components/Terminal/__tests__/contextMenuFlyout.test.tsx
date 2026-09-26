@@ -2052,6 +2052,48 @@ describe('snippet row context actions', () => {
         }
     });
 
+    it('positions actions at the mouse click coordinates when right-clicked', async () => {
+        const previousWidth = window.innerWidth;
+        const previousHeight = window.innerHeight;
+        const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetWidth');
+        const offsetHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
+        Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1000 });
+        Object.defineProperty(window, 'innerHeight', { configurable: true, value: 800 });
+        Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
+            configurable: true,
+            get() { return this.classList.contains('context-menu-flyout-row-actions') ? 120 : 0; },
+        });
+        Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
+            configurable: true,
+            get() { return this.classList.contains('context-menu-flyout-row-actions') ? 100 : 0; },
+        });
+        try {
+            await render(menuWith({
+                rows: [row('a', 'alpha', {
+                    contextActions: [{ id: 'copy', label: 'Copy', onSelect: jest.fn() }],
+                })],
+            }));
+            await click(menuItem('Snippets'));
+            const rowEl = rows()[0];
+            const flyout = panel()!;
+            jest.spyOn(flyout, 'getBoundingClientRect').mockReturnValue({
+                top: 100, left: 100, right: 300, bottom: 400, width: 200, height: 300,
+                x: 100, y: 100, toJSON: () => ({}),
+            });
+            await fire(rowEl, new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 250, clientY: 180 }));
+            const actions = document.querySelector<HTMLElement>('.context-menu-flyout-row-actions')!;
+            expect(actions).not.toBeNull();
+            // Mouse click (250, 180) minus panel top-left (100, 100) = (150, 80)
+            expect(actions.style.left).toBe('150px');
+            expect(actions.style.top).toBe('80px');
+        } finally {
+            Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+            Object.defineProperty(window, 'innerHeight', { configurable: true, value: previousHeight });
+            if (offsetWidth) Object.defineProperty(HTMLElement.prototype, 'offsetWidth', offsetWidth);
+            if (offsetHeight) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', offsetHeight);
+        }
+    });
+
     it('opens from the active row by keyboard, navigates actions, activates, and returns focus on Escape', async () => {
         const copy = jest.fn();
         const insert = jest.fn();

@@ -233,6 +233,8 @@ describe('buildSnippetsMenuItem — flat view (the default arrangement)', () => 
     const expectActions = (row: any) => {
       expect(row).toBeDefined();
       expect(row.contextActions.map((a: any) => a.id)).toEqual(['copy', 'insert', 'edit', 'delete']);
+      expect(row.contextActions.find((a: any) => a.id === 'edit').keepMenuOpen).toBe(true);
+      expect(row.contextActions.find((a: any) => a.id === 'delete').keepMenuOpen).toBe(true);
       const expectedId = row.id.replace(/^snippet-/, '');
       for (const [actionId, callback] of [
         ['copy', callbacks.onCopy], ['edit', callbacks.onEdit], ['delete', callbacks.onDelete],
@@ -754,7 +756,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
     expect(body).toMatch(/onAddNew: \(seedText\) => openSnippetDialog\(seedText\)/);
     expect(body).not.toContain('closeMenu()');
     expect(DISPLAY).toMatch(/onOpenSettings: \(\) => \{ closeMenu\(\); openSettingsTab\('snippets'\); \}/);
-    expect((DISPLAY.match(/suppressDismiss=\{snippetDialogOpen\}/g) ?? [])).toHaveLength(2);
+    expect((DISPLAY.match(/suppressDismiss=\{snippetDialogOpen \|\| snippetDeleteTarget !== null\}/g) ?? [])).toHaveLength(2);
   });
 
   /**
@@ -811,7 +813,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
       expect(code).toMatch(re);
     }
     // The dialog is the one deliberate exception, and it closes the loop itself.
-    expect(code).toMatch(/snippetDialogOpenRef\.current\) return;/);
+    expect(code).toMatch(/snippetDialogOpenRef\.current \|\| snippetDeleteTargetRef\.current !== null\) return;/);
     expect(code).toMatch(/const closeSnippetDialog = useCallback\(\(\) => \{[\s\S]*?refocusTerminal\(\);/);
   });
 

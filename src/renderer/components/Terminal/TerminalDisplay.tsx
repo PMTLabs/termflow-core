@@ -260,10 +260,14 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * the ref is what lets that one path opt out of the refocus.
    */
   const snippetDialogOpenRef = useRef(false);
+  const snippetDeleteTargetRef = useRef<Snippet | null>(null);
   useEffect(() => {
     contextMenuOpenRef.current = contextMenu !== null;
     snippetsMenuOpenRef.current = snippetsMenu !== null;
   }, [contextMenu, snippetsMenu]);
+  useEffect(() => {
+    snippetDeleteTargetRef.current = snippetDeleteTarget;
+  }, [snippetDeleteTarget]);
   /**
    * Put the keyboard back in the terminal.
    *
@@ -280,7 +284,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    * checked so the intent is stated rather than implied.
    */
   const refocusTerminal = useCallback(() => {
-    if (snippetDialogOpenRef.current) return;
+    if (snippetDialogOpenRef.current || snippetDeleteTargetRef.current !== null) return;
     engineRef.current?.focus();
   }, []);
   const closeContextMenu = useCallback(() => {
@@ -358,21 +362,15 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
    */
   const engineHostRef = useRef<HTMLElement | null>(null);
   /**
-   * Open the Snippets flyout at the terminal's CURSOR (plan/029 §6) — the keyboard
+   * Open the Snippets flyout at the center of the main window (plan/029 §6) — the keyboard
    * equivalent of right-clicking and picking Snippets.
    *
-   * Anchored at the cursor rather than at a corner because that is where the user is
-   * already looking, and because it is the point the inserted text will appear at.
-   * `getCursorPixelPosition` is relative to the engine's container and returns null when
-   * the cursor is scrolled out of view, so the container's own top-left is the fallback.
+   * Anchored at the center of the main window with increased font size.
    */
   const openSnippetsMenu = useCallback(() => {
-    const rect = engineHostRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const cursor = engineRef.current?.getCursorPixelPosition() ?? null;
     setSnippetsMenu({
-      x: rect.left + (cursor?.left ?? 0),
-      y: rect.top + (cursor ? cursor.top + cursor.cellHeight : 0),
+      x: typeof window !== 'undefined' ? Math.round(window.innerWidth / 2) : 0,
+      y: typeof window !== 'undefined' ? Math.round(window.innerHeight / 2) : 0,
       selectionText: engineRef.current?.getCopyableSelection().trim() || undefined,
     });
   }, []);
@@ -842,7 +840,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
 
   /**
    * The Snippets item, built ONCE for both of its hosts: the right-click menu and the
-   * `Ctrl+Shift+S` menu. Two call sites building their own would be two places for a
+   * `Ctrl+Shift+A` menu. Two call sites building their own would be two places for a
    * prop to be forgotten — and the toggle, the insert target and the dialog hook all
    * have to behave identically whichever way the flyout was opened.
    */
@@ -1129,11 +1127,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           y={contextMenu.y}
           items={getContextMenuItems()}
           onClose={closeContextMenu}
-          suppressDismiss={snippetDialogOpen}
+          suppressDismiss={snippetDialogOpen || snippetDeleteTarget !== null}
         />
       )}
       {/* plan/029 §6 — the same flyout the right-click menu carries, opened straight from
-          the keyboard: the panel alone, at the cursor, with its search box focused. */}
+          the keyboard: the panel alone, at the center of the main window, with its search box focused. */}
       {snippetsMenu && (
         <ContextMenu
           x={snippetsMenu.x}
@@ -1141,7 +1139,9 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
           items={[snippetsMenuItem(closeSnippetsMenu, snippetsMenu.selectionText)]}
           standaloneSubmenu={0}
           onClose={closeSnippetsMenu}
-          suppressDismiss={snippetDialogOpen}
+          suppressDismiss={snippetDialogOpen || snippetDeleteTarget !== null}
+          centered
+          className="terminal-snippets-popup"
         />
       )}
       {pathPicker && (
