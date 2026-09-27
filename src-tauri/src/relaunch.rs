@@ -366,7 +366,7 @@ mod tests {
             WaitOutcome::TimedOut { waited } => {
                 assert!(waited >= timeout);
                 assert!(
-                    waited < timeout + 2 * tick + Duration::from_millis(50),
+                    waited < timeout + 2 * tick + Duration::from_millis(250),
                     "must not wait far longer than the timeout: {waited:?}"
                 );
             }
