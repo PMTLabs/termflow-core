@@ -246,6 +246,24 @@ pub fn set_keep_running_in_background(
     )
 }
 
+/// Plan 047: persist the "bypass the system proxy for localhost in spawned shells"
+/// toggle and mirror it into the `AppState` atomic every spawn path reads. Takes
+/// effect for the next terminal opened; already-running shells keep their env.
+#[tauri::command]
+pub fn set_exempt_loopback_from_proxy(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    state.exempt_loopback_from_proxy.store(enabled, Ordering::Relaxed);
+    crate::app_config::merge_root_value(
+        &app_handle,
+        "exemptLoopbackFromProxy",
+        serde_json::Value::Bool(enabled),
+    )
+}
+
 /// Diagnostic logging bridge: lets the renderer mirror terminal diagnostics to
 /// the Rust logger (and thus the `tauri dev` terminal stdout) without DevTools.
 /// Gated on the frontend (disabled by default); see the renderer's diag util and

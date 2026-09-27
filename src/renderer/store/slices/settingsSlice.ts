@@ -198,6 +198,11 @@ interface SettingsState {
   // background; when false (default), closing the last window exits the app.
   // Persisted + mirrored into the Rust AppState via setKeepRunningInBackground.
   keepRunningInBackground: boolean;
+  // Plan 047: when true (default), a shell spawned while HTTP_PROXY/HTTPS_PROXY is set
+  // gets NO_PROXY with localhost appended, so an agent inside it reaches the MCP
+  // server directly instead of through a corporate web gateway. Persisted + mirrored
+  // into the Rust AppState via setExemptLoopbackFromProxy; applies to new terminals.
+  exemptLoopbackFromProxy: boolean;
   // Launch TermFlow automatically at OS login (Windows Run key, macOS LaunchAgent,
   // Linux autostart .desktop) via tauri-plugin-autostart. NOT persisted to config.json
   // — the OS registration is the source of truth; this field mirrors isEnabled() for
@@ -265,6 +270,7 @@ const initialState: SettingsState = {
   canvasBusyCue: 'sweep',
   customKeybindings: {},
   keepRunningInBackground: false,
+  exemptLoopbackFromProxy: true,
   launchAtLogin: false,
   notifySoundEnabled: false,
   notifyToastEnabled: false,
@@ -636,6 +642,13 @@ const settingsSlice = createSlice({
       window.electronAPI?.setKeepRunningInBackground?.(action.payload);
     },
 
+    // Plan 047: same single-persistence shape as setKeepRunningInBackground — the
+    // Rust command writes the config file AND the atomic the spawn paths read.
+    setExemptLoopbackFromProxy: (state, action: PayloadAction<boolean>) => {
+      state.exemptLoopbackFromProxy = action.payload;
+      window.electronAPI?.setExemptLoopbackFromProxy?.(action.payload);
+    },
+
     // Launch-at-login: mirror the OS registration state into the store for the toggle
     // UI. NOT persisted via setConfigValue — tauri-plugin-autostart's enable()/disable()
     // owns the actual OS registration; this is only the reflected value.
@@ -723,6 +736,7 @@ export const {
   setCustomKeybinding,
   resetCustomKeybinding,
   setKeepRunningInBackground,
+  setExemptLoopbackFromProxy,
   setLaunchAtLogin,
   setNotifySoundEnabled,
   setNotifyToastEnabled,

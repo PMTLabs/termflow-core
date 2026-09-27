@@ -317,7 +317,9 @@ async fn subscribe_fabric_events(
     // A dedicated client with NO total request timeout: SSE is a long-lived stream,
     // so the bounded-timeout localhost client used for one-shot control calls would
     // abort it. reqwest's default builder sets no request timeout.
+    // Loopback: never route through a machine-wide HTTP_PROXY (see localhost_client).
     let client = reqwest::Client::builder()
+        .no_proxy()
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 

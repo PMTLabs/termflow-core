@@ -645,6 +645,16 @@ pub fn run() {
                 .store(keep, std::sync::atomic::Ordering::Relaxed);
         }
 
+        // Plan 047: the loopback proxy exemption defaults ON; only an explicit saved
+        // `false` turns it off. Seeded before the first spawn can happen.
+        if let Some(exempt) =
+            crate::app_config::read_bool_setting(&app.handle(), "exemptLoopbackFromProxy")
+        {
+            state
+                .exempt_loopback_from_proxy
+                .store(exempt, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // System tray (Plan 010): reuse the app's window icon (no new asset). Left-
         // click shows/focuses the main window; the menu offers Show / Peers / Quit.
         // Failure is non-fatal — the app still runs without a tray.
@@ -969,6 +979,7 @@ pub fn run() {
         commands::close_self_window,
         commands::open_devtools,
         commands::set_keep_running_in_background,
+        commands::set_exempt_loopback_from_proxy,
         peer_commands::fabric_status,
         peer_commands::peers_list,
         peer_commands::pending_approvals_list,

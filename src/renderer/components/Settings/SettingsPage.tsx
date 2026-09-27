@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration } from '../../store/slices/settingsSlice';
+import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration, setExemptLoopbackFromProxy } from '../../store/slices/settingsSlice';
 import type { TerminalFontWeight } from '../../store/slices/settingsSlice';
 import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
@@ -1829,6 +1829,23 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                             {!mcpPortDirty && fallbackNote(mcpPort, effective?.mcpPort)}
                         </div>
                         {conflictNote('MCP Server')}
+                        {/* Plan 047: the corporate-proxy case. Applies to shells spawned after
+                            the change — env is handed over at spawn and never rewritten. */}
+                        <label className="toggle-row">
+                            <input
+                                type="checkbox"
+                                checked={settings.exemptLoopbackFromProxy}
+                                onChange={(e) => dispatch(setExemptLoopbackFromProxy(e.target.checked))}
+                            />
+                            <span>Bypass the system proxy for localhost in shells TermFlow starts</span>
+                        </label>
+                        <p className="help-text">
+                            When HTTP_PROXY or HTTPS_PROXY is set, new terminals get{' '}
+                            <code>NO_PROXY</code> with localhost, 127.0.0.1 and ::1 appended (existing
+                            entries are kept), so an agent running in the terminal reaches this MCP
+                            server directly instead of through the proxy. Applies to terminals opened
+                            after the change.
+                        </p>
                     </div>
 
                     {/* Network access */}

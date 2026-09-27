@@ -389,6 +389,8 @@ export interface ElectronAPI {
   // into the Rust AppState atomic that the window-close/exit guard reads. Tauri-only
   // (the browser host is a no-op).
   setKeepRunningInBackground?: (enabled: boolean) => Promise<void>;
+  // Plan 047: loopback proxy exemption for spawned shells. Optional for the same reason.
+  setExemptLoopbackFromProxy?: (enabled: boolean) => Promise<void>;
 
   // Terminal Automations (Plan 028) — the fifteen commands of `automation_commands.rs`.
   // The first twelve are in the order that file declares them; the three id-only writers

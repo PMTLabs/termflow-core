@@ -5,7 +5,7 @@ use std::thread;
 use tauri::Emitter;
 use uuid::Uuid;
 use super::cwd::exit_cwd_for;
-use super::spawn_spec::{FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV, PS_CWD_INTEGRATION, identity_env_value};
+use super::spawn_spec::{FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV, PS_CWD_INTEGRATION, identity_env_value, loopback_no_proxy_env};
 
 /// Find the last valid UTF-8 boundary in a byte slice.
 /// Returns the index up to which the data is valid UTF-8.
@@ -174,6 +174,20 @@ pub fn spawn_terminal(
     // (module consts shared with build_spawn_spec so the two paths never drift).
     for key in FOREIGN_TERMINAL_ENV.iter().chain(HOST_CONTROL_ENV.iter()) {
         cmd_builder.env_remove(key);
+    }
+    // Plan 047: loopback exemption from a configured proxy — the same derivation
+    // the sidecar path applies in build_spawn_spec, gated by the same toggle.
+    if app_state
+        .exempt_loopback_from_proxy
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        let no_proxy = loopback_no_proxy_env(|k| std::env::var(k).ok());
+        if !no_proxy.is_empty() {
+            log::debug!("[SPAWN] {id}: exempting loopback from the configured proxy: {no_proxy:?}");
+        }
+        for (key, value) in no_proxy {
+            cmd_builder.env(key, value);
+        }
     }
 
     let mut has_command_flag = false;

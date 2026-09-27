@@ -494,6 +494,9 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         cwd.as_deref(),
         cols,
         rows,
+        state
+            .exempt_loopback_from_proxy
+            .load(std::sync::atomic::Ordering::Relaxed),
     );
     // Timed because this round trip is the user-visible "how long until my new
     // tab appears": the sidecar answers `Spawn` from ONE sequential frame loop,

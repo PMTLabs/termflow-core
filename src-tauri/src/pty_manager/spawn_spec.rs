@@ -59,6 +59,62 @@ pub const HOST_CONTROL_ENV: &[&str] = &[
     "TERMFLOW_PTY_DISCOVERY",
 ];
 
+/// Loopback names appended to `NO_PROXY` when a proxy is configured (plan 047).
+/// Counterpart of `LOOPBACK_NO_PROXY` in `mcp-server/src/apiClient.ts` (which also
+/// carries Bun's bracketed `[::1]` spelling); curl, Node and Bun all match `::1`.
+/// On Windows env names are case-insensitive, so `no_proxy`/`NO_PROXY` are ONE
+/// variable there and both derived values are identical; on Unix they are two.
+pub const LOOPBACK_NO_PROXY: &[&str] = &["localhost", "127.0.0.1", "::1"];
+
+/// The variables whose presence means "a proxy is configured". Both cases: Bun,
+/// curl and proxy-from-env accept either, and corporate policy scripts set either.
+const PROXY_VARS: &[&str] = &[
+    "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
+];
+
+/// The `no_proxy`/`NO_PROXY` pairs a spawned shell receives so an agent inside it
+/// reaches TermFlow's MCP server on `localhost` instead of the corporate web gateway
+/// (plan 047). A machine with `HTTP_PROXY` set and `localhost` absent from `NO_PROXY`
+/// sends every loopback request through the proxy, which answers with a block page
+/// that Claude Code reports as an auth failure.
+///
+/// Empty unless `lookup` finds one of [`PROXY_VARS`] — a user without a proxy gets no
+/// new variable. Otherwise BOTH spellings are returned, each extended independently:
+/// consumers read `no_proxy` first and fall back to `NO_PROXY` only when it is unset
+/// or empty, so setting one spelling can leave the other one still effective.
+/// Additive only — existing entries are kept verbatim and in order, and a loopback
+/// name already present is not repeated. `lookup` abstracts the process env so this
+/// stays testable; production passes `|k| std::env::var(k).ok()`.
+pub(crate) fn loopback_no_proxy_env(lookup: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+    let proxy_configured = PROXY_VARS
+        .iter()
+        .any(|k| lookup(k).is_some_and(|v| !v.trim().is_empty()));
+    if !proxy_configured {
+        return Vec::new();
+    }
+    ["no_proxy", "NO_PROXY"]
+        .into_iter()
+        .filter_map(|key| {
+            let existing: Vec<String> = lookup(key)
+                .unwrap_or_default()
+                .split([',', ' ', '\t'])
+                .filter(|e| !e.is_empty())
+                .map(str::to_string)
+                .collect();
+            let missing: Vec<String> = LOOPBACK_NO_PROXY
+                .iter()
+                .filter(|h| !existing.iter().any(|e| e == *h))
+                .map(|h| h.to_string())
+                .collect();
+            if missing.is_empty() {
+                return None;
+            }
+            let merged = existing.into_iter().chain(missing).collect::<Vec<_>>().join(",");
+            Some((key.to_string(), merged))
+        })
+        .collect()
+}
+
 /// Build a fully-resolved [`SpawnSpec`] for the PTY-host sidecar. Produces the
 /// exact env/args/cwd the in-process path uses (shared consts), including the
 /// `TERMFLOW_TERMINAL_ID` identity var and the PowerShell OSC 9;9 cwd
@@ -128,6 +184,10 @@ pub fn shell_emits_prompt_osc(
 /// equal for anything created on this build and differ for a migrated terminal,
 /// which is why `TERMFLOW_TERMINAL_ID` takes the leaf specifically
 /// (design 014 §A6.1).
+///
+/// `exempt_loopback_from_proxy` is the plan 047 toggle; when set, the shell also
+/// receives [`loopback_no_proxy_env`] derived from this process's environment.
+#[allow(clippy::too_many_arguments)]
 pub fn build_spawn_spec(
     tab_id: &str,
     leaf: Option<&str>,
@@ -137,6 +197,36 @@ pub fn build_spawn_spec(
     cwd: Option<&str>,
     cols: u16,
     rows: u16,
+    exempt_loopback_from_proxy: bool,
+) -> termflow_pty_protocol::SpawnSpec {
+    build_spawn_spec_with(
+        tab_id,
+        leaf,
+        shell_path,
+        shell_name,
+        shell_args,
+        cwd,
+        cols,
+        rows,
+        exempt_loopback_from_proxy,
+        |k| std::env::var(k).ok(),
+    )
+}
+
+/// [`build_spawn_spec`] with the environment lookup injected, so a test can prove
+/// the proxy exemption lands (or not) without touching the test process's env.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_spawn_spec_with(
+    tab_id: &str,
+    leaf: Option<&str>,
+    shell_path: Option<&str>,
+    shell_name: &str,
+    shell_args: Option<&[String]>,
+    cwd: Option<&str>,
+    cols: u16,
+    rows: u16,
+    exempt_loopback_from_proxy: bool,
+    lookup: impl Fn(&str) -> Option<String>,
 ) -> termflow_pty_protocol::SpawnSpec {
     let inject_prompt_hook = shell_emits_prompt_osc(shell_path, shell_name, shell_args);
 
@@ -146,7 +236,7 @@ pub fn build_spawn_spec(
         None => std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string()),
     };
 
-    let env = vec![
+    let mut env = vec![
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("COLORTERM".to_string(), "truecolor".to_string()),
         ("TERMFLOW_TERMINAL_ID".to_string(), identity_env_value(leaf, tab_id)),
@@ -156,6 +246,13 @@ pub fn build_spawn_spec(
             env!("CARGO_PKG_VERSION").to_string(),
         ),
     ];
+    if exempt_loopback_from_proxy {
+        let no_proxy = loopback_no_proxy_env(lookup);
+        if !no_proxy.is_empty() {
+            log::debug!("[SPAWN] {tab_id}: exempting loopback from the configured proxy: {no_proxy:?}");
+        }
+        env.extend(no_proxy);
+    }
     let env_remove: Vec<String> = FOREIGN_TERMINAL_ENV
         .iter()
         .chain(HOST_CONTROL_ENV.iter())
@@ -240,6 +337,7 @@ mod prompt_integration_tests {
             None,
             120,
             30,
+            false,
         );
         // Identity env
         assert!(spec
@@ -281,6 +379,7 @@ mod prompt_integration_tests {
             None,
             80,
             24,
+            false,
         );
         assert!(!spec.args.iter().any(|a| a == "-NoExit"));
     }
@@ -301,7 +400,7 @@ mod prompt_integration_tests {
         assert!(!shell_emits_prompt_osc(Some("C:\\Windows\\System32\\cmd.exe"), "cmd", None));
         assert!(!shell_emits_prompt_osc(Some("/bin/bash"), "bash", None));
         // Decision must match build_spawn_spec's actual injection.
-        let spec = super::build_spawn_spec("t", None, Some("powershell.exe"), "powershell", None, None, 80, 24);
+        let spec = super::build_spawn_spec("t", None, Some("powershell.exe"), "powershell", None, None, 80, 24, false);
         assert_eq!(
             spec.args.iter().any(|a| a.contains("]9;9;")),
             shell_emits_prompt_osc(Some("powershell.exe"), "powershell", None),
@@ -316,7 +415,7 @@ mod identity_env_tests {
     use super::{build_spawn_spec, identity_env_value};
 
     fn spec_identity(leaf: Option<&str>, session_key: &str) -> String {
-        let spec = build_spawn_spec(session_key, leaf, Some("pwsh.exe"), "pwsh", None, None, 80, 24);
+        let spec = build_spawn_spec(session_key, leaf, Some("pwsh.exe"), "pwsh", None, None, 80, 24, false);
         spec.env
             .iter()
             .find(|(k, _)| k == "TERMFLOW_TERMINAL_ID")
@@ -362,5 +461,109 @@ mod identity_env_tests {
         // The in-process path calls `identity_env_value` directly; the host path
         // routes through `build_spawn_spec`. Same inputs must give same output.
         assert_eq!(spec_identity(leaf, process_id), identity_env_value(leaf, process_id));
+    }
+}
+
+/// Plan 047: loopback exemption from a machine-wide proxy for spawned shells.
+#[cfg(test)]
+mod loopback_no_proxy_tests {
+    use super::{build_spawn_spec_with, loopback_no_proxy_env, LOOPBACK_NO_PROXY};
+    use std::collections::HashMap;
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |k| map.get(k).cloned()
+    }
+
+    fn value_of<'a>(out: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        out.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn no_proxy_configured_means_no_new_variables() {
+        // A user without a proxy must not see a NO_PROXY they never set — even if
+        // they have one already, we have nothing to add for.
+        assert!(loopback_no_proxy_env(env(&[])).is_empty());
+        assert!(loopback_no_proxy_env(env(&[("NO_PROXY", "a.corp")])).is_empty());
+        // An empty proxy var is "unset" to every consumer; treat it the same.
+        assert!(loopback_no_proxy_env(env(&[("HTTP_PROXY", "")])).is_empty());
+    }
+
+    #[test]
+    fn a_proxy_with_no_exemption_list_gets_loopback_in_both_spellings() {
+        let out = loopback_no_proxy_env(env(&[("HTTP_PROXY", "http://hcm-proxy:9090")]));
+        assert_eq!(value_of(&out, "no_proxy"), Some("localhost,127.0.0.1,::1"));
+        assert_eq!(value_of(&out, "NO_PROXY"), Some("localhost,127.0.0.1,::1"));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn every_proxy_spelling_counts_as_configured() {
+        for var in ["http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
+            let out = loopback_no_proxy_env(env(&[(var, "http://p:1")]));
+            assert_eq!(out.len(), 2, "{var} did not trigger the exemption");
+        }
+    }
+
+    #[test]
+    fn an_existing_list_is_kept_verbatim_and_only_missing_names_are_appended() {
+        // The corporate shape: a curated list that simply forgot loopback.
+        let out = loopback_no_proxy_env(env(&[
+            ("HTTPS_PROXY", "http://p:1"),
+            ("NO_PROXY", "codevista.fsoft.com.vn,*claude*,localhost"),
+        ]));
+        assert_eq!(
+            value_of(&out, "NO_PROXY"),
+            Some("codevista.fsoft.com.vn,*claude*,localhost,127.0.0.1,::1"),
+            "order kept, `localhost` not repeated"
+        );
+        // The other spelling was unset, so it is created from scratch.
+        assert_eq!(value_of(&out, "no_proxy"), Some("localhost,127.0.0.1,::1"));
+    }
+
+    #[test]
+    fn each_spelling_is_extended_independently() {
+        // Consumers read `no_proxy` first and fall back to NO_PROXY only when it is
+        // unset/empty, so the two must not be assumed to mirror each other.
+        let out = loopback_no_proxy_env(env(&[
+            ("HTTP_PROXY", "http://p:1"),
+            ("no_proxy", "a.corp"),
+            ("NO_PROXY", "b.corp 127.0.0.1"), // whitespace-separated, curl style
+        ]));
+        assert_eq!(value_of(&out, "no_proxy"), Some("a.corp,localhost,127.0.0.1,::1"));
+        assert_eq!(value_of(&out, "NO_PROXY"), Some("b.corp,127.0.0.1,localhost,::1"));
+    }
+
+    #[test]
+    fn a_spelling_that_already_has_every_loopback_name_is_left_alone() {
+        let full = LOOPBACK_NO_PROXY.join(",");
+        let out = loopback_no_proxy_env(env(&[
+            ("HTTP_PROXY", "http://p:1"),
+            ("NO_PROXY", full.as_str()),
+        ]));
+        assert_eq!(value_of(&out, "NO_PROXY"), None, "nothing to add — must not rewrite");
+        assert_eq!(value_of(&out, "no_proxy"), Some(full.as_str()));
+    }
+
+    fn spec_with(exempt: bool, lookup: impl Fn(&str) -> Option<String>) -> termflow_pty_protocol::SpawnSpec {
+        build_spawn_spec_with("t", None, Some("pwsh.exe"), "pwsh", None, None, 80, 24, exempt, lookup)
+    }
+
+    #[test]
+    fn the_sidecar_spec_carries_the_exemption_only_when_the_toggle_is_on() {
+        let proxied = || env(&[("HTTP_PROXY", "http://p:1"), ("NO_PROXY", "a.corp")]);
+        let on = spec_with(true, proxied());
+        assert_eq!(
+            on.env.iter().find(|(k, _)| k == "NO_PROXY").map(|(_, v)| v.as_str()),
+            Some("a.corp,localhost,127.0.0.1,::1")
+        );
+        assert!(on.env.iter().any(|(k, _)| k == "no_proxy"));
+        // Toggle off: same environment, nothing injected.
+        let off = spec_with(false, proxied());
+        assert!(!off.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("no_proxy")));
+        // Toggle on but no proxy configured: nothing injected either.
+        let unproxied = spec_with(true, env(&[]));
+        assert!(!unproxied.env.iter().any(|(k, _)| k.eq_ignore_ascii_case("no_proxy")));
     }
 }

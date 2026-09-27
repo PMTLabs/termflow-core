@@ -198,6 +198,8 @@ where
 pub async fn http_call(req: SiblingCall) -> Result<(), String> {
     let url = format!("{}{}", sibling_base_url(req.port), req.action.path());
     let client = reqwest::Client::builder()
+        // Loopback: never route through a machine-wide HTTP_PROXY (see localhost_client).
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(SIBLING_CALL_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;

@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setExemptLoopbackFromProxy, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -130,6 +130,36 @@ describe('settingsSlice launchAtLogin', () => {
     expect(state.launchAtLogin).toBe(true);
     // OS/plugin is the source of truth — the reducer must NOT persist to config.json.
     expect(setConfigValue).not.toHaveBeenCalled();
+    delete (global as any).window.electronAPI;
+  });
+});
+
+describe('settingsSlice exemptLoopbackFromProxy (Plan 047)', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it('defaults to true (loopback bypasses a corporate proxy out of the box)', () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.exemptLoopbackFromProxy).toBe(true);
+  });
+
+  it('persists through the Rust command only, never setConfigValue (single persistence path)', () => {
+    const setConfigValue = jest.fn();
+    const setExemptLoopbackFromProxyBridge = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue, setExemptLoopbackFromProxy: setExemptLoopbackFromProxyBridge };
+    const state = settingsReducer(undefined, setExemptLoopbackFromProxy(false));
+    expect(state.exemptLoopbackFromProxy).toBe(false);
+    // The command writes the config file AND the AppState atomic the spawn paths read;
+    // a second write via setConfigValue would race it.
+    expect(setExemptLoopbackFromProxyBridge).toHaveBeenCalledWith(false);
+    expect(setConfigValue).not.toHaveBeenCalled();
+    delete (global as any).window.electronAPI;
+  });
+
+  it('tolerates a host without the bridge method (browser host)', () => {
+    (global as any).window.electronAPI = {};
+    expect(() => settingsReducer(undefined, setExemptLoopbackFromProxy(false))).not.toThrow();
     delete (global as any).window.electronAPI;
   });
 });

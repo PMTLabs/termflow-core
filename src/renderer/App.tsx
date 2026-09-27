@@ -44,6 +44,7 @@ import {
   isSnippetSortMode,
   setCustomKeybindings,
   setKeepRunningInBackground,
+  setExemptLoopbackFromProxy,
   setNotifySoundEnabled,
   setNotifyToastEnabled,
   setNotifyOsEnabled,
@@ -699,6 +700,9 @@ const App: React.FC = () => {
         }
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));
+        }
+        if (config.exemptLoopbackFromProxy !== undefined) {
+          dispatch(setExemptLoopbackFromProxy(config.exemptLoopbackFromProxy));
         }
         // Notification preferences (Stream 1) — all opt-in, default off.
         if (config.notifySoundEnabled !== undefined) {
