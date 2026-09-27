@@ -1,6 +1,7 @@
 import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
+import { getStoredApiToken } from '../services/profileScope';
 
 // Configuration for connecting to the Rust backend. Default matches this build's
 // instance (dev backend = 42051, prod = 42031).
@@ -76,7 +77,7 @@ class BrowserBridge implements ElectronAPI {
     }
 
     private buildAuthHeaders(): Record<string, string> {
-        const token = localStorage.getItem('api_token');
+        const token = getStoredApiToken();
         return token ? { Authorization: `Bearer ${token}` } : {};
     }
 

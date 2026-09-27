@@ -103,7 +103,7 @@ pub(crate) enum RebindPlan {
 /// Choose the sequence for rebinding `target`.
 ///
 /// `serving` is the address we are ACTUALLY on — `None` when we hold nothing (stopped, or
-/// suppressed for an elevated profile). That distinction is the whole point: this used to
+/// when port binding failed). That distinction is the whole point: this used to
 /// compare `target` against the CONFIGURED address, so a second instance that owned nothing
 /// still matched "same address" and went down the stop-then-rebind path — onto a port a
 /// sibling was serving, which `SO_REUSEADDR` would have let it hijack rather than refuse.
@@ -228,7 +228,7 @@ pub async fn restart_api_server(state: AppState, cfg: &NetworkConfig) -> Result<
     // an address a second instance never held — sending it down the stop-then-rebind path
     // for a port belonging to a sibling.
     //
-    // `None` = we hold nothing (stopped, or suppressed for an elevated profile), which is
+    // `None` = we hold nothing (stopped, or when port binding failed), which is
     // never "the same address" as a port we are about to bind.
     let old_addr = {
         let net = state.network.read();
@@ -396,9 +396,10 @@ pub async fn set_network_config(
     // API auth gate and status reads see the new values immediately rather than the
     // stale ones during sidecar startup (matches rotate_auth_token's ordering).
     *state.network.write() = cfg.clone();
-    // Only respawn the sidecar when its env actually changed — a no-op apply
+    // Only respawn the sidecar when its env actually changed, API moved, or it was not running — a no-op apply
     // shouldn't drop every client's in-memory MCP session.
-    if crate::mcp_respawn_needed(&old, &cfg) || api_moved {
+    let mcp_was_alive = crate::mcp_alive(&state);
+    if crate::mcp_respawn_needed(&old, &cfg) || (api_moved && mcp_was_alive) || !mcp_was_alive {
         // Unlike the boot path there is no walk-forward fallback here, so a sidecar that
         // came up is on exactly the configured port — but it still has to be RECORDED, or
         // Settings keeps reporting the boot-time one. Recorded ONLY on success: publishing
@@ -433,10 +434,10 @@ pub async fn rotate_auth_token(
     // Axum server here: the port/host are unchanged, the gate reads the token
     // from shared state, and restarting would drop every UI connection and race
     // the same-port rebind (the Windows "Port did not free up" failure). Only a
-    // networked sidecar needs a respawn, since it receives the token via env at
-    // spawn time; in localhost mode the sidecar's token env is empty, so the
-    // rotation is a no-op for it and respawning would needlessly drop every MCP
-    // session (mcp_respawn_needed encodes exactly that).
+    // sidecar whose API requires auth (networked mode or elevated loopback) needs a
+    // respawn, since it receives the token via env at spawn time; in unauthenticated
+    // localhost mode the sidecar's token env is empty, so the rotation is a no-op for
+    // it and respawning would needlessly drop every MCP session (mcp_respawn_needed encodes exactly that).
     *state.network.write() = cfg.clone();
     if crate::mcp_respawn_needed(&old, &cfg) {
         // The ports do not change here, but the sidecar can still fail to come back — and a
@@ -444,7 +445,7 @@ pub async fn rotate_auth_token(
         let started = crate::respawn_mcp(app.clone(), (*state).clone(), &cfg).await;
         state.effective_endpoints.write().mcp_port = started.then_some(cfg.mcp_port);
     }
-    // Unlike the MCP sidecar (token only matters in networked mode), the fabric ALWAYS
+    // Unlike the MCP sidecar (token only matters when auth is required), the fabric ALWAYS
     // authenticates to the core with this token, so a rotation always leaves it stale (M6).
     if crate::fabric_manager::fabric_respawn_needed(&old, &cfg) {
         crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;

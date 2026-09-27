@@ -8,7 +8,7 @@ import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
-import { apiTokenKey } from '../services/profileScope';
+import { getStoredApiToken, setStoredApiToken } from '../services/profileScope';
 import { apiBase, invalidateApiBase } from './apiBase';
 
 export interface NetworkConfig {
@@ -276,10 +276,11 @@ console.log('Initializing Tauri Bridge...');
 // The auth token is per-instance CONFIG (not an address), so it still comes from
 // `get_network_config`. When exposed on the network the backend enforces it on ALL
 // requests, including this renderer's loopback calls; harmless in localhost mode.
+// D5: on an elevated instance, setStoredApiToken keeps it in memory only.
 invoke<{ authToken: string }>('get_network_config')
   .then((cfg) => {
     if (cfg?.authToken) {
-      localStorage.setItem(apiTokenKey(), cfg.authToken);
+      setStoredApiToken(cfg.authToken);
     }
   })
   .catch(() => { /* the token stays whatever a previous session stored */ });
@@ -300,7 +301,7 @@ export function getWindowsBuildNumber(): number {
 }
 
 const buildAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem(apiTokenKey());
+  const token = getStoredApiToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
@@ -725,12 +726,12 @@ const tauriBridge: ElectronAPI = {
     // what came back is the CONFIGURED port, and the restart is what decides which
     // one is actually ours.
     invalidateApiBase();
-    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+    if (cfg?.authToken) setStoredApiToken(cfg.authToken);
     return cfg;
   },
   rotateAuthToken: async () => {
     const cfg = await invoke<NetworkConfig>('rotate_auth_token');
-    if (cfg?.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+    if (cfg?.authToken) setStoredApiToken(cfg.authToken);
     return cfg;
   },
   listNetworkInterfaces: async () => invoke('list_network_interfaces'),

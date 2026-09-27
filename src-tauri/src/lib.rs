@@ -611,10 +611,9 @@ pub fn run() {
         // Manage state in Tauri
         app.manage(state.clone());
 
-        // Advertise this instance BEFORE the servers come up: an instance that
-        // serves no endpoints at all (an elevated launch without a port flag) is
-        // still a running sibling, and the updater must see it (Task 17).
-        // Re-published with the real ports once they are bound.
+        // Advertise this instance BEFORE the servers come up: even before endpoints
+        // are bound (or if binding fails), this is still a running sibling, and the
+        // updater must see it (Task 17). Re-published with the real ports once they are bound.
         let publish_record = |api_port, mcp_port| {
             let id = crate::profile::current();
             let rec = crate::net_ports::InstanceRecord {
@@ -709,20 +708,10 @@ pub fn run() {
         if let Ok(mut g) = api_state.api_shutdown.lock() {
             *g = Some(api_sd_tx);
         }
-        // An elevated instance serves its API/MCP only when the user explicitly
-        // asked for it with a port flag. Otherwise the safest surface is none at
-        // all: the default is an admin terminal you drive by hand, not one any
-        // local program can reach.
-        let serve_endpoints =
-            !elevated || cli_api_port.is_some() || cli_mcp_port.is_some();
         tauri::async_runtime::spawn(async move {
-            if !serve_endpoints {
-                log::info!(
-                    "[API] Suppressed for the elevated profile: pass --api-port or --mcp-port \
-                     to serve them (the token is minted per launch)"
-                );
-                return;
-            }
+            // Boot network initialization acquires network_op_lock so it is fully serialized
+            // with any concurrent set_network_config / rotate_auth_token / stop_network.
+            let _op = api_state.network_op_lock.lock().await;
             let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
             // Bind-and-RETAIN, walking forward from the configured port. A probe
             // followed by a separate bind leaves a window in which a sibling can
@@ -754,15 +743,43 @@ pub fn run() {
                         &api_state.instance_id,
                     )
                     .await;
+
+                    // Only start the MCP sidecar (which forwards every tool call
+                    // to this API) after binding the API, so a bind failure can never
+                    // leave a sidecar advertising our instanceId while pointing at a port
+                    // we don't own. It is launched with the EFFECTIVE ports.
+                    let mut mcp_net = mcp_net;
+                    mcp_net.api_port = api_port;
+                    let mcp_effective_port = match mcp_port {
+                        Some(p) => {
+                            mcp_net.mcp_port = p;
+                            let started = respawn_mcp(mcp_app_handle, api_state.clone(), &mcp_net).await;
+                            if started {
+                                Some(p)
+                            } else {
+                                log::error!("[MCP] boot startup was rejected or failed; endpoint unpublished");
+                                None
+                            }
+                        }
+                        None => {
+                            log::error!(
+                                "[MCP] no free MCP port near {} — the MCP server is NOT running",
+                                api_net.mcp_port
+                            );
+                            None
+                        }
+                    };
+
                     {
                         let mut eff = api_state.effective_endpoints.write();
                         eff.api_port = Some(api_port);
-                        eff.mcp_port = mcp_port;
+                        eff.mcp_port = mcp_effective_port;
                     }
                     log::info!(
                         "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
-                        api_net.api_port, mcp_port, api_net.mcp_port
+                        api_net.api_port, mcp_effective_port, api_net.mcp_port
                     );
+
                     // Re-advertise with the ports we actually got, so a sibling
                     // (or the user) can find this instance without guessing.
                     if let Err(e) = crate::net_ports::publish(
@@ -770,7 +787,7 @@ pub fn run() {
                             profile: crate::profile::current().key(),
                             pid: std::process::id(),
                             api_port: Some(api_port),
-                            mcp_port,
+                            mcp_port: mcp_effective_port,
                             token: (crate::profile::current().integrity
                                 == crate::profile::Integrity::High)
                                 .then(|| api_net.auth_token.clone()),
@@ -779,33 +796,7 @@ pub fn run() {
                     ) {
                         log::warn!("[NET] could not republish the instance record: {e}");
                     }
-                    // Only NOW start the MCP sidecar (which forwards every tool call
-                    // to this API), so a bind failure can never leave a sidecar
-                    // advertising our instanceId while pointing at a port we don't
-                    // own. It is launched with the EFFECTIVE ports.
-                    let mut mcp_net = mcp_net;
-                    mcp_net.api_port = api_port;
-                    let mcp_state = api_state.clone();
-                    match mcp_port {
-                        Some(p) => {
-                            mcp_net.mcp_port = p;
-                            tauri::async_runtime::spawn(async move {
-                                let _op = mcp_state.network_op_lock.lock().await;
-                                let started = respawn_mcp(mcp_app_handle, mcp_state.clone(), &mcp_net).await;
-                                if !started {
-                                    let mut effective = mcp_state.effective_endpoints.write();
-                                    if effective.mcp_port == Some(p) {
-                                        effective.mcp_port = None;
-                                    }
-                                    log::error!("[MCP] boot startup was rejected or failed; endpoint unpublished");
-                                }
-                            });
-                        }
-                        None => log::error!(
-                            "[MCP] no free MCP port near {} — the MCP server is NOT running",
-                            api_net.mcp_port
-                        ),
-                    }
+
                     // Spawn the peering fabric sidecar. Spawn failure (binary absent /
                     // not bundled) is logged and NON-FATAL — the open-core app runs
                     // fine with peering "not installed".
@@ -815,28 +806,26 @@ pub fn run() {
                     // listener port), which are not profile-scoped. A second profile
                     // starting one would contend for both.
                     if crate::profile::current().is_primary() {
-                        let fabric_state = api_state.clone();
-                        tauri::async_runtime::spawn(async move {
-                            // Boot is lifecycle work too: serialize it with a
-                            // concurrent Stop/API-network transition before it
-                            // can claim or install a fabric generation.
-                            let _op = fabric_state.network_op_lock.lock().await;
-                            if let Err(e) =
-                                crate::fabric_manager::start_fabric(fabric_app_handle, fabric_state.clone())
-                                    .await
-                            {
-                                log::warn!(
-                                    "[FABRIC] termflow-fabric not started (peering not installed): {}",
-                                    e
-                                );
-                            }
-                        });
+                        if let Err(e) =
+                            crate::fabric_manager::start_fabric(fabric_app_handle, api_state.clone())
+                                .await
+                        {
+                            log::warn!(
+                                "[FABRIC] termflow-fabric not started (peering not installed): {}",
+                                e
+                            );
+                        }
                     } else {
                         log::info!(
                             "[FABRIC] Not started: profile '{}' is not the primary instance",
                             crate::profile::current().name
                         );
                     }
+
+                    // Release network_op_lock before entering the serving loop so concurrent
+                    // mutations (e.g. set_network_config) are not blocked.
+                    drop(_op);
+
                     crate::api_server::start_api_server(
                         api_state,
                         listener,
@@ -845,11 +834,14 @@ pub fn run() {
                     )
                     .await;
                 }
-                None => log::error!(
-                    "API could not bind any port near {} — the REST/WebSocket API and MCP are \
-                     NOT running. Change the port in Settings > Connections.",
-                    api_net.api_port
-                ),
+                None => {
+                    drop(_op);
+                    log::error!(
+                        "API could not bind any port near {} — the REST/WebSocket API and MCP are \
+                         NOT running. Change the port in Settings > Connections.",
+                        api_net.api_port
+                    );
+                }
             }
         });
 

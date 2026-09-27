@@ -15,7 +15,7 @@ import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
 import { ShellProfile } from '../../store/slices/settingsSlice';
 import { NetworkConfig, NetworkInterfaceInfo, EffectiveEndpoints } from '../../types/electron';
-import { apiTokenKey } from '../../services/profileScope';
+import { setStoredApiToken } from '../../services/profileScope';
 import { McpConnectModal } from './McpConnectModal';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
 import { UnsavedChangesDialog } from '../UI/UnsavedChangesDialog';
@@ -702,7 +702,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setNetCfg(cfg);
             // Keep the renderer's bearer token current so its own (loopback) calls
             // stay authorized once the network token is being enforced.
-            if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+            if (cfg.authToken) setStoredApiToken(cfg.authToken);
             // The restart re-binds, so the effective ports may have changed too.
             await refreshEffective();
             dispatch(addToast({ message: 'Network settings applied — servers restarted.', type: 'success' }));
@@ -761,7 +761,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             setNetCfg(cfg);
             setRevealToken(true);
             // Update the renderer's bearer token to the freshly rotated one.
-            if (cfg.authToken) localStorage.setItem(apiTokenKey(), cfg.authToken);
+            if (cfg.authToken) setStoredApiToken(cfg.authToken);
             dispatch(addToast({ message: 'Access token rotated.', type: 'success' }));
         } catch (err) {
             dispatch(addToast({ message: `Failed to rotate token: ${err}`, type: 'error' }));
@@ -776,7 +776,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
      * `enabled: false` for an endpoint we are NOT currently serving.
      *
      * The displayed port falls back to the configured one when this instance holds nothing
-     * (servers stopped, or suppressed for an elevated profile) — which is fine to LOOK at,
+     * (servers stopped) — which is fine to LOOK at,
      * and wrong to hand out: the configured port is exactly where a sibling instance is
      * listening, so a copied URL would point an agent or a colleague at another app.
      */

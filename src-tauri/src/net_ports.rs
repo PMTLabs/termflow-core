@@ -119,8 +119,8 @@ pub async fn pick_mcp_port(start: u16, span: u16, own_id: &str) -> Option<u16> {
 /// which ports it ended up on, and — for an elevated instance — the per-launch
 /// token needed to talk to it.
 ///
-/// Ports are OPTIONAL: an elevated instance serves neither unless asked, so
-/// "running, no endpoints" must be representable.
+/// Ports are OPTIONAL: an instance that failed to bind its ports or has not
+/// finished startup must still be representable as "running, no endpoints".
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InstanceRecord {
     /// The full identity key (`rel`, `rel.work.high`).

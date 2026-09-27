@@ -20,7 +20,7 @@ use crate::search_endpoints::{
 use crate::layout_endpoints::{get_layout, save_layout};
 use crate::canvas_endpoints;
 
-mod auth;
+pub(crate) mod auth;
 mod capture;
 mod exec;
 mod fleet;
@@ -29,7 +29,8 @@ mod system;
 mod terminals;
 mod ws;
 
-use auth::{auth_required, cors_layer, ct_eq, generate_token_handler, origin_allowed, route_always_requires_token};
+pub use auth::auth_required;
+use auth::{cors_layer, ct_eq, generate_token_handler, origin_allowed, route_always_requires_token};
 use capture::{
     capture_backend, capture_frontend, capture_terminal_content, compare_captures, get_tmux_status,
     list_captures, resize_with_reflow, start_test_capture, stop_test_capture,

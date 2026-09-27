@@ -24,7 +24,7 @@ const MCP_PORT = parseInt(process.env.MCP_PORT || "42032", 10);
 const MCP_HOST = process.env.MCP_HOST || "127.0.0.1";
 const API_BASE = (process.env.AUTO_TERMINAL_API_URL || "http://localhost:42031").replace(/\/+$/, "") + "/api";
 // Single access token. Used both to authenticate incoming MCP requests (when set,
-// i.e. networked) and to authorize this server's calls to the backend API.
+// e.g. networked or elevated loopback) and to authorize this server's calls to the backend API.
 // AUTO_TERMINAL_TOKEN is preferred; AUTO_TERMINAL_API_TOKEN kept for back-compat.
 const ACCESS_TOKEN = process.env.AUTO_TERMINAL_TOKEN || process.env.AUTO_TERMINAL_API_TOKEN || "";
 const API_TOKEN = ACCESS_TOKEN || undefined;
@@ -61,7 +61,7 @@ app.use((_req: Request, res: Response, next) => {
 });
 
 // Incoming-request auth gate. Enforced ONLY when ACCESS_TOKEN is set (networked
-// mode); in localhost mode it is empty and every request passes (back-compat).
+// mode or elevated loopback); in unauthenticated localhost mode it is empty and every request passes (back-compat).
 // Health stays open so the app's Settings page can always poll status.
 app.use((req: Request, res: Response, next) => {
     if (!ACCESS_TOKEN) return next();

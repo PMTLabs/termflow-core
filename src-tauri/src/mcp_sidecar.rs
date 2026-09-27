@@ -130,11 +130,12 @@ pub(crate) fn resolved_tauri_sidecar(name: &str) -> std::io::Result<(std::path::
 }
 
 /// The environment the MCP server is launched with, derived from the current
-/// network config. The same `AUTO_TERMINAL_TOKEN` is used both for incoming
-/// client auth (when networked) and forwarded by the MCP server to the API.
-fn mcp_env(cfg: &app_config::NetworkConfig) -> Vec<(String, String)> {
+fn mcp_env_with_integrity(
+    cfg: &app_config::NetworkConfig,
+    integrity: crate::profile::Integrity,
+) -> Vec<(String, String)> {
     let host = if cfg.expose_on_network { "0.0.0.0" } else { "127.0.0.1" };
-    let token = if cfg.expose_on_network {
+    let token = if crate::api_server::auth_required(integrity, cfg.expose_on_network) {
         cfg.auth_token.clone()
     } else {
         String::new()
@@ -151,6 +152,18 @@ fn mcp_env(cfg: &app_config::NetworkConfig) -> Vec<(String, String)> {
     ]
 }
 
+fn mcp_env(cfg: &app_config::NetworkConfig) -> Vec<(String, String)> {
+    mcp_env_with_integrity(cfg, crate::profile::current().integrity)
+}
+
+pub(crate) fn mcp_respawn_needed_with_integrity(
+    old: &app_config::NetworkConfig,
+    new: &app_config::NetworkConfig,
+    integrity: crate::profile::Integrity,
+) -> bool {
+    mcp_env_with_integrity(old, integrity) != mcp_env_with_integrity(new, integrity)
+}
+
 /// True only when a config change actually alters the sidecar's environment, so
 /// we don't kill every client's in-memory MCP session on a no-op apply or on a
 /// localhost token rotation (where the sidecar's token env is empty either way).
@@ -160,7 +173,7 @@ pub(crate) fn mcp_respawn_needed(
     old: &app_config::NetworkConfig,
     new: &app_config::NetworkConfig,
 ) -> bool {
-    mcp_env(old) != mcp_env(new)
+    mcp_respawn_needed_with_integrity(old, new, crate::profile::current().integrity)
 }
 
 async fn start_mcp_sidecar(
@@ -387,7 +400,9 @@ pub async fn respawn_mcp(
 #[cfg(test)]
 mod respawn_tests {
     use super::{
-        cached_tauri_sidecar_digest, classify_sidecar_report, mcp_respawn_needed, wait_for_mcp_health_within, SidecarAcceptance, SIDECAR_DIGEST_CACHE,
+        cached_tauri_sidecar_digest, classify_sidecar_report, mcp_env_with_integrity,
+        mcp_respawn_needed, mcp_respawn_needed_with_integrity, wait_for_mcp_health_within,
+        SidecarAcceptance, SIDECAR_DIGEST_CACHE,
     };
 
     #[test]
@@ -450,6 +465,51 @@ mod respawn_tests {
         let mut new = old.clone();
         new.auth_token = "tok-b".into();
         assert!(mcp_respawn_needed(&old, &new));
+    }
+
+    #[test]
+    fn elevated_token_rotation_needs_respawn() {
+        // D5: when running elevated, loopback authentication is required, so the
+        // sidecar receives the token via env and rotation requires a respawn.
+        use crate::profile::Integrity;
+        let old = base();
+        let mut new = base();
+        new.auth_token = "tok-b".into();
+        assert!(mcp_respawn_needed_with_integrity(&old, &new, Integrity::High));
+    }
+
+    #[test]
+    fn elevated_instance_passes_auth_token_in_mcp_env() {
+        use crate::profile::Integrity;
+        let mut cfg = base();
+        cfg.auth_token = "secret-token-123".into();
+        cfg.expose_on_network = false;
+
+        // Elevated loopback: token MUST be passed
+        let high_env = mcp_env_with_integrity(&cfg, Integrity::High);
+        let token_entry = high_env.iter().find(|(k, _)| k == "AUTO_TERMINAL_TOKEN");
+        assert_eq!(
+            token_entry,
+            Some(&("AUTO_TERMINAL_TOKEN".to_string(), "secret-token-123".to_string()))
+        );
+
+        // Medium loopback: token MUST NOT be passed (empty string)
+        let med_env = mcp_env_with_integrity(&cfg, Integrity::Medium);
+        let token_entry = med_env.iter().find(|(k, _)| k == "AUTO_TERMINAL_TOKEN");
+        assert_eq!(
+            token_entry,
+            Some(&("AUTO_TERMINAL_TOKEN".to_string(), String::new()))
+        );
+
+        // Medium networked: token MUST be passed
+        let mut net_cfg = cfg.clone();
+        net_cfg.expose_on_network = true;
+        let net_env = mcp_env_with_integrity(&net_cfg, Integrity::Medium);
+        let token_entry = net_env.iter().find(|(k, _)| k == "AUTO_TERMINAL_TOKEN");
+        assert_eq!(
+            token_entry,
+            Some(&("AUTO_TERMINAL_TOKEN".to_string(), "secret-token-123".to_string()))
+        );
     }
 
     #[test]

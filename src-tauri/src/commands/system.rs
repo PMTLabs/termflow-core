@@ -349,7 +349,7 @@ pub async fn check_connection_health(state: State<'_, AppState>) -> Result<Vec<C
     // "conflict" badge for an instance whose own API on 42035 was fine, and once our own
     // server was stopped the same probe would have reported the sibling as OUR healthy one.
     //
-    // `None` means we hold no port — stopped, or suppressed for an elevated profile — so
+    // `None` means we hold no port — stopped, or when port binding failed — so
     // there is nothing of OURS to probe and "offline" is the answer without asking anyone.
     // The displayed URL still falls back to the configured port in that case: it is the
     // number in Settings and the one a restart would try first.

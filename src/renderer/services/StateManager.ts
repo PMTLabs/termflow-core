@@ -14,7 +14,7 @@ import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
 import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
-import { layoutsKey, apiTokenKey, currentProfile, isForeignInstance } from './profileScope';
+import { layoutsKey, getStoredApiToken, currentProfile, isForeignInstance } from './profileScope';
 import { apiBase } from '../api/apiBase';
 import { isVirtualTab } from './tabKinds';
 // `stateKey` is deliberately NOT imported: the session key is per WINDOW now
@@ -619,7 +619,7 @@ class StateManagerClass {
       } catch {
         return; // no API of our own to reconcile against
       }
-      const token = localStorage.getItem(apiTokenKey());
+      const token = getStoredApiToken();
       const res = await fetch(`${base}/terminals`, {
         headers: token ? { Authorization: `Bearer ${token}` } : {},
       });
