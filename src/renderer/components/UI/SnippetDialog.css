@@ -26,9 +26,10 @@
   border: 1px solid var(--border-color, #3e3e42);
   border-radius: 12px;
   width: 90%;
-  max-width: 480px;
+  max-width: 620px;
   box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
   overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 .snippet-dialog-header {
@@ -86,12 +87,12 @@
   border: 1px solid var(--border-color, #3e3e42);
   border-radius: 6px;
   color: var(--tab-active-foreground, #ffffff);
-  font-family: var(--mono-font, 'Cascadia Code', Consolas, monospace);
-  font-size: 13px;
+  font-family: inherit;
+  font-size: 17px;
   line-height: 1.5;
-  padding: 10px 12px;
+  padding: 12px 14px;
   resize: vertical;
-  min-height: 120px;
+  min-height: 140px;
 }
 
 .snippet-dialog-textarea:focus {
@@ -106,7 +107,8 @@
   border: 1px solid var(--border-color, #3e3e42);
   border-radius: 6px;
   color: var(--tab-active-foreground, #ffffff);
-  font-size: 13px;
+  font-family: inherit;
+  font-size: 14px;
   padding: 8px 12px;
 }
 
