@@ -8,6 +8,7 @@ use axum::{
     Router,
 };
 use tokio::net::TcpListener;
+use tauri::Emitter;
 use crate::state::AppState;
 use crate::recording_endpoints::{
     start_recording, stop_recording, list_recordings, get_recording,
@@ -240,16 +241,18 @@ pub async fn start_api_server(
             }
         }))
         .layer(cors_layer())
-        .with_state(state);
+        .with_state(state.clone());
 
     let local = listener.local_addr();
     log::info!("API server listening on {:?}", local);
+    let _ = state.app_handle.emit("server-status:changed", ());
     let _ = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = shutdown.await;
         })
         .await;
     log::info!("API server on {:?} stopped", local);
+    let _ = state.app_handle.emit("server-status:changed", ());
 }
 
 

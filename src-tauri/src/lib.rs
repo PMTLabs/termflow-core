@@ -773,7 +773,6 @@ pub fn run() {
                     };
 
                     api_state.effective_endpoints.write().mcp_port = mcp_effective_port;
-                    let _ = api_state.app_handle.emit("server-status:changed", ());
                     log::info!(
                         "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
                         api_net.api_port, mcp_effective_port, api_net.mcp_port

@@ -1,6 +1,7 @@
 use crate::app_config;
 use crate::state::{AppState, McpProcessHandle};
 use crate::{shutdown_mcp_generation, shutdown_mcp_server};
+use tauri::Emitter;
 use tauri_plugin_shell::ShellExt;
 
 static SIDECAR_DIGEST_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
@@ -62,7 +63,8 @@ async fn wait_for_mcp_health_within(
     attempts: u32,
 ) -> SidecarAcceptance {
     // Bounded-timeout client so an unresponsive port can't stall each attempt for the
-    // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
+    // OS default (~20s); progressive delay (60ms, 120ms, 250ms, then 500ms) + 10 attempts
+    // and 1500ms probe timeout bounds total wait while accelerating healthy startup.
     let client = crate::network_commands::localhost_client(1500);
     for attempt in 1..=attempts {
         let delay_ms = match attempt {
@@ -249,6 +251,8 @@ async fn start_mcp_sidecar(
                         payload.code,
                         payload.signal
                     );
+                    drain_state.effective_endpoints.write().mcp_port = None;
+                    let _ = drain_state.app_handle.emit("server-status:changed", ());
                 } else {
                     log::debug!(
                         "[MCP] stale sidecar child (gen {generation}) terminated after respawn; keeping current handle"

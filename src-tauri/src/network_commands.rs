@@ -451,6 +451,7 @@ pub async fn rotate_auth_token(
     if crate::fabric_manager::fabric_respawn_needed(&old, &cfg) {
         crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;
     }
+    let _ = app.emit("server-status:changed", ());
     app_config::save(&app, &cfg)?;
     Ok(cfg)
 }

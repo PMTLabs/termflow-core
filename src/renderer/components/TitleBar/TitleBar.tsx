@@ -37,13 +37,18 @@ export const TitleBar: React.FC = () => {
     useEffect(() => {
         let active = true;
         let pollTimer: ReturnType<typeof setTimeout> | undefined;
+        let nextRequestId = 0;
+        let latestHandledId = 0;
         let startupAttempt = 0;
         const MAX_STARTUP_ATTEMPTS = 15; // fast-poll window while booting
 
         const check = async () => {
+            const reqId = ++nextRequestId;
             try {
                 const res = await window.electronAPI?.checkConnectionHealth?.();
-                if (!active) return;
+                if (!active || reqId < latestHandledId) return;
+                latestHandledId = reqId;
+
                 if (!res) {
                     if (startupAttempt < MAX_STARTUP_ATTEMPTS) {
                         setServerStatus('checking');
@@ -75,7 +80,8 @@ export const TitleBar: React.FC = () => {
                 }
                 scheduleNext(isOnline);
             } catch {
-                if (active) {
+                if (active && reqId >= latestHandledId) {
+                    latestHandledId = reqId;
                     if (startupAttempt < MAX_STARTUP_ATTEMPTS) {
                         setServerStatus('checking');
                         setStatusTitle('Starting servers…');
@@ -91,7 +97,11 @@ export const TitleBar: React.FC = () => {
         const scheduleNext = (isOnline: boolean) => {
             if (!active) return;
             if (pollTimer) clearTimeout(pollTimer);
-            startupAttempt++;
+            if (isOnline) {
+                startupAttempt = MAX_STARTUP_ATTEMPTS;
+            } else {
+                startupAttempt++;
+            }
             const delay = isOnline || startupAttempt >= MAX_STARTUP_ATTEMPTS ? 15000 : 400;
             pollTimer = setTimeout(check, delay);
         };
@@ -100,13 +110,19 @@ export const TitleBar: React.FC = () => {
 
         let unlistenStatus: (() => void) | undefined;
         listen('server-status:changed', () => {
-            if (active) check();
+            if (active) {
+                startupAttempt = 0;
+                check();
+            }
         }).then(fn => {
             if (active) unlistenStatus = fn;
             else fn();
         }).catch(() => {});
 
-        const onRefresh = () => { check(); };
+        const onRefresh = () => {
+            startupAttempt = 0;
+            check();
+        };
         window.addEventListener('ui:serverStatusRefresh', onRefresh);
         return () => {
             active = false;
