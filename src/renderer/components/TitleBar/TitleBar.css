@@ -45,6 +45,25 @@
 .server-status-icon rect { fill: currentColor; stroke: none; }
 .server-status-icon path { fill: none; }
 
+.server-status-icon.checking {
+  color: #f85149;                /* animated red while booting/connecting */
+  animation: serverStatusPulse 1.1s ease-in-out infinite;
+  transform-origin: center;
+}
+
+@keyframes serverStatusPulse {
+  0%, 100% {
+    opacity: 0.35;
+    filter: drop-shadow(0 0 1px rgba(248, 81, 73, 0.25));
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 6px rgba(248, 81, 73, 0.85));
+    transform: scale(1.08);
+  }
+}
+
 .server-status-icon.online {
   color: #3fb950;                /* green */
   filter: drop-shadow(0 0 3px rgba(63, 185, 80, 0.55));

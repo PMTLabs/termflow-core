@@ -1,7 +1,7 @@
 use crate::app_config::{self, NetworkConfig};
 use crate::state::AppState;
 use std::net::SocketAddr;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(serde::Serialize)]
 pub struct NetworkInterface {
@@ -414,6 +414,7 @@ pub async fn set_network_config(
         crate::fabric_manager::respawn_fabric(app.clone(), (*state).clone()).await;
     }
 
+    let _ = app.emit("server-status:changed", ());
     app_config::save(&app, &cfg)?;
     Ok(cfg)
 }
@@ -497,6 +498,7 @@ pub async fn stop_servers(state: State<'_, AppState>, target: String) -> Result<
         "[NET] stop_servers: target={} (api={} mcp={} fabric={})",
         target, api, stop_mcp, api
     );
+    let _ = state.app_handle.emit("server-status:changed", ());
     Ok(())
 }
 
@@ -553,6 +555,7 @@ pub async fn start_servers(
         "[NET] start_servers: target={} (api={} mcp={}) api_moved={}",
         target, api, mcp, api_moved
     );
+    let _ = app.emit("server-status:changed", ());
     Ok(())
 }
 

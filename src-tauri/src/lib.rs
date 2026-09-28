@@ -737,6 +737,8 @@ pub fn run() {
                     // read a config clone captured before binding, so a fallback
                     // port left the MCP sidecar forwarding to the OTHER instance's
                     // API. Same for the fabric and the renderer.
+                    api_state.effective_endpoints.write().api_port = Some(api_port);
+
                     let mcp_port = crate::net_ports::pick_mcp_port(
                         api_net.mcp_port,
                         crate::net_ports::DEFAULT_SPAN,
@@ -770,11 +772,8 @@ pub fn run() {
                         }
                     };
 
-                    {
-                        let mut eff = api_state.effective_endpoints.write();
-                        eff.api_port = Some(api_port);
-                        eff.mcp_port = mcp_effective_port;
-                    }
+                    api_state.effective_endpoints.write().mcp_port = mcp_effective_port;
+                    let _ = api_state.app_handle.emit("server-status:changed", ());
                     log::info!(
                         "[NET] effective endpoints: api={api_port} (configured {}) mcp={:?} (configured {})",
                         api_net.api_port, mcp_effective_port, api_net.mcp_port
@@ -836,6 +835,7 @@ pub fn run() {
                 }
                 None => {
                     drop(_op);
+                    let _ = api_state.app_handle.emit("server-status:changed", ());
                     log::error!(
                         "API could not bind any port near {} — the REST/WebSocket API and MCP are \
                          NOT running. Change the port in Settings > Connections.",

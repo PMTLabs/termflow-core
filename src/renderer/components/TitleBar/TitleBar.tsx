@@ -17,7 +17,7 @@ export const TitleBar: React.FC = () => {
     const [isMaximized, setIsMaximized] = useState(false);
     const [isMac, setIsMac] = useState(false);
     const [serverStatus, setServerStatus] = useState<ServerStatus>('checking');
-    const [statusTitle, setStatusTitle] = useState('Checking server status…');
+    const [statusTitle, setStatusTitle] = useState('Starting servers…');
     // P0a: this window's label, and the label of the window currently receiving
     // API/MCP-created terminals. They match ⇒ this is the active target.
     const [myLabel, setMyLabel] = useState('');
@@ -36,31 +36,82 @@ export const TitleBar: React.FC = () => {
     // re-checks immediately when the Connections tab stops/starts a server.
     useEffect(() => {
         let active = true;
+        let pollTimer: ReturnType<typeof setTimeout> | undefined;
+        let startupAttempt = 0;
+        const MAX_STARTUP_ATTEMPTS = 15; // fast-poll window while booting
+
         const check = async () => {
             try {
                 const res = await window.electronAPI?.checkConnectionHealth?.();
                 if (!active) return;
-                if (!res) { setServerStatus('offline'); setStatusTitle('Server status unavailable'); return; }
+                if (!res) {
+                    if (startupAttempt < MAX_STARTUP_ATTEMPTS) {
+                        setServerStatus('checking');
+                        setStatusTitle('Starting servers…');
+                    } else {
+                        setServerStatus('offline');
+                        setStatusTitle('Server status unavailable');
+                    }
+                    scheduleNext(false);
+                    return;
+                }
                 const api = res.find(r => r.name === 'API Server')?.healthy ?? false;
                 const mcp = res.find(r => r.name === 'MCP Server')?.healthy ?? false;
-                const status: ServerStatus = api && mcp ? 'online' : (!api && !mcp ? 'offline' : 'partial');
-                setServerStatus(status);
-                setStatusTitle(
-                    status === 'online' ? 'Servers online (API + MCP)'
-                    : status === 'offline' ? 'Servers offline (API + MCP stopped)'
-                    : `Partly offline — ${api ? 'MCP' : 'API'} server is stopped`,
-                );
+                const isOnline = api && mcp;
+
+                if (isOnline) {
+                    setServerStatus('online');
+                    setStatusTitle('Servers online (API + MCP)');
+                } else if (startupAttempt < MAX_STARTUP_ATTEMPTS && !api && !mcp) {
+                    setServerStatus('checking');
+                    setStatusTitle('Starting servers…');
+                } else {
+                    const status: ServerStatus = !api && !mcp ? 'offline' : 'partial';
+                    setServerStatus(status);
+                    setStatusTitle(
+                        status === 'offline' ? 'Servers offline (API + MCP stopped)'
+                        : `Partly offline — ${api ? 'MCP' : 'API'} server is stopped`,
+                    );
+                }
+                scheduleNext(isOnline);
             } catch {
-                if (active) { setServerStatus('offline'); setStatusTitle('Servers offline'); }
+                if (active) {
+                    if (startupAttempt < MAX_STARTUP_ATTEMPTS) {
+                        setServerStatus('checking');
+                        setStatusTitle('Starting servers…');
+                    } else {
+                        setServerStatus('offline');
+                        setStatusTitle('Servers offline');
+                    }
+                    scheduleNext(false);
+                }
             }
         };
+
+        const scheduleNext = (isOnline: boolean) => {
+            if (!active) return;
+            if (pollTimer) clearTimeout(pollTimer);
+            startupAttempt++;
+            const delay = isOnline || startupAttempt >= MAX_STARTUP_ATTEMPTS ? 15000 : 400;
+            pollTimer = setTimeout(check, delay);
+        };
+
         check();
-        const interval = setInterval(check, 15000);
+
+        let unlistenStatus: (() => void) | undefined;
+        listen('server-status:changed', () => {
+            if (active) check();
+        }).then(fn => {
+            if (active) unlistenStatus = fn;
+            else fn();
+        }).catch(() => {});
+
         const onRefresh = () => { check(); };
         window.addEventListener('ui:serverStatusRefresh', onRefresh);
         return () => {
             active = false;
-            clearInterval(interval);
+            if (pollTimer) clearTimeout(pollTimer);
+            if (unlistenStatus) unlistenStatus();
             window.removeEventListener('ui:serverStatusRefresh', onRefresh);
         };
     }, []);

@@ -65,7 +65,13 @@ async fn wait_for_mcp_health_within(
     // OS default (~20s); the 500ms poll cadence + 10 attempts bounds total wait.
     let client = crate::network_commands::localhost_client(1500);
     for attempt in 1..=attempts {
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        let delay_ms = match attempt {
+            1 => 60,
+            2 => 120,
+            3 => 250,
+            _ => 500,
+        };
+        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
 
         let result = match &client {
             Some(c) => c.get(format!("http://localhost:{}/health", port)).send().await,
@@ -376,12 +382,15 @@ pub async fn respawn_mcp(
     patched.api_port = api_port;
     let cfg = &patched;
 
+    let was_running = crate::mcp_alive(&state);
     shutdown_mcp_server(&state);
     // Let the previous process fully release its port before rebinding. The
     // sidecar handle is killed (not waited), so give it a generous margin to
     // avoid an EADDRINUSE on the fresh listener; health-check + legacy fallback
     // cover the rare case it's still slow.
-    tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+    if was_running {
+        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+    }
 
     match start_mcp_sidecar(app_handle.clone(), state.clone(), cfg).await {
         Ok(true) => return true,
