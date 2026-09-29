@@ -1177,9 +1177,13 @@ fn conpty_staged_intact(dir: &std::path::Path, src_dir: &std::path::Path) -> boo
 }
 
 /// Stage the ConPTY pair into `<dir>/conpty/` as a unit: copy into a private
-/// `conpty.staging-*` sibling, verify every hash, then rename the directory, so a
-/// reader never sees half a pair. (The pair lives in a subfolder, not beside the
-/// exe, so `TERMFLOW_DISABLE_BUNDLED_CONPTY=1` can roll back — see `conpty.rs`.)
+/// `conpty.staging-*` sibling, verify every hash, then publish with ONE directory
+/// rename, so a reader never sees half a pair. The published directory is never
+/// deleted in place: a running host may have `conpty.dll` mapped, and a racing
+/// stager may just have published it. A damaged leftover is renamed aside (which
+/// fails harmlessly while it is in use); the loader independently refuses any
+/// `conpty/` that is not exactly the pinned pair, so a failure here degrades to
+/// the bundled pair or inbox ConPTY rather than loading something untrusted.
 fn stage_conpty_into(dir: &std::path::Path, src_dir: &std::path::Path) -> std::io::Result<()> {
     if conpty_staged_intact(dir, src_dir) {
         return Ok(());
@@ -1197,15 +1201,19 @@ fn stage_conpty_into(dir: &std::path::Path, src_dir: &std::path::Path) -> std::i
             }
         }
         let final_dir = dir.join("conpty");
-        if final_dir.exists() {
-            // Incomplete/corrupt leftover (the dir key guarantees no valid variant).
-            let _ = std::fs::remove_dir_all(&final_dir);
+        if final_dir.exists() && !conpty_staged_intact(dir, src_dir) {
+            let stale = dir.join(format!("conpty.stale-{}", uuid::Uuid::new_v4()));
+            std::fs::rename(&final_dir, &stale)?;
+            let _ = std::fs::remove_dir_all(&stale);
         }
-        std::fs::rename(&staging, &final_dir)
+        match std::fs::rename(&staging, &final_dir) {
+            Ok(()) => Ok(()),
+            // Lost a race: another instance published first. Fine if it is the pair.
+            Err(_) if conpty_staged_intact(dir, src_dir) => Ok(()),
+            Err(e) => Err(e),
+        }
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&staging);
-    }
+    let _ = std::fs::remove_dir_all(&staging); // no-op after a successful rename
     result
 }
 
@@ -1236,7 +1244,7 @@ fn install_host_with_conpty(
             if d == digest {
                 if let Some(c) = conpty_src {
                     if let Err(e) = stage_conpty_into(&dir, c) {
-                        log::warn!("pty-host: could not stage ConPTY ({e}); using inbox ConPTY");
+                        log::warn!("pty-host: could not stage ConPTY ({e}); the host will use the bundled pair or inbox ConPTY");
                     }
                 }
                 return Ok(dest);
@@ -1269,7 +1277,7 @@ fn install_host_with_conpty(
     // is non-fatal — the host falls back to inbox ConPTY.
     if let Some(c) = conpty_src {
         if let Err(e) = stage_conpty_into(&dir, c) {
-            log::warn!("pty-host: could not stage ConPTY ({e}); using inbox ConPTY");
+            log::warn!("pty-host: could not stage ConPTY ({e}); the host will use the bundled pair or inbox ConPTY");
         }
     }
     // TODO(RP-9/signing): in release, Authenticode/codesign-verify `dest` here

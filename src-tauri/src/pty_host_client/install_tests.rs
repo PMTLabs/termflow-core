@@ -1,6 +1,6 @@
 use super::{host_binary_name, install_host_into};
 #[cfg(windows)]
-use super::{install_host_with_conpty, CONPTY_FILES};
+use super::{install_host_with_conpty, stage_conpty_into, CONPTY_FILES};
 
 fn scratch() -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!("tfhost-test-{}", uuid::Uuid::new_v4()));
@@ -68,8 +68,12 @@ fn conpty_pair_stages_into_a_subfolder_not_beside_the_host() {
     let dest = install_host_with_conpty(&host, &base, Some(&pair)).unwrap();
     let dir = dest.parent().unwrap();
     for f in CONPTY_FILES {
-        assert!(dir.join("conpty").join(f).is_file(), "{f} staged under conpty/");
         assert!(!dir.join(f).exists(), "{f} must NOT sit beside the exe (defeats rollback)");
+        assert_eq!(
+            std::fs::read(dir.join("conpty").join(f)).unwrap(),
+            std::fs::read(pair.join(f)).unwrap(),
+            "{f} staged byte-for-byte"
+        );
     }
     let leftovers = std::fs::read_dir(dir).unwrap().flatten()
         .filter(|e| e.file_name().to_string_lossy().contains(".staging-")).count();
@@ -100,9 +104,70 @@ fn changing_only_the_conpty_pair_installs_to_a_new_dir() {
 
     let a = install_host_with_conpty(&host, &base, Some(&p1)).unwrap();
     let b = install_host_with_conpty(&host, &base, Some(&p2)).unwrap();
+    // Changing ONLY one file of the pair must also change the key (each file).
+    for (i, f) in CONPTY_FILES.iter().enumerate() {
+        let p = root.join(format!("only-{i}"));
+        fake_pair(&p, b"v1");
+        std::fs::write(p.join(f), b"different").unwrap();
+        let c = install_host_with_conpty(&host, &base, Some(&p)).unwrap();
+        assert_ne!(a.parent(), c.parent(), "changing only {f} must not reuse the dir");
+    }
     let none = install_host_with_conpty(&host, &base, None).unwrap();
     assert_ne!(a.parent(), b.parent(), "ConPTY bump must not reuse the old dir");
     assert_ne!(a.parent(), none.parent());
     assert!(!none.parent().unwrap().join("conpty").exists(), "no pair, no subfolder");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(windows)]
+#[test]
+fn concurrent_stagers_all_succeed_and_leave_one_intact_pair() {
+    let root = scratch();
+    let pair = root.join("pair");
+    fake_pair(&pair, b"v1");
+    let dir = root.join("dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let (d, p) = (dir.clone(), pair.clone());
+            std::thread::spawn(move || stage_conpty_into(&d, &p))
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap().expect("every racing stager must succeed");
+    }
+    for f in CONPTY_FILES {
+        assert_eq!(
+            std::fs::read(dir.join("conpty").join(f)).unwrap(),
+            std::fs::read(pair.join(f)).unwrap()
+        );
+    }
+    let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, vec!["conpty".to_string()], "no staging/stale leftovers: {names:?}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A damaged published pair that a running host holds open must be left alone
+/// (not half-deleted): repair fails, the directory stays, and no error is hidden.
+#[cfg(windows)]
+#[test]
+fn repair_never_deletes_a_pair_that_is_in_use() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = scratch();
+    let pair = root.join("pair");
+    fake_pair(&pair, b"v1");
+    let dir = root.join("dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    stage_conpty_into(&dir, &pair).unwrap();
+    let live = dir.join("conpty").join(CONPTY_FILES[0]);
+    // Hold the DLL open the way a loaded module is held (deny write/delete).
+    let _held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&live).unwrap();
+    // Damage the OTHER file, so the pair is no longer intact.
+    std::fs::write(dir.join("conpty").join(CONPTY_FILES[1]), b"damaged").unwrap();
+
+    assert!(stage_conpty_into(&dir, &pair).is_err(), "repair of an in-use pair must fail loudly");
+    assert!(live.is_file(), "in-use DLL must still be there");
+    assert!(dir.join("conpty").join(CONPTY_FILES[1]).is_file(), "published dir left in place");
     let _ = std::fs::remove_dir_all(&root);
 }

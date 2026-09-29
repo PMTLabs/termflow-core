@@ -20,6 +20,7 @@ log = "0.4"
 
 # Modern-ConPTY sideload helper (conpty.rs) — Windows only.
 [target.'cfg(windows)'.dependencies]
+sha2 = "0.10"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
