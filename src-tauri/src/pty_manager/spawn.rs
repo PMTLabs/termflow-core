@@ -106,6 +106,14 @@ pub fn spawn_terminal(
     // session's content (the scrollback-persistence "ratchet" bug).
     history_seed: Option<String>,
 ) -> Result<String, String> {
+    // Plan 049: sideload modern ConPTY once, before the first pseudoconsole opens.
+    #[cfg(windows)]
+    {
+        static CONPTY_INIT: std::sync::Once = std::sync::Once::new();
+        CONPTY_INIT.call_once(|| {
+            let _ = termflow_pty_protocol::conpty::init_for_current_exe();
+        });
+    }
     let pty_system = NativePtySystem::default();
     
     let size = PtySize {

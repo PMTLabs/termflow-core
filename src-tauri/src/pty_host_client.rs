@@ -1127,6 +1127,96 @@ fn hex16(digest: &[u8; 32]) -> String {
     s
 }
 
+/// Files of the modern-ConPTY pair (plan 049) staged under `<dir>/conpty/`.
+#[cfg(windows)]
+const CONPTY_FILES: [&str; 2] = [
+    termflow_pty_protocol::conpty::DLL,
+    termflow_pty_protocol::conpty::HOST,
+];
+#[cfg(not(windows))]
+const CONPTY_FILES: [&str; 0] = [];
+
+/// Where the shipped ConPTY pair lives for this app (Windows only).
+fn bundled_conpty_source() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        if termflow_pty_protocol::conpty::disabled() {
+            return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        return termflow_pty_protocol::conpty::bundled_source(exe.parent()?);
+    }
+    #[cfg(not(windows))]
+    None
+}
+
+/// Digest keying the install dir: the host alone, or — when a ConPTY pair ships —
+/// host + `conpty.dll` + `OpenConsole.exe`, so a ConPTY bump gets a fresh dir.
+fn install_key(
+    host: &[u8; 32],
+    conpty_src: Option<&std::path::Path>,
+) -> std::io::Result<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let Some(dir) = conpty_src else { return Ok(*host) };
+    let mut h = Sha256::new();
+    h.update(host);
+    for f in CONPTY_FILES {
+        h.update(sha256_file(&dir.join(f))?);
+    }
+    Ok(h.finalize().into())
+}
+
+/// True when `<dir>/conpty/` holds exactly the pair from `src_dir`.
+fn conpty_staged_intact(dir: &std::path::Path, src_dir: &std::path::Path) -> bool {
+    CONPTY_FILES.iter().all(|f| {
+        match (sha256_file(&src_dir.join(f)), sha256_file(&dir.join("conpty").join(f))) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    })
+}
+
+/// Stage the ConPTY pair into `<dir>/conpty/` as a unit: copy into a private
+/// `conpty.staging-*` sibling, verify every hash, then publish with ONE directory
+/// rename, so a reader never sees half a pair. The published directory is never
+/// deleted in place: a running host may have `conpty.dll` mapped, and a racing
+/// stager may just have published it. A damaged leftover is renamed aside (which
+/// fails harmlessly while it is in use); the loader independently refuses any
+/// `conpty/` that is not exactly the pinned pair, so a failure here degrades to
+/// the bundled pair or inbox ConPTY rather than loading something untrusted.
+fn stage_conpty_into(dir: &std::path::Path, src_dir: &std::path::Path) -> std::io::Result<()> {
+    if conpty_staged_intact(dir, src_dir) {
+        return Ok(());
+    }
+    let staging = dir.join(format!("conpty.staging-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&staging)?;
+    let result = (|| {
+        for f in CONPTY_FILES {
+            std::fs::copy(src_dir.join(f), staging.join(f))?;
+            if sha256_file(&src_dir.join(f))? != sha256_file(&staging.join(f))? {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pty-host: staged ConPTY file hash did not match source",
+                ));
+            }
+        }
+        let final_dir = dir.join("conpty");
+        if final_dir.exists() && !conpty_staged_intact(dir, src_dir) {
+            let stale = dir.join(format!("conpty.stale-{}", uuid::Uuid::new_v4()));
+            std::fs::rename(&final_dir, &stale)?;
+            let _ = std::fs::remove_dir_all(&stale);
+        }
+        match std::fs::rename(&staging, &final_dir) {
+            Ok(()) => Ok(()),
+            // Lost a race: another instance published first. Fine if it is the pair.
+            Err(_) if conpty_staged_intact(dir, src_dir) => Ok(()),
+            Err(e) => Err(e),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&staging); // no-op after a successful rename
+    result
+}
+
 /// Install the host binary into `base/<hash>/<name>`, idempotently and
 /// atomically, verifying the copy's hash matches the source. Returns the
 /// installed path. Split out (base as a param) so it is unit-testable without
@@ -1135,8 +1225,16 @@ fn install_host_into(
     src: &std::path::Path,
     base: &std::path::Path,
 ) -> std::io::Result<std::path::PathBuf> {
+    install_host_with_conpty(src, base, bundled_conpty_source().as_deref())
+}
+
+fn install_host_with_conpty(
+    src: &std::path::Path,
+    base: &std::path::Path,
+    conpty_src: Option<&std::path::Path>,
+) -> std::io::Result<std::path::PathBuf> {
     let digest = sha256_file(src)?;
-    let dir = base.join(hex16(&digest));
+    let dir = base.join(hex16(&install_key(&digest, conpty_src)?));
     let name = host_binary_name();
     let dest = dir.join(name);
 
@@ -1144,6 +1242,11 @@ fn install_host_into(
     if dest.exists() {
         if let Ok(d) = sha256_file(&dest) {
             if d == digest {
+                if let Some(c) = conpty_src {
+                    if let Err(e) = stage_conpty_into(&dir, c) {
+                        log::warn!("pty-host: could not stage ConPTY ({e}); the host will use the bundled pair or inbox ConPTY");
+                    }
+                }
                 return Ok(dest);
             }
         }
@@ -1168,6 +1271,14 @@ fn install_host_into(
             std::io::ErrorKind::InvalidData,
             "pty-host: installed copy hash did not match source",
         ));
+    }
+    // Stage the ConPTY pair BEFORE the host becomes visible: the host's presence
+    // is the idempotence marker, so a crash here re-stages next launch. A failure
+    // is non-fatal — the host falls back to inbox ConPTY.
+    if let Some(c) = conpty_src {
+        if let Err(e) = stage_conpty_into(&dir, c) {
+            log::warn!("pty-host: could not stage ConPTY ({e}); the host will use the bundled pair or inbox ConPTY");
+        }
     }
     // TODO(RP-9/signing): in release, Authenticode/codesign-verify `dest` here
     // before it is ever executed. In dev the bundled host is unsigned.

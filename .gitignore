@@ -135,7 +135,8 @@ terminal-kit/node_modules/
 terminal-kit/dist/
 
 # Tauri sidecars
-src-tauri/binaries/
+src-tauri/binaries/*
+!src-tauri/binaries/conpty/
 
 # AI agent / editor tool config (local only, not tracked)
 .claude/
