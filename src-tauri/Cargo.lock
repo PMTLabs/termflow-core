@@ -6205,9 +6205,11 @@ name = "termflow-pty-protocol"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "log",
  "serde",
  "serde_json",
  "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

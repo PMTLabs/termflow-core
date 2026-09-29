@@ -5,6 +5,8 @@
 //! dependency-light — it is compiled into two binaries.
 
 pub mod bootstrap;
+#[cfg(windows)]
+pub mod conpty;
 pub mod discovery;
 pub mod frame;
 pub mod spec;

@@ -188,7 +188,28 @@ foreach ($d in $PayloadDirs) {
     $src = Join-Path $RelDir $d
     if (Test-Path $src) { Copy-Item $src (Join-Path $StageDir $d) -Recurse -Force }
 }
-Write-Host "    Staged $($PayloadFiles.Count) binaries + resource dirs"
+
+# Modern ConPTY (conpty.dll + OpenConsole.exe, plan 049). Staged explicitly rather
+# than via Tauri resources so it lands at resources\binaries\conpty\<arch>, the
+# path the pty-host loader probes. A missing half silently degrades to inbox
+# ConPTY (no OSC 10/11 replies), so fail the build instead.
+$ConptySub = if ($Arch -eq "x64") { "x86_64" } else { "aarch64" }
+$ConptySrc = Join-Path $ScriptDir "src-tauri\binaries\conpty\$ConptySub"
+$ConptyDst = Join-Path $StageDir "resources\binaries\conpty\$ConptySub"
+New-Item -ItemType Directory -Force -Path $ConptyDst | Out-Null
+foreach ($f in @("conpty.dll", "OpenConsole.exe")) {
+    $src = Join-Path $ConptySrc $f
+    if (-not (Test-Path $src)) {
+        Write-Error "Required ConPTY file missing: $src"
+        exit 1
+    }
+    Copy-Item $src (Join-Path $ConptyDst $f) -Force
+    if (-not (Test-Path (Join-Path $ConptyDst $f))) {
+        Write-Error "ConPTY file not staged: $f"
+        exit 1
+    }
+}
+Write-Host "    Staged $($PayloadFiles.Count) binaries + resource dirs + ConPTY ($ConptySub)"
 
 # ─── Stage 4: resolve signing credentials from Infisical ─────────────────────
 $SignArgs = @()

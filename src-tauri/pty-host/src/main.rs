@@ -151,6 +151,11 @@ async fn main() {
     // ignore-vs-process CTRL+C attribute at creation time.
     restore_ctrl_c_processing();
 
+    // Plan 049: sideload modern ConPTY (answers OSC 10/11 colour queries) before
+    // any session opens a pseudoconsole — portable-pty resolves it once, lazily.
+    #[cfg(windows)]
+    let _ = termflow_pty_protocol::conpty::init_for_current_exe();
+
     if let Some(dial_args) = parse_dial_args() {
         run_dial_out_mode(dial_args).await;
         return;

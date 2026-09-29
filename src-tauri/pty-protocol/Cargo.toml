@@ -16,6 +16,16 @@ bincode = "1.3"
 # fields and #[serde(default)] tolerates missing ones. bincode can't do that.
 serde_json = "1.0"
 tokio = { version = "1", features = ["io-util"] }
+log = "0.4"
+
+# Modern-ConPTY sideload helper (conpty.rs) — Windows only.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
+    "Win32_System_LibraryLoader",
+] }
 
 [dev-dependencies]
 serde_json = "1.0"
