@@ -126,6 +126,14 @@ mod tests {
         fn bytes(&self) -> Vec<u8> {
             self.emitted.concat()
         }
+        /// Each emitted payload is decoded on its own downstream (`output_pipeline` runs
+        /// `from_utf8_lossy` per payload), so a scalar split across two payloads is corrupted
+        /// even when the concatenation is right.
+        fn assert_every_chunk_is_valid_utf8(&self) {
+            for (i, c) in self.emitted.iter().enumerate() {
+                assert!(std::str::from_utf8(c).is_ok(), "emitted chunk {i} is not valid UTF-8 on its own: {c:?}");
+            }
+        }
     }
     fn run(mut r: Script, armed: bool) -> Run {
         let mut da1 = StartupDa1::new(armed);
@@ -152,7 +160,7 @@ mod tests {
     fn the_query_split_across_reads_is_still_removed() {
         let r = run(Script::ok(&[b"\x1b", b"[", b"c", b"\x1b[?9001h"]), true);
         assert_eq!(r.bytes(), b"\x1b[?9001h");
-        assert_eq!(r.answered_at.len(), 1);
+        assert_eq!(r.answered_at, vec![3], "consumed = the three query bytes seen so far");
     }
 
     #[test]
@@ -167,6 +175,12 @@ mod tests {
         let euro = "€".as_bytes(); // E2 82 AC
         let r = run(Script::ok(&[&[PRE, &euro[..2]].concat(), &euro[2..], b"!"]), true);
         assert_eq!(r.bytes(), [PRE_STRIPPED, euro, b"!"].concat());
+        r.assert_every_chunk_is_valid_utf8();
+        assert!(
+            r.emitted.iter().any(|c| c.starts_with(euro)),
+            "the scalar is emitted whole, at the start of the chunk that completes it: {:?}",
+            r.emitted
+        );
         assert_eq!(String::from_utf8(r.bytes()).unwrap().chars().last(), Some('!'));
         assert_eq!(r.answered_at.len(), 1);
     }
@@ -185,6 +199,7 @@ mod tests {
         let end = pump_output(&mut r, boundary, &mut da1, |_| {}, |d| emitted.push(d));
         assert_eq!(end, PumpEnd::Eof);
         assert_eq!(emitted.concat(), [&b"hi"[..], &euro[..2]].concat(), "partial scalar is flushed, not lost");
+        assert_eq!(emitted, vec![b"hi".to_vec(), euro[..2].to_vec()], "the carried scalar is the final, separate tail emit");
 
         // (2) Bytes held by the filter at EOF (an unfinished preamble sequence).
         let mut r = Script::ok(&[b"\x1b[1t", b"\x1b"]);
@@ -192,6 +207,7 @@ mod tests {
         let mut emitted: Vec<Vec<u8>> = Vec::new();
         pump_output(&mut r, boundary, &mut da1, |_| {}, |d| emitted.push(d));
         assert_eq!(emitted.concat(), b"\x1b[1t\x1b", "held ESC released after the forwarded sequence");
+        assert_eq!(emitted.last().unwrap(), b"\x1b", "the held ESC is the final tail emit");
     }
 
     #[test]
@@ -200,12 +216,20 @@ mod tests {
         let r = run(Script::ok(&[&[PRE, &euro[..1]].concat()]).then_err(io::ErrorKind::BrokenPipe), true);
         assert_eq!(r.end, PumpEnd::Err(io::ErrorKind::BrokenPipe));
         assert_eq!(r.bytes(), [PRE_STRIPPED, &euro[..1]].concat());
+        assert_eq!(r.emitted.last().unwrap(), &euro[..1], "the carried byte is the final tail emit, not forwarded mid-read");
+
+        // A read error while the filter still holds an unfinished escape: `finish()` must run on
+        // the error path too (the case above has already retired the filter).
+        let r = run(Script::ok(&[b"\x1b[1t", b"\x1b[?10"]).then_err(io::ErrorKind::BrokenPipe), true);
+        assert_eq!(r.end, PumpEnd::Err(io::ErrorKind::BrokenPipe));
+        assert_eq!(r.bytes(), b"\x1b[1t\x1b[?10", "bytes held by the filter are released on error");
+        assert_eq!(r.emitted.last().unwrap(), b"\x1b[?10");
     }
 
     #[test]
     fn an_answer_fires_exactly_once_even_with_later_queries() {
         let r = run(Script::ok(&[PRE, b"\x1b[c", b"\x1b[0c"]), true);
-        assert_eq!(r.answered_at.len(), 1);
+        assert_eq!(r.answered_at, vec![7], "one answer, at the offset where the query ended");
         assert_eq!(r.bytes(), [PRE_STRIPPED, &b"\x1b[c\x1b[0c"[..]].concat(), "later queries are the frontend's");
     }
 
@@ -213,6 +237,6 @@ mod tests {
     fn a_chunk_that_is_only_the_query_emits_nothing() {
         let r = run(Script::ok(&[b"\x1b[c"]), true);
         assert!(r.emitted.is_empty());
-        assert_eq!(r.answered_at.len(), 1);
+        assert_eq!(r.answered_at, vec![3]);
     }
 }

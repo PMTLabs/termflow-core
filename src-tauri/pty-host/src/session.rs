@@ -72,10 +72,12 @@ pub struct Session {
     /// liveness therefore tests the OS's cleanup schedule, not our behaviour —
     /// which is precisely how it flakes.
     kill_done: Arc<AtomicBool>,
-    /// Set by the reader when the ConPTY startup DA1 was answered (plan 050). Diagnostic:
-    /// the inbox ConPTY never asks, so `true` also proves the modern handshake ran.
+    /// Set by the reader when it found and removed the ConPTY startup DA1 and handed the reply
+    /// to the reply thread (plan 050). That is a REQUEST: the write may still be waiting for the
+    /// writer lock or fail. Diagnostic only; the inbox ConPTY never asks, so `true` also proves
+    /// the modern handshake ran.
     #[cfg_attr(not(test), allow(dead_code))]
-    da1_answered: Arc<AtomicBool>,
+    da1_reply_requested: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -120,7 +122,7 @@ impl Session {
         let ring = Arc::new(Mutex::new(ReplayRing::new(ring_cap)));
         let attached = Arc::new(AtomicBool::new(attached_initial));
         let exited = Arc::new(AtomicBool::new(false));
-        let da1_answered = Arc::new(AtomicBool::new(false));
+        let da1_reply_requested = Arc::new(AtomicBool::new(false));
 
         // Waiter: on child exit, wait a short grace so conhost flushes final
         // output, then drop the master to force the reader to observe EOF.
@@ -143,7 +145,7 @@ impl Session {
             events: events.clone(),
             tab_id: tab_id.clone(),
             writer: writer.clone(),
-            da1_answered: da1_answered.clone(),
+            da1_reply_requested: da1_reply_requested.clone(),
         };
         std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_platform()));
 
@@ -158,7 +160,7 @@ impl Session {
             exited,
             killing: Arc::new(AtomicBool::new(false)),
             kill_done: Arc::new(AtomicBool::new(false)),
-            da1_answered,
+            da1_reply_requested,
         })
     }
 
@@ -170,11 +172,11 @@ impl Session {
         !self.exited.load(Ordering::Acquire)
     }
 
-    /// Whether the modern ConPTY's startup DA1 query was found and answered.
-    /// Test-only, like `kill_done_flag`: production never reads it.
+    /// Whether the modern ConPTY's startup DA1 query was found, removed and its reply requested
+    /// (not that the reply was written). Test-only, like `kill_done_flag`: production never reads it.
     #[cfg(test)]
-    pub fn startup_da1_answered(&self) -> bool {
-        self.da1_answered.load(Ordering::Acquire)
+    pub fn startup_da1_reply_requested(&self) -> bool {
+        self.da1_reply_requested.load(Ordering::Acquire)
     }
 
     pub fn set_attached(&self, on: bool) {
@@ -301,16 +303,16 @@ struct ReaderShared {
     events: Sender<Data>,
     tab_id: String,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    da1_answered: Arc<AtomicBool>,
+    da1_reply_requested: Arc<AtomicBool>,
 }
 
 /// The reader thread body, over any `Read` so it is testable without a PTY.
 ///
 /// Ring push + attached-check + live send are serialized with `attach()` on the
 /// ring lock, so a byte is either in the reattach snapshot OR streamed live, never
-/// both. The ConPTY startup DA1 is answered from its own thread (never under the
-/// ring lock, never blocking this loop on the writer mutex) and removed BEFORE the
-/// ring push, so neither replay nor the renderer ever sees it.
+/// both. The ConPTY startup DA1 query is removed BEFORE the ring push, so neither
+/// replay nor the renderer ever sees it; its reply is sent from its own thread (never
+/// under the ring lock, never blocking this loop on the writer mutex).
 fn run_reader<R: Read>(mut reader: R, sh: ReaderShared, mut da1: StartupDa1) {
     // True after a live frame was dropped under backpressure; the next
     // successful send is preceded by a Gap so the GUI resyncs.
@@ -320,7 +322,7 @@ fn run_reader<R: Read>(mut reader: R, sh: ReaderShared, mut da1: StartupDa1) {
         find_utf8_boundary,
         &mut da1,
         |consumed| {
-            sh.da1_answered.store(true, Ordering::Release);
+            sh.da1_reply_requested.store(true, Ordering::Release);
             send_da1_reply(sh.writer.clone(), sh.tab_id.clone(), consumed);
         },
         |data| {
@@ -720,7 +722,7 @@ mod tests {
                 events: tx.clone(),
                 tab_id: "tab-fake".into(),
                 writer: writer.clone(),
-                da1_answered: answered.clone(),
+                da1_reply_requested: answered.clone(),
             },
             StartupDa1::new(armed),
         );
@@ -735,7 +737,7 @@ mod tests {
             exited,
             killing: Arc::new(Flag::new(true)), // nothing to kill: Drop must not taskkill pid 0
             kill_done: Arc::new(Flag::new(false)),
-            da1_answered: answered,
+            da1_reply_requested: answered,
         };
         (sess, rx, cap)
     }
@@ -755,7 +757,7 @@ mod tests {
             true,
             true,
         );
-        assert!(sess.startup_da1_answered());
+        assert!(sess.startup_da1_reply_requested());
         assert!(wait_for(|| *cap.0.lock().unwrap() == DA1_REPLY), "exactly one reply reaches the PTY input");
 
         let mut want = PRE_STRIPPED.to_vec();
@@ -763,12 +765,16 @@ mod tests {
         let (mut bytes, mut next, mut exits) = (Vec::new(), 0u64, 0);
         for d in drain(&mut rx) {
             match d {
-                Data::Stdout { offset, bytes: b, .. } => {
+                Data::Stdout { tab_id, offset, bytes: b, .. } => {
+                    assert_eq!(tab_id, "tab-fake", "frames are routed by tab_id in the client");
                     assert_eq!(offset, next, "live offsets are contiguous");
                     next += b.len() as u64;
                     bytes.extend(b);
                 }
-                Data::Exit { .. } => exits += 1,
+                Data::Exit { tab_id, .. } => {
+                    assert_eq!(tab_id, "tab-fake");
+                    exits += 1;
+                }
                 other => panic!("unexpected frame {other:?}"),
             }
         }
@@ -789,12 +795,18 @@ mod tests {
         sess.attach(0);
         let frames = drain(&mut rx);
         match &frames[..] {
-            [Data::Stdout { offset: 0, bytes, .. }, Data::Exit { .. }] => assert_eq!(bytes, &want),
+            [Data::Stdout { tab_id, offset: 0, bytes, .. }, Data::Exit { tab_id: exit_tab, .. }] => {
+                assert_eq!((tab_id.as_str(), exit_tab.as_str()), ("tab-fake", "tab-fake"));
+                assert_eq!(bytes, &want)
+            }
             other => panic!("attach(0) must replay the whole filtered ring then Exit: {other:?}"),
         }
         sess.attach(9);
         match &drain(&mut rx)[..] {
-            [Data::Stdout { offset: 9, bytes, .. }, Data::Exit { .. }] => assert_eq!(bytes, &want[9..]),
+            [Data::Stdout { tab_id, offset: 9, bytes, .. }, Data::Exit { tab_id: exit_tab, .. }] => {
+                assert_eq!((tab_id.as_str(), exit_tab.as_str()), ("tab-fake", "tab-fake"));
+                assert_eq!(bytes, &want[9..])
+            }
             other => panic!("attach(9) must replay the exact suffix: {other:?}"),
         }
         assert!(wait_for(|| cap.0.lock().unwrap().len() == DA1_REPLY.len()));
@@ -805,7 +817,7 @@ mod tests {
     #[test]
     fn a_disarmed_reader_leaves_the_query_alone() {
         let (sess, mut rx, cap) = fake_session(&[PRE], true, false);
-        assert!(!sess.startup_da1_answered());
+        assert!(!sess.startup_da1_reply_requested());
         let got: Vec<u8> = drain(&mut rx)
             .into_iter()
             .filter_map(|d| match d {
@@ -834,7 +846,7 @@ mod tests {
             events: tx,
             tab_id: "tab-blocked".into(),
             writer: writer.clone(),
-            da1_answered: Arc::new(Flag::new(false)),
+            da1_reply_requested: Arc::new(Flag::new(false)),
         };
         std::thread::spawn(move || {
             run_reader(Script::new(&[PRE, b"after the query\r\n"]), shared, StartupDa1::new(true));
@@ -859,6 +871,18 @@ mod tests {
         src[..cut].to_string()
     }
 
+    /// Spellings that drain a reader without going through the pump.
+    fn private_read_spellings(code: &str) -> Vec<&'static str> {
+        [".read(", ".read_exact(", ".read_to_end(", ".read_to_string(", ".bytes()", "io::copy("]
+            .into_iter()
+            .filter(|s| code.contains(s))
+            .collect()
+    }
+
+    /// A SOURCE-PRESENCE check (it cannot prove reachability); the route itself is pinned by the
+    /// fresh-process real-ConPTY test below on Windows. It fixes the PTY reader handle's whole life:
+    /// bound from `try_clone_reader`, then handed to `run_reader` together with the platform filter,
+    /// and named nowhere else, so it cannot be swapped for another reader or drained privately.
     #[test]
     fn the_host_reader_runs_the_shared_pump_with_the_platform_filter() {
         let code: String = production_source()
@@ -866,9 +890,19 @@ mod tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
-        for needle in ["pump_output(", "StartupDa1::for_platform()", "send_da1_reply("] {
-            assert!(code.contains(needle), "session.rs must call `{needle}` outside comments");
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "let pair_reader = pair.master.try_clone_reader()?;",
+            "std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_platform()));",
+            "pump_output( &mut reader, find_utf8_boundary, &mut da1,",
+            "send_da1_reply(sh.writer.clone(), sh.tab_id.clone(), consumed)",
+        ] {
+            assert!(flat.contains(needle), "session.rs must contain `{needle}` outside comments");
         }
+        assert_eq!(flat.matches("pair_reader").count(), 2, "the PTY reader handle is bound once and passed once");
+        assert_eq!(private_read_spellings(&code), Vec::<&str>::new(), "a private read loop bypasses the pump");
+        // Calibration: the detector does go dirty.
+        assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
     }
 
     /// THE real-ConPTY test. `portable-pty` resolves kernel32-vs-bundled ONCE per
@@ -882,17 +916,41 @@ mod tests {
         if std::env::var_os("TF_DA1_CHILD").is_some() {
             return; // the child runs the body below, not this driver
         }
-        let out = std::process::Command::new(std::env::current_exe().unwrap())
+        // Output goes to files (not pipes) so the parent can poll for a deadline without a
+        // pipe-buffer deadlock; the body's own 12 s loop does not bound `Session::spawn` or teardown.
+        let dir = std::env::temp_dir();
+        let (out_path, err_path) = (
+            dir.join(format!("tf-da1-{}.out", std::process::id())),
+            dir.join(format!("tf-da1-{}.err", std::process::id())),
+        );
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["fresh_process_bundled_handshake_body", "--nocapture", "--test-threads=1"])
             .env("TF_DA1_CHILD", "1")
-            .output()
+            .stdout(std::fs::File::create(&out_path).unwrap())
+            .stderr(std::fs::File::create(&err_path).unwrap())
+            .spawn()
             .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break Some(st);
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
         let text = format!(
             "{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+            std::fs::read_to_string(&out_path).unwrap_or_default(),
+            std::fs::read_to_string(&err_path).unwrap_or_default()
         );
-        assert!(out.status.success(), "fresh-process handshake test failed:\n{text}");
+        let _ = std::fs::remove_file(&out_path);
+        let _ = std::fs::remove_file(&err_path);
+        let status = status.unwrap_or_else(|| panic!("fresh-process handshake test hung (killed after 60 s):\n{text}"));
+        assert!(status.success(), "fresh-process handshake test failed:\n{text}");
         assert!(text.contains("DA1-FRESH-OK"), "child did not report success (vacuous pass?):\n{text}");
     }
 
@@ -923,13 +981,14 @@ mod tests {
         let t0 = Instant::now();
         let sess = Session::spawn("tab-da1-real".into(), &spec, 1 << 16, tx, true).unwrap();
 
-        let (mut all, mut next, mut t_answered, mut t_nonce) = (Vec::<u8>::new(), 0u64, None, None);
+        let (mut all, mut next, mut t_reply, mut t_nonce) = (Vec::<u8>::new(), 0u64, None, None);
         while t0.elapsed() < Duration::from_secs(12) {
-            if t_answered.is_none() && sess.startup_da1_answered() {
-                t_answered = Some(t0.elapsed());
+            if t_reply.is_none() && sess.startup_da1_reply_requested() {
+                t_reply = Some(t0.elapsed());
             }
             match rx.try_recv() {
-                Ok(Data::Stdout { offset, bytes, .. }) => {
+                Ok(Data::Stdout { tab_id, offset, bytes, .. }) => {
+                    assert_eq!(tab_id, "tab-da1-real", "frames are routed by tab_id in the client");
                     assert_eq!(offset, next, "offsets must stay contiguous");
                     next += bytes.len() as u64;
                     all.extend(bytes);
@@ -937,16 +996,19 @@ mod tests {
                         t_nonce = Some(t0.elapsed());
                     }
                 }
-                Ok(Data::Exit { .. }) => break,
-                Ok(_) => {}
+                Ok(Data::Exit { tab_id, .. }) => {
+                    assert_eq!(tab_id, "tab-da1-real");
+                    break;
+                }
+                Ok(other) => panic!("unexpected frame from a healthy session: {other:?}"),
                 Err(_) => std::thread::sleep(Duration::from_millis(2)),
             }
         }
-        if t_answered.is_none() && sess.startup_da1_answered() {
-            t_answered = Some(t0.elapsed());
+        if t_reply.is_none() && sess.startup_da1_reply_requested() {
+            t_reply = Some(t0.elapsed());
         }
-        let (t_answered, t_nonce) = (
-            t_answered.expect("the modern ConPTY's startup DA1 was never answered"),
+        let (t_reply, t_nonce) = (
+            t_reply.expect("no reply to the modern ConPTY's startup DA1 was ever requested"),
             t_nonce.expect("the child's output never arrived"),
         );
         let text = String::from_utf8_lossy(&all).into_owned();
@@ -955,12 +1017,12 @@ mod tests {
         assert!(text.contains("\u{1b}[?1004h\u{1b}[?9001h"), "mode sets survive: {text:?}");
         assert_eq!(sess.replay_from(0).1, all, "the ring equals the forwarded stream");
         assert!(
-            t_nonce.saturating_sub(t_answered) < Duration::from_secs(1),
-            "child output {:?} after the reply (answered at {t_answered:?})",
-            t_nonce.saturating_sub(t_answered)
+            t_nonce.saturating_sub(t_reply) < Duration::from_secs(1),
+            "child output {:?} after the reply (reply requested at {t_reply:?})",
+            t_nonce.saturating_sub(t_reply)
         );
         assert!(t_nonce < Duration::from_millis(2500), "un-fixed ConPTY stalls >= 3 s; got {t_nonce:?}");
-        println!("DA1-FRESH-OK answered_at={t_answered:?} child_output_at={t_nonce:?}");
+        println!("DA1-FRESH-OK reply_requested_at={t_reply:?} child_output_at={t_nonce:?}");
     }
 
 }

@@ -9,11 +9,15 @@
 //! query from the stream so a renderer never answers it a second time.
 //!
 //! [`StartupDa1`] is a byte-level recogniser for the *preamble context only*:
-//! complete CSI sequences whose final byte is `t`, `h` or `l`. The first DA1
-//! met inside that context is answered and stripped; the first byte that is not
-//! part of such a sequence (child text, another CSI, a stray `ESC`) retires the
-//! filter untouched, so a child's own DA1 can never be eaten. The result depends
-//! only on the byte stream, never on how `read()` happened to chunk it.
+//! `ESC [` + bytes 0x20..=0x3F + a final byte of `t`, `h` or `l` (it does not
+//! validate parameter-before-intermediate ordering). The first DA1 met inside
+//! that context is answered and stripped; the first byte that is not part of
+//! such a sequence (child text, another CSI, a stray `ESC`) retires the filter
+//! untouched. The recogniser cannot tell WHO sent the bytes: it relies on the
+//! bundled ConPTY emitting its preamble before any child output, so a child's own
+//! DA1 is only safe from it once something else (the backend's own preamble, or
+//! any other byte) has been seen first. The result depends only on the byte
+//! stream, never on how `read()` happened to chunk it.
 
 use std::borrow::Cow;
 use std::io::Write;
@@ -70,8 +74,11 @@ impl StartupDa1 {
         Self { armed, mode: Mode::Ground, consumed: 0, held: Vec::new() }
     }
 
-    /// Armed only when the bundled (modern) ConPTY is what `portable-pty` will use —
-    /// the inbox ConPTY never asks, so arming there could only ever eat a child's query.
+    /// Armed only when the bundled (modern) ConPTY has been loaded — the inbox ConPTY
+    /// never asks, so arming there could only ever eat a child's query. "Loaded" is
+    /// `portable-pty`'s backend only provided `conpty::init_bundled_conpty` ran before
+    /// the process's first `openpty` (`portable-pty` resolves its function table once);
+    /// both production entry points (host `main`, fallback `spawn`) do that.
     pub fn for_platform() -> Self {
         #[cfg(windows)]
         {
@@ -268,6 +275,32 @@ mod tests {
     }
 
     #[test]
+    fn every_accepted_final_and_intermediate_byte_is_forwarded_and_keeps_the_filter_armed() {
+        // `l` (e.g. DECTCEM hide, `ESC[?25l`) and an intermediate byte (`ESC[1 t`) sit in the
+        // preamble context; the query behind them must still be answered and only it stripped.
+        for before in [&b"\x1b[?1004h"[..], b"\x1b[?25l", b"\x1b[1t", b"\x1b[1 t"] {
+            let stream = [before, b"\x1b[c", b"\x1b[?9001h"].concat();
+            assert_chunking_independent(&stream, &[before, b"\x1b[?9001h"].concat(), 1);
+        }
+    }
+
+    #[test]
+    fn the_longest_held_sequence_is_accepted_and_one_byte_more_retires() {
+        // MAX_SEQ = 16 held bytes: `ESC [` + 14 parameter bytes may be held, then the final.
+        let seq = |params: usize| {
+            let mut v = b"\x1b[".to_vec();
+            v.extend(std::iter::repeat_n(b'1', params));
+            v.push(b't');
+            v
+        };
+        let ok = [seq(14), b"\x1b[c".to_vec(), b"x".to_vec()].concat();
+        assert_chunking_independent(&ok, &[seq(14), b"x".to_vec()].concat(), 1);
+
+        let too_long = [seq(15), b"\x1b[c".to_vec()].concat();
+        assert_chunking_independent(&too_long, &too_long, 0);
+    }
+
+    #[test]
     fn zero_param_form_is_recognised_for_every_chunking() {
         let stream = b"\x1b[1t\x1b[0c\x1b[?9001h";
         assert_chunking_independent(stream, b"\x1b[1t\x1b[?9001h", 1);
@@ -369,7 +402,9 @@ mod tests {
 
         let mut done = StartupDa1::new(true);
         assert!(done.filter(PREAMBLE).answered);
-        assert!(matches!(done.filter(data).bytes, Cow::Borrowed(_)), "hot path must not copy");
+        let hot = done.filter(data);
+        assert!(matches!(hot.bytes, Cow::Borrowed(_)), "hot path must not copy");
+        assert_eq!(&*hot.bytes, data, "and must hand back every byte");
     }
 
     // ---- reply writer -------------------------------------------------------
@@ -456,6 +491,40 @@ mod tests {
         assert_eq!(sink.0.lock().unwrap().len(), 3, "partial write then failure is reported, not hidden");
     }
 
+    /// Bytes become visible in `visible` only when `flush` runs.
+    struct FlushGated {
+        staged: Vec<u8>,
+        visible: Shared,
+    }
+    impl Write for FlushGated {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.staged.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.visible.0.lock().unwrap().append(&mut self.staged);
+            Ok(())
+        }
+    }
+    struct FlushFails;
+    impl Write for FlushFails {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn write_da1_reply_flushes_and_reports_a_failed_flush() {
+        let visible = Shared::default();
+        write_da1_reply(&boxed(FlushGated { staged: Vec::new(), visible: visible.clone() })).unwrap();
+        assert_eq!(*visible.0.lock().unwrap(), DA1_REPLY, "the reply is not delivered until the writer is flushed");
+
+        assert_eq!(write_da1_reply(&boxed(FlushFails)).unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    }
+
     #[test]
     fn write_da1_reply_survives_a_poisoned_writer_mutex() {
         let sink = Shared::default();
@@ -476,9 +545,20 @@ mod tests {
         let sink = Shared::default();
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(sink.clone()));
         let guard = writer.lock().unwrap(); // an input write holding the mutex
-        let t0 = std::time::Instant::now();
-        send_da1_reply(writer.clone(), "t".into(), 7);
-        assert!(t0.elapsed() < std::time::Duration::from_millis(500), "caller must not wait for the lock");
+        // Run the call behind a deadline the test controls: a synchronous implementation would
+        // block here forever instead of failing the assertion below.
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let caller = {
+            let writer = writer.clone();
+            std::thread::spawn(move || {
+                send_da1_reply(writer, "t".into(), 7);
+                let _ = done_tx.send(());
+            })
+        };
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("send_da1_reply must return while the writer lock is held elsewhere");
+        caller.join().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(sink.0.lock().unwrap().is_empty(), "reply must wait for the writer lock");
         drop(guard);

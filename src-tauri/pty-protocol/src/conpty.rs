@@ -293,7 +293,11 @@ pub fn init_for_current_exe() -> Option<PathBuf> {
 /// True once a verified bundled `conpty.dll` has been preloaded into this process.
 ///
 /// This — not [`disabled`] — is the authority for "the modern ConPTY is what
-/// `portable-pty` will use": the env flag is only one of several reasons the inbox
+/// `portable-pty` will use", PROVIDED initialisation ran before the process's first
+/// `openpty` (`portable-pty` resolves its function table once, so a pair preloaded
+/// after an inbox `openpty` reports true here while the inbox functions stay in use;
+/// host `main` and the fallback `spawn` both initialise first): the env flag is only
+/// one of several reasons the inbox
 /// ConPTY ends up in charge (no pair found, tampered pair, failed load). The
 /// modern host asks a DA1 query at startup and stalls ~3 s without an answer; the
 /// inbox one never asks, so anything keyed on that handshake must key on this.

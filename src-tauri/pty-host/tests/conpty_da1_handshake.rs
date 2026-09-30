@@ -100,11 +100,14 @@ fn bundled_conpty_asks_for_da1_and_waits_for_the_answer() {
         "ConPTY's startup preamble changed - revisit termflow_pty_protocol::da1: {:?}",
         String::from_utf8_lossy(&answered.raw[..answered.raw.len().min(64)])
     );
-    // (c) Answering unblocks the child promptly.
+    // (c) Answering unblocks the child promptly. Absolute bound, not just "soon after the reply":
+    //     a backend that always waits ~3 s would still have its marker right behind our reply.
+    let after_reply = m.checked_sub(replied).expect("the marker cannot precede the reply that unblocks it");
+    assert!(after_reply < Duration::from_secs(1), "child took {after_reply:?} after the reply");
+    let answered_at = m;
     assert!(
-        m.saturating_sub(replied) < Duration::from_secs(1),
-        "child took {:?} after the reply",
-        m.saturating_sub(replied)
+        answered_at < Duration::from_millis(1500),
+        "the answered run took {answered_at:?}: the reply no longer unblocks ConPTY's ~3 s handshake wait"
     );
 
     // (b) Not answering stalls it for ~3 s — the reason the filter exists. The child's output must
@@ -113,5 +116,9 @@ fn bundled_conpty_asks_for_da1_and_waits_for_the_answer() {
     let m = stalled.marker_at.expect("child never ran when the query went unanswered");
     assert!(m >= Duration::from_secs(2), "expected the ~3 s handshake stall, child output came at {m:?}");
     assert!(m < Duration::from_secs(10), "child output at {m:?}");
-    println!("CONTRACT-OK unanswered stall = {m:?}, answered reply->child = {:?}", answered.marker_at);
+    assert!(
+        m > answered_at + Duration::from_secs(1),
+        "unanswered ({m:?}) must be clearly slower than answered ({answered_at:?}): the reply is what unblocks the child"
+    );
+    println!("CONTRACT-OK unanswered stall = {m:?}, answered = {answered_at:?}");
 }

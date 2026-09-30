@@ -404,9 +404,26 @@ fn kill_process_tree_blocking(pid: u32) {
 
 #[cfg(test)]
 mod reader_wiring_tests {
+    /// Spellings that drain a reader without going through the pump.
+    fn private_read_spellings(code: &str) -> Vec<&'static str> {
+        [".read(", ".read_exact(", ".read_to_end(", ".read_to_string(", ".bytes()", "io::copy("]
+            .into_iter()
+            .filter(|s| code.contains(s))
+            .collect()
+    }
+
+    fn word_count(code: &str, word: &str) -> usize {
+        code.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| *w == word).count()
+    }
+
     /// Plan 050: the fallback reader must run the SAME pump as the pty-host reader, or it keeps the
-    /// ~3 s ConPTY handshake stall. The pump's behaviour is covered in `termflow-pty-protocol`; this
-    /// only proves this file still calls it, on non-comment lines.
+    /// ~3 s ConPTY handshake stall. The pump's behaviour is covered in `termflow-pty-protocol`.
+    ///
+    /// This is a SOURCE-PRESENCE check, not a behavioural one (no test drives this function's reader
+    /// with a fake PTY; the real-ConPTY route is exercised for the pty-host reader only). It fixes
+    /// the PTY reader handle's whole life: bound from `try_clone_reader`, moved into the thread, and
+    /// passed to the pump with the platform filter and this file's writer clone for the reply; the
+    /// name appears nowhere else, and no other read spelling exists in the file.
     #[test]
     fn the_fallback_reader_runs_the_shared_pump_with_the_platform_filter() {
         let src = include_str!("spawn.rs").replace("\r\n", "\n");
@@ -416,15 +433,20 @@ mod reader_wiring_tests {
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
         for needle in [
-            "pump::pump_output(",
+            "let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;",
+            "let mut reader = reader;",
             "da1::StartupDa1::for_platform()",
-            "da1::send_da1_reply(",
-            "find_utf8_boundary,",
+            "pump::pump_output( &mut reader, find_utf8_boundary, &mut da1,",
+            "da1::send_da1_reply(writer.clone(), thread_id.clone(), consumed)",
         ] {
-            assert!(code.contains(needle), "spawn.rs must call `{needle}` outside comments");
+            assert!(flat.contains(needle), "spawn.rs must contain `{needle}` outside comments");
         }
-        // The old hand-rolled loop must be gone (it would bypass the filter).
-        assert!(!code.contains("reader.read(&mut buffer)"), "a private read loop bypasses the pump");
+        assert_eq!(word_count(&code, "reader"), 4, "the PTY reader handle is bound, moved and passed, nothing else");
+        assert_eq!(private_read_spellings(&code), Vec::<&str>::new(), "a private read loop bypasses the pump");
+        // Calibration: the detector does go dirty.
+        assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
+        assert_eq!(word_count("let reader = 1; reader.len()", "reader"), 2);
     }
 }
