@@ -500,8 +500,9 @@ impl<R: Runtime> AppState<R> {
     /// replayed into a NEW session's xterm, where that position points into the
     /// middle of the just-drawn history: the "session restored" divider and the
     /// fresh shell's prompt were then painted over the old TUI's rows, and the
-    /// cursor sat mid-screen until Ctrl+L. It shows only when the last screen was
-    /// a full-screen-ish TUI (Claude Code) whose cursor is not on the last row.
+    /// cursor sat mid-screen until Ctrl+L. Seen with Claude Code: its last cursor sat
+    /// above rows that replay below it. Any stored cursor row that is not the last
+    /// replayed row does the same.
     pub fn persisted_scrollback_snapshot(&self, id: &str) -> Option<Vec<u8>> {
         self.render_scrollback(id, false)
     }
