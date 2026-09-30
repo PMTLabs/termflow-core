@@ -23,6 +23,9 @@ import { reattachPromptGate, takeArmProbePending } from '../../services/reattach
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
+import { isHostOwnershipPending } from '../../services/hostOwnershipPending';
+import type { HostWaitState } from '../../services/TerminalService';
+import { addToast } from '../../store/slices/uiSlice';
 import { isAdminUacCancelled } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
@@ -88,6 +91,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // the top-row "Failed to start shell" status (P0: never leave a silent blank
   // while startup is in flight or has failed).
   const [startupFailed, setStartupFailed] = useState(false);
+  const [waitingForHost, setWaitingForHost] = useState<HostWaitState>();
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(name || 'Terminal');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -163,6 +168,18 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // seed copies from the tab, is what carries a tab's profile down now.
   const finalShellTypeForDisplay = shellType || defaultProfile || 'default';
 
+  // Read leaf-owned state on remount, and follow it throughout the shared create promise.
+  useEffect(() => {
+    if (!terminalId) return;
+    setWaitingForHost(terminalService.getHostWaitState?.(terminalId));
+    const onWait = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (detail.terminalId === terminalId) setWaitingForHost(detail.state);
+    };
+    window.addEventListener('pty:host-wait', onWait);
+    return () => window.removeEventListener('pty:host-wait', onWait);
+  }, [terminalId]);
+
   // Initialize terminal when component mounts or terminalId changes
   useEffect(() => {
     console.log(`TerminalPane: Terminal init effect - terminalId: ${terminalId}, name: ${name}, tab: ${tab?.id}`);
@@ -236,9 +253,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           console.log(`TerminalPane: Found initialization promise for ${terminalId}, waiting...`);
           existingPromise.then(pid => {
             console.log(`TerminalPane: Reusing process ${pid} from existing promise`);
-            setProcessId(pid);
+            if (pid) setProcessId(pid);
           }).catch(error => {
-            console.error('Failed to get process from existing promise:', error);
+            if (isHostOwnershipPending(error)) setWaitingForHost('retry');
+            else setStartupFailed(true);
           });
         } else {
           console.log(`TerminalPane: WARNING - Lock exists but no promise found for ${terminalId}`);
@@ -299,6 +317,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
     initPromise
       .then(async pid => {
+        if (!pid) {
+          terminalInitMap.delete(terminalId);
+          terminalInitLock.delete(terminalId);
+          terminalInitPromises.delete(terminalId);
+          return;
+        }
+        setWaitingForHost(undefined);
         // Spend a provisional-recovery mark on its first settle, successful or
         // failed. A later create failure belongs to an established user pane.
         takeProvisionalRecovery(terminalId);
@@ -363,6 +388,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         terminalInitMap.delete(terminalId);
         terminalInitPromises.delete(terminalId);
         terminalInitLock.delete(terminalId);
+        if (isHostOwnershipPending(error)) {
+          setWaitingForHost('retry');
+          setStartupFailed(false);
+          return;
+        }
         const isProvisionalRecovery = takeProvisionalRecovery(terminalId);
         const state = store.getState();
 
@@ -407,7 +437,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // decides the shell, nothing else. `tab?.shellType` used to sit here and is
     // gone with the branch that read it — leaving it would re-run this effect on
     // a tab profile change now that `tab` actually resolves (design 014).
-  }, [terminalId, defaultProfile]);
+  }, [terminalId, defaultProfile, retryAttempt]);
 
   useEffect(() => {
     const handleClick = () => {
@@ -572,6 +602,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // "single most likely silent defect".
         findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId),
       );
+      if (!newPid) return;
       // The engine re-attaches to the new process when processId changes below.
       setProcessId(newPid);
       dispatch(clearSessionClosed({ terminalId }));
@@ -582,7 +613,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       dispatch(resetZoom(terminalId));
       if (ownerTabId) dispatch(clearTabExited(ownerTabId));
     } catch (error) {
-      console.error('TerminalPane: Failed to restart session:', error);
+      if (isHostOwnershipPending(error)) {
+        dispatch(addToast({ message: 'Waiting for terminal host. Please retry when the host is available.', type: 'warning' }));
+      } else {
+        console.error('TerminalPane: Failed to restart session:', error);
+      }
     } finally {
       isRestartingRef.current = false;
     }
@@ -860,6 +895,16 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 dispatch(setAutoTabTitle({ id: owningTabId, title }));
               }}
             />
+          ) : terminalId && !processId && waitingForHost ? (
+            <div className="terminal-startup-status" style={{ fontFamily, fontSize: effectiveFontSize }}>
+              Waiting for terminal host{waitingForHost === 'waiting' ? '…' : '. The host has not answered.'}
+              {waitingForHost === 'retry' && (
+                <button onClick={() => {
+                  setWaitingForHost('waiting');
+                  setRetryAttempt(attempt => attempt + 1);
+                }}>Retry</button>
+              )}
+            </div>
           ) : terminalId && !processId ? (
             (() => {
               const status = getPaneStartupStatus(processId, startupFailed);

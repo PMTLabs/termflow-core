@@ -83,6 +83,8 @@ interface ElectronAPI {
   /// (broadcasts `settings:open`; see services/openSettings.ts) and focus it,
   /// regardless of which window this was invoked from.
   openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
+  registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
+  forgetRestoringLeaf: (leafId: string) => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
   writeToTerminal: (id: string, data: string) => Promise<void>;
@@ -428,6 +430,8 @@ const tauriBridge: ElectronAPI = {
     await invoke('set_terminal_title_color', { rendererTerminalId, titleColor });
   },
 
+  registerRestoringLeaves: async (leaves) => invoke<void>('register_restoring_leaves', { leaves }),
+  forgetRestoringLeaf: async (leafId) => invoke<void>('forget_restoring_leaf', { leafId }),
   closeTerminal: async (id) => {
     return invoke('close_terminal', { id });
   },

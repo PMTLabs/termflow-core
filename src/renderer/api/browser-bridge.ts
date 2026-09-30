@@ -185,6 +185,13 @@ class BrowserBridge implements ElectronAPI {
     async setTerminalDisplayLabel(_rendererTerminalId: string, _label: string): Promise<void> { }
     async setTerminalTitleColor(_rendererTerminalId: string, _titleColor: string): Promise<void> { }
 
+    async registerRestoringLeaves(_leaves: Array<{ leafId: string; sessionKey?: string | null }>): Promise<void> {
+        // REST creates cannot register host restore intent; do not silently spawn saved leaves.
+        throw new Error('Restoring terminal hosts requires the desktop bridge');
+    }
+
+    async forgetRestoringLeaf(_leafId: string): Promise<void> { }
+
     async closeTerminal(id: string): Promise<void> {
         try {
             await fetch(`${API_BASE_URL}/terminals/${id}`, {

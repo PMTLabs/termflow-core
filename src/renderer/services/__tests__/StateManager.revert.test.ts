@@ -23,6 +23,10 @@ import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager } from '../StateManager';
+
+beforeEach(() => {
+  (window as any).electronAPI = { registerRestoringLeaves: jest.fn().mockResolvedValue(undefined) };
+});
 import { peekUndo, __resetLayoutUndoForTests } from '../layoutUndo';
 import { layoutUndoKey, sessionStateKey } from '../windowScope';
 import { getLayoutBaseline, clearLayoutBaseline } from '../layoutBaseline';

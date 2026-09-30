@@ -1,16 +1,21 @@
 import { termDiag } from '../utils/diag';
+import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import type { PaneNode } from '../store/slices/panesSlice';
+import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
 import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
 import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
 import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
 
+export type HostWaitState = 'waiting' | 'retry' | undefined;
+
 export interface TerminalProcess {
   id: string;
   terminalId: string;
 }
 
-class TerminalServiceClass {
+export class TerminalServiceClass {
   private processes: Map<string, TerminalProcess> = new Map();
   private listenersInitialized = false;
   // Backlog 011 prompt-gate handoff for a cross-window attach: stashed here by
@@ -34,7 +39,13 @@ class TerminalServiceClass {
   // `finally` so a failed create does not permanently poison the leaf.
   private inFlightCreates: Map<string, Promise<string>> = new Map();
 
-  constructor() {
+  private hostWaitStates = new Map<string, HostWaitState>();
+
+  constructor(
+    private readonly paneTrees: () => Record<string, PaneNode | null> =
+      () => (window as any).__REDUX_STORE__?.getState().panes.treesByTabId ?? {},
+    private readonly api: () => typeof window.electronAPI = () => window.electronAPI,
+  ) {
     // Initialize listeners immediately and synchronously
     this.initializeListeners();
     // Also try to initialize on DOMContentLoaded if not already done
@@ -143,7 +154,7 @@ class TerminalServiceClass {
     // makes an old bridge/backend pair indistinguishable from an admin request
     // that failed to carry its flag.  Every non-admin pane is deliberately
     // routed as `false`; only the pane-tree marker can opt into elevation.
-    const createPromise = this.createTerminalInner(
+    const createPromise = this.createTerminalWithRetry(
       terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey,
       elevated === true,
     );
@@ -156,6 +167,67 @@ class TerminalServiceClass {
       // starting a new one so this is effectively always true).
       if (this.inFlightCreates.get(terminalId) === createPromise) {
         this.inFlightCreates.delete(terminalId);
+      }
+    }
+  }
+
+  getHostWaitState(terminalId: string): HostWaitState {
+    return this.hostWaitStates.get(terminalId);
+  }
+
+  private setHostWaitState(terminalId: string, state: HostWaitState): void {
+    if (state) this.hostWaitStates.set(terminalId, state);
+    else this.hostWaitStates.delete(terminalId);
+    window.dispatchEvent(new CustomEvent('pty:host-wait', { detail: { terminalId, state } }));
+  }
+
+  /** The single-flight promise includes sleeps, so a remount cannot race the next attach. */
+  private async createTerminalWithRetry(
+    terminalId: string, shellType: string, name?: string, cwd?: string,
+    cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean,
+  ): Promise<string> {
+    let hostDeadline: number | undefined;
+    let lifecycleDeadline: number | undefined;
+    let hostDelay = 1000;
+    let firstAttempt = true;
+    this.setHostWaitState(terminalId, undefined);
+    while (true) {
+      // A move is not a close. Only this webview's trees may authorize its next attempt.
+      const owner = findTabIdByTerminalId(this.paneTrees(), terminalId);
+      if (!owner) {
+        this.setHostWaitState(terminalId, undefined);
+        return ''; // Silent cancellation; never forget restore intent on a move.
+      }
+      try {
+        const attemptOwner = firstAttempt ? owningTabId : owner;
+        firstAttempt = false;
+        const pid = await this.createTerminalInner(
+          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated,
+        );
+        this.setHostWaitState(terminalId, undefined);
+        return pid;
+      } catch (error) {
+        if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
+          this.setHostWaitState(terminalId, undefined);
+          throw error;
+        }
+        if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
+          this.setHostWaitState(terminalId, undefined);
+          return '';
+        }
+        const now = Date.now();
+        const hostPending = isHostOwnershipPending(error);
+        if (hostPending) hostDeadline ??= now + 90_000;
+        else lifecycleDeadline ??= now + 10_000;
+        const deadline = hostPending ? hostDeadline! : lifecycleDeadline!;
+        if (now >= deadline) {
+          this.setHostWaitState(terminalId, hostPending ? 'retry' : undefined);
+          throw error;
+        }
+        if (hostPending) this.setHostWaitState(terminalId, 'waiting');
+        const delay = Math.min(hostPending ? hostDelay : 500, deadline - now);
+        if (hostPending) hostDelay = Math.min(hostDelay * 2, 8000);
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
@@ -190,7 +262,7 @@ class TerminalServiceClass {
 
       // Call IPC to create actual PTY process
       console.log(`TerminalService: Calling electronAPI.createTerminal with profileId: "${shellType}", cwd: "${cwd}", tabId: "${terminalId}"`);
-      const processId = await window.electronAPI.createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+      const processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
       // Store the mapping
@@ -228,8 +300,10 @@ class TerminalServiceClass {
 
       return processId;
     } catch (error) {
-      console.error('Failed to create terminal:', error);
-      console.error('Shell type was:', shellType);
+      if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
+        console.error('Failed to create terminal:', error);
+        console.error('Shell type was:', shellType);
+      }
       throw error;
     }
   }
@@ -284,7 +358,9 @@ class TerminalServiceClass {
     const process = this.processes.get(terminalId);
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
-      return; // Already closed
+      await this.api().forgetRestoringLeaf(terminalId);
+      this.setHostWaitState(terminalId, undefined);
+      return; // A waiting restored pane has no process, but still has restore intent.
     }
 
     console.log(`TerminalService: Found process ${process.id} for terminal ${terminalId}, calling electronAPI.closeTerminal`);
@@ -327,7 +403,7 @@ class TerminalServiceClass {
       id: processId,
       terminalId
     });
-    window.electronAPI?.adoptConsoleWindow?.(processId)?.catch(() => { });
+    this.api()?.adoptConsoleWindow?.(processId)?.catch(() => { });
   }
 
   /**
@@ -423,6 +499,7 @@ class TerminalServiceClass {
    */
   detachTerminal(terminalId: string): void {
     this.processes.delete(terminalId);
+    this.hostWaitStates.delete(terminalId);
     const w = window as any;
     w.terminalInitLock?.delete(terminalId);
     w.terminalInitPromises?.delete(terminalId);

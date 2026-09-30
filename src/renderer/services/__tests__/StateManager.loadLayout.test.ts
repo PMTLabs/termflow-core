@@ -22,6 +22,10 @@ import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import { StateManager } from '../StateManager';
 
+beforeEach(() => {
+  (window as any).electronAPI = { registerRestoringLeaves: jest.fn().mockResolvedValue(undefined) };
+});
+
 function makeStore() {
   return configureStore({ reducer: { tabs: tabsReducer, panes: panesReducer } });
 }
