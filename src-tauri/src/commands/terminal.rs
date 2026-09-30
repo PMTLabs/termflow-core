@@ -444,8 +444,13 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // anything created on this build and the old `tb-` id for a migrated one.
     let session_key = session_key.unwrap_or_else(|| id.clone());
 
-    let claimed_pid = state.claim_host_registration(&session_key)?;
-    if let Some(pid) = claimed_pid {
+    let claimed = state.claim_host_registration(&session_key, channel)?;
+    if let Some((pid, claimed_channel)) = claimed {
+        if claimed_channel != channel {
+            log::warn!(
+                "[HOTSWAP] {session_key} is reserved on {claimed_channel:?} but this create targets {channel:?}"
+            );
+        }
         let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
         let process_id = ident.process_id.clone();
         register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
@@ -1082,11 +1087,17 @@ mod scrollback_restore_tests {
     #[test]
     fn surfacing_an_orphan_reserves_the_listed_pid_for_reattach() {
         let (_app, state) = mock_state();
-        state.surface_host_orphans(vec![termflow_pty_protocol::SessionMeta {
-            tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
-        }]);
+        state.surface_host_orphans(
+            vec![termflow_pty_protocol::SessionMeta {
+                tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
+            }],
+            crate::elevated_host::HostChannel::Primary,
+        );
 
-        assert_eq!(state.claim_host_registration("S"), Ok(Some(4242)));
+        assert_eq!(
+            state.claim_host_registration("S", crate::elevated_host::HostChannel::Primary),
+            Ok(Some((4242, crate::elevated_host::HostChannel::Primary)))
+        );
     }
 
     #[test]
@@ -1098,6 +1109,7 @@ mod scrollback_restore_tests {
             state: HostSessionClaimState::Registered,
             pid: 4242,
             process_id: Some("pc-replacement".into()),
+            channel: crate::elevated_host::HostChannel::Primary,
         });
 
         state.forget_host_session_claim_if_owner("S", "pc-stale-exit");

@@ -14,7 +14,8 @@ use std::sync::Mutex;
 use super::render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, tail_text_with};
 use super::reattach::plan_reattach;
 use super::types::*;
-use crate::elevated_host::HostChannel;
+use super::host_registry;
+use crate::elevated_host::{FrozenId, HostChannel};
 
 fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> bool {
     pending_windows == 0 && !already_released
@@ -112,7 +113,7 @@ mod restore_sweep_gate_tests {
             .map(|start| &source[start..])
             .and_then(|rest| rest.split("    /// Clone out the connected client").next())
             .expect("surface_host_orphans body");
-        let reserve = body.find("self.reserve_host_session(&orphan.tab_id, orphan.pid);").expect("orphan must reserve its listed PID");
+        let reserve = body.find("self.reserve_host_session(&orphan.tab_id, orphan.pid, channel);").expect("orphan must reserve its listed PID on the listing host's channel");
         let emit = body.find("self.app_handle.emit").expect("orphan must emit recovery event");
         assert!(reserve < emit, "reservation must precede recovery emission");
     }
@@ -150,31 +151,20 @@ impl<R: Runtime> AppState<R> {
     /// Reserve a listed host session for the renderer which already knows it.
     /// This is an entry operation so recovery cannot slip a second owner between
     /// the observation and reservation.
-    pub fn reserve_host_session(&self, session_key: &str, pid: u32) {
-        self.host_session_claims.entry(session_key.to_string()).or_insert(HostSessionClaim {
-            state: HostSessionClaimState::Reserved, pid, process_id: None,
-        });
+    pub fn reserve_host_session(&self, session_key: &str, pid: u32, channel: HostChannel) {
+        host_registry::reserve_session(&self.host_session_claims, session_key, pid, channel);
     }
 
     /// Claim a session for backend registration. A recovery create consumes the
-    /// Reserved entry established from the host's authoritative listing.
-    pub fn claim_host_registration(&self, session_key: &str) -> Result<Option<u32>, String> {
-        use dashmap::mapref::entry::Entry;
-        match self.host_session_claims.entry(session_key.to_string()) {
-            Entry::Vacant(v) => {
-                v.insert(HostSessionClaim { state: HostSessionClaimState::RegistrationInProgress, pid: 0, process_id: None });
-                Ok(None)
-            }
-            Entry::Occupied(mut o) => match o.get().state {
-                HostSessionClaimState::Reserved => {
-                    let pid = o.get().pid;
-                    o.get_mut().state = HostSessionClaimState::RegistrationInProgress;
-                    Ok(Some(pid))
-                }
-                HostSessionClaimState::Registered => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is already registered")),
-                _ => Err(format!("{HOST_SESSION_CONTENDED}: host session {session_key} is claimed by another recovery")),
-            }
-        }
+    /// Reserved entry established from a host's authoritative listing and gets
+    /// back that host's pid and channel; `fresh_channel` is where a fresh spawn
+    /// (no Reserved entry) is headed.
+    pub fn claim_host_registration(
+        &self,
+        session_key: &str,
+        fresh_channel: HostChannel,
+    ) -> Result<Option<(u32, HostChannel)>, String> {
+        host_registry::claim_registration(&self.host_session_claims, session_key, fresh_channel)
     }
 
     pub fn host_session_registered(&self, session_key: &str, process_id: &str) {
@@ -276,6 +266,8 @@ impl<R: Runtime> AppState<R> {
             instance_id: uuid::Uuid::new_v4().to_string(),
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
+            frozen_hosts: Arc::new(Mutex::new(Vec::new())),
+            frozen_host_seq: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
             host_session_claims: Arc::new(DashMap::new()),
@@ -287,6 +279,8 @@ impl<R: Runtime> AppState<R> {
             host_stream_offsets: Arc::new(DashMap::new()),
             host_recovering: Arc::new(tokio::sync::Mutex::new(())),
             host_close_pending: Arc::new(DashMap::new()),
+            restoring_keys: Arc::new(DashMap::new()),
+            closed_unowned: Arc::new(DashMap::new()),
             recovering: Arc::new(AtomicBool::new(false)),
             restart_in_flight: Arc::new(AtomicBool::new(false)),
             started_at: Arc::new(std::time::Instant::now()),
@@ -552,13 +546,15 @@ impl<R: Runtime> AppState<R> {
     }
 
     /// The connected client actually serving `channel` — the primary sidecar
-    /// for `Primary`, the elevated sidecar for `Elevated`. `None` when that
-    /// sidecar is not currently connected (caller must surface the failure,
-    /// never silently fall back to the other one — plan 045 R7).
+    /// for `Primary`, the elevated sidecar for `Elevated`, the registered
+    /// frozen host for `Frozen`. `None` when that sidecar is not currently
+    /// connected (or a frozen host has been retired) — caller must surface the
+    /// failure, never silently fall back to another one (plan 045 R7).
     fn client_for_channel(&self, channel: HostChannel) -> Option<crate::pty_host_client::PtyHostClient> {
         match channel {
             HostChannel::Primary => self.pty_host_clone(),
             HostChannel::Elevated => self.elevated_host.client_clone(),
+            HostChannel::Frozen(id) => self.frozen_client(id),
         }
     }
 
@@ -792,6 +788,9 @@ impl<R: Runtime> AppState<R> {
         // Record sessions that survived a hot-swap (tab_id -> pid) so
         // create_host_terminal reattaches instead of respawning. `None` means
         // the host did not answer — treat as unknown, never as empty.
+        // The host this listing speaks for. Its answer settles only the closes
+        // owed to it and is compared only against the sessions it owns.
+        let listing_channel = HostChannel::Primary;
         match client.list_sessions().await {
             None => log::warn!(
                 "[HOTSWAP] host did not answer ListSessions during connect; \
@@ -799,7 +798,8 @@ impl<R: Runtime> AppState<R> {
             ),
             Some(surviving) if surviving.is_empty() => {
                 log::info!("[HOTSWAP] host reports no surviving sessions (fresh host or clean start)");
-                self.host_close_pending.clear(); // authoritative: nothing left to close
+                // Authoritative for THIS host: nothing left for it to close.
+                self.prune_pending_closes(listing_channel);
             }
             Some(surviving) => {
                 log::info!(
@@ -817,11 +817,11 @@ impl<R: Runtime> AppState<R> {
                 // directly makes every live pane look unowned, which queues it for
                 // adoption and lets a concurrent create re-adopt a LIVE session at
                 // offset 0 straight into its parser (review 007 F-1).
-                let owned_sessions = self.host_sessions_by_key();
+                let owned_sessions = self.host_sessions_by_key(listing_channel);
                 for meta in &surviving {
                     // A close that couldn't reach the host while the pipe was
                     // down: deliver it now instead of re-adopting the session.
-                    if self.host_close_pending.remove(&meta.tab_id).is_some() {
+                    if self.take_pending_close(&meta.tab_id, listing_channel) {
                         log::info!(
                             "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
                             meta.tab_id
@@ -835,12 +835,13 @@ impl<R: Runtime> AppState<R> {
                     // concurrent create re-adopt one at offset 0 straight into
                     // its live parser (review 007 F-1).
                     if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
-                        self.reserve_host_session(&meta.tab_id, meta.pid);
+                        self.reserve_host_session(&meta.tab_id, meta.pid, listing_channel);
                     }
                 }
-                // Any remaining tombstone names a session this (authoritative)
-                // list doesn't have — moot, drop them.
-                self.host_close_pending.clear();
+                // Any remaining tombstone owed to this host names a session its
+                // (authoritative) list doesn't have — moot, drop them. Other
+                // hosts' tombstones are theirs to settle.
+                self.prune_pending_closes(listing_channel);
             }
         }
         // Never leave a client published whose pipe dropped during setup — its
@@ -1072,7 +1073,10 @@ impl<R: Runtime> AppState<R> {
         // design 014, so comparing the two directly matches NOTHING and sends
         // every live terminal to teardown — i.e. a transient pipe drop
         // (sleep/wake) would destroy every shell. Translate once, here.
-        let initial_by_session = self.host_sessions_by_key();
+        //
+        // Primary-only by design: this pass reconnects the primary, and an
+        // elevated or frozen session never appears in its listing.
+        let initial_by_session = self.host_sessions_by_key(HostChannel::Primary);
         let tabs: Vec<String> = initial_by_session.keys().cloned().collect();
         // Do not return when the app currently owns no tabs: the host can still
         // hold live sessions which must be recovered into visible terminals.
@@ -1140,7 +1144,7 @@ impl<R: Runtime> AppState<R> {
         // authority. A terminal registered after the host built this answer is
         // absent from `sessions`, but that is not evidence it has died.
         // Fresh ownership is useful only to suppress orphan recovery.
-        let by_session = self.host_sessions_by_key();
+        let by_session = self.host_sessions_by_key(HostChannel::Primary);
         let saved: std::collections::HashMap<String, u64> = self
             .host_stream_offsets
             .iter()
@@ -1153,7 +1157,7 @@ impl<R: Runtime> AppState<R> {
             plan.teardown.len(),
             plan.orphans.len()
         );
-        self.surface_host_orphans(plan.orphans);
+        self.surface_host_orphans(plan.orphans, HostChannel::Primary);
         for a in plan.reattach {
             if !still_current() {
                 log::warn!("[HOTSWAP] recovery superseded mid-reattach; aborting pass");
@@ -1282,24 +1286,29 @@ impl<R: Runtime> AppState<R> {
         let Some(client) = self.pty_host_clone() else { return false };
         // An unanswered listing is unknown, never empty: do not surface or tear down.
         let Some(sessions) = client.list_sessions().await else { return false };
-        let claims = self.host_sessions_by_key().into_keys().collect::<Vec<_>>();
+        // Primary-only: the sweep lists the primary alone today, so what it
+        // compares against is what the primary owns.
+        let claims = self.host_sessions_by_key(HostChannel::Primary).into_keys().collect::<Vec<_>>();
         let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());
-        self.surface_host_orphans(plan.orphans);
+        self.surface_host_orphans(plan.orphans, HostChannel::Primary);
         true
     }
 
     /// The sole UI emission path for live host sessions that no known tab claims.
-    pub(crate) fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>) {
+    /// `channel` is the host whose listing reported `orphans`.
+    pub(crate) fn surface_host_orphans(&self, orphans: Vec<termflow_pty_protocol::SessionMeta>, channel: HostChannel) {
         use tauri::Emitter;
         for orphan in orphans {
             // A terminal can be created between a listing and this UI pass.
             // The current ownership map, rather than a restore snapshot, is
-            // authoritative at the point recovery would become visible.
-            if !session_needs_surface(self.host_sessions_by_key().contains_key(&orphan.tab_id)) { continue; }
+            // authoritative at the point recovery would become visible — and it
+            // must see EVERY channel: the registration that raced the listing
+            // may have landed on a different host than the one that listed it.
+            if !session_needs_surface(self.session_registered_on_any_channel(&orphan.tab_id)) { continue; }
             // This emission carries the authoritative PID from the host listing.
             // Reserve it so a recovery create can never degrade into a fresh spawn
             // merely because the reservation was absent.
-            self.reserve_host_session(&orphan.tab_id, orphan.pid);
+            self.reserve_host_session(&orphan.tab_id, orphan.pid, channel);
             let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
             if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
                 "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
@@ -1323,13 +1332,15 @@ impl<R: Runtime> AppState<R> {
         self.pty_host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Every terminal owned by the PRIMARY sidecar, as `session_key ->
-    /// process_id`. Used exclusively by `reconnect_after_pipe_drop`, which is
-    /// primary-only by design (plan 045 §5: an elevated session is never
-    /// reconnected — the elevated host self-exits on EOF instead). Without
-    /// the `Primary` filter, an elevated tab would appear in `tabs` here but
-    /// never in the primary's own `ListSessions` answer, so a primary pipe
-    /// drop would classify every open admin tab as "lost" and tear it down.
+    /// Every terminal owned by the sidecar on `channel`, as `session_key ->
+    /// process_id`. There is deliberately no channel-less form: each caller
+    /// must say which host's listing it is reasoning about. Without the
+    /// channel filter, an elevated tab would appear in a primary pipe drop's
+    /// `tabs` but never in the primary's own `ListSessions` answer, so the
+    /// drop would classify every open admin tab as "lost" and tear it down
+    /// (plan 045 §5: an elevated session is never reconnected — the elevated
+    /// host self-exits on EOF instead). A check that must hold whichever
+    /// channel owns the key uses `session_registered_on_any_channel`.
     ///
     /// **The pty-host speaks only session keys.** `host_terminals`,
     /// `terminals` and the screens are keyed by our per-run `pc-` id since
@@ -1337,17 +1348,105 @@ impl<R: Runtime> AppState<R> {
     /// the host's space. Anything that compares a host answer against our
     /// registrations must go through this map, or every comparison silently
     /// fails and the terminal looks dead to us while being perfectly alive.
-    pub fn host_sessions_by_key(&self) -> std::collections::HashMap<String, String> {
-        self.host_terminals
-            .iter()
-            .filter(|e| *e.value() == HostChannel::Primary)
-            .filter_map(|e| {
-                let process_id = e.key().clone();
-                self.terminals
-                    .get(&process_id)
-                    .map(|t| (session_key_of(&t), process_id))
-            })
-            .collect()
+    pub fn host_sessions_by_key(&self, channel: HostChannel) -> std::collections::HashMap<String, String> {
+        host_registry::sessions_by_key(&self.host_terminals, &self.terminals, channel)
+    }
+
+    /// True if any channel — primary, elevated or frozen — has a live
+    /// registration for this session key.
+    pub fn session_registered_on_any_channel(&self, session_key: &str) -> bool {
+        host_registry::session_registered_on_any_channel(&self.host_terminals, &self.terminals, session_key)
+    }
+
+    /// Consume the deferred close owed to `channel` for this session, if any.
+    pub fn take_pending_close(&self, session_key: &str, channel: HostChannel) -> bool {
+        host_registry::take_pending_close(&self.host_close_pending, session_key, channel)
+    }
+
+    /// Drop the deferred closes owed to `channel`, after that host's answered
+    /// listing; closes owed to other hosts are left for their own listings.
+    pub fn prune_pending_closes(&self, channel: HostChannel) {
+        host_registry::prune_pending_closes(&self.host_close_pending, channel)
+    }
+
+    pub fn next_frozen_id(&self) -> FrozenId {
+        host_registry::next_frozen_id(&self.frozen_host_seq)
+    }
+
+    pub fn add_frozen_host(&self, host: FrozenHost) {
+        self.frozen_hosts.lock().unwrap_or_else(|e| e.into_inner()).push(host);
+    }
+
+    pub fn remove_frozen_host(&self, id: FrozenId) -> Option<FrozenHost> {
+        let mut hosts = self.frozen_hosts.lock().unwrap_or_else(|e| e.into_inner());
+        let at = hosts.iter().position(|h| h.id == id)?;
+        Some(hosts.remove(at))
+    }
+
+    /// The client of a registered frozen host; `None` once it is retired.
+    pub fn frozen_client(&self, id: FrozenId) -> Option<crate::pty_host_client::PtyHostClient> {
+        host_registry::frozen_client(&self.frozen_hosts, id)
+    }
+
+    /// Record that the pane owning this key is being restored and must wait
+    /// for its host. Skips a key that already has a live registration.
+    pub fn register_restoring_key(&self, session_key: &str) -> bool {
+        host_registry::register_restoring_key(
+            &self.restoring_keys,
+            &self.host_terminals,
+            &self.terminals,
+            session_key,
+            std::time::Instant::now(),
+        )
+    }
+
+    /// Extend a restore intent's life; every keyed create calls this.
+    pub fn refresh_restoring_key(&self, session_key: &str) {
+        host_registry::refresh_restoring_key(&self.restoring_keys, session_key, std::time::Instant::now())
+    }
+
+    pub fn is_restoring_key(&self, session_key: &str) -> bool {
+        host_registry::is_restoring_key(&self.restoring_keys, session_key, std::time::Instant::now())
+    }
+
+    /// Remove a restore intent (bound, closed, or no longer waiting). The TTL
+    /// reap goes through the same remover.
+    pub fn forget_restoring_key(&self, session_key: &str) -> bool {
+        host_registry::forget_restoring_key(&self.restoring_keys, session_key, None)
+    }
+
+    /// The user closed a restored pane that never found its session.
+    pub fn mark_closed_unowned(&self, session_key: &str) {
+        host_registry::mark_closed_unowned(
+            &self.restoring_keys,
+            &self.closed_unowned,
+            session_key,
+            std::time::Instant::now(),
+        )
+    }
+
+    /// Should the session with this key, reported by any host, be closed
+    /// instead of adopted or surfaced?
+    pub fn unowned_close_due(&self, session_key: &str) -> bool {
+        host_registry::unowned_close_due(
+            &self.closed_unowned,
+            self.session_registered_on_any_channel(session_key),
+            session_key,
+            std::time::Instant::now(),
+        )
+    }
+
+    /// Remove an unowned close. A fresh keyed spawn or attach for the key
+    /// calls this; the TTL reap goes through the same remover.
+    pub fn forget_closed_unowned(&self, session_key: &str) -> bool {
+        host_registry::forget_closed_unowned(&self.closed_unowned, session_key, None)
+    }
+
+    /// Drop restore intents and unowned closes nobody refreshed within the TTL.
+    pub fn reap_expired_restore_intents(&self) {
+        let now = std::time::Instant::now();
+        host_registry::reap_expired_restoring_keys(&self.restoring_keys, now);
+        host_registry::reap_expired_closed_unowned(&self.closed_unowned, now);
     }
 
     /// Normalise any caller-supplied terminal reference to this run's map key.
@@ -1435,13 +1534,14 @@ impl<R: Runtime> AppState<R> {
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, id);
         match self.client_for_channel(channel) {
             Some(c) if c.is_alive() => c.close(&session_key),
-            _ if channel == HostChannel::Primary => {
+            _ if channel != HostChannel::Elevated => {
                 // Pending closes are replayed against the HOST later, so they
-                // must be recorded in the host id space. The elevated channel
-                // has no such replay story — it is never reconnected (plan
-                // 045 §5); a close that can't reach it is simply dropped,
-                // same as the process being gone already.
-                self.host_close_pending.insert(session_key.clone(), ());
+                // must be recorded in the host id space, and against the host
+                // that owns the session: the tombstone carries its channel.
+                // The elevated channel has no such replay story — it is never
+                // reconnected (plan 045 §5); a close that can't reach it is
+                // simply dropped, same as the process being gone already.
+                self.host_close_pending.insert(session_key.clone(), channel);
             }
             _ => {}
         }

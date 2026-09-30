@@ -1,5 +1,6 @@
 mod types;
 mod terminals;
+mod host_registry;
 mod windows;
 mod history;
 mod render;

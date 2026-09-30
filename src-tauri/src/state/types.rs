@@ -42,6 +42,30 @@ pub struct HostSessionClaim {
     /// Process identity currently registered under this session, if any. This
     /// stops a stale exit callback from retiring a replacement's claim.
     pub process_id: Option<String>,
+    /// The host the session lives on. A Reserved claim comes from one host's
+    /// listing, so attaching must go to that same host; a fresh claim records
+    /// where the spawn is headed.
+    pub channel: crate::elevated_host::HostChannel,
+}
+
+/// One surviving host of an older generation. It keeps serving the shells it
+/// already holds; new terminals are never routed to it while a current host is
+/// usable.
+#[derive(Clone)]
+pub struct FrozenHost {
+    pub id: crate::elevated_host::FrozenId,
+    /// Install-dir generation of the host binary; `None` for a legacy host
+    /// whose generation cannot be shown.
+    pub generation: Option<String>,
+    pub endpoint: String,
+    pub client: crate::pty_host_client::PtyHostClient,
+    /// Bumped on every reconnect so a callback from a superseded connection
+    /// can recognise itself as stale and do nothing.
+    pub epoch: u64,
+    pub build_id: Option<String>,
+    /// Whether the host process image lives inside the updater's payload, i.e.
+    /// would not survive a payload swap. `None` is unknown.
+    pub exe_in_payload: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -585,6 +609,11 @@ pub struct AppState<R: Runtime = Wry> {
     // (insert) and `AppState::forget_host_terminal` (remove) — see that
     // method's doc and its source-assertion test.
     pub host_terminals: Arc<DashMap<String, crate::elevated_host::HostChannel>>,
+    /// Surviving hosts of older generations, one entry per host. Touched only
+    /// in short synchronous sections; never held across an `.await`.
+    pub frozen_hosts: Arc<std::sync::Mutex<Vec<FrozenHost>>>,
+    /// Source of `FrozenId`s; ids are never reused within a run.
+    pub frozen_host_seq: Arc<std::sync::atomic::AtomicU32>,
     /// The elevated ("Open admin Tab") sidecar's connection manager (plan
     /// 045). Lazily connected on the first elevated spawn request; torn down
     /// when the last `Elevated` `host_terminals` entry is removed.
@@ -634,7 +663,20 @@ pub struct AppState<R: Runtime = Wry> {
     // the tab here and the next successful connect delivers the deferred Close
     // — otherwise the session lingers alive in the host as an adoptable zombie
     // the user explicitly closed (review 007 C-2).
-    pub host_close_pending: Arc<DashMap<String, ()>>,
+    //
+    // The value is the host the close is owed to. Hosts answer their listings
+    // independently, so one host's answer may only settle its own tombstones.
+    pub host_close_pending: Arc<DashMap<String, crate::elevated_host::HostChannel>>,
+    // Session keys of panes restored from a saved layout that have not yet
+    // found their session (value: when the intent was last refreshed). While a
+    // key is here its pane waits for the owning host instead of being spawned
+    // fresh, and its session is not surfaced as a recovered terminal.
+    pub restoring_keys: Arc<DashMap<String, std::time::Instant>>,
+    // Session keys the user closed while their owning host was still unknown
+    // (value: when). Whichever host later reports such a key, and no
+    // registration on any channel exists for it, closes the session instead of
+    // adopting it.
+    pub closed_unowned: Arc<DashMap<String, std::time::Instant>>,
     // Set true the moment a `webview_recovery` handler first claims a browser-
     // process death, and NEVER cleared: every window shares ONE WebView2
     // browser process, so one death fires N per-window `ProcessFailed`
@@ -715,6 +757,8 @@ impl<R: Runtime> Clone for AppState<R> {
             instance_id: self.instance_id.clone(),
             pty_host: self.pty_host.clone(),
             host_terminals: self.host_terminals.clone(),
+            frozen_hosts: self.frozen_hosts.clone(),
+            frozen_host_seq: self.frozen_host_seq.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
             host_session_claims: self.host_session_claims.clone(),
@@ -726,6 +770,8 @@ impl<R: Runtime> Clone for AppState<R> {
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
             host_close_pending: self.host_close_pending.clone(),
+            restoring_keys: self.restoring_keys.clone(),
+            closed_unowned: self.closed_unowned.clone(),
             recovering: self.recovering.clone(),
             restart_in_flight: self.restart_in_flight.clone(),
             started_at: self.started_at.clone(),
