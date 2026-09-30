@@ -187,6 +187,8 @@ export interface ElectronAPI {
   openSettingsInMainWindow?: (category?: string, detail?: string) => Promise<void>;
   registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
   forgetRestoringLeaf: (leafId: string) => Promise<void>;
+  /** The process already registered for this leaf's session, or null. */
+  getProcessIdForLeaf: (leafId: string) => Promise<string | null>;
   closeTerminal: (id: string) => Promise<void>;
   /** Delete persisted terminal scrollback for every renderer id NOT in keepIds (startup orphan sweep). */
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;

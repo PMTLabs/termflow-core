@@ -177,27 +177,49 @@ test('handleRestart surfaces a host-ownership-pending toast and never registers 
   expect(api.registerRestoringLeaves).not.toHaveBeenCalled();
 });
 
-test('move_a_waiting_pane_to_another_window_does_not_spawn_and_binds_in_the_destination', async () => {
+// A host whose keyed creates park in flight (as the backend does at its barrier) until the
+// test releases them. The first release takes the session; a later one is refused as contended.
+function makeGatedHost() {
+  const parked = new Map<string, () => void>();
+  const frames: Array<{ webview: string; frame: string; leaf: string }> = [];
+  let holder: string | undefined;
+  return {
+    frames,
+    createFor: (webview: string) => jest.fn((_p, _n, _c, id) => new Promise<string>((resolve, reject) => {
+      parked.set(webview, () => {
+        if (holder) {
+          reject(new Error(`host-session-contended: host session ${id} is already registered`));
+          return;
+        }
+        holder = 'pc-old-host';
+        frames.push({ webview, frame: 'Attach:old-host', leaf: id });
+        resolve(holder);
+      });
+    })),
+    isParked: (webview: string) => parked.has(webview),
+    release: (webview: string) => parked.get(webview)!(),
+    processIdForLeaf: jest.fn(async () => holder ?? null),
+  };
+}
+
+test.each([
+  ['the window the pane left', 'source', 'destination'],
+  ['the window the pane moved to', 'destination', 'source'],
+] as const)('move_a_waiting_pane_to_another_window_while_its_create_is_in_flight: %s wins the session', async (_label, first, second) => {
   const sourceStore = activeStore;
   const destinationStore = makeStore();
   const tree = { id: 'pn-split', type: 'split' as const, direction: 'horizontal' as const, children: [leaf('tm-live'), leaf('tm-wait')] };
   seed(sourceStore, tree, 'tb-source');
-  let resolved = false;
-  const frames: Array<{ webview: string; frame: string; leaf: string }> = [];
-  const createFor = (webview: string) => jest.fn(async (_p, _n, _c, id) => {
-    if (!resolved) throw new Error('host-ownership-pending: frozen host listing delayed');
-    frames.push({ webview, frame: 'Attach:old-host', leaf: id });
-    return 'pc-old-host';
-  });
-  const sourceApi = apiFor(createFor('source'));
-  const destinationApi = apiFor(createFor('destination'));
+  const host = makeGatedHost();
+  const sourceApi = { ...apiFor(host.createFor('source')), getProcessIdForLeaf: host.processIdForLeaf };
+  const destinationApi = { ...apiFor(host.createFor('destination')), getProcessIdForLeaf: host.processIdForLeaf };
   const sourceService = useService(sourceStore, sourceApi);
   const destinationService = useService(destinationStore, destinationApi);
   sourceService.registerExistingTerminal('tm-live', 'pc-live');
   activeService = sourceService;
   act(() => mount('tm-wait'));
   await flush();
-  await act(async () => { await jest.advanceTimersByTimeAsync(500); });
+  expect(host.isParked('source')).toBe(true); // in the backend's barrier, not in a backoff sleep
   act(() => root.render(null));
   act(() => sourceStore.dispatch(removeTabTree('tb-source')));
   sourceService.detachTerminal('tm-wait');
@@ -210,16 +232,22 @@ test('move_a_waiting_pane_to_another_window_does_not_spawn_and_binds_in_the_dest
   (window as any).electronAPI = destinationApi;
   act(() => mount('tm-wait'));
   await flush();
-  expect(container.textContent).toContain('Waiting for terminal host');
-  resolved = true;
-  await act(async () => { await jest.advanceTimersByTimeAsync(1000); });
+  expect(host.isParked('destination')).toBe(true);
+  expect(container.textContent).not.toContain('Failed to start shell');
+
+  host.release(first);
   await flush();
-  expect(frames).toEqual([{ webview: 'destination', frame: 'Attach:old-host', leaf: 'tm-wait' }]);
-  expect(sourceApi.createTerminal).toHaveBeenCalledTimes(1);
+  host.release(second);
+  await flush();
+  await act(async () => { await jest.advanceTimersByTimeAsync(1000); });
+
   expect(container.querySelector('[data-process-id="pc-old-host"]')).not.toBeNull();
   expect(container.textContent).not.toContain('Failed to start shell');
   expect(destinationService.getProcessId('tm-wait')).toBe('pc-old-host');
   expect(sourceService.getProcessId('tm-wait')).toBeUndefined();
+  expect(host.frames).toEqual([{ webview: first, frame: 'Attach:old-host', leaf: 'tm-wait' }]);
+  expect(sourceApi.createTerminal).toHaveBeenCalledTimes(1);
+  expect(destinationApi.createTerminal).toHaveBeenCalledTimes(1);
   expect(sourceApi.forgetRestoringLeaf).not.toHaveBeenCalled();
   expect(destinationApi.forgetRestoringLeaf).not.toHaveBeenCalled();
 });

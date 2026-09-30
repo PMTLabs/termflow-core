@@ -248,6 +248,18 @@ pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Res
     Ok(())
 }
 
+/// The process that already carries this leaf's session, if one is registered.
+/// A pane moved to another window while its first create was still in flight
+/// loses that create to the window it left; the session is then registered under
+/// the leaf, and this is how the moved pane finds it instead of failing.
+#[tauri::command]
+pub fn process_id_for_leaf(
+    state: State<'_, AppState>,
+    leaf_id: String,
+) -> Result<Option<String>, String> {
+    Ok(state.identity.process_for_leaf(&leaf_id))
+}
+
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane
 /// currently lives in. Without it, dialogs a console program parents to
 /// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open

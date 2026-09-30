@@ -874,6 +874,7 @@ pub fn run() {
         commands::report_host_restore_settled,
         commands::register_restoring_leaves,
         commands::forget_restoring_leaf,
+        commands::process_id_for_leaf,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,

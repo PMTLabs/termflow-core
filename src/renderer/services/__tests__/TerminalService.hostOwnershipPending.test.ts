@@ -6,10 +6,11 @@ import { TerminalServiceClass } from '../TerminalService';
 const leaf = (terminalId: string) => ({ id: `pn-${terminalId}`, type: 'terminal' as const, terminalId });
 const makeStore = () => configureStore({ reducer: { panes: panesReducer } });
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
-function makeService(store: ReturnType<typeof makeStore>, createTerminal = jest.fn()) {
+function makeService(store: ReturnType<typeof makeStore>, createTerminal = jest.fn(), extraApi: Record<string, unknown> = {}) {
   const api = {
     createTerminal, forgetRestoringLeaf: jest.fn().mockResolvedValue(undefined),
     adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    ...extraApi,
   };
   const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any);
   return { service, api, createTerminal };
@@ -56,25 +57,48 @@ test('split_a_waiting_solo_pane_does_not_spawn', async () => {
   expect(service.getHostWaitState('tm-wait')).toBeUndefined();
 });
 
-test('move_a_waiting_pane_to_another_window_does_not_spawn_and_binds_in_the_destination', async () => {
+// A host whose keyed creates park in flight (as the backend does at its barrier) until the
+// test releases them. The first release takes the session; a later one is refused as contended.
+function makeGatedHost() {
+  const parked = new Map<string, () => void>();
+  const frames: Array<{ window: string; kind: string; leaf: string }> = [];
+  let holder: string | undefined;
+  const createFor = (windowId: string) => jest.fn((_profile, _name, _cwd, id) => new Promise<string>((resolve, reject) => {
+    parked.set(windowId, () => {
+      if (holder) {
+        reject(new Error(`host-session-contended: host session ${id} is already registered`));
+        return;
+      }
+      holder = 'pc-old-host';
+      frames.push({ window: windowId, kind: 'Attach', leaf: id });
+      resolve(holder);
+    });
+  }));
+  return {
+    createFor,
+    frames,
+    isParked: (windowId: string) => parked.has(windowId),
+    release: (windowId: string) => parked.get(windowId)!(),
+    processIdForLeaf: jest.fn(async () => holder ?? null),
+  };
+}
+
+test.each([
+  ['the window the pane left', 'source', 'destination'],
+  ['the window the pane moved to', 'destination', 'source'],
+] as const)('move_a_waiting_pane_to_another_window_while_its_create_is_in_flight: %s wins the session', async (_label, first, second) => {
   const sourceStore = makeStore();
   const destinationStore = makeStore();
   const tree = { id: 'pn-split', type: 'split' as const, direction: 'horizontal' as const,
     children: [leaf('tm-live'), leaf('tm-wait')] };
   sourceStore.dispatch(addTabTree({ tabId: 'tb-source', tree }));
-  let resolved = false;
-  const frames: Array<{ window: string; kind: string; leaf: string }> = [];
-  const createFor = (windowId: string) => jest.fn(async (_profile, _name, _cwd, id) => {
-    if (!resolved) throw 'host-ownership-pending: old host listing delayed';
-    frames.push({ window: windowId, kind: 'Attach', leaf: id });
-    return 'pc-old-host';
-  });
-  const source = makeService(sourceStore, createFor('source'));
-  const destination = makeService(destinationStore, createFor('destination'));
+  const host = makeGatedHost();
+  const source = makeService(sourceStore, host.createFor('source'), { getProcessIdForLeaf: host.processIdForLeaf });
+  const destination = makeService(destinationStore, host.createFor('destination'), { getProcessIdForLeaf: host.processIdForLeaf });
   source.service.registerExistingTerminal('tm-live', 'pc-live');
   const sourcePromise = source.service.createTerminal('tm-wait');
   await flush();
-  await jest.advanceTimersByTimeAsync(500);
+  expect(host.isParked('source')).toBe(true); // in the backend's barrier, not in a backoff sleep
   // A tab with a live pane can move while its sibling is waiting for an owner.
   sourceStore.dispatch(removeTabTree('tb-source'));
   source.service.detachTerminal('tm-live');
@@ -86,17 +110,69 @@ test('move_a_waiting_pane_to_another_window_does_not_spawn_and_binds_in_the_dest
     destinationPane.processId = pid;
   }, () => { destinationPane.startupFailed = true; });
   await flush();
-  resolved = true;
-  await jest.advanceTimersByTimeAsync(1000);
+  expect(host.isParked('destination')).toBe(true);
+
+  host.release(first);
+  await flush();
+  host.release(second);
+  await flush();
   await destinationPromise;
+
   expect(await sourcePromise).toBe('');
-  expect(source.createTerminal).toHaveBeenCalledTimes(1); // zero attempts after the move
   expect(destinationPane).toEqual({ processId: 'pc-old-host', startupFailed: false });
   expect(destination.service.getProcessId('tm-wait')).toBe('pc-old-host');
   expect(source.service.getProcessId('tm-wait')).toBeUndefined();
-  expect(frames).toEqual([{ window: 'destination', kind: 'Attach', leaf: 'tm-wait' }]);
+  // One shell, reachable from exactly one window, and never a second session for the leaf.
+  const holders = [source, destination].filter(w => w.service.getTerminalIdForProcess('pc-old-host') === 'tm-wait');
+  expect(holders).toEqual([destination]);
+  expect(host.frames).toEqual([{ window: first, kind: 'Attach', leaf: 'tm-wait' }]);
+  expect(source.createTerminal).toHaveBeenCalledTimes(1);
+  expect(destination.createTerminal).toHaveBeenCalledTimes(1);
+  expect(source.service.getHostWaitState('tm-wait')).toBeUndefined();
+  expect(destination.service.getHostWaitState('tm-wait')).toBeUndefined();
   expect(source.api.forgetRestoringLeaf).not.toHaveBeenCalled();
   expect(destination.api.forgetRestoringLeaf).not.toHaveBeenCalled();
+});
+
+test('a contended create for a leaf that no registered session carries still fails', async () => {
+  const store = makeStore();
+  store.dispatch(addTabTree({ tabId: 'tb-lost', tree: leaf('tm-lost') }));
+  const refusal = new Error('host-session-contended: claimed by another recovery');
+  const { service, api } = makeService(store, jest.fn().mockRejectedValue(refusal), {
+    getProcessIdForLeaf: jest.fn().mockResolvedValue(null),
+  });
+  await expect(service.createTerminal('tm-lost')).rejects.toBe(refusal);
+  expect(api.getProcessIdForLeaf).toHaveBeenCalledWith('tm-lost');
+  expect(service.getProcessId('tm-lost')).toBeUndefined();
+});
+
+test('a failed lookup of the registered session leaves the contention error intact', async () => {
+  const store = makeStore();
+  store.dispatch(addTabTree({ tabId: 'tb-lost', tree: leaf('tm-lost') }));
+  const refusal = new Error('host-session-contended: host session tm-lost is already registered');
+  const { service } = makeService(store, jest.fn().mockRejectedValue(refusal), {
+    getProcessIdForLeaf: jest.fn().mockRejectedValue(new Error('ipc down')),
+  });
+  await expect(service.createTerminal('tm-lost')).rejects.toBe(refusal);
+});
+
+test('a pane that leaves while it looks up its registered session binds nothing', async () => {
+  const store = makeStore();
+  store.dispatch(addTabTree({ tabId: 'tb-moving', tree: leaf('tm-moving') }));
+  let answer!: (processId: string) => void;
+  const lookup = jest.fn(() => new Promise<string>(resolve => { answer = resolve; }));
+  const { service } = makeService(
+    store,
+    jest.fn().mockRejectedValue(new Error('host-session-contended: host session tm-moving is already registered')),
+    { getProcessIdForLeaf: lookup },
+  );
+  const promise = service.createTerminal('tm-moving');
+  await flush();
+  expect(lookup).toHaveBeenCalledTimes(1);
+  store.dispatch(removeTabTree('tb-moving'));
+  answer('pc-old-host');
+  expect(await promise).toBe('');
+  expect(service.getProcessId('tm-moving')).toBeUndefined();
 });
 
 test('host retry backoff is 1, 2, 4, 8, 8 seconds and ends with Retry at 90 seconds', async () => {
@@ -156,6 +232,21 @@ test('closeTerminal no-process branch forgets restore intent', async () => {
   const { service, api } = makeService(makeStore());
   await service.closeTerminal('tm-never-bound');
   expect(api.forgetRestoringLeaf).toHaveBeenCalledWith('tm-never-bound');
+});
+
+test('closeTerminal still clears the wait state and resolves when forgetting the restore intent fails', async () => {
+  const store = makeStore();
+  store.dispatch(addTabTree({ tabId: 'tb-wait', tree: leaf('tm-wait') }));
+  const { service, api } = makeService(store, jest.fn().mockRejectedValue('host-ownership-pending: unanswered'));
+  const waiting = service.createTerminal('tm-wait');
+  await flush();
+  expect(service.getHostWaitState('tm-wait')).toBe('waiting');
+  api.forgetRestoringLeaf.mockRejectedValueOnce(new Error('ipc down'));
+  await expect(service.closeTerminal('tm-wait')).resolves.toBeUndefined();
+  expect(service.getHostWaitState('tm-wait')).toBeUndefined();
+  store.dispatch(removeTabTree('tb-wait'));
+  await jest.advanceTimersByTimeAsync(1000);
+  expect(await waiting).toBe('');
 });
 
 test('an absent leaf cannot start even its first attempt', async () => {

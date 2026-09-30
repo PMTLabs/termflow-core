@@ -572,7 +572,8 @@ class StateManagerClass {
       return true;
     } catch (error) {
       console.error('Failed to restore state:', error);
-      // A transport failure is not corrupt saved data; leave it available for Retry.
+      // A transport failure is not corrupt saved data, so it is kept rather than deleted. Nothing
+      // offers to retry: the caller opens a default tab, and the next periodic save replaces it.
       if (!(error instanceof RestoreRegistrationError)) localStorage.removeItem(this.STATE_KEY);
       return false;
     }
@@ -1094,7 +1095,7 @@ class StateManagerClass {
       } catch (error) {
         if (!isCurrent()) return false;
         if (Date.now() >= deadline) {
-          throw new RestoreRegistrationError('Waiting for terminal host: could not register restored panes. Retry loading the layout.');
+          throw new RestoreRegistrationError('Waiting for terminal host: could not register restored panes, so none of them were loaded.');
         }
         console.warn('StateManager: restored panes remain unmounted until host registration succeeds:', error);
         await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));

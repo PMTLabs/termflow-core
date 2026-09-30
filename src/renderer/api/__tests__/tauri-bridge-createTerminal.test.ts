@@ -47,6 +47,12 @@ describe('tauriBridge restore intent contract', () => {
     expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-migrated' });
   });
 
+  it('looks a leaf up by the leaf identity, with a camelCase argument key', async () => {
+    invokeMock.mockResolvedValueOnce('pc-holder');
+    await expect(tauriBridge.getProcessIdForLeaf('tm-moved')).resolves.toBe('pc-holder');
+    expect(invokeMock).toHaveBeenCalledWith('process_id_for_leaf', { leafId: 'tm-moved' });
+  });
+
   it('surfaces register failure instead of allowing an unkeyed mount', async () => {
     invokeMock.mockRejectedValueOnce(new Error('transport down'));
     await expect(tauriBridge.registerRestoringLeaves([{ leafId: 'tm-modern' }])).rejects.toThrow('transport down');
