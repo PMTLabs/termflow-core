@@ -165,7 +165,8 @@ pub fn render_full_scrollback(screen: &mut vt100::Screen) -> Option<Vec<u8>> {
 /// reset. `rows_formatted` never emits a cursor-visibility control, so the LAST
 /// `ESC[?25h|l` in a blob is where a tail starts. The tail can hold bare LF bytes
 /// (vt100 walks the cursor down to a row it cannot address after an end-of-row
-/// overflow) but never CR: every rendered row ends `ESC[0m CR LF`. A blob without
+/// overflow) but never CR: the tail formatter emits absolute moves, SGR and cell
+/// text, and a cell cannot hold a CR. Hard-ended rows end `ESC[0m CR LF`. A blob without
 /// the marker, or with a CR after it, is returned untouched.
 pub fn strip_cursor_state_tail(blob: &str) -> &str {
     const HIDE: &str = "\x1b[?25l";
@@ -916,11 +917,12 @@ mod scrollback_tests {
     }
 
     /// The exact oracle: stripping a legacy blob must give back precisely the rows
-    /// alone, whatever tail vt100 wrote. Every state below is produced by the real
-    /// parser, not hand-assembled, so a tail shape the crate really emits cannot be
-    /// missed by a fixture that only imitates it.
+    /// alone. Every state below is produced by the real parser, not hand-assembled,
+    /// so each fixture is a tail vt100 really emits. They are representative, not
+    /// exhaustive: wide characters in the last column and the save/backspace/erase
+    /// fallback for a pending wrap over a cleared row are not among them.
     #[test]
-    fn stripping_returns_exactly_the_rows_for_every_tail_shape_vt100_emits() {
+    fn stripping_returns_exactly_the_rows_for_representative_vt100_tail_shapes() {
         let overflow_filled = || {
             let mut p = vt100::Parser::new(24, 80, 5000);
             p.process(b"\x1b[13;1Hstatus-line\x1b[11;1H");

@@ -1203,10 +1203,23 @@ mod scrollback_restore_tests {
         let prefix = super::restore_prefix(&state, "tb-legacy").expect("prefix");
         assert_eq!(prefix, format!("{rows_only}{}", crate::state::REPLAY_SEPARATOR));
 
+        // Several chunks, two of them legacy dumps with DIFFERENT rows and their own
+        // tails around a rows-only chunk: every tail goes, nothing else does.
+        state.init_screen("tb-tail2", 24, 80);
+        register_terminal(&state, "tb-tail2");
+        state.feed_screen("tb-tail2", b"third\r\nfourth line");
+        let live2 = String::from_utf8_lossy(&state.full_scrollback_snapshot("tb-tail2").unwrap()).into_owned();
+        let mut reference2 = vt100::Parser::new(24, 80, 5000);
+        reference2.process(b"third\r\nfourth line");
+        let rows_only2 = String::from_utf8_lossy(
+            &crate::state::render_full_scrollback(reference2.screen_mut()).expect("rows"),
+        )
+        .into_owned();
+        assert_ne!(rows_only, rows_only2);
         let later = "later\r\n".to_string();
-        state.history_store.upsert("tb-chunks", &[live.clone(), later.clone()], 3);
+        state.history_store.upsert("tb-chunks", &[live.clone(), later.clone(), live2], 3);
         let prefix = super::restore_prefix(&state, "tb-chunks").expect("prefix");
-        assert_eq!(prefix, format!("{rows_only}{later}{}", crate::state::REPLAY_SEPARATOR));
+        assert_eq!(prefix, format!("{rows_only}{later}{rows_only2}{}", crate::state::REPLAY_SEPARATOR));
     }
 
     /// ED3 resize-wipe repair (review 27/codex): the repair path does

@@ -480,7 +480,9 @@ impl<R: Runtime> AppState<R> {
     }
 
     /// Render this terminal's FULL buffer (scrollback + visible screen) as a styled,
-    /// replayable byte stream for persistence — soft-wrapped rows joined, no
+    /// replayable byte stream for the live ED3 repair (`/full_scrollback`, which
+    /// keeps the cursor tail; persistence uses `persisted_scrollback_snapshot`) —
+    /// soft-wrapped rows joined, no
     /// screen-clear, so 2J-cleared transient frames (full-screen TUIs) are excluded by
     /// construction. Returns None when the whole buffer is blank.
     ///
@@ -501,8 +503,8 @@ impl<R: Runtime> AppState<R> {
     /// middle of the just-drawn history: the "session restored" divider and the
     /// fresh shell's prompt were then painted over the old TUI's rows, and the
     /// cursor sat mid-screen until Ctrl+L. Seen with Claude Code: its last cursor sat
-    /// above rows that replay below it. Any stored cursor row that is not the last
-    /// replayed row does the same.
+    /// above rows that replay below it. Any stored cursor jump INTO already replayed
+    /// content does the same.
     pub fn persisted_scrollback_snapshot(&self, id: &str) -> Option<Vec<u8>> {
         self.render_scrollback(id, false)
     }
