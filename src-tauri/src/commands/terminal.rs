@@ -664,7 +664,14 @@ fn restore_prefix<R: tauri::Runtime>(state: &AppState<R>, history_key: &str) -> 
     if chunks.is_empty() {
         return None;
     }
-    let mut prefix = chunks.concat();
+    // Rows saved by an older build carry a trailing absolute cursor position; see
+    // `strip_cursor_state_tail`. Left in, it parks the cursor in the middle of the
+    // replayed history and the divider overwrites the old screen. Stripped per
+    // chunk: each chunk was persisted as its own dump, so each carries its own tail.
+    let mut prefix: String = chunks
+        .iter()
+        .map(|chunk| crate::state::strip_cursor_state_tail(chunk))
+        .collect();
     prefix.push_str(crate::state::REPLAY_SEPARATOR);
     Some(prefix)
 }
@@ -1160,6 +1167,59 @@ mod scrollback_restore_tests {
         // After cleanup (the exit path's next step) the row must remain intact.
         state.cleanup_terminal_state("tb-exit");
         assert!(state.history_store.get("tb-exit").is_some());
+    }
+
+    /// The persisted blob is replayed into a NEW xterm, so it must not carry the
+    /// live-repair path's absolute cursor jump (it parked the cursor mid-screen and
+    /// the divider + new prompt overwrote the old TUI's rows). Rows an older build
+    /// already stored with that tail are cleaned on the way out.
+    #[test]
+    fn persisted_history_has_no_cursor_tail_and_legacy_rows_are_cleaned_on_restore() {
+        let (_app, state) = mock_state();
+        state.history_store.init(&temp_db("cursor-tail"));
+        state.init_screen("tb-tail", 24, 80);
+        register_terminal(&state, "tb-tail");
+        state.feed_screen("tb-tail", b"first line\r\nsecond");
+
+        // Live repair keeps the cursor restore; persistence must not.
+        let live = String::from_utf8_lossy(&state.full_scrollback_snapshot("tb-tail").unwrap()).into_owned();
+        assert!(live.contains("\x1b[2;7H"), "live repair needs the cursor position: {live:?}");
+        state.persist_terminal_history("tb-tail", 1);
+        let stored = state.history_store.get("tb-tail").expect("row").concat();
+
+        // Independent oracle: the rows-only dump of a parser fed the same bytes.
+        let mut reference = vt100::Parser::new(24, 80, 5000);
+        reference.process(b"first line\r\nsecond");
+        let rows_only = String::from_utf8_lossy(
+            &crate::state::render_full_scrollback(reference.screen_mut()).expect("rows"),
+        )
+        .into_owned();
+        assert!(rows_only.contains("first line") && rows_only.contains("second"));
+        assert_eq!(stored, rows_only, "persisted blob must be exactly the rows, no cursor state");
+        assert_ne!(live, rows_only, "the live repair dump must still carry the cursor tail");
+
+        // Rows saved by the old build end with the tail; restore drops it, chunk by chunk.
+        state.history_store.upsert("tb-legacy", std::slice::from_ref(&live), 2);
+        let prefix = super::restore_prefix(&state, "tb-legacy").expect("prefix");
+        assert_eq!(prefix, format!("{rows_only}{}", crate::state::REPLAY_SEPARATOR));
+
+        // Several chunks, two of them legacy dumps with DIFFERENT rows and their own
+        // tails around a rows-only chunk: every tail goes, nothing else does.
+        state.init_screen("tb-tail2", 24, 80);
+        register_terminal(&state, "tb-tail2");
+        state.feed_screen("tb-tail2", b"third\r\nfourth line");
+        let live2 = String::from_utf8_lossy(&state.full_scrollback_snapshot("tb-tail2").unwrap()).into_owned();
+        let mut reference2 = vt100::Parser::new(24, 80, 5000);
+        reference2.process(b"third\r\nfourth line");
+        let rows_only2 = String::from_utf8_lossy(
+            &crate::state::render_full_scrollback(reference2.screen_mut()).expect("rows"),
+        )
+        .into_owned();
+        assert_ne!(rows_only, rows_only2);
+        let later = "later\r\n".to_string();
+        state.history_store.upsert("tb-chunks", &[live.clone(), later.clone(), live2], 3);
+        let prefix = super::restore_prefix(&state, "tb-chunks").expect("prefix");
+        assert_eq!(prefix, format!("{rows_only}{later}{rows_only2}{}", crate::state::REPLAY_SEPARATOR));
     }
 
     /// ED3 resize-wipe repair (review 27/codex): the repair path does
