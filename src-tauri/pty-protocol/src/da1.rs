@@ -76,9 +76,9 @@ impl StartupDa1 {
 
     /// Armed only when the bundled (modern) ConPTY has been loaded — the inbox ConPTY
     /// never asks, so arming there could only ever eat a child's query. "Loaded" is
-    /// `portable-pty`'s backend only provided `conpty::init_bundled_conpty` ran before
-    /// the process's first `openpty` (`portable-pty` resolves its function table once);
-    /// both production entry points (host `main`, fallback `spawn`) do that.
+    /// `portable-pty`'s backend only provided `conpty::init_for_current_exe` (or `init_conpty`)
+    /// ran before the process's first `openpty` (`portable-pty` resolves its function table
+    /// once); both production entry points (host `main`, fallback `spawn`) do that.
     pub fn for_platform() -> Self {
         #[cfg(windows)]
         {

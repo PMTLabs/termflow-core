@@ -72,10 +72,10 @@ pub struct Session {
     /// liveness therefore tests the OS's cleanup schedule, not our behaviour —
     /// which is precisely how it flakes.
     kill_done: Arc<AtomicBool>,
-    /// Set by the reader when it found and removed the ConPTY startup DA1 and handed the reply
-    /// to the reply thread (plan 050). That is a REQUEST: the write may still be waiting for the
-    /// writer lock or fail. Diagnostic only; the inbox ConPTY never asks, so `true` also proves
-    /// the modern handshake ran.
+    /// Set by the reader when it found and removed the ConPTY startup DA1 query, just before it
+    /// asks for the reply to be sent (plan 050). That is a REQUEST: starting the reply thread,
+    /// taking the writer lock and the write itself can each still fail or wait. Diagnostic only;
+    /// the inbox ConPTY never asks, so `true` means the modern handshake's query was observed.
     #[cfg_attr(not(test), allow(dead_code))]
     da1_reply_requested: Arc<AtomicBool>,
 }
@@ -818,15 +818,24 @@ mod tests {
     fn a_disarmed_reader_leaves_the_query_alone() {
         let (sess, mut rx, cap) = fake_session(&[PRE], true, false);
         assert!(!sess.startup_da1_reply_requested());
-        let got: Vec<u8> = drain(&mut rx)
-            .into_iter()
-            .filter_map(|d| match d {
-                Data::Stdout { bytes, .. } => Some(bytes),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        let (mut got, mut next, mut exits) = (Vec::new(), 0u64, 0);
+        for d in drain(&mut rx) {
+            match d {
+                Data::Stdout { tab_id, offset, bytes, .. } => {
+                    assert_eq!(tab_id, "tab-fake", "frames are routed by tab_id in the client");
+                    assert_eq!(offset, next, "live offsets are contiguous");
+                    next += bytes.len() as u64;
+                    got.extend(bytes);
+                }
+                Data::Exit { tab_id, .. } => {
+                    assert_eq!(tab_id, "tab-fake");
+                    exits += 1;
+                }
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
         assert_eq!(got, PRE);
+        assert_eq!(exits, 1);
         std::thread::sleep(Duration::from_millis(50));
         assert!(cap.0.lock().unwrap().is_empty(), "inbox ConPTY: nothing is answered");
     }
@@ -900,6 +909,7 @@ mod tests {
             assert!(flat.contains(needle), "session.rs must contain `{needle}` outside comments");
         }
         assert_eq!(flat.matches("pair_reader").count(), 2, "the PTY reader handle is bound once and passed once");
+        assert_eq!(flat.matches("try_clone_reader").count(), 1, "a second cloned PTY reader could drain output outside the pump");
         assert_eq!(private_read_spellings(&code), Vec::<&str>::new(), "a private read loop bypasses the pump");
         // Calibration: the detector does go dirty.
         assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
@@ -918,27 +928,46 @@ mod tests {
         }
         // Output goes to files (not pipes) so the parent can poll for a deadline without a
         // pipe-buffer deadlock; the body's own 12 s loop does not bound `Session::spawn` or teardown.
+        /// Kills and reaps the child and removes the output files on EVERY exit path, including
+        /// a panic while the files are being created or the child polled.
+        struct Cleanup {
+            paths: Vec<std::path::PathBuf>,
+            child: Option<std::process::Child>,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(c) = self.child.as_mut() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                for p in &self.paths {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+        }
         let dir = std::env::temp_dir();
         let (out_path, err_path) = (
             dir.join(format!("tf-da1-{}.out", std::process::id())),
             dir.join(format!("tf-da1-{}.err", std::process::id())),
         );
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["fresh_process_bundled_handshake_body", "--nocapture", "--test-threads=1"])
-            .env("TF_DA1_CHILD", "1")
-            .stdout(std::fs::File::create(&out_path).unwrap())
-            .stderr(std::fs::File::create(&err_path).unwrap())
-            .spawn()
-            .unwrap();
+        let mut guard = Cleanup { paths: vec![out_path.clone(), err_path.clone()], child: None };
+        let (out_file, err_file) = (std::fs::File::create(&out_path).unwrap(), std::fs::File::create(&err_path).unwrap());
+        guard.child = Some(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["fresh_process_bundled_handshake_body", "--nocapture", "--test-threads=1"])
+                .env("TF_DA1_CHILD", "1")
+                .stdout(out_file)
+                .stderr(err_file)
+                .spawn()
+                .unwrap(),
+        );
         let deadline = Instant::now() + Duration::from_secs(60);
         let status = loop {
-            if let Some(st) = child.try_wait().unwrap() {
+            if let Some(st) = guard.child.as_mut().unwrap().try_wait().unwrap() {
                 break Some(st);
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
+                break None; // the guard kills and reaps it
             }
             std::thread::sleep(Duration::from_millis(50));
         };
@@ -947,8 +976,6 @@ mod tests {
             std::fs::read_to_string(&out_path).unwrap_or_default(),
             std::fs::read_to_string(&err_path).unwrap_or_default()
         );
-        let _ = std::fs::remove_file(&out_path);
-        let _ = std::fs::remove_file(&err_path);
         let status = status.unwrap_or_else(|| panic!("fresh-process handshake test hung (killed after 60 s):\n{text}"));
         assert!(status.success(), "fresh-process handshake test failed:\n{text}");
         assert!(text.contains("DA1-FRESH-OK"), "child did not report success (vacuous pass?):\n{text}");

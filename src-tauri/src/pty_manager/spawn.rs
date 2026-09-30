@@ -444,6 +444,7 @@ mod reader_wiring_tests {
             assert!(flat.contains(needle), "spawn.rs must contain `{needle}` outside comments");
         }
         assert_eq!(word_count(&code, "reader"), 4, "the PTY reader handle is bound, moved and passed, nothing else");
+        assert_eq!(flat.matches("try_clone_reader").count(), 1, "a second cloned PTY reader could drain output outside the pump");
         assert_eq!(private_read_spellings(&code), Vec::<&str>::new(), "a private read loop bypasses the pump");
         // Calibration: the detector does go dirty.
         assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
