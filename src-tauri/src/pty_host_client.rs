@@ -14,12 +14,15 @@
 //! The client depends on a few concrete pieces (not `AppState`) so it is
 //! testable without the Windows `mock_app` crash and avoids an Arc cycle.
 
+mod conn;
 mod endpoints;
 mod discovery;
+mod exe_origin;
 pub use endpoints::{current_host_paths, HostPaths};
 pub use discovery::{discover_hosts, HostCandidate, HostRole};
 
 use crate::state::ChannelPayload;
+use conn::{cancelled, ConnState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -151,6 +154,10 @@ pub struct PtyHostClient {
     /// leaves a permanently-dead client installed that nothing will ever null.
     alive: Arc<std::sync::atomic::AtomicBool>,
     lifecycle_token: Arc<String>,
+    /// Who ended the connection and when its stream was really released.
+    conn: Arc<ConnState>,
+    /// Where the host behind this connection runs from; see `exe_in_payload`.
+    exe_origin: Arc<exe_origin::ExeOrigin>,
 }
 
 impl PtyHostClient {
@@ -193,6 +200,49 @@ impl PtyHostClient {
     /// False once the pipe closed (reader task ended). See `alive` field doc.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    /// Close the connection for real, on purpose: both reader and writer drop
+    /// their half, so the stream is released and the host sees EOF. Dropping the
+    /// client (or `shutdown()`) cannot do that: the two halves share the stream.
+    ///
+    /// Idempotent across clones. `on_disconnect` does NOT fire for this close.
+    /// Requests still waiting are failed and the pending map is emptied.
+    /// Returns whether the stream was released within the bound.
+    pub async fn close_transport(&self) -> bool {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.conn.begin_close() {
+            self.alive.store(false, Ordering::Release);
+            self.conn.cancel();
+        }
+        self.pending.lock().unwrap().clear();
+        self.conn.halves_released(BOUND).await
+    }
+
+    /// Record that a host we spawned ourselves runs from the bundled source path
+    /// (the runtime-dir install failed): known at spawn time, no lookup needed.
+    #[cfg(any(windows, unix))]
+    fn note_bundled_fallback(&self, origin: HostConnectionOrigin, sidecar: &std::path::Path) {
+        let runtime_dir = runtime_host_dir();
+        self.exe_origin.set_bundled_fallback(exe_origin::spawned_from_bundled_fallback(
+            origin == HostConnectionOrigin::SpawnedHere,
+            sidecar,
+            runtime_dir.as_deref(),
+            cfg!(windows),
+        ));
+    }
+
+    /// Whether the host behind this connection runs from inside the Velopack
+    /// install root, where an update swap kills it. `None` means it could not be
+    /// determined, and callers must treat that as unsafe. A host this app spawned
+    /// from the bundled source path is inside the payload on every platform;
+    /// other hosts are classified on Windows only (elsewhere: `Some(false)`).
+    pub fn exe_in_payload(&self) -> Option<bool> {
+        let runtime_dir = runtime_host_dir();
+        self.exe_origin.in_payload(
+            exe_origin::velopack_root().as_deref(),
+            runtime_dir.as_deref().and_then(std::path::Path::parent),
+        )
     }
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
@@ -288,7 +338,9 @@ impl PtyHostClient {
         let req = self.next_req();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
-        if self.outbound.send(Frame::Ctrl(make(req))).is_err() {
+        // `alive` is cleared before the pending map is drained, so a request that
+        // slipped in after the drain sees it here instead of waiting out `timeout`.
+        if !self.is_alive() || self.outbound.send(Frame::Ctrl(make(req))).is_err() {
             self.pending.lock().unwrap().remove(&req);
             return None;
         }
@@ -428,6 +480,11 @@ impl PtyHostClient {
 
 /// Build a client around already-connected pipe halves. Split out so tests can
 /// drive it over an in-memory duplex without a real named pipe.
+///
+/// The connection ends exactly one way, decided by a compare-exchange from
+/// `Live`: `close_transport` (intentional, silent) or a transport failure — the
+/// reader's EOF/error or the writer's write error — which fires `on_disconnect`.
+/// Either way both tasks drop their half, which is what closes the stream.
 #[cfg(any(windows, unix))]
 pub fn wire_client<R, W>(rd: R, wr: W, deps: PtyHostDeps) -> PtyHostClient
 where
@@ -440,25 +497,59 @@ where
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let req_ctr = Arc::new(AtomicU64::new(1));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let alive_r = alive.clone();
     let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
+    let conn = ConnState::new();
+    let end = Arc::new(ConnLoss {
+        conn: conn.clone(),
+        alive: alive.clone(),
+        pending: pending.clone(),
+        on_disconnect: deps.on_disconnect.clone(),
+    });
 
     // Writer task.
+    let mut cancel_w = conn.cancel_rx();
+    let half_w = conn.half_guard();
+    let end_w = end.clone();
     tokio::spawn(async move {
         let mut wr = wr;
-        while let Some(f) = out_rx.recv().await {
-            if write_frame(&mut wr, &f).await.is_err() {
+        let mut failed = false;
+        loop {
+            let next = tokio::select! {
+                _ = cancelled(&mut cancel_w) => break,
+                f = out_rx.recv() => f,
+            };
+            let Some(f) = next else { break };
+            let wrote = tokio::select! {
+                _ = cancelled(&mut cancel_w) => break,
+                r = write_frame(&mut wr, &f) => r,
+            };
+            if wrote.is_err() {
+                failed = true;
                 break;
             }
+        }
+        drop(wr);
+        drop(half_w);
+        if failed {
+            // A dead write side is a dead connection: stop the reader too and
+            // surface the loss, exactly as a reader EOF would.
+            end_w.lost();
         }
     });
 
     // Reader task.
     let pending_r = pending.clone();
+    let mut cancel_r = conn.cancel_rx();
+    let half_r = conn.half_guard();
     tokio::spawn(async move {
         let mut rd = rd;
+        let mut lost = false;
         loop {
-            match read_frame(&mut rd).await {
+            let next = tokio::select! {
+                _ = cancelled(&mut cancel_r) => break,
+                f = read_frame(&mut rd) => f,
+            };
+            match next {
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
                     // Ring bookkeeping stays in the HOST's id space — it is the
                     // host's own offset, and reattach replays from it.
@@ -496,13 +587,17 @@ where
                     }
                 }
                 Ok(Some(_)) => {} // GUI never receives Ctrl / Stdin
-                Ok(None) | Err(_) => break, // pipe closed
+                Ok(None) | Err(_) => {
+                    lost = true; // pipe closed
+                    break;
+                }
             }
         }
-        // Pipe closed: mark the client dead FIRST (so a concurrent
-        // ensure_pty_host can refuse to publish it), then surface the loss.
-        alive_r.store(false, Ordering::Release);
-        (deps.on_disconnect)();
+        drop(rd);
+        drop(half_r);
+        if lost {
+            end.lost();
+        }
     });
 
     PtyHostClient {
@@ -515,6 +610,35 @@ where
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
+        conn,
+        exe_origin: Arc::default(),
+    }
+}
+
+/// What to do when the transport fails (as opposed to being closed on purpose).
+/// Shared by the reader and the writer; only the one that wins the `Live -> Lost`
+/// compare-exchange acts, so `on_disconnect` fires at most once.
+#[cfg(any(windows, unix))]
+struct ConnLoss {
+    conn: Arc<ConnState>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    pending: PendingMap,
+    on_disconnect: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(any(windows, unix))]
+impl ConnLoss {
+    fn lost(&self) {
+        if !self.conn.begin_lost() {
+            return; // closed on purpose, or already lost
+        }
+        // Mark the client dead FIRST (so a concurrent ensure_pty_host can refuse
+        // to publish it), stop the other task, fail waiting requests, and only
+        // then surface the loss.
+        self.alive.store(false, Ordering::Release);
+        self.conn.cancel();
+        self.pending.lock().unwrap().clear();
+        (self.on_disconnect)();
     }
 }
 
@@ -682,11 +806,19 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
+    // Asked of the live connection, not a record: a record-less legacy host
+    // still has a pipe.
+    let server_pid = {
+        use std::os::windows::io::AsRawHandle;
+        exe_origin::server_pid_of_pipe(conn.as_raw_handle())
+    };
     let (rd, wr) = tokio::io::split(conn);
     let client = wire_client(rd, wr, deps);
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
+    client.exe_origin.set_server_pid(server_pid);
+    client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
 }
 
@@ -850,6 +982,7 @@ pub async fn connect_or_spawn(
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
+    client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
 }
 
@@ -1099,6 +1232,15 @@ mod runtime_dir_tests;
 
 #[cfg(test)]
 mod discovery_tests;
+
+#[cfg(test)]
+mod conn_tests;
+
+#[cfg(test)]
+mod exe_origin_tests;
+
+#[cfg(test)]
+mod real_host_tests;
 
 #[cfg(test)]
 mod test_dirs;
