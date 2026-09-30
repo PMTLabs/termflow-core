@@ -489,6 +489,24 @@ impl<R: Runtime> AppState<R> {
     /// same parser mutex (feed_screen), and holding it across a 5000-row render would
     /// stall output delivery for every terminal (see output-pipeline-architecture).
     pub fn full_scrollback_snapshot(&self, id: &str) -> Option<Vec<u8>> {
+        self.render_scrollback(id, true)
+    }
+
+    /// The same dump WITHOUT the cursor-restore tail, for persistence.
+    ///
+    /// The tail is an ABSOLUTE `CUP` into the visible screen of a still-running
+    /// program, which is only meaningful to a client that replays the blob into a
+    /// terminal that program is live in (the ED3 repair). A persisted blob is
+    /// replayed into a NEW session's xterm, where that position points into the
+    /// middle of the just-drawn history: the "session restored" divider and the
+    /// fresh shell's prompt were then painted over the old TUI's rows, and the
+    /// cursor sat mid-screen until Ctrl+L. It shows only when the last screen was
+    /// a full-screen-ish TUI (Claude Code) whose cursor is not on the last row.
+    pub fn persisted_scrollback_snapshot(&self, id: &str) -> Option<Vec<u8>> {
+        self.render_scrollback(id, false)
+    }
+
+    fn render_scrollback(&self, id: &str, with_cursor: bool) -> Option<Vec<u8>> {
         let mut screen = {
             let entry = self.terminal_screens.get(id)?;
             let parser = match entry.lock() {
@@ -501,6 +519,9 @@ impl<R: Runtime> AppState<R> {
             parser.screen().clone()
         };
         let mut blob = render_full_scrollback(&mut screen)?;
+        if !with_cursor {
+            return Some(blob);
+        }
         // render_full_scrollback replays plain rows with no position tracking, so a
         // client that resets and writes this blob (the ED3 resize-wipe repair path)
         // would otherwise leave the cursor wherever the last line's newline landed —

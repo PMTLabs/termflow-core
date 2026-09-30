@@ -664,7 +664,11 @@ fn restore_prefix<R: tauri::Runtime>(state: &AppState<R>, history_key: &str) -> 
     if chunks.is_empty() {
         return None;
     }
-    let mut prefix = chunks.concat();
+    let blob = chunks.concat();
+    // Rows saved by an older build carry a trailing absolute cursor position; see
+    // `strip_cursor_state_tail`. Left in, it parks the cursor in the middle of the
+    // replayed history and the divider overwrites the old screen.
+    let mut prefix = crate::state::strip_cursor_state_tail(&blob).to_string();
     prefix.push_str(crate::state::REPLAY_SEPARATOR);
     Some(prefix)
 }
@@ -1160,6 +1164,34 @@ mod scrollback_restore_tests {
         // After cleanup (the exit path's next step) the row must remain intact.
         state.cleanup_terminal_state("tb-exit");
         assert!(state.history_store.get("tb-exit").is_some());
+    }
+
+    /// The persisted blob is replayed into a NEW xterm, so it must not carry the
+    /// live-repair path's absolute cursor jump (it parked the cursor mid-screen and
+    /// the divider + new prompt overwrote the old TUI's rows). Rows an older build
+    /// already stored with that tail are cleaned on the way out.
+    #[test]
+    fn persisted_history_has_no_cursor_tail_and_legacy_rows_are_cleaned_on_restore() {
+        let (_app, state) = mock_state();
+        state.history_store.init(&temp_db("cursor-tail"));
+        state.init_screen("tb-tail", 24, 80);
+        register_terminal(&state, "tb-tail");
+        state.feed_screen("tb-tail", b"first line\r\nsecond");
+
+        // Live repair keeps the cursor restore; persistence must not.
+        let live = String::from_utf8_lossy(&state.full_scrollback_snapshot("tb-tail").unwrap()).into_owned();
+        assert!(live.contains("\x1b[2;7H"), "live repair needs the cursor position: {live:?}");
+        state.persist_terminal_history("tb-tail", 1);
+        let stored = state.history_store.get("tb-tail").expect("row").concat();
+        assert!(stored.contains("second") && !stored.contains("\x1b[?25") && !stored.contains("\x1b[2;7H"),
+            "persisted blob must be rows only: {stored:?}");
+
+        // A row saved by the old build ends with the tail; restore drops it.
+        state.history_store.upsert("tb-legacy", std::slice::from_ref(&live), 2);
+        let prefix = super::restore_prefix(&state, "tb-legacy").expect("prefix");
+        assert!(prefix.contains("second") && !prefix.contains("\x1b[?25") && !prefix.contains("\x1b[2;7H"),
+            "legacy tail must be stripped from the restore prefix: {prefix:?}");
+        assert!(prefix.ends_with(crate::state::REPLAY_SEPARATOR));
     }
 
     /// ED3 resize-wipe repair (review 27/codex): the repair path does

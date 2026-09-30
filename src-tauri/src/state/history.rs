@@ -36,7 +36,7 @@ impl<R: Runtime> AppState<R> {
         // Skip when the parser is absent or the whole buffer is blank (brand-new or
         // already-cleared terminal) so we never persist a blank blob that would replay as
         // an empty "session restored" divider with nothing above it.
-        let Some(snapshot) = self.full_scrollback_snapshot(id) else { return };
+        let Some(snapshot) = self.persisted_scrollback_snapshot(id) else { return };
         let blob = String::from_utf8_lossy(&snapshot).into_owned();
         self.history_store.upsert(key, std::slice::from_ref(&blob), now_ms);
     }
