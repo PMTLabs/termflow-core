@@ -249,7 +249,8 @@ pub fn spawn_terminal(
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
     // Store writer
-    app_state.shell_writer_channels.insert(id.clone(), std::sync::Arc::new(std::sync::Mutex::new(writer)));
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
+    app_state.shell_writer_channels.insert(id.clone(), writer.clone());
 
     // Store master
     app_state.ptys.insert(id.clone(), std::sync::Mutex::new(pair.master));
@@ -302,59 +303,29 @@ pub fn spawn_terminal(
 
     thread::spawn(move || {
         let mut reader = reader;
-        // Use 4KB buffer to reduce chance of splitting UTF-8 sequences
-        // Also keeps a pending buffer for incomplete UTF-8 at chunk boundaries
-        let mut buffer = [0u8; 4096];
-        let mut pending: Vec<u8> = Vec::new();
-
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(n) if n > 0 => {
-                    // Combine pending bytes with new data
-                    let mut data = if pending.is_empty() {
-                        buffer[0..n].to_vec()
-                    } else {
-                        let mut combined = std::mem::take(&mut pending);
-                        combined.extend_from_slice(&buffer[0..n]);
-                        combined
-                    };
-
-                    // Find the last valid UTF-8 boundary
-                    // Check if we might have an incomplete UTF-8 sequence at the end
-                    let valid_end = find_utf8_boundary(&data);
-
-                    if valid_end < data.len() {
-                        // Save incomplete bytes for next iteration
-                        pending = data[valid_end..].to_vec();
-                        data.truncate(valid_end);
-                    }
-
-                    if !data.is_empty() {
-                        // Producer heartbeat for the pipeline watchdog (lib.rs):
-                        // "produced advances while consumed doesn't" = stalled consumer.
-                        app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        // Send to channel (broadcast::Sender::send returns Result<usize, SendError>)
-                        // We ignore error if no receivers
-                        let _ = output_tx.send(ChannelPayload {
-                            id: thread_id.clone(),
-                            data,
-                        });
-                    }
-                }
-                Ok(_) => {
-                    // EOF - send any remaining pending data
-                    if !pending.is_empty() {
-                        app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let _ = output_tx.send(ChannelPayload {
-                            id: thread_id.clone(),
-                            data: pending,
-                        });
-                    }
-                    break;
-                }
-                Err(_) => break, // Error
-            }
-        }
+        // The read loop is shared with the pty-host session reader (plan 050): it applies
+        // the ConPTY startup-handshake filter, the 4KB-read UTF-8 carry (an incomplete
+        // trailing scalar waits for the next read) and the ordered EOF/error tail.
+        let mut da1 = termflow_pty_protocol::da1::StartupDa1::for_platform();
+        termflow_pty_protocol::pump::pump_output(
+            &mut reader,
+            find_utf8_boundary,
+            &mut da1,
+            |consumed| {
+                termflow_pty_protocol::da1::send_da1_reply(writer.clone(), thread_id.clone(), consumed)
+            },
+            |data| {
+                // Producer heartbeat for the pipeline watchdog (lib.rs):
+                // "produced advances while consumed doesn't" = stalled consumer.
+                app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Send to channel (broadcast::Sender::send returns Result<usize, SendError>)
+                // We ignore error if no receivers
+                let _ = output_tx.send(ChannelPayload {
+                    id: thread_id.clone(),
+                    data,
+                });
+            },
+        );
         // Spec 045 §3.3: capture the cwd BEFORE cleanup — cleanup_terminal_state
         // removes `terminal_cwds` and `terminals`, so this is the last moment the
         // shell's final directory is knowable. The renderer needs it to restart
@@ -428,5 +399,55 @@ fn kill_process_tree_blocking(pid: u32) {
         let _ = std::process::Command::new("kill")
             .args(["-9", &format!("-{}", pid)])
             .output();
+    }
+}
+
+#[cfg(test)]
+mod reader_wiring_tests {
+    /// Spellings that drain a reader without going through the pump.
+    fn private_read_spellings(code: &str) -> Vec<&'static str> {
+        [".read(", ".read_exact(", ".read_to_end(", ".read_to_string(", ".bytes()", "io::copy("]
+            .into_iter()
+            .filter(|s| code.contains(s))
+            .collect()
+    }
+
+    fn word_count(code: &str, word: &str) -> usize {
+        code.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| *w == word).count()
+    }
+
+    /// Plan 050: the fallback reader must run the SAME pump as the pty-host reader, or it keeps the
+    /// ~3 s ConPTY handshake stall. The pump's behaviour is covered in `termflow-pty-protocol`.
+    ///
+    /// This is a SOURCE-PRESENCE check, not a behavioural one (no test drives this function's reader
+    /// with a fake PTY; the real-ConPTY route is exercised for the pty-host reader only). It fixes
+    /// the PTY reader handle's whole life: bound from `try_clone_reader`, moved into the thread, and
+    /// passed to the pump with the platform filter and this file's writer clone for the reply; the
+    /// name appears nowhere else, and no other read spelling exists in the file.
+    #[test]
+    fn the_fallback_reader_runs_the_shared_pump_with_the_platform_filter() {
+        let src = include_str!("spawn.rs").replace("\r\n", "\n");
+        let cut = src.find("#[cfg(test)]\nmod reader_wiring_tests").expect("test module marker");
+        let code: String = src[..cut]
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in [
+            "let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;",
+            "let mut reader = reader;",
+            "da1::StartupDa1::for_platform()",
+            "pump::pump_output( &mut reader, find_utf8_boundary, &mut da1,",
+            "da1::send_da1_reply(writer.clone(), thread_id.clone(), consumed)",
+        ] {
+            assert!(flat.contains(needle), "spawn.rs must contain `{needle}` outside comments");
+        }
+        assert_eq!(word_count(&code, "reader"), 4, "the PTY reader handle is bound, moved and passed, nothing else");
+        assert_eq!(flat.matches("try_clone_reader").count(), 1, "a second cloned PTY reader could drain output outside the pump");
+        assert_eq!(private_read_spellings(&code), Vec::<&str>::new(), "a private read loop bypasses the pump");
+        // Calibration: the detector does go dirty.
+        assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
+        assert_eq!(word_count("let reader = 1; reader.len()", "reader"), 2);
     }
 }

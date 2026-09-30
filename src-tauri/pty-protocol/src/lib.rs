@@ -7,8 +7,10 @@
 pub mod bootstrap;
 #[cfg(windows)]
 pub mod conpty;
+pub mod da1;
 pub mod discovery;
 pub mod frame;
+pub mod pump;
 pub mod spec;
 
 pub use bootstrap::{
