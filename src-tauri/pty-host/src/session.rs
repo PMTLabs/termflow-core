@@ -30,6 +30,8 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use termflow_pty_protocol::da1::{send_da1_reply, StartupDa1};
+use termflow_pty_protocol::pump::pump_output;
 use termflow_pty_protocol::{Data, SpawnSpec};
 use tokio::sync::mpsc::Sender;
 
@@ -70,6 +72,10 @@ pub struct Session {
     /// liveness therefore tests the OS's cleanup schedule, not our behaviour —
     /// which is precisely how it flakes.
     kill_done: Arc<AtomicBool>,
+    /// Set by the reader when the ConPTY startup DA1 was answered (plan 050). Diagnostic:
+    /// the inbox ConPTY never asks, so `true` also proves the modern handshake ran.
+    #[cfg_attr(not(test), allow(dead_code))]
+    da1_answered: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -108,12 +114,13 @@ impl Session {
         let pid = child.process_id().unwrap_or(0);
         drop(pair.slave);
 
-        let reader = pair.master.try_clone_reader()?;
+        let pair_reader = pair.master.try_clone_reader()?;
         let writer = Arc::new(Mutex::new(pair.master.take_writer()?));
         let master: MasterSlot = Arc::new(Mutex::new(Some(pair.master)));
         let ring = Arc::new(Mutex::new(ReplayRing::new(ring_cap)));
         let attached = Arc::new(AtomicBool::new(attached_initial));
         let exited = Arc::new(AtomicBool::new(false));
+        let da1_answered = Arc::new(AtomicBool::new(false));
 
         // Waiter: on child exit, wait a short grace so conhost flushes final
         // output, then drop the master to force the reader to observe EOF.
@@ -125,74 +132,20 @@ impl Session {
         });
 
         // Reader: drain output into the ring; stream live (bounded) while
-        // attached; emit Exit after the loop when attached.
-        let ring_r = ring.clone();
-        let attached_r = attached.clone();
-        let exited_r = exited.clone();
-        let events_r = events.clone();
-        let id_r = tab_id.clone();
-        std::thread::spawn(move || {
-            let mut reader = reader;
-            let mut buf = [0u8; 4096];
-            let mut pending: Vec<u8> = Vec::new();
-            // True after a live frame was dropped under backpressure; the next
-            // successful send is preceded by a Gap so the GUI resyncs.
-            let mut lost = false;
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(n) if n > 0 => {
-                        let mut data = if pending.is_empty() {
-                            buf[..n].to_vec()
-                        } else {
-                            let mut combined = std::mem::take(&mut pending);
-                            combined.extend_from_slice(&buf[..n]);
-                            combined
-                        };
-                        let valid_end = find_utf8_boundary(&data);
-                        if valid_end < data.len() {
-                            pending = data[valid_end..].to_vec(); // ≤3 bytes
-                            data.truncate(valid_end);
-                        }
-                        if data.is_empty() {
-                            continue;
-                        }
-                        // Ring push + attached-check + live send are serialized
-                        // with attach() on the ring lock, so a byte is either in
-                        // the reattach snapshot OR streamed live, never both.
-                        let mut r = lock(&ring_r);
-                        let off = r.tail();
-                        r.push(&data);
-                        if attached_r.load(Ordering::Acquire) {
-                            lost = stream_live(&events_r, &id_r, off, data, lost);
-                        }
-                        drop(r);
-                    }
-                    _ => {
-                        if !pending.is_empty() {
-                            let mut r = lock(&ring_r);
-                            let off = r.tail();
-                            let tail = std::mem::take(&mut pending);
-                            r.push(&tail);
-                            if attached_r.load(Ordering::Acquire) {
-                                let _ = stream_live(&events_r, &id_r, off, tail, lost);
-                            }
-                            drop(r);
-                        }
-                        exited_r.store(true, Ordering::Release);
-                        // Only stream Exit if attached; while detached (Hold) the
-                        // tombstone is the durable signal and attach() re-emits
-                        // Exit after replay on reconnect.
-                        if attached_r.load(Ordering::Acquire) {
-                            let _ = events_r.try_send(Data::Exit {
-                                tab_id: id_r.clone(),
-                                exit_cwd: None,
-                            });
-                        }
-                        break;
-                    }
-                }
-            }
-        });
+        // attached; emit Exit after the loop when attached. The loop itself is
+        // `pump_output` (shared with the in-process fallback reader, plan 050):
+        // it applies the ConPTY startup-handshake filter, the UTF-8 carry and the
+        // ordered EOF/error tail.
+        let shared = ReaderShared {
+            ring: ring.clone(),
+            attached: attached.clone(),
+            exited: exited.clone(),
+            events: events.clone(),
+            tab_id: tab_id.clone(),
+            writer: writer.clone(),
+            da1_answered: da1_answered.clone(),
+        };
+        std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_platform()));
 
         Ok(Session {
             tab_id,
@@ -205,6 +158,7 @@ impl Session {
             exited,
             killing: Arc::new(AtomicBool::new(false)),
             kill_done: Arc::new(AtomicBool::new(false)),
+            da1_answered,
         })
     }
 
@@ -214,6 +168,13 @@ impl Session {
 
     pub fn is_alive(&self) -> bool {
         !self.exited.load(Ordering::Acquire)
+    }
+
+    /// Whether the modern ConPTY's startup DA1 query was found and answered.
+    /// Test-only, like `kill_done_flag`: production never reads it.
+    #[cfg(test)]
+    pub fn startup_da1_answered(&self) -> bool {
+        self.da1_answered.load(Ordering::Acquire)
     }
 
     pub fn set_attached(&self, on: bool) {
@@ -329,6 +290,54 @@ impl Session {
     #[cfg(test)]
     pub fn kill_done_flag(&self) -> Arc<AtomicBool> {
         self.kill_done.clone()
+    }
+}
+
+/// Everything the reader thread shares with its [`Session`].
+struct ReaderShared {
+    ring: Arc<Mutex<ReplayRing>>,
+    attached: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+    events: Sender<Data>,
+    tab_id: String,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    da1_answered: Arc<AtomicBool>,
+}
+
+/// The reader thread body, over any `Read` so it is testable without a PTY.
+///
+/// Ring push + attached-check + live send are serialized with `attach()` on the
+/// ring lock, so a byte is either in the reattach snapshot OR streamed live, never
+/// both. The ConPTY startup DA1 is answered from its own thread (never under the
+/// ring lock, never blocking this loop on the writer mutex) and removed BEFORE the
+/// ring push, so neither replay nor the renderer ever sees it.
+fn run_reader<R: Read>(mut reader: R, sh: ReaderShared, mut da1: StartupDa1) {
+    // True after a live frame was dropped under backpressure; the next
+    // successful send is preceded by a Gap so the GUI resyncs.
+    let mut lost = false;
+    pump_output(
+        &mut reader,
+        find_utf8_boundary,
+        &mut da1,
+        |consumed| {
+            sh.da1_answered.store(true, Ordering::Release);
+            send_da1_reply(sh.writer.clone(), sh.tab_id.clone(), consumed);
+        },
+        |data| {
+            let mut r = lock(&sh.ring);
+            let off = r.tail();
+            r.push(&data);
+            if sh.attached.load(Ordering::Acquire) {
+                lost = stream_live(&sh.events, &sh.tab_id, off, data, lost);
+            }
+            drop(r);
+        },
+    );
+    sh.exited.store(true, Ordering::Release);
+    // Only stream Exit if attached; while detached (Hold) the tombstone is the
+    // durable signal and attach() re-emits Exit after replay on reconnect.
+    if sh.attached.load(Ordering::Acquire) {
+        let _ = sh.events.try_send(Data::Exit { tab_id: sh.tab_id.clone(), exit_cwd: None });
     }
 }
 
@@ -632,4 +641,326 @@ mod tests {
             "process-group kill must reap the background descendant (pid {bg_pid})"
         );
     }
+
+    // ---- plan 050: the ConPTY startup DA1 handshake -------------------------
+
+    use std::collections::VecDeque;
+    use std::sync::atomic::AtomicBool as Flag;
+    use std::time::Instant;
+    use termflow_pty_protocol::da1::DA1_REPLY;
+    use tokio::sync::mpsc::Receiver;
+
+    /// Reads one scripted chunk per call, then EOF.
+    struct Script(VecDeque<Vec<u8>>);
+    impl Script {
+        fn new(chunks: &[&[u8]]) -> Self {
+            Script(chunks.iter().map(|c| c.to_vec()).collect())
+        }
+    }
+    impl Read for Script {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            match self.0.pop_front() {
+                None => Ok(0),
+                Some(v) => {
+                    out[..v.len()].copy_from_slice(&v);
+                    Ok(v.len())
+                }
+            }
+        }
+    }
+
+    /// A writer that records what reaches the PTY's input.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+    impl Write for Captured {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    fn wait_for(cond: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if cond() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        cond()
+    }
+
+    const PRE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h";
+    const PRE_STRIPPED: &[u8] = b"\x1b[1t\x1b[?1004h\x1b[?9001h";
+
+    /// A `Session` assembled from fakes, plus the reader's input writer and the GUI channel.
+    /// `run_reader` is executed inline, so the ring and `exited` are settled on return.
+    fn fake_session(
+        chunks: &[&[u8]],
+        attached: bool,
+        armed: bool,
+    ) -> (Session, Receiver<Data>, Captured) {
+        let (tx, rx) = channel(1024);
+        let cap = Captured::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(cap.clone())));
+        let ring = Arc::new(Mutex::new(ReplayRing::new(1 << 16)));
+        let (attached, exited, answered) = (
+            Arc::new(Flag::new(attached)),
+            Arc::new(Flag::new(false)),
+            Arc::new(Flag::new(false)),
+        );
+        run_reader(
+            Script::new(chunks),
+            ReaderShared {
+                ring: ring.clone(),
+                attached: attached.clone(),
+                exited: exited.clone(),
+                events: tx.clone(),
+                tab_id: "tab-fake".into(),
+                writer: writer.clone(),
+                da1_answered: answered.clone(),
+            },
+            StartupDa1::new(armed),
+        );
+        let sess = Session {
+            tab_id: "tab-fake".into(),
+            pid: 0,
+            writer,
+            master: Arc::new(Mutex::new(None)),
+            ring,
+            events: tx,
+            attached,
+            exited,
+            killing: Arc::new(Flag::new(true)), // nothing to kill: Drop must not taskkill pid 0
+            kill_done: Arc::new(Flag::new(false)),
+            da1_answered: answered,
+        };
+        (sess, rx, cap)
+    }
+
+    fn drain(rx: &mut Receiver<Data>) -> Vec<Data> {
+        let mut v = Vec::new();
+        while let Ok(d) = rx.try_recv() {
+            v.push(d);
+        }
+        v
+    }
+
+    #[test]
+    fn startup_query_is_answered_once_and_never_reaches_the_live_stream() {
+        let (sess, mut rx, cap) = fake_session(
+            &[b"\x1b[1t", b"\x1b[c\x1b[?1004h", b"\x1b[?9001h", b"banner\r\n"],
+            true,
+            true,
+        );
+        assert!(sess.startup_da1_answered());
+        assert!(wait_for(|| *cap.0.lock().unwrap() == DA1_REPLY), "exactly one reply reaches the PTY input");
+
+        let mut want = PRE_STRIPPED.to_vec();
+        want.extend_from_slice(b"banner\r\n");
+        let (mut bytes, mut next, mut exits) = (Vec::new(), 0u64, 0);
+        for d in drain(&mut rx) {
+            match d {
+                Data::Stdout { offset, bytes: b, .. } => {
+                    assert_eq!(offset, next, "live offsets are contiguous");
+                    next += b.len() as u64;
+                    bytes.extend(b);
+                }
+                Data::Exit { .. } => exits += 1,
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+        assert_eq!(bytes, want, "everything but the query is forwarded, in order");
+        assert_eq!(exits, 1);
+        assert_eq!(sess.replay_from(0), (0, want, false), "the ring holds the same filtered stream");
+    }
+
+    #[test]
+    fn a_detached_session_replays_the_filtered_stream_with_the_right_offsets() {
+        let (sess, mut rx, cap) =
+            fake_session(&[b"\x1b[1t\x1b", b"[c\x1b[?1004h\x1b[?9001h", b"banner\r\n"], false, true);
+        let mut want = PRE_STRIPPED.to_vec();
+        want.extend_from_slice(b"banner\r\n");
+        assert!(drain(&mut rx).is_empty(), "nothing is streamed while detached");
+        assert_eq!(sess.replay_from(0), (0, want.clone(), false));
+
+        sess.attach(0);
+        let frames = drain(&mut rx);
+        match &frames[..] {
+            [Data::Stdout { offset: 0, bytes, .. }, Data::Exit { .. }] => assert_eq!(bytes, &want),
+            other => panic!("attach(0) must replay the whole filtered ring then Exit: {other:?}"),
+        }
+        sess.attach(9);
+        match &drain(&mut rx)[..] {
+            [Data::Stdout { offset: 9, bytes, .. }, Data::Exit { .. }] => assert_eq!(bytes, &want[9..]),
+            other => panic!("attach(9) must replay the exact suffix: {other:?}"),
+        }
+        assert!(wait_for(|| cap.0.lock().unwrap().len() == DA1_REPLY.len()));
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(*cap.0.lock().unwrap(), DA1_REPLY, "replay must not trigger a second answer");
+    }
+
+    #[test]
+    fn a_disarmed_reader_leaves_the_query_alone() {
+        let (sess, mut rx, cap) = fake_session(&[PRE], true, false);
+        assert!(!sess.startup_da1_answered());
+        let got: Vec<u8> = drain(&mut rx)
+            .into_iter()
+            .filter_map(|d| match d {
+                Data::Stdout { bytes, .. } => Some(bytes),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(got, PRE);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(cap.0.lock().unwrap().is_empty(), "inbox ConPTY: nothing is answered");
+    }
+
+    #[test]
+    fn a_writer_lock_held_by_input_does_not_stall_output() {
+        let (tx, _rx) = channel(1024);
+        let cap = Captured::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(cap.clone())));
+        let ring = Arc::new(Mutex::new(ReplayRing::new(1 << 16)));
+        let guard = writer.lock().unwrap(); // an in-flight input write
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shared = ReaderShared {
+            ring: ring.clone(),
+            attached: Arc::new(Flag::new(true)),
+            exited: Arc::new(Flag::new(false)),
+            events: tx,
+            tab_id: "tab-blocked".into(),
+            writer: writer.clone(),
+            da1_answered: Arc::new(Flag::new(false)),
+        };
+        std::thread::spawn(move || {
+            run_reader(Script::new(&[PRE, b"after the query\r\n"]), shared, StartupDa1::new(true));
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "the reader must finish draining while the writer mutex is held"
+        );
+        let mut want = PRE_STRIPPED.to_vec();
+        want.extend_from_slice(b"after the query\r\n");
+        assert_eq!(ring.lock().unwrap().snapshot_from(0).bytes, want);
+        assert!(cap.0.lock().unwrap().is_empty(), "the reply is still waiting for the lock");
+        drop(guard);
+        assert!(wait_for(|| *cap.0.lock().unwrap() == DA1_REPLY), "reply lands once the lock is free");
+    }
+
+    /// The production half of this file: everything before the test module.
+    fn production_source() -> String {
+        let src = include_str!("session.rs").replace("\r\n", "\n");
+        let cut = src.find("#[cfg(test)]\nmod tests").expect("test module marker");
+        src[..cut].to_string()
+    }
+
+    #[test]
+    fn the_host_reader_runs_the_shared_pump_with_the_platform_filter() {
+        let code: String = production_source()
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in ["pump_output(", "StartupDa1::for_platform()", "send_da1_reply("] {
+            assert!(code.contains(needle), "session.rs must call `{needle}` outside comments");
+        }
+    }
+
+    /// THE real-ConPTY test. `portable-pty` resolves kernel32-vs-bundled ONCE per
+    /// process, so running this in the shared test process could certify whichever
+    /// backend an earlier test happened to open. The outer test therefore re-executes
+    /// this binary with `TF_DA1_CHILD=1`, and the child preloads the bundled pair
+    /// BEFORE any `openpty`.
+    #[cfg(windows)]
+    #[test]
+    fn bundled_conpty_handshake_is_answered_by_the_host_session() {
+        if std::env::var_os("TF_DA1_CHILD").is_some() {
+            return; // the child runs the body below, not this driver
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["fresh_process_bundled_handshake_body", "--nocapture", "--test-threads=1"])
+            .env("TF_DA1_CHILD", "1")
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "fresh-process handshake test failed:\n{text}");
+        assert!(text.contains("DA1-FRESH-OK"), "child did not report success (vacuous pass?):\n{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fresh_process_bundled_handshake_body() {
+        if std::env::var_os("TF_DA1_CHILD").is_none() {
+            return; // only meaningful in the dedicated child process
+        }
+        let _ = termflow_pty_protocol::conpty::init_for_current_exe();
+        assert!(
+            termflow_pty_protocol::conpty::is_bundled_active(),
+            "the bundled ConPTY did not load, so this test would certify the inbox backend. \
+             Debug builds find the pair by walking up from the test exe to `binaries/conpty`; \
+             keep CARGO_TARGET_DIR under src-tauri/ (or unset)."
+        );
+        let nonce = "TF-DA1-NONCE-7f3a";
+        let spec = SpawnSpec {
+            shell: "cmd.exe".into(),
+            args: vec!["/D".into(), "/C".into(), format!("echo {nonce}")],
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 100,
+            rows: 30,
+        };
+        let (tx, mut rx) = channel(1024);
+        let t0 = Instant::now();
+        let sess = Session::spawn("tab-da1-real".into(), &spec, 1 << 16, tx, true).unwrap();
+
+        let (mut all, mut next, mut t_answered, mut t_nonce) = (Vec::<u8>::new(), 0u64, None, None);
+        while t0.elapsed() < Duration::from_secs(12) {
+            if t_answered.is_none() && sess.startup_da1_answered() {
+                t_answered = Some(t0.elapsed());
+            }
+            match rx.try_recv() {
+                Ok(Data::Stdout { offset, bytes, .. }) => {
+                    assert_eq!(offset, next, "offsets must stay contiguous");
+                    next += bytes.len() as u64;
+                    all.extend(bytes);
+                    if t_nonce.is_none() && String::from_utf8_lossy(&all).contains(nonce) {
+                        t_nonce = Some(t0.elapsed());
+                    }
+                }
+                Ok(Data::Exit { .. }) => break,
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        if t_answered.is_none() && sess.startup_da1_answered() {
+            t_answered = Some(t0.elapsed());
+        }
+        let (t_answered, t_nonce) = (
+            t_answered.expect("the modern ConPTY's startup DA1 was never answered"),
+            t_nonce.expect("the child's output never arrived"),
+        );
+        let text = String::from_utf8_lossy(&all).into_owned();
+        assert!(!all.windows(3).any(|w| w == b"\x1b[c"), "the query must not be forwarded: {text:?}");
+        assert!(all.starts_with(b"\x1b[1t"), "the rest of the preamble is preserved: {text:?}");
+        assert!(text.contains("\u{1b}[?1004h\u{1b}[?9001h"), "mode sets survive: {text:?}");
+        assert_eq!(sess.replay_from(0).1, all, "the ring equals the forwarded stream");
+        assert!(
+            t_nonce.saturating_sub(t_answered) < Duration::from_secs(1),
+            "child output {:?} after the reply (answered at {t_answered:?})",
+            t_nonce.saturating_sub(t_answered)
+        );
+        assert!(t_nonce < Duration::from_millis(2500), "un-fixed ConPTY stalls >= 3 s; got {t_nonce:?}");
+        println!("DA1-FRESH-OK answered_at={t_answered:?} child_output_at={t_nonce:?}");
+    }
+
 }

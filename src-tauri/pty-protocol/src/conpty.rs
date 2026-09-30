@@ -290,6 +290,19 @@ pub fn init_for_current_exe() -> Option<PathBuf> {
     init_conpty(exe.parent()?)
 }
 
+/// True once a verified bundled `conpty.dll` has been preloaded into this process.
+///
+/// This — not [`disabled`] — is the authority for "the modern ConPTY is what
+/// `portable-pty` will use": the env flag is only one of several reasons the inbox
+/// ConPTY ends up in charge (no pair found, tampered pair, failed load). The
+/// modern host asks a DA1 query at startup and stalls ~3 s without an answer; the
+/// inbox one never asks, so anything keyed on that handshake must key on this.
+///
+/// Sticky: a later `init_conpty_with(.., true)` does not unload what is mapped.
+pub fn is_bundled_active() -> bool {
+    LOADED.lock().unwrap_or_else(|e| e.into_inner()).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +360,7 @@ mod tests {
     /// rollback, tampered copy, then the real load.
     #[test]
     fn rollback_and_tamper_leave_conpty_unloaded_then_init_preloads_by_full_path() {
+        assert!(!is_bundled_active(), "nothing is loaded before the first init");
         let root = scratch("load");
         let sub = root.join(SUBDIR);
         for f in [DLL, HOST] {
@@ -356,6 +370,7 @@ mod tests {
 
         assert!(init_conpty_with(&root, true).is_none());
         assert!(module_path(DLL).is_none(), "rollback must not load conpty.dll");
+        assert!(!is_bundled_active(), "rollback leaves the inbox ConPTY in charge");
 
         // Tamper one byte: same signature-shaped file, different bytes.
         let dll = sub.join(DLL);
@@ -366,9 +381,14 @@ mod tests {
         assert_eq!(locate(&root), None, "tampered pair must not be selected");
         assert!(init_conpty_with(&root, false).is_none());
         assert!(module_path(DLL).is_none(), "tampered pair must not be loaded");
+        assert!(!is_bundled_active(), "a failed verification must not look active");
         std::fs::write(&dll, &good).unwrap();
 
         assert_eq!(init_conpty_with(&root, false), Some(sub.clone()));
+        assert!(is_bundled_active(), "a verified preload is active");
+        // Sticky: the rollback flag cannot unmap a loaded DLL, so the answer must not flip.
+        assert!(init_conpty_with(&root, true).is_none());
+        assert!(is_bundled_active(), "still active after a later disabled init");
         assert_eq!(
             std::fs::canonicalize(module_path(DLL).unwrap()).unwrap(),
             std::fs::canonicalize(&dll).unwrap()
