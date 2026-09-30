@@ -17,6 +17,8 @@ struct RealHost {
     endpoint: String,
     bin: PathBuf,
     _dir: test_dirs::TestDir,
+    // Held for the host's whole life: see `test_dirs::child_process_gate`.
+    _gate: std::sync::MutexGuard<'static, ()>,
 }
 
 impl Drop for RealHost {
@@ -28,6 +30,7 @@ impl Drop for RealHost {
 }
 
 fn start_host() -> Option<RealHost> {
+    let gate = test_dirs::child_process_gate();
     let Some(bin) = resolve_bundled_host_path() else {
         eprintln!("skipping: termflow-pty-host is not built (cargo build in src-tauri/pty-host)");
         return None;
@@ -50,7 +53,7 @@ fn start_host() -> Option<RealHost> {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn the test host");
-    Some(RealHost { child, endpoint, bin, _dir: dir })
+    Some(RealHost { child, endpoint, bin, _dir: dir, _gate: gate })
 }
 
 /// Connect to the host we started. `record_pid` makes the open wait for the

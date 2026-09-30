@@ -203,6 +203,36 @@ async fn republishing_keeps_tickets_of_the_old_connection_counted() {
     assert!(table.drain_host(OLD).is_ok());
 }
 
+#[tokio::test]
+async fn publishing_does_not_reopen_a_retired_host() {
+    let table = table_with_hosts();
+    let epoch = table.reserve_epoch();
+    table.publish(OLD, epoch);
+    table.drain_host(OLD).unwrap().retire();
+
+    let later = table.reserve_epoch();
+    assert!(!table.publish(OLD, later), "a retired host cannot be published again");
+    assert_eq!(table.admission(OLD), Some(Admission::Retired));
+    assert!(matches!(table.begin(OLD), Err(Busy::Host(OLD, Admission::Retired))));
+    assert!(table.is_current(OLD, epoch), "and its epoch is untouched");
+    assert!(!table.is_current(OLD, later));
+}
+
+#[tokio::test]
+async fn publishing_during_a_drain_leaves_the_drain_in_charge() {
+    let table = table_with_hosts();
+    let epoch = table.reserve_epoch();
+    table.publish(OLD, epoch);
+    let drain = table.drain_host(OLD).unwrap();
+
+    assert!(!table.publish(OLD, table.reserve_epoch()));
+    assert_eq!(table.admission(OLD), Some(Admission::Draining), "still closed while the drain is decided");
+
+    drop(drain);
+    assert_eq!(table.admission(OLD), Some(Admission::Open), "the drain's guard still reopens its own host");
+    assert!(table.publish(OLD, table.reserve_epoch()), "an open host publishes as before");
+}
+
 // ---- claims ---------------------------------------------------------------
 
 fn reserved(pid: u32, channel: HostChannel) -> HostSessionClaim {

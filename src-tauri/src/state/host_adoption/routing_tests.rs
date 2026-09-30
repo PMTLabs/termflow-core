@@ -467,9 +467,10 @@ fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits
         assert!(!arm.contains("reserve_host_session") && !arm.contains("emit"), "{needle} must not surface");
     }
 
-    // All four orphan-surfacing sites go through that one function: the sweep,
-    // the pipe-drop recovery, and the function's own re-check are in it; nothing
-    // else in the state module emits a recovery tab.
+    // The two callers that surface orphans, `reconnect_after_pipe_drop` and
+    // `run_host_restore_sweep`, both go through that one function, and the source
+    // of the recovery-tab request appears once in terminals.rs: inside it. Other
+    // files are not read here.
     assert_eq!(terminals.matches("\"api:createTerminalTab\"").count(), 1);
     for caller in ["pub async fn reconnect_after_pipe_drop(", "async fn run_host_restore_sweep("] {
         assert!(

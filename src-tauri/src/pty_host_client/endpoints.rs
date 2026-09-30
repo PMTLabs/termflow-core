@@ -97,11 +97,17 @@ fn paths_for(generation: Option<&str>) -> HostPaths {
 /// Pin endpoint and companion paths at the first successful launch resolution.
 /// A transient later install failure cannot turn an existing current host frozen.
 pub fn current_host_paths() -> HostPaths {
-    if let Some(paths) = CURRENT_PATHS.get() {
+    pinned_or_legacy(&CURRENT_PATHS, || super::resolve_host_launch().is_some())
+}
+
+/// What `cell` holds once `resolve_launch` has had the chance to pin it; the
+/// legacy paths when it never pinned anything.
+fn pinned_or_legacy(cell: &OnceLock<HostPaths>, resolve_launch: impl FnOnce() -> bool) -> HostPaths {
+    if let Some(paths) = cell.get() {
         return paths.clone();
     }
-    if super::resolve_host_launch().is_some() {
-        if let Some(paths) = CURRENT_PATHS.get() {
+    if resolve_launch() {
+        if let Some(paths) = cell.get() {
             return paths.clone();
         }
     }
@@ -109,12 +115,17 @@ pub fn current_host_paths() -> HostPaths {
 }
 
 pub(super) fn pin_current_paths(generation: Option<&str>) {
-    pin_paths(&CURRENT_PATHS, || {
-        paths_for(named_generation(
-            generation,
-            generations_enabled(std::env::var("TERMFLOW_PTY_GENERATIONS").ok().as_deref()),
-        ))
-    });
+    pin_generation_paths(
+        &CURRENT_PATHS,
+        generation,
+        generations_enabled(std::env::var("TERMFLOW_PTY_GENERATIONS").ok().as_deref()),
+    );
+}
+
+/// Pin the paths a launch with `generation` runs on; `naming_enabled` is the
+/// naming gate, which decides whether the generation appears in them at all.
+fn pin_generation_paths(cell: &OnceLock<HostPaths>, generation: Option<&str>, naming_enabled: bool) {
+    pin_paths(cell, || paths_for(named_generation(generation, naming_enabled)));
 }
 
 fn pin_paths(cell: &OnceLock<HostPaths>, resolve: impl FnOnce() -> HostPaths) -> &HostPaths {
@@ -153,9 +164,10 @@ pub(super) fn validate_socket_dir(meta: &std::fs::Metadata, uid: u32) -> std::io
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn e_cur_pinned_transient_install_failure_does_not_rerole() {
-        use super::*;
         let cell = OnceLock::new();
         let first = HostPaths {
             endpoint: "qualified".into(),
@@ -170,6 +182,44 @@ mod tests {
         };
         assert_eq!(pin_paths(&cell, || fallback), &first);
         assert_eq!(cell.get().unwrap().endpoint, "qualified");
+    }
+
+    const GEN: &str = "12345678aaaaaaaa";
+
+    /// Pin a launch that has a generation, then read the paths back the way the
+    /// rest of the client does.
+    fn paths_after_pinning(naming_enabled: bool) -> HostPaths {
+        let cell = OnceLock::new();
+        pin_generation_paths(&cell, Some(GEN), naming_enabled);
+        pinned_or_legacy(&cell, || false)
+    }
+
+    fn mentions_generation(paths: &HostPaths) -> bool {
+        paths.endpoint.contains(GEN)
+            || paths.record.iter().chain(paths.log.iter()).any(|p| p.to_string_lossy().contains(GEN))
+    }
+
+    #[test]
+    fn gate_off_pins_exactly_the_legacy_names_even_with_a_generation() {
+        let pinned = paths_after_pinning(false);
+        assert_eq!(pinned, paths_for(None));
+        assert!(!mentions_generation(&pinned), "{pinned:?}");
+    }
+
+    #[test]
+    fn gate_on_pins_the_generation_qualified_names() {
+        let pinned = paths_after_pinning(true);
+        assert_eq!(pinned, paths_for(Some(GEN)));
+        assert!(pinned.endpoint.contains(GEN), "{pinned:?}");
+        assert_ne!(pinned.endpoint, paths_for(None).endpoint);
+        if let Some(record) = &pinned.record {
+            assert!(record.to_string_lossy().contains(GEN), "{record:?}");
+        }
+    }
+
+    #[test]
+    fn nothing_pinned_reads_back_as_legacy() {
+        assert_eq!(pinned_or_legacy(&OnceLock::new(), || true), paths_for(None));
     }
 
     #[test]

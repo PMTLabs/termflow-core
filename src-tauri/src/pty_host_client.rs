@@ -806,20 +806,29 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
-    // Asked of the live connection, not a record: a record-less legacy host
-    // still has a pipe.
-    let server_pid = {
-        use std::os::windows::io::AsRawHandle;
-        exe_origin::server_pid_of_pipe(conn.as_raw_handle())
-    };
-    let (rd, wr) = tokio::io::split(conn);
-    let client = wire_client(rd, wr, deps);
+    let client = wire_pipe_client(conn, deps);
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
-    client.exe_origin.set_server_pid(server_pid);
     client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
+}
+
+/// Wire a client over an opened pipe and record which process serves it. Every
+/// Windows connection goes through here, so a host adopted without being started
+/// (an older one left running) still has its origin found. Asked of the live
+/// connection, not a record: a record-less legacy host still has a pipe.
+#[cfg(windows)]
+pub(crate) fn wire_pipe_client(
+    conn: tokio::net::windows::named_pipe::NamedPipeClient,
+    deps: PtyHostDeps,
+) -> PtyHostClient {
+    use std::os::windows::io::AsRawHandle;
+    let server_pid = exe_origin::server_pid_of_pipe(conn.as_raw_handle());
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    client.exe_origin.set_server_pid(server_pid);
+    client
 }
 
 /// Spawn the sidecar detached from the GUI's lifetime. Returns whether it broke
@@ -1243,7 +1252,7 @@ mod exe_origin_tests;
 mod real_host_tests;
 
 #[cfg(test)]
-mod test_dirs;
+pub(crate) mod test_dirs;
 
 /// Where the running host advertises itself (RP-2 discovery). Lives in the
 /// update-stable runtime dir (per-user + per-identity, matching the pipe name's

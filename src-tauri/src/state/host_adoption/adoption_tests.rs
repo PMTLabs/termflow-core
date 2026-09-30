@@ -586,6 +586,131 @@ async fn adoption_ticket_is_returned_when_the_attempt_fails() {
     assert!(guard.drained(), "a failed adoption must not leak its ticket");
 }
 
+// ---- a primary that dropped ----------------------------------------------------
+
+/// The primary is unreachable while an older host is fine: `ensure_hosts`
+/// succeeds (an older host is usable), which says nothing about the primary. The
+/// reconnect must keep its backoff and leave the panes alone until the primary is
+/// really back.
+#[tokio::test(start_paused = true)]
+async fn reconnect_keeps_retrying_while_only_an_older_host_is_usable() {
+    let (world, port) = machine(&[("h1", holding(&[("k1", 11)]))]);
+    world.set_unreachable(CURRENT, true);
+    let reconnect = tokio::spawn({
+        let port = port.clone();
+        async move { reconnect_current(&port, &[500, 1000, 2000]).await }
+    });
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(port.frozen_ids().len(), 1, "the first attempt did adopt the older host");
+    assert_eq!(port.connect_count(CURRENT), 1);
+    assert!(port.current_client().is_none());
+    assert!(!reconnect.is_finished(), "an older host being usable does not end the reconnect");
+
+    world.set_unreachable(CURRENT, false);
+    tokio::time::sleep(secs(1)).await;
+    assert!(reconnect.await.unwrap(), "the primary came back on a later attempt");
+    assert_eq!(port.connect_count(CURRENT), 2, "retried once, after its first backoff");
+    assert!(port.current_client().is_some());
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconnect_gives_up_only_after_every_backoff_step() {
+    let (world, port) = machine(&[("h1", holding(&[("k1", 11)]))]);
+    world.set_unreachable(CURRENT, true);
+    let start = Instant::now();
+    assert!(!reconnect_current(&port, &[500, 1000, 2000]).await);
+    assert_eq!(port.connect_count(CURRENT), 3, "one attempt per step");
+    assert!(start.elapsed() >= Duration::from_millis(3500), "{:?}", start.elapsed());
+}
+
+#[test]
+fn the_pipe_drop_recovery_reconnects_through_reconnect_current() {
+    let terminals = source_of("terminals.rs");
+    let body = fn_body(&terminals, "pub async fn reconnect_after_pipe_drop(");
+    assert!(body.contains("host_adoption::reconnect_current(self,"));
+    assert!(!body.contains("ensure_pty_host"), "ensure_pty_host also succeeds on an older host alone");
+}
+
+// ---- publication --------------------------------------------------------------
+
+/// A create that can see the current client takes a ticket on its slot. If the
+/// slot were published after the client, that create would pass the host over.
+#[tokio::test(start_paused = true)]
+async fn the_primary_slot_is_open_before_the_current_client_is_visible() {
+    let (_world, port) = machine(&[]);
+    ensure_hosts(&port).await.unwrap();
+    assert_eq!(
+        *port.0.admission_when_published.lock().unwrap(),
+        vec![Some(Admission::Open)],
+        "what the table said at the moment the client was made visible"
+    );
+    assert_eq!(port.0.table.admission(HostChannel::Primary), Some(Admission::Open));
+}
+
+// ---- hosts that are gone ------------------------------------------------------
+
+/// What discovery finds for an endpoint with no record and no process behind it,
+/// such as a socket file a dead host left.
+fn probe_only(name: &str) -> HostCandidate {
+    HostCandidate { record: None, pid: None, generation: None, ..frozen(name) }
+}
+
+fn machine_with(stale: HostCandidate, spec: HostSpec) -> (Arc<World>, FakePort) {
+    let world = World::new();
+    world.add_host(CURRENT, HostSpec::default());
+    world.add_host(&stale.endpoint, spec);
+    let port = FakePort::new(&world, CURRENT);
+    port.set_candidates(vec![stale, current()]);
+    (world, port)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_refused_probe_only_candidate_does_not_hold_a_restoring_pane() {
+    let (world, port) = machine_with(probe_only("stale"), HostSpec { refused: true, ..HostSpec::default() });
+    assert_eq!(keyed_create(&port, "k1").await, Keyed::Spawned, "nothing lives on the dead endpoint");
+    assert!(port.barrier().unresolved().is_empty());
+    assert!(!port.barrier().is_tracked("stale"), "dropped, not held unresolved");
+    assert_eq!(world.count(CURRENT, "Spawn"), 1);
+    assert_eq!(port.connect_count("stale"), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_busy_probe_only_candidate_keeps_its_restoring_pane_waiting() {
+    let (world, port) = machine_with(probe_only("slow"), HostSpec { unreachable: true, ..HostSpec::default() });
+    assert_eq!(keyed_create(&port, "k1").await, Keyed::Pending(vec!["slow".into()]));
+    assert!(port.barrier().is_tracked("slow"));
+    assert_eq!(world.count_everywhere("Spawn"), 0);
+}
+
+/// Its record says a process is alive behind the endpoint: it may just not be
+/// listening yet, so a refusal is no proof that the host is gone.
+#[tokio::test(start_paused = true)]
+async fn a_refused_candidate_with_a_live_process_stays_unresolved() {
+    let (world, port) = machine_with(frozen("starting"), HostSpec { refused: true, ..HostSpec::default() });
+    assert_eq!(keyed_create(&port, "k1").await, Keyed::Pending(vec!["starting".into()]));
+    assert_eq!(world.count_everywhere("Spawn"), 0);
+}
+
+// ---- a failing attempt --------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_panicking_attempt_does_not_strand_its_host() {
+    let (world, port) = machine(&[("h1", holding(&[("k1", 11)]))]);
+    world.connect_panics.store(true, Ordering::SeqCst);
+    // The frozen attempt runs on its own task and nobody awaits it.
+    ensure_hosts(&port).await.unwrap();
+    tokio::time::sleep(SEC).await;
+    assert_eq!(port.connect_count("h1"), 1, "the attempt did start, and panicked");
+    assert!(port.barrier().needs_attempt_for("h1"), "the in-flight mark did not outlive the attempt");
+
+    world.connect_panics.store(false, Ordering::SeqCst);
+    rediscover_hosts(&port).await.unwrap();
+    assert_eq!(port.connect_count("h1"), 2, "the host is tried again");
+    assert!(port.barrier().unresolved().is_empty());
+    assert_eq!(port.frozen_ids().len(), 1);
+}
+
 // ---- no ticket where keystrokes and closes flow -------------------------------
 
 fn fn_body(src: &str, signature: &str) -> String {

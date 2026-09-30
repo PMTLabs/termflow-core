@@ -338,18 +338,107 @@ fn closed_unowned_never_closes_a_registered_session() {
 // ---- single-remover census --------------------------------------------------
 
 /// Each of these maps is written from many places but may only be shrunk by one
-/// function (two for `host_close_pending`, whose two shapes of removal are the
-/// two halves of an answered listing): a removal anywhere else bypasses the
-/// host scoping or the expiry re-check and is invisible at runtime.
+/// function (two for `host_close_pending` and `restoring_leaf_keys`, whose two
+/// shapes of removal are the two halves of an answered listing, and of a close
+/// plus the expiry sweep): a removal anywhere else bypasses the host scoping or
+/// the expiry re-check and is invisible at runtime.
+///
+/// The files scanned are every production source under `src/state` and
+/// `src/commands`, found by walking the directories, so a new file that grows a
+/// removal is covered without anyone remembering to list it.
 #[test]
 fn registry_maps_are_only_shrunk_by_their_chokepoints() {
+    /// `#[cfg(test)] mod name { ... }` blocks cut out, so what remains is
+    /// production text.
+    fn without_test_modules(source: &str) -> String {
+        let bytes = source.as_bytes();
+        let mut out = String::new();
+        let mut at = 0;
+        while let Some(rel) = source[at..].find("#[cfg(") {
+            let attr = at + rel;
+            let attr_end = source[attr..].find(']').map_or(source.len(), |e| attr + e + 1);
+            let attribute = &source[attr..attr_end];
+            let after = source[attr_end..].trim_start();
+            let is_test_mod =
+                attribute.contains("test") && !attribute.contains("not(") && after.starts_with("mod ");
+            if !is_test_mod {
+                out.push_str(&source[at..attr_end]);
+                at = attr_end;
+                continue;
+            }
+            out.push_str(&source[at..attr]);
+            let item = source.len() - after.len();
+            let brace = source[item..].find(['{', ';']).map(|i| item + i);
+            at = match brace {
+                Some(i) if bytes[i] == b';' => i + 1,
+                Some(i) => matching_brace(source, i) + 1,
+                None => source.len(),
+            };
+        }
+        out.push_str(&source[at..]);
+        out
+    }
+
+    /// Index of the `}` closing the `{` at `open`, skipping comments, strings and
+    /// char literals.
+    fn matching_brace(source: &str, open: usize) -> usize {
+        let b = source.as_bytes();
+        let mut depth = 0usize;
+        let mut i = open;
+        while i < b.len() {
+            match b[i] {
+                b'/' if b.get(i + 1) == Some(&b'/') => {
+                    i += source[i..].find('\n').unwrap_or(b.len() - i);
+                    continue;
+                }
+                b'/' if b.get(i + 1) == Some(&b'*') => {
+                    i += source[i..].find("*/").map_or(b.len() - i, |e| e + 2);
+                    continue;
+                }
+                b'"' => {
+                    let before = &source[..i];
+                    let hashes = before.bytes().rev().take_while(|c| *c == b'#').count();
+                    let raw = before[..before.len() - hashes].ends_with('r');
+                    if raw {
+                        let close = format!("\"{}", "#".repeat(hashes));
+                        i += 1 + source[i + 1..].find(&close).map_or(b.len(), |e| e + close.len());
+                    } else {
+                        i += 1;
+                        while i < b.len() && b[i] != b'"' {
+                            i += if b[i] == b'\\' { 2 } else { 1 };
+                        }
+                        i += 1;
+                    }
+                    continue;
+                }
+                b'\'' if b.get(i + 2) == Some(&b'\'') => {
+                    i += 3;
+                    continue;
+                }
+                b'\'' if b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'') => {
+                    i += 4;
+                    continue;
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        panic!("unbalanced braces in a scanned source file");
+    }
+
     /// Production text only, with a method chain split over lines rejoined so
     /// `map\n    .remove(` is seen as `map.remove(`.
-    fn production(source: &str, test_mod_marker: &str) -> String {
-        let normalised = source.replace("\r\n", "\n");
-        let end = normalised.find(test_mod_marker).unwrap_or(normalised.len());
+    fn production(source: &str) -> String {
+        let normalised = without_test_modules(&source.replace("\r\n", "\n"));
         let mut out = String::new();
-        for line in normalised[..end].lines() {
+        for line in normalised.lines() {
             if line.trim_start().starts_with('.') {
                 out.push_str(line.trim_start());
             } else {
@@ -365,16 +454,64 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
         let end = src[start..].find("\n}\n").expect("fn end at column 0") + start;
         start..end
     }
+    /// Production sources below `dir` (relative to `src`): test files, which build
+    /// their own maps, are not part of the application.
+    fn sources_under(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {} ({e})", dir.display()))
+            .map(|e| e.unwrap().path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                sources_under(&path, out);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let is_test_file = name.ends_with("_tests.rs") || name == "tests.rs" || name == "fake_hosts.rs";
+            if name.ends_with(".rs") && !is_test_file {
+                let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+                let relative = path.strip_prefix(&src_root).unwrap().to_string_lossy().replace('\\', "/");
+                out.push((relative, production(&std::fs::read_to_string(&path).unwrap())));
+            }
+        }
+    }
 
-    let registry = production(include_str!("../host_registry.rs"), "#[cfg(test)]\nmod registry_tests");
-    let terminals = production(include_str!("../terminals.rs"), "mod host_terminal_removal_source_tests");
-    let commands = production(include_str!("../../commands/terminal.rs"), "#[cfg(test)]");
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = Vec::new();
+    for dir in ["state", "commands"] {
+        sources_under(&src_root.join(dir), &mut sources);
+    }
+    // The census must have found the files that matter, or it proves nothing.
+    for expected in [
+        "state/host_registry.rs",
+        "state/terminals.rs",
+        "state/host_routing.rs",
+        "state/host_adoption.rs",
+        "state/host_port.rs",
+        "commands/terminal.rs",
+    ] {
+        assert!(
+            sources.iter().any(|(name, _)| name == expected),
+            "{expected} was not scanned: the census would be vacuous"
+        );
+    }
+    let registry = &sources.iter().find(|(name, _)| name == "state/host_registry.rs").unwrap().1;
 
     // (needle, the only functions whose body may contain it)
     let rules: &[(&[&str], &[&str])] = &[
         (
             &["restoring_keys.remove(", "restoring_keys.remove_if(", "restoring_keys.retain(", "restoring_keys.clear("],
             &["pub(super) fn forget_restoring_key("],
+        ),
+        (
+            &[
+                "restoring_leaf_keys.remove(",
+                "restoring_leaf_keys.remove_if(",
+                "restoring_leaf_keys.retain(",
+                "restoring_leaf_keys.clear(",
+            ],
+            &["pub(super) fn forget_restoring_leaf(", "pub(super) fn prune_restoring_leaf_keys("],
         ),
         (
             &["closed_unowned.remove(", "closed_unowned.remove_if(", "closed_unowned.retain(", "closed_unowned.clear("],
@@ -387,7 +524,7 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
     ];
 
     for (needles, allowed) in rules {
-        let allowed_spans: Vec<_> = allowed.iter().map(|sig| fn_span(&registry, sig)).collect();
+        let allowed_spans: Vec<_> = allowed.iter().map(|sig| fn_span(registry, sig)).collect();
         for needle in *needles {
             let mut offset = 0;
             while let Some(rel) = registry[offset..].find(needle) {
@@ -398,7 +535,7 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
                 );
                 offset = at + needle.len();
             }
-            for (name, src) in [("terminals.rs", &terminals), ("commands/terminal.rs", &commands)] {
+            for (name, src) in sources.iter().filter(|(name, _)| name != "state/host_registry.rs") {
                 assert!(
                     !src.contains(needle),
                     "`{needle}` found in {name}: route it through the chokepoint in host_registry.rs"
@@ -406,7 +543,7 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
             }
         }
         for sig in *allowed {
-            let body = &registry[fn_span(&registry, sig)];
+            let body = &registry[fn_span(registry, sig)];
             assert!(
                 needles.iter().any(|n| body.contains(n)),
                 "chokepoint `{sig}` no longer removes anything — the census above is vacuous"

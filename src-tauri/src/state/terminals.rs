@@ -814,21 +814,7 @@ impl<R: Runtime> AppState<R> {
         // Do not return when the app currently owns no tabs: the host can still
         // hold live sessions which must be recovered into visible terminals.
         const BACKOFF_MS: &[u64] = &[500, 1000, 2000, 4000, 8000, 8000, 8000];
-        let mut connected = false;
-        for (i, ms) in BACKOFF_MS.iter().enumerate() {
-            // A concurrent terminal-create may already have reconnected
-            // (ensure_pty_host is single-flight); otherwise try ourselves.
-            if self.pty_host_clone().is_some() || self.ensure_pty_host().await.is_ok() {
-                connected = true;
-                break;
-            }
-            log::warn!(
-                "[HOTSWAP] reconnect attempt {}/{} failed; retrying in {ms}ms",
-                i + 1,
-                BACKOFF_MS.len()
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(*ms)).await;
-        }
+        let connected = super::host_adoption::reconnect_current(self, BACKOFF_MS).await;
         let client = if connected { self.pty_host_clone() } else { None };
         let Some(client) = client else {
             log::error!(

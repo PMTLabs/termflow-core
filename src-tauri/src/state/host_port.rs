@@ -2,8 +2,8 @@
 //! connected, what a listing reserves, and where a connected host is published.
 //! The ordering and timing rules live in `host_adoption`.
 
-use super::host_adoption::{frozen_connection_lost, AdoptionPort, Barrier, Opened};
-use super::host_connect::{connect_existing, GRACE_ENDPOINT_ONLY, GRACE_LIVE_HOST};
+use super::host_adoption::{frozen_connection_lost, AdoptionPort, Barrier, ConnectFailure, Opened};
+use super::host_connect::{connect_existing, endpoint_is_gone, GRACE_ENDPOINT_ONLY, GRACE_LIVE_HOST};
 use super::host_registry;
 use super::host_table::HostTable;
 use super::types::{AppState, FrozenHost};
@@ -203,7 +203,7 @@ impl<R: Runtime> AppState<R> {
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })
     }
 
-    async fn connect_frozen(&self, candidate: &HostCandidate, id: FrozenId, epoch: u64) -> Result<Opened, String> {
+    async fn connect_frozen(&self, candidate: &HostCandidate, id: FrozenId, epoch: u64) -> Result<Opened, ConnectFailure> {
         let plan = crate::pty_host_client::plan_connection(candidate.record.clone());
         let flags = host_flags(&plan, &candidate.endpoint)?;
         let deps = self.host_deps(
@@ -211,9 +211,10 @@ impl<R: Runtime> AppState<R> {
             self.frozen_disconnect(id, epoch, candidate.endpoint.clone()),
         );
         let grace = if candidate.pid.is_some() { GRACE_LIVE_HOST } else { GRACE_ENDPOINT_ONLY };
-        let mut client = connect_existing(&flags.endpoint, grace, deps)
-            .await
-            .map_err(|e| format!("could not connect to terminal host {}: {e}", candidate.endpoint))?;
+        let mut client = connect_existing(&flags.endpoint, grace, deps).await.map_err(|e| ConnectFailure {
+            reason: format!("could not connect to terminal host {}: {e}", candidate.endpoint),
+            endpoint_gone: endpoint_is_gone(&e),
+        })?;
         client.set_attach_acks(flags.attach_acks);
         client.set_shutdown_control(flags.shutdown_control);
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
@@ -266,10 +267,10 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
         candidate: &HostCandidate,
         role: HostRole,
         frozen: Option<(FrozenId, u64)>,
-    ) -> Result<Opened, String> {
+    ) -> Result<Opened, ConnectFailure> {
         match (role, frozen) {
             (HostRole::Frozen, Some((id, epoch))) => self.connect_frozen(candidate, id, epoch).await,
-            _ => self.connect_current(candidate).await,
+            _ => self.connect_current(candidate).await.map_err(ConnectFailure::from),
         }
     }
 

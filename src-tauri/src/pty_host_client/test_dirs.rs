@@ -16,3 +16,12 @@ pub(super) fn tempdir() -> std::io::Result<TestDir> {
     std::fs::create_dir(&path)?;
     Ok(TestDir(path))
 }
+
+/// Serialises tests that run a real child process against tests that inspect the
+/// test process's own descendants (the foreground-cwd walk would otherwise pick
+/// up the child and report its working directory).
+pub(crate) static CHILD_PROCESS_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn child_process_gate() -> std::sync::MutexGuard<'static, ()> {
+    CHILD_PROCESS_TESTS.lock().unwrap_or_else(|e| e.into_inner())
+}

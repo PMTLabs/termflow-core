@@ -32,13 +32,22 @@ pub(super) struct HostSpec {
     pub list: ListBehavior,
     /// How long connecting takes.
     pub connect_delay: Duration,
-    /// The endpoint exists but nothing can be connected to it.
+    /// The endpoint exists but nothing can be connected to it: the host is busy
+    /// or slow, which is not the same as gone.
     pub unreachable: bool,
+    /// Connecting is refused outright: nothing listens on the endpoint.
+    pub refused: bool,
 }
 
 impl Default for HostSpec {
     fn default() -> Self {
-        Self { sessions: Vec::new(), list: ListBehavior::Answer, connect_delay: Duration::ZERO, unreachable: false }
+        Self {
+            sessions: Vec::new(),
+            list: ListBehavior::Answer,
+            connect_delay: Duration::ZERO,
+            unreachable: false,
+            refused: false,
+        }
     }
 }
 
@@ -85,6 +94,8 @@ pub(super) struct World {
     /// Endpoints a host process was started for, in order.
     pub started_processes: Mutex<Vec<String>>,
     pub spawn_fails: AtomicBool,
+    /// Connecting to a frozen host panics, as a bug in the port would.
+    pub connect_panics: AtomicBool,
 }
 
 impl World {
@@ -95,11 +106,19 @@ impl World {
             log: Arc::new(Mutex::new(Vec::new())),
             started_processes: Mutex::new(Vec::new()),
             spawn_fails: AtomicBool::new(false),
+            connect_panics: AtomicBool::new(false),
         })
     }
 
     pub fn add_host(&self, endpoint: &str, spec: HostSpec) {
         self.hosts.lock().unwrap().insert(endpoint.to_owned(), (spec, Vec::new()));
+    }
+
+    /// The host becomes (or stops being) something nothing can connect to.
+    pub fn set_unreachable(&self, endpoint: &str, unreachable: bool) {
+        if let Some((spec, _)) = self.hosts.lock().unwrap().get_mut(endpoint) {
+            spec.unreachable = unreachable;
+        }
     }
 
     /// The host dies: every connection to it drops.
@@ -254,6 +273,9 @@ pub(super) struct Inner {
     pub listings: Mutex<Vec<(HostChannel, Option<usize>)>>,
     pub disconnects: AtomicUsize,
     pub duplicates: Mutex<Vec<String>>,
+    /// What the table said about the primary slot each time the current client
+    /// was made visible.
+    pub admission_when_published: Mutex<Vec<Option<crate::state::host_table::Admission>>>,
 }
 
 /// `AppState`'s stand-in: the same port, over a fake machine.
@@ -284,6 +306,7 @@ impl FakePort {
             listings: Mutex::new(Vec::new()),
             disconnects: AtomicUsize::new(0),
             duplicates: Mutex::new(Vec::new()),
+            admission_when_published: Mutex::new(Vec::new()),
         }))
     }
 
@@ -413,20 +436,26 @@ impl AdoptionPort for FakePort {
         candidate: &HostCandidate,
         role: HostRole,
         frozen: Option<(FrozenId, u64)>,
-    ) -> Result<Opened, String> {
+    ) -> Result<Opened, ConnectFailure> {
         self.0.connects.lock().unwrap().push((candidate.endpoint.clone(), role));
         let world = &self.0.world;
         let endpoint = candidate.endpoint.as_str();
+        if role == HostRole::Frozen && world.connect_panics.load(Ordering::SeqCst) {
+            panic!("the port failed while connecting {endpoint}");
+        }
         if let Some(spec) = world.spec(endpoint) {
             tokio::time::sleep(spec.connect_delay).await;
+            if spec.refused {
+                return Err(ConnectFailure { reason: format!("connection refused on {endpoint}"), endpoint_gone: true });
+            }
         }
         let stream = match world.open(endpoint) {
             Some(stream) => stream,
-            None if role == HostRole::Frozen => return Err(format!("nothing answers on {endpoint}")),
+            None if role == HostRole::Frozen => return Err(format!("nothing answers on {endpoint}").into()),
             None if candidate.pid.is_some() => {
-                return Err("a running pty-host is unreachable; not spawning a duplicate".into())
+                return Err("a running pty-host is unreachable; not spawning a duplicate".to_string().into())
             }
-            None if world.spawn_fails.load(Ordering::SeqCst) => return Err("no valid pty-host binary".into()),
+            None if world.spawn_fails.load(Ordering::SeqCst) => return Err("no valid pty-host binary".to_string().into()),
             None => {
                 world.started_processes.lock().unwrap().push(endpoint.to_owned());
                 world.add_host(endpoint, HostSpec::default());
@@ -479,6 +508,7 @@ impl AdoptionPort for FakePort {
     }
 
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String> {
+        self.0.admission_when_published.lock().unwrap().push(self.0.table.admission(HostChannel::Primary));
         *self.0.current.lock().unwrap() = Some(client.clone());
         if !client.is_alive() {
             *self.0.current.lock().unwrap() = None;

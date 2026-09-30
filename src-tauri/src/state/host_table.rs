@@ -174,14 +174,23 @@ impl HostTable {
     /// Make `epoch` the current connection of `channel` and open it for
     /// admission. Publishing again (a reconnect) supersedes the old epoch;
     /// tickets already held on the host keep counting.
-    pub fn publish(&self, channel: HostChannel, epoch: u64) {
+    ///
+    /// A host that is being retired (`Draining`) or has been (`Retired`) is left
+    /// exactly as it is, and `false` is returned: reopening it would admit
+    /// creates to a host whose emptiness was just decided, and would make the
+    /// retirement's own guard (bound to the old epoch) inert.
+    pub fn publish(&self, channel: HostChannel, epoch: u64) -> bool {
         let mut inner = self.shared.lock();
         match inner.slot_mut(channel) {
+            Some(slot) if slot.admission != Admission::Open => false,
             Some(slot) => {
-                slot.admission = Admission::Open;
                 slot.epoch = epoch;
+                true
             }
-            None => inner.hosts.push(HostSlot { channel, admission: Admission::Open, inflight: 0, epoch }),
+            None => {
+                inner.hosts.push(HostSlot { channel, admission: Admission::Open, inflight: 0, epoch });
+                true
+            }
         }
     }
 

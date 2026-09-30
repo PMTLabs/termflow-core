@@ -74,9 +74,11 @@ struct Entry {
     /// roles, however a later discovery classifies its endpoint.
     role: HostRole,
     resolution: Resolution,
-    /// Something will settle this host: an attempt is in flight, or (after a
-    /// lost connection) its own reconnect owns it. Nothing else may assume a
-    /// retry is coming.
+    /// An attempt is in flight for this host, or its connection dropped after it
+    /// was adopted. Either way no discovery round starts another attempt on it,
+    /// so nothing else may assume a retry is coming. A dropped connection is not
+    /// retried at all yet: the host stays unresolved until a reconnect of that one
+    /// host exists to settle it.
     retry_pending: bool,
 }
 
@@ -200,6 +202,14 @@ impl Barrier {
         self.notify();
     }
 
+    /// Stop tracking a host that cannot be connected to at all, so it no longer
+    /// holds the panes that wait for the hosts to answer. A later discovery that
+    /// still finds its endpoint tracks it again and finds it gone again.
+    pub fn forget(&self, key: &str) {
+        self.lock().retain(|e| e.key != key);
+        self.notify();
+    }
+
     /// An attempt on a host that was never tracked failed: there is nothing to
     /// record, because no host process was found behind it.
     pub fn abandon_attempt(&self, key: &str) {
@@ -209,8 +219,10 @@ impl Barrier {
         self.notify();
     }
 
-    /// The connection to a resolved host dropped: what it holds is unknown again,
-    /// and its own reconnect — not a rediscovery — owns getting it back.
+    /// The connection to a resolved host dropped: what it holds is unknown again.
+    /// A rediscovery does not retry it (`retry_pending` stays set), and there is no
+    /// reconnect of a single older host yet, so until one exists it keeps holding
+    /// every pane that waits for the hosts to answer.
     pub fn mark_lost(&self, key: &str, reason: &str) {
         if let Some(entry) = self.lock().iter_mut().find(|e| e.key == key) {
             entry.resolution = Resolution::Unresolved(reason.to_owned());
@@ -273,6 +285,21 @@ pub(super) fn frozen_connection_lost(
 
 // ---- the port -------------------------------------------------------------
 
+/// Why a host could not be connected to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ConnectFailure {
+    pub reason: String,
+    /// Nothing listens on the endpoint at all (connection refused, no such socket
+    /// file or pipe), as opposed to a host that is busy or slow to answer.
+    pub endpoint_gone: bool,
+}
+
+impl From<String> for ConnectFailure {
+    fn from(reason: String) -> Self {
+        Self { reason, endpoint_gone: false }
+    }
+}
+
 /// A connection made to a host, before its sessions are known.
 pub(super) struct Opened {
     pub client: PtyHostClient,
@@ -303,7 +330,7 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
         candidate: &HostCandidate,
         role: HostRole,
         frozen: Option<(FrozenId, u64)>,
-    ) -> impl Future<Output = Result<Opened, String>> + Send;
+    ) -> impl Future<Output = Result<Opened, ConnectFailure>> + Send;
     /// Reserve what `channel`'s answered listing reports and settle the closes
     /// owed to it. `None` = the host never answered; nothing is changed.
     fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&[SessionMeta]>);
@@ -366,10 +393,10 @@ async fn adopt<P: AdoptionPort>(
     candidate: &HostCandidate,
     role: HostRole,
     deadline: Instant,
-) -> Result<Resolution, String> {
+) -> Result<Resolution, Failure> {
     // Held for the whole adoption so a quiesce waits for it; refused outright
     // once exit, offload or update has closed admission.
-    let _ticket = port.table().begin_adoption().map_err(|busy| busy.to_string())?;
+    let _ticket = port.table().begin_adoption().map_err(|busy| Failure::Other(busy.to_string()))?;
     let key = barrier_key(&candidate.endpoint);
 
     let existing = match role {
@@ -386,7 +413,11 @@ async fn adopt<P: AdoptionPort>(
     let frozen = (role == HostRole::Frozen).then(|| (port.next_frozen_id(), port.table().reserve_epoch()));
     let opened = tokio::time::timeout_at(deadline, port.connect(candidate, role, frozen))
         .await
-        .map_err(|_| "timed out connecting to the terminal host".to_string())??;
+        .map_err(|_| Failure::Other("timed out connecting to the terminal host".to_string()))?
+        .map_err(|failure| match failure.endpoint_gone {
+            true => Failure::EndpointGone(failure.reason),
+            false => Failure::Other(failure.reason),
+        })?;
     let client = opened.client;
     let listing = settle(&client, deadline).await;
     match (role, frozen) {
@@ -408,16 +439,57 @@ async fn adopt<P: AdoptionPort>(
             // epoch; look once more, now that a later one would not be.
             if !client.is_alive() {
                 frozen_connection_lost(port.table(), port.barrier(), id, epoch, &candidate.endpoint);
-                return Err(CONNECTION_LOST.into());
+                return Err(Failure::ConnectionLost);
             }
         }
         _ => {
             port.apply_listing(HostChannel::Primary, &client, listing.as_deref());
-            port.publish_current(&client)?;
+            // Admission first: a create that sees the client must find a slot to
+            // take a ticket on, or it would pass the host over.
             port.table().publish(HostChannel::Primary, opened.epoch);
+            port.publish_current(&client).map_err(Failure::Other)?;
         }
     }
     Ok(resolution_of(&listing))
+}
+
+/// How an adoption ended without a listing.
+enum Failure {
+    /// The connection dropped after the host was adopted; the barrier already
+    /// says so (`frozen_connection_lost`), and recording a failure would undo it.
+    ConnectionLost,
+    /// Nothing listens on the host's endpoint.
+    EndpointGone(String),
+    Other(String),
+}
+
+impl Failure {
+    fn into_message(self) -> String {
+        match self {
+            Failure::ConnectionLost => CONNECTION_LOST.to_string(),
+            Failure::EndpointGone(reason) | Failure::Other(reason) => reason,
+        }
+    }
+}
+
+/// Clears a host's in-flight mark if its attempt ends without recording an
+/// outcome, a panic included: nothing else would ever clear it, and the host
+/// would then never be tried again.
+struct AttemptGuard<'a> {
+    barrier: &'a Barrier,
+    key: &'a str,
+    recorded: bool,
+}
+
+impl Drop for AttemptGuard<'_> {
+    fn drop(&mut self) {
+        if !self.recorded {
+            if std::thread::panicking() {
+                log::error!("[GEN] the adoption attempt on {} panicked", self.key);
+            }
+            self.barrier.abandon_attempt(self.key);
+        }
+    }
 }
 
 /// One attempt on one candidate, recorded in the barrier whatever happens.
@@ -428,19 +500,28 @@ async fn attempt<P: AdoptionPort>(
     deadline: Instant,
 ) -> Result<(), String> {
     let key = barrier_key(&candidate.endpoint);
+    let mut guard = AttemptGuard { barrier: port.barrier(), key: &key, recorded: false };
     let outcome = adopt(&port, &candidate, role, deadline).await;
     match &outcome {
         Ok(resolution) => port.barrier().finish(&key, &candidate.endpoint, role, resolution.clone()),
-        // Its own reconnect owns a dropped host from here; the barrier already
-        // says so (`frozen_connection_lost`), and finishing would undo that.
-        Err(reason) if reason == CONNECTION_LOST => {}
-        Err(reason) if port.barrier().is_tracked(&key) => {
+        // A dropped connection is left as the drop callback recorded it.
+        Err(Failure::ConnectionLost) => {}
+        // Discovery found this endpoint without any process behind it (an old
+        // socket file, a pipe that vanished): nothing holds sessions there, so it
+        // must not keep a restoring pane waiting. A host whose process is known to
+        // be alive stays unresolved: it may just not be listening yet.
+        Err(Failure::EndpointGone(reason)) if role == HostRole::Frozen && candidate.pid.is_none() => {
+            log::info!("[GEN] nothing answers on {} ({reason}); dropping it", candidate.endpoint);
+            port.barrier().forget(&key);
+        }
+        Err(Failure::EndpointGone(reason) | Failure::Other(reason)) if port.barrier().is_tracked(&key) => {
             port.barrier()
                 .finish(&key, &candidate.endpoint, role, Resolution::Unresolved(reason.clone()))
         }
         Err(_) => port.barrier().abandon_attempt(&key),
     }
-    outcome.map(|_| ())
+    guard.recorded = true;
+    outcome.map(|_| ()).map_err(Failure::into_message)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -471,6 +552,29 @@ pub(super) async fn ensure_hosts<P: AdoptionPort>(port: &P) -> Result<(), String
 /// or not the current host is up. For the router and the periodic sweep.
 pub(super) async fn rediscover_hosts<P: AdoptionPort>(port: &P) -> Result<(), String> {
     round(port, Wait::All).await
+}
+
+/// Get the current host connected again after its connection dropped, waiting
+/// `backoff_ms[i]` milliseconds after attempt `i` fails. Whether the current host
+/// is back is asked of the published client, not of `ensure_hosts`: that also
+/// succeeds when only an older host is usable, which is no help to the panes
+/// that were on the current one.
+pub(super) async fn reconnect_current<P: AdoptionPort>(port: &P, backoff_ms: &[u64]) -> bool {
+    for (i, ms) in backoff_ms.iter().enumerate() {
+        // A concurrent create may already have reconnected; otherwise try here.
+        if port.current_client().is_some()
+            || (ensure_hosts(port).await.is_ok() && port.current_client().is_some())
+        {
+            return true;
+        }
+        log::warn!(
+            "[HOTSWAP] reconnect attempt {}/{} failed; retrying in {ms}ms",
+            i + 1,
+            backoff_ms.len()
+        );
+        tokio::time::sleep(Duration::from_millis(*ms)).await;
+    }
+    false
 }
 
 async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {

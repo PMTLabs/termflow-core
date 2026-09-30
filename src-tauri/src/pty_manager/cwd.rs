@@ -203,6 +203,9 @@ mod tests {
 
     #[test]
     fn process_cwd_resolves_for_current_process() {
+        // A real-host test running at the same time would be a descendant of this
+        // process and be picked by the foreground walk; wait for it to finish.
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         // The test binary has no child processes, so the foreground walk returns
         // the test pid itself; its cwd must equal the process's working directory.
         let pid = std::process::id();
