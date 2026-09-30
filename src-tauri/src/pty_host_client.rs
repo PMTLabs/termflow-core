@@ -14,6 +14,11 @@
 //! The client depends on a few concrete pieces (not `AppState`) so it is
 //! testable without the Windows `mock_app` crash and avoids an Arc cycle.
 
+mod endpoints;
+mod discovery;
+pub use endpoints::{current_host_paths, HostPaths};
+pub use discovery::{discover_hosts, HostCandidate, HostRole};
+
 use crate::state::ChannelPayload;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -658,7 +663,9 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
+            let paths = current_host_paths();
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                paths.record.as_deref(), paths.log.as_deref())?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -693,6 +700,8 @@ fn spawn_sidecar_detached(
     build_id: Option<&str>,
     pipe: &str,
     token: &str,
+    record: Option<&std::path::Path>,
+    log_path: Option<&std::path::Path>,
 ) -> std::io::Result<bool> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -714,14 +723,12 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — Velopack treats a process whose CWD is inside
     // the swapped `current\` tree as an update blocker it may kill (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
-    let record = record_path();
     // Capture the sidecar's diagnostics. These previously went to Stdio::null(),
     // which made the host completely undiagnosable from the app side — every
     // warning it prints (failed job breakaway, serve errors, a failed CTRL+C
     // restore) vanished. Point them at a per-channel log file in the same
     // update-stable dir instead; truncated on each spawn, so it stays small.
     // Only lifecycle/error lines are written here — never session I/O.
-    let log_path = runtime_host_dir().map(|d| d.join("host.log"));
     let base = move || {
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
@@ -730,7 +737,7 @@ fn spawn_sidecar_detached(
         if let Some(build_id) = build_id {
             c.env("TERMFLOW_PTY_BUILD_ID", build_id);
         }
-        match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
+        match log_path.and_then(|p| std::fs::File::create(p).ok()) {
             Some(f) => {
                 c.stdout(f.try_clone().expect("clone log file handle"));
                 c.stderr(f);
@@ -741,7 +748,7 @@ fn spawn_sidecar_detached(
             }
         }
         // RP-2: tell the host where to advertise itself (discovery record).
-        if let Some(ref rp) = record {
+        if let Some(rp) = record {
             c.env("TERMFLOW_PTY_RECORD", rp);
         }
         if let Some(ref wd) = workdir {
@@ -819,7 +826,9 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
+            let paths = current_host_paths();
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                paths.record.as_deref(), paths.log.as_deref())?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -856,6 +865,8 @@ fn spawn_sidecar_detached(
     build_id: Option<&str>,
     pipe: &str,
     token: &str,
+    record: Option<&std::path::Path>,
+    log_path: Option<&std::path::Path>,
 ) -> std::io::Result<bool> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -864,17 +875,22 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — a Velopack swap of the payload must not
     // disrupt the running host (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
+    if log_path.is_some() {
+        endpoints::ensure_socket_parent(pipe)?;
+    }
     let mut c = Command::new(sidecar);
     c.env("TERMFLOW_PTY_PIPE", pipe)
         .env("TERMFLOW_PTY_TOKEN", token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::null());
+    match log_path.and_then(|p| std::fs::File::create(p).ok()) {
+        Some(f) => { c.stdout(f.try_clone()?); c.stderr(f); }
+        None => { c.stdout(Stdio::null()); c.stderr(Stdio::null()); }
+    }
     if let Some(build_id) = build_id {
         c.env("TERMFLOW_PTY_BUILD_ID", build_id);
     }
     // RP-2: tell the host where to advertise itself (discovery record).
-    if let Some(rp) = record_path() {
+    if let Some(rp) = record {
         c.env("TERMFLOW_PTY_RECORD", rp);
     }
     if let Some(ref wd) = workdir {
@@ -917,15 +933,9 @@ pub async fn connect_or_spawn(
 /// Windows named-pipe name for an identity. Pure, so the naming invariant is
 /// testable without touching the environment. `id.key()` is `"rel"` for the
 /// default identity, so today's name is reproduced byte for byte.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn pipe_for(user: &str, id: &crate::profile::ProfileIdentity) -> String {
-    format!(r"\\.\pipe\termflow-pty-host.{user}.{}", id.key())
-}
-
-/// Unix socket path for an identity. Same reasoning as `pipe_for`.
-#[cfg(unix)]
-fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String {
-    format!("{runtime_dir}/termflow-pty-host.{}.sock", id.key())
+    endpoints::qualified_pipe_for(user, id, None)
 }
 
 /// Per-user, per-identity endpoint so two users — or two profiles — on one
@@ -934,17 +944,7 @@ fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String
 /// `TERMFLOW_PTY_PIPE`, so both agree by construction (the sidecar creates the
 /// socket's parent dir on bind).
 pub fn resolve_pipe() -> String {
-    #[cfg(windows)]
-    {
-        let user = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "user".to_string());
-        pipe_for(&user, crate::profile::current())
-    }
-    #[cfg(unix)]
-    {
-        socket_for(&unix_runtime_dir(), crate::profile::current())
-    }
+    current_host_paths().endpoint
 }
 
 /// Per-user runtime directory for the Unix socket, mirroring the sidecar's
@@ -1097,6 +1097,12 @@ mod disarm_tests;
 #[cfg(test)]
 mod runtime_dir_tests;
 
+#[cfg(test)]
+mod discovery_tests;
+
+#[cfg(test)]
+mod test_dirs;
+
 /// Where the running host advertises itself (RP-2 discovery). Lives in the
 /// update-stable runtime dir (per-user + per-identity, matching the pipe name's
 /// scope) so it survives updates alongside the host itself. Absent file ⇒
@@ -1105,7 +1111,7 @@ mod runtime_dir_tests;
 /// The sidecar never computes this path — the GUI passes it as
 /// `TERMFLOW_PTY_RECORD`, so scoping it here scopes the writer too.
 pub fn record_path() -> Option<std::path::PathBuf> {
-    runtime_host_dir().map(|d| d.join("host-record.json"))
+    current_host_paths().record
 }
 
 /// SHA-256 of a file's bytes.
@@ -1302,13 +1308,27 @@ pub fn resolve_host_path() -> Option<std::path::PathBuf> {
 pub struct HostLaunch {
     pub path: std::path::PathBuf,
     pub build_id: Option<String>,
+    /// Install-directory identity includes the host and the staged ConPTY pair.
+    /// Bundled fallback has no stable generation.
+    pub generation: Option<String>,
 }
 
 pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
-    let path = match runtime_host_dir() {
-        Some(base) => match install_host_into(&src, &base) {
-            Ok(dest) => dest,
+    let launch = resolve_launch_from(src, runtime_host_dir().as_deref());
+    endpoints::pin_current_paths(launch.generation.as_deref());
+    Some(launch)
+}
+
+fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) -> HostLaunch {
+    let mut generation = None;
+    let path = match base {
+        Some(base) => match install_host_into(&src, base) {
+            Ok(dest) => {
+                generation = dest.parent().and_then(|p| p.file_name())
+                    .map(|g| g.to_string_lossy().into_owned());
+                dest
+            }
             Err(e) => {
                 log::warn!(
                     "pty-host: could not install host into runtime dir ({e}); \
@@ -1329,7 +1349,7 @@ pub fn resolve_host_launch() -> Option<HostLaunch> {
         );
         e
     }).ok();
-    Some(HostLaunch { path, build_id })
+    HostLaunch { path, build_id, generation }
 }
 
 fn hex_full(digest: &[u8; 32]) -> String {
