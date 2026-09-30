@@ -192,8 +192,9 @@ class BrowserBridge implements ElectronAPI {
 
     async forgetRestoringLeaf(_leafId: string): Promise<void> { }
 
-    /// A browser session has no other window that could hold a leaf's session.
-    async getProcessIdForLeaf(_leafId: string): Promise<string | null> { return null; }
+    /// A browser session has no other window to hand a session to or from.
+    async offerSessionHandoff(_leafId: string): Promise<boolean> { return false; }
+    async takeSessionHandoff(_leafId: string): Promise<string | null> { return null; }
 
     async closeTerminal(id: string): Promise<void> {
         try {

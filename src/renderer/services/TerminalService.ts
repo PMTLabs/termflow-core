@@ -9,6 +9,11 @@ import { reassertLabelAfterSpawn } from './terminalLabelSync';
 import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
 import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
 
+// The offering window's create may return a moment after the destination's is
+// refused, so the destination asks a few times before giving up.
+const HANDOFF_TAKE_ATTEMPTS = 3;
+const HANDOFF_TAKE_DELAY_MS = 200;
+
 export type HostWaitState = 'waiting' | 'retry' | undefined;
 
 export interface TerminalProcess {
@@ -39,6 +44,10 @@ export class TerminalServiceClass {
   // `renderer_terminal_id`, breaking the PRIMARY KEY invariant. Cleared in a
   // `finally` so a failed create does not permanently poison the leaf.
   private inFlightCreates: Map<string, Promise<string>> = new Map();
+  // Leaves closed (not moved) while their create was in flight. A create that comes
+  // back for a leaf this window no longer has closes the new shell instead of
+  // offering it to another window when the user closed the pane.
+  private closedWhileCreating: Set<string> = new Set();
 
   private hostWaitStates = new Map<string, HostWaitState>();
 
@@ -150,6 +159,8 @@ export class TerminalServiceClass {
       console.log(`TerminalService: Create already in flight for ${terminalId}, reusing pending promise`);
       return pending;
     }
+    // A close recorded for an earlier create of this leaf says nothing about this one.
+    this.closedWhileCreating.delete(terminalId);
     // Keep the ordinary path explicit at the renderer/bridge boundary.  Leaving
     // this as `undefined` relies on JSON serialization to omit the field and
     // makes an old bridge/backend pair indistinguishable from an admin request
@@ -168,6 +179,7 @@ export class TerminalServiceClass {
       // starting a new one so this is effectively always true).
       if (this.inFlightCreates.get(terminalId) === createPromise) {
         this.inFlightCreates.delete(terminalId);
+        this.closedWhileCreating.delete(terminalId);
       }
     }
   }
@@ -215,10 +227,10 @@ export class TerminalServiceClass {
           return '';
         }
         // The other side of that move: the window the pane left won the session
-        // while this window's own create was refused. The session is registered
-        // under this leaf, so this pane takes it over instead of failing.
+        // while this window's own create was refused, and offers it to whichever
+        // window has the pane now. Only a contention can mean that.
         if (isHostSessionContended(error)) {
-          const adopted = await this.adoptSessionOfLeaf(terminalId);
+          const adopted = await this.takeOfferedSession(terminalId);
           if (adopted !== undefined) {
             this.setHostWaitState(terminalId, undefined);
             return adopted;
@@ -246,24 +258,60 @@ export class TerminalServiceClass {
   }
 
   /**
-   * Bind to the process already registered for this leaf's session. `undefined`
-   * when nothing carries the leaf (a recovery pane that lost to another pane finds
-   * nothing under its own leaf and keeps its refusal); `''` when the leaf left
-   * this window while asking.
+   * Bind to the session another window offered for this leaf. The offer may still
+   * be on its way (the other window's create returned just now), so a few short
+   * retries. `undefined` when no offer shows up (a recovery pane that lost to
+   * another pane, or a shell another window is showing, keeps its refusal); `''`
+   * when the leaf left this window meanwhile.
    */
-  private async adoptSessionOfLeaf(terminalId: string): Promise<string | undefined> {
-    let processId: string | null | undefined;
-    try {
-      processId = await this.api().getProcessIdForLeaf?.(terminalId);
-    } catch (error) {
-      console.warn(`TerminalService: could not look up the registered session of ${terminalId}:`, error);
-      return undefined;
+  private async takeOfferedSession(terminalId: string): Promise<string | undefined> {
+    for (let attempt = 0; attempt < HANDOFF_TAKE_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        await new Promise(resolve => setTimeout(resolve, HANDOFF_TAKE_DELAY_MS));
+        if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) return '';
+      }
+      let processId: string | null | undefined;
+      try {
+        processId = await this.api().takeSessionHandoff?.(terminalId);
+      } catch (error) {
+        console.warn(`TerminalService: could not take the offered session of ${terminalId}:`, error);
+        return undefined;
+      }
+      if (!processId) continue;
+      if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
+        // The offer is spent; whoever has the pane now needs it again.
+        await this.releaseAbsentCreate(terminalId, processId);
+        return '';
+      }
+      console.log(`TerminalService: ${terminalId} took over the session ${processId} offered for it`);
+      this.bindCreated(terminalId, processId, undefined);
+      return processId;
     }
-    if (!processId) return undefined;
-    if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) return '';
-    console.log(`TerminalService: ${terminalId} took over its registered session ${processId}`);
-    this.bindCreated(terminalId, processId, undefined);
-    return processId;
+    return undefined;
+  }
+
+  /**
+   * A create produced `processId` for a leaf this window no longer has. A pane the
+   * user closed gets its new shell closed; a pane that moved has the shell offered
+   * to the window that has it now. Binding it here would leave two windows holding
+   * one shell.
+   */
+  private async releaseAbsentCreate(terminalId: string, processId: string): Promise<void> {
+    if (this.closedWhileCreating.has(terminalId)) {
+      console.log(`TerminalService: ${terminalId} was closed during its create; closing process ${processId}`);
+      try {
+        await this.api().closeTerminal(processId);
+      } catch (error) {
+        console.error(`TerminalService: could not close the shell ${processId} of the closed pane ${terminalId}:`, error);
+      }
+      return;
+    }
+    console.log(`TerminalService: ${terminalId} left this window during its create; offering process ${processId} to its new window`);
+    try {
+      await this.api().offerSessionHandoff?.(terminalId);
+    } catch (error) {
+      console.warn(`TerminalService: could not offer the session of ${terminalId}:`, error);
+    }
   }
 
   private async createTerminalInner(
@@ -299,12 +347,9 @@ export class TerminalServiceClass {
       const processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
-      // The pane may have moved to another window while this create was in
-      // flight. The session is registered under the leaf now and the window that
-      // has the pane takes it over; binding it here would leave two windows
-      // holding one shell.
+      // The pane may have left this window while this create was in flight.
       if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
-        console.log(`TerminalService: ${terminalId} left this window during its create; leaving process ${processId} for its new window`);
+        await this.releaseAbsentCreate(terminalId, processId);
         return '';
       }
 
@@ -406,6 +451,7 @@ export class TerminalServiceClass {
     const process = this.processes.get(terminalId);
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
+      if (this.inFlightCreates.has(terminalId)) this.closedWhileCreating.add(terminalId);
       try {
         await this.api().forgetRestoringLeaf(terminalId);
       } catch (error) {

@@ -424,6 +424,9 @@ async fn adopt<P: AdoptionPort>(
         (HostRole::Frozen, Some((id, epoch))) => {
             let channel = HostChannel::Frozen(id);
             port.apply_listing(channel, &client, listing.as_deref());
+            // Admission first, as for the current host below: a create that sees the
+            // client must find a slot to take a ticket on.
+            publish_admission(port, channel, epoch);
             port.publish_frozen(FrozenHost {
                 id,
                 generation: candidate.generation.clone(),
@@ -434,7 +437,6 @@ async fn adopt<P: AdoptionPort>(
                 advertised: candidate.mtime,
                 exe_in_payload: client.exe_in_payload(),
             });
-            port.table().publish(channel, epoch);
             // A drop that fired before the host was published was inert by
             // epoch; look once more, now that a later one would not be.
             if !client.is_alive() {
@@ -446,11 +448,19 @@ async fn adopt<P: AdoptionPort>(
             port.apply_listing(HostChannel::Primary, &client, listing.as_deref());
             // Admission first: a create that sees the client must find a slot to
             // take a ticket on, or it would pass the host over.
-            port.table().publish(HostChannel::Primary, opened.epoch);
+            publish_admission(port, HostChannel::Primary, opened.epoch);
             port.publish_current(&client).map_err(Failure::Other)?;
         }
     }
     Ok(resolution_of(&listing))
+}
+
+/// Open `channel` for admission on `epoch`. The table leaves a host that is
+/// draining or retired as it is; an adoption must not do that silently.
+fn publish_admission<P: AdoptionPort>(port: &P, channel: HostChannel, epoch: u64) {
+    if !port.table().publish(channel, epoch) {
+        log::warn!("[GEN] {channel:?} is draining or retired; its connection was not opened for admission");
+    }
 }
 
 /// How an adoption ended without a listing.

@@ -496,7 +496,7 @@ async fn stale_epoch_callback_inert() {
     let unresolved = port.barrier().unresolved();
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].reason, "connection lost");
-    // Its reconnect owns it from here; a rediscovery must not start a second attempt.
+    // No reconnect of a single older host exists yet: it stays unresolved, and a rediscovery must not start an attempt on it.
     assert!(!port.barrier().needs_attempt());
 }
 
@@ -646,6 +646,21 @@ async fn the_primary_slot_is_open_before_the_current_client_is_visible() {
         "what the table said at the moment the client was made visible"
     );
     assert_eq!(port.0.table.admission(HostChannel::Primary), Some(Admission::Open));
+}
+
+/// The same ordering for a frozen host: a keyed create for a session reserved on
+/// it sees the client the moment it is visible and must find a slot to take a
+/// ticket on, or it would be told the host is missing and retried.
+#[tokio::test(start_paused = true)]
+async fn a_frozen_slot_is_open_before_its_client_is_visible() {
+    let (_world, port) = machine(&[("h1", HostSpec::default())]);
+    ensure_hosts(&port).await.unwrap();
+    assert_eq!(
+        *port.0.frozen_admission_when_published.lock().unwrap(),
+        vec![Some(Admission::Open)],
+        "what the table said at the moment the frozen client was made visible"
+    );
+    assert_eq!(port.frozen_ids().len(), 1);
 }
 
 // ---- hosts that are gone ------------------------------------------------------

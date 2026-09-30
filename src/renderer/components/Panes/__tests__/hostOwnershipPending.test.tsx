@@ -148,13 +148,18 @@ test('user-created tab, UI split and API-created leaf never register restore int
 test('host-session-contended is a startup failure, not a host ownership wait', async () => {
   seed(activeStore);
   const create = jest.fn().mockRejectedValue(new Error('host-session-contended: already bound'));
-  activeService = useService(activeStore, apiFor(create));
+  const takeSessionHandoff = jest.fn().mockResolvedValue(null);
+  activeService = useService(activeStore, { ...apiFor(create), takeSessionHandoff });
   act(() => mount('tm-wait'));
   await flush();
+  // The few short asks for an offered session are not a host ownership wait.
+  expect(container.textContent).not.toContain('Waiting for terminal host');
+  await act(async () => { await jest.advanceTimersByTimeAsync(400); });
   expect(container.textContent).toContain('Failed to start shell');
   expect(container.textContent).not.toContain('Waiting for terminal host');
   await act(async () => { await jest.advanceTimersByTimeAsync(8000); });
   expect(create).toHaveBeenCalledTimes(1);
+  expect(takeSessionHandoff).toHaveBeenCalledTimes(3);
 });
 
 test('handleRestart surfaces a host-ownership-pending toast and never registers restart intent', async () => {
@@ -179,10 +184,13 @@ test('handleRestart surfaces a host-ownership-pending toast and never registers 
 
 // A host whose keyed creates park in flight (as the backend does at its barrier) until the
 // test releases them. The first release takes the session; a later one is refused as contended.
+// Hand-offs behave like the backend's: an offer needs a registered terminal, and a take is
+// single use and only honours an offer for the terminal still registered.
 function makeGatedHost() {
   const parked = new Map<string, () => void>();
   const frames: Array<{ webview: string; frame: string; leaf: string }> = [];
   let holder: string | undefined;
+  let offered: string | undefined;
   return {
     frames,
     createFor: (webview: string) => jest.fn((_p, _n, _c, id) => new Promise<string>((resolve, reject) => {
@@ -198,7 +206,16 @@ function makeGatedHost() {
     })),
     isParked: (webview: string) => parked.has(webview),
     release: (webview: string) => parked.get(webview)!(),
-    processIdForLeaf: jest.fn(async () => holder ?? null),
+    offerSessionHandoff: jest.fn(async (_leaf: string) => {
+      if (!holder) return false;
+      offered = holder;
+      return true;
+    }),
+    takeSessionHandoff: jest.fn(async (_leaf: string) => {
+      const taken = offered;
+      offered = undefined;
+      return taken && taken === holder ? taken : null;
+    }),
   };
 }
 
@@ -211,8 +228,9 @@ test.each([
   const tree = { id: 'pn-split', type: 'split' as const, direction: 'horizontal' as const, children: [leaf('tm-live'), leaf('tm-wait')] };
   seed(sourceStore, tree, 'tb-source');
   const host = makeGatedHost();
-  const sourceApi = { ...apiFor(host.createFor('source')), getProcessIdForLeaf: host.processIdForLeaf };
-  const destinationApi = { ...apiFor(host.createFor('destination')), getProcessIdForLeaf: host.processIdForLeaf };
+  const handoff = { offerSessionHandoff: host.offerSessionHandoff, takeSessionHandoff: host.takeSessionHandoff };
+  const sourceApi = { ...apiFor(host.createFor('source')), ...handoff };
+  const destinationApi = { ...apiFor(host.createFor('destination')), ...handoff };
   const sourceService = useService(sourceStore, sourceApi);
   const destinationService = useService(destinationStore, destinationApi);
   sourceService.registerExistingTerminal('tm-live', 'pc-live');

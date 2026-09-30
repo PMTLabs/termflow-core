@@ -248,16 +248,22 @@ pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Res
     Ok(())
 }
 
-/// The process that already carries this leaf's session, if one is registered.
-/// A pane moved to another window while its first create was still in flight
-/// loses that create to the window it left; the session is then registered under
-/// the leaf, and this is how the moved pane finds it instead of failing.
+/// A pane moved to another window while its first create was still in flight, and
+/// the window it left won that create. That window binds nothing and offers the
+/// terminal registered for the leaf to whichever window has the pane now.
+/// `false` (and no offer) when no terminal is registered for the leaf.
 #[tauri::command]
-pub fn process_id_for_leaf(
-    state: State<'_, AppState>,
-    leaf_id: String,
-) -> Result<Option<String>, String> {
-    Ok(state.identity.process_for_leaf(&leaf_id))
+pub fn offer_session_handoff(state: State<'_, AppState>, leaf_id: String) -> Result<bool, String> {
+    Ok(state.handoff_offers.offer(&state.identity, &leaf_id, std::time::Instant::now()))
+}
+
+/// The moved pane's own create was refused because the window it left won the
+/// session: take the terminal that window offered. Returns the process id and
+/// removes the offer in the same step, so only one window can ever adopt it;
+/// `None` when there is no live offer (or the registered terminal has changed).
+#[tauri::command]
+pub fn take_session_handoff(state: State<'_, AppState>, leaf_id: String) -> Result<Option<String>, String> {
+    Ok(state.handoff_offers.take(&state.identity, &leaf_id, std::time::Instant::now()))
 }
 
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane

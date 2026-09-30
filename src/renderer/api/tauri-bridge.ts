@@ -85,8 +85,10 @@ interface ElectronAPI {
   openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
   registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
   forgetRestoringLeaf: (leafId: string) => Promise<void>;
-  /// The process already registered for this leaf's session, or null.
-  getProcessIdForLeaf: (leafId: string) => Promise<string | null>;
+  /// Offer the terminal registered for this leaf to the window that has the pane now.
+  offerSessionHandoff: (leafId: string) => Promise<boolean>;
+  /// Take the offered terminal's process id (single use), or null when none is on offer.
+  takeSessionHandoff: (leafId: string) => Promise<string | null>;
   closeTerminal: (id: string) => Promise<void>;
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
   writeToTerminal: (id: string, data: string) => Promise<void>;
@@ -434,7 +436,8 @@ const tauriBridge: ElectronAPI = {
 
   registerRestoringLeaves: async (leaves) => invoke<void>('register_restoring_leaves', { leaves }),
   forgetRestoringLeaf: async (leafId) => invoke<void>('forget_restoring_leaf', { leafId }),
-  getProcessIdForLeaf: async (leafId) => invoke<string | null>('process_id_for_leaf', { leafId }),
+  offerSessionHandoff: async (leafId) => invoke<boolean>('offer_session_handoff', { leafId }),
+  takeSessionHandoff: async (leafId) => invoke<string | null>('take_session_handoff', { leafId }),
   closeTerminal: async (id) => {
     return invoke('close_terminal', { id });
   },

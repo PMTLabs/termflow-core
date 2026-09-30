@@ -630,6 +630,9 @@ pub struct AppState<R: Runtime = Wry> {
     /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
     /// type so it is unit-testable without a Tauri AppHandle.
     pub identity: crate::identity_index::IdentityIndex,
+    /// Shells a window created for a pane that had already moved away, waiting for
+    /// the window that has the pane to take them (single use, short TTL).
+    pub handoff_offers: crate::session_handoff::HandoffOffers,
     // Sessions the sidecar still held when we connected (survived a hot-swap),
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
@@ -778,6 +781,7 @@ impl<R: Runtime> Clone for AppState<R> {
             host_barrier: self.host_barrier.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
+            handoff_offers: self.handoff_offers.clone(),
             host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_released: self.host_restore_released.clone(),

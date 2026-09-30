@@ -114,12 +114,17 @@ fn pinned_or_legacy(cell: &OnceLock<HostPaths>, resolve_launch: impl FnOnce() ->
     paths_for(None)
 }
 
+const GENERATIONS_GATE_VAR: &str = "TERMFLOW_PTY_GENERATIONS";
+
 pub(super) fn pin_current_paths(generation: Option<&str>) {
-    pin_generation_paths(
-        &CURRENT_PATHS,
-        generation,
-        generations_enabled(std::env::var("TERMFLOW_PTY_GENERATIONS").ok().as_deref()),
-    );
+    pin_from_env(&CURRENT_PATHS, generation, |name| std::env::var(name).ok());
+}
+
+/// Pin `cell` for a launch with `generation`, reading the naming gate from `env`.
+/// The whole of `pin_current_paths` but the process-wide cell and the real
+/// environment, so the gate can be exercised without touching either.
+fn pin_from_env(cell: &OnceLock<HostPaths>, generation: Option<&str>, env: impl Fn(&str) -> Option<String>) {
+    pin_generation_paths(cell, generation, generations_enabled(env(GENERATIONS_GATE_VAR).as_deref()));
 }
 
 /// Pin the paths a launch with `generation` runs on; `naming_enabled` is the
@@ -215,6 +220,46 @@ mod tests {
         if let Some(record) = &pinned.record {
             assert!(record.to_string_lossy().contains(GEN), "{record:?}");
         }
+    }
+
+    /// What the process-wide pin would hold for a launch with a generation, given
+    /// the environment `vars` (only the named variables exist).
+    fn paths_pinned_from_env(vars: &[(&str, &str)]) -> HostPaths {
+        let cell = OnceLock::new();
+        pin_from_env(&cell, Some(GEN), |name| {
+            vars.iter().find(|(key, _)| *key == name).map(|(_, value)| value.to_string())
+        });
+        pinned_or_legacy(&cell, || false)
+    }
+
+    #[test]
+    fn the_production_pin_reads_the_gate_from_the_environment() {
+        let on = paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "1")]);
+        assert_eq!(on, paths_for(Some(GEN)));
+        for off in [
+            paths_pinned_from_env(&[]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "0")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "true")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATION", "1")]),
+        ] {
+            assert_eq!(off, paths_for(None));
+        }
+    }
+
+    /// `pin_current_paths` must do nothing but hand the process-wide cell and the
+    /// real environment to `pin_from_env`: any gate logic of its own would be
+    /// untested by the cases above.
+    #[test]
+    fn the_production_pin_is_only_the_delegation_the_gate_tests_drive() {
+        let source = include_str!("endpoints.rs");
+        let start = source.find("pub(super) fn pin_current_paths(").expect("pin_current_paths");
+        let end = source[start..].find("\n}").expect("end of pin_current_paths");
+        let body = &source[start..start + end];
+        let squeezed: String = body.split_whitespace().collect();
+        assert_eq!(
+            squeezed,
+            "pub(super)fnpin_current_paths(generation:Option<&str>){pin_from_env(&CURRENT_PATHS,generation,|name|std::env::var(name).ok());",
+        );
     }
 
     #[test]

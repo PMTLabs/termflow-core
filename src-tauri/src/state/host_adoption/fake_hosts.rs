@@ -276,6 +276,7 @@ pub(super) struct Inner {
     /// What the table said about the primary slot each time the current client
     /// was made visible.
     pub admission_when_published: Mutex<Vec<Option<crate::state::host_table::Admission>>>,
+    pub frozen_admission_when_published: Mutex<Vec<Option<crate::state::host_table::Admission>>>,
 }
 
 /// `AppState`'s stand-in: the same port, over a fake machine.
@@ -307,6 +308,7 @@ impl FakePort {
             disconnects: AtomicUsize::new(0),
             duplicates: Mutex::new(Vec::new()),
             admission_when_published: Mutex::new(Vec::new()),
+            frozen_admission_when_published: Mutex::new(Vec::new()),
         }))
     }
 
@@ -518,6 +520,7 @@ impl AdoptionPort for FakePort {
     }
 
     fn publish_frozen(&self, host: FrozenHost) {
+        self.0.frozen_admission_when_published.lock().unwrap().push(self.0.table.admission(HostChannel::Frozen(host.id)));
         self.0.frozen.lock().unwrap().push(host);
     }
 }

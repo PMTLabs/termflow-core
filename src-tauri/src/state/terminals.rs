@@ -272,6 +272,7 @@ impl<R: Runtime> AppState<R> {
             host_barrier: super::host_adoption::Barrier::new(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
+            handoff_offers: crate::session_handoff::HandoffOffers::new(),
             host_session_claims: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
             host_restore_released: Arc::new(AtomicBool::new(false)),

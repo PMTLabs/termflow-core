@@ -47,10 +47,16 @@ describe('tauriBridge restore intent contract', () => {
     expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-migrated' });
   });
 
-  it('looks a leaf up by the leaf identity, with a camelCase argument key', async () => {
-    invokeMock.mockResolvedValueOnce('pc-holder');
-    await expect(tauriBridge.getProcessIdForLeaf('tm-moved')).resolves.toBe('pc-holder');
-    expect(invokeMock).toHaveBeenCalledWith('process_id_for_leaf', { leafId: 'tm-moved' });
+  it('offers a session by the leaf identity, with a camelCase argument key', async () => {
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(tauriBridge.offerSessionHandoff('tm-moved')).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('offer_session_handoff', { leafId: 'tm-moved' });
+  });
+
+  it('takes an offered session by the leaf identity, with a camelCase argument key', async () => {
+    invokeMock.mockResolvedValueOnce('pc-offered');
+    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toBe('pc-offered');
+    expect(invokeMock).toHaveBeenCalledWith('take_session_handoff', { leafId: 'tm-moved' });
   });
 
   it('surfaces register failure instead of allowing an unkeyed mount', async () => {

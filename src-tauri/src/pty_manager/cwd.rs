@@ -196,6 +196,9 @@ mod tests {
     /// version, which is what this pins.
     #[test]
     fn process_cwd_with_a_shared_system_matches_the_owned_scan() {
+        // Both resolutions walk the foreground chain, from snapshots taken at different
+        // moments; a real-host test's child appearing between them would make them differ.
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let pid = std::process::id();
         let sys = System::new_all();
         assert_eq!(get_process_cwd_with(&sys, pid), get_process_cwd(pid));
