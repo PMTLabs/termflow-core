@@ -304,33 +304,20 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
                         .collect::<Vec<_>>()
                         .join(", ")
                 );
-                // Same translation as the recovery pass: `meta.tab_id` is a
-                // SESSION key and `host_terminals` is keyed by process id, so the
-                // ownership test below must go through this map. Comparing them
-                // directly makes every live pane look unowned, which queues it for
-                // adoption and lets a concurrent create re-adopt a LIVE session at
-                // offset 0 straight into its parser (review 007 F-1).
-                let owned_sessions = self.host_sessions_by_key(channel);
-                for meta in surviving {
-                    // A close that couldn't reach the host while the pipe was
-                    // down: deliver it now instead of re-adopting the session.
-                    if self.take_pending_close(&meta.tab_id, channel) {
-                        log::info!(
-                            "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
-                            meta.tab_id
-                        );
-                        client.close(&meta.tab_id);
-                        continue;
-                    }
-                    // Only sessions the GUI does NOT already own belong in the
-                    // adoption queue. During an in-place pipe-drop recovery the
-                    // live tabs are still registered; queueing them would let a
-                    // concurrent create re-adopt one at offset 0 straight into
-                    // its live parser (review 007 F-1).
-                    if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
-                        self.reserve_host_session(&meta.tab_id, meta.pid, channel);
-                    }
-                }
+                let duplicates = host_registry::apply_answered_listing(
+                    &host_registry::ListingMaps {
+                        host_terminals: &self.host_terminals,
+                        terminals: &self.terminals,
+                        host_session_claims: &self.host_session_claims,
+                        host_close_pending: &self.host_close_pending,
+                        closed_unowned: &self.closed_unowned,
+                    },
+                    channel,
+                    client,
+                    surviving,
+                    std::time::Instant::now(),
+                );
+                self.note_duplicate_sessions(&duplicates);
                 // Any remaining tombstone owed to this host names a session its
                 // (authoritative) list doesn't have — moot, drop them. Other
                 // hosts' tombstones are theirs to settle.

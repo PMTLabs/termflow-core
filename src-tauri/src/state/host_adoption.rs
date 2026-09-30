@@ -400,6 +400,7 @@ async fn adopt<P: AdoptionPort>(
                 client: client.clone(),
                 epoch,
                 build_id: opened.build_id,
+                advertised: candidate.mtime,
                 exe_in_payload: client.exe_in_payload(),
             });
             port.table().publish(channel, epoch);
@@ -561,3 +562,5 @@ async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
 mod fake_hosts;
 #[cfg(test)]
 mod adoption_tests;
+#[cfg(test)]
+mod routing_tests;

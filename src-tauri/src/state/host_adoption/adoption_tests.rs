@@ -640,12 +640,20 @@ fn no_ticket_for_input_resize_close() {
     }
 }
 
-/// The only code in the state module that takes a ticket today is adoption.
-/// (The create paths in the command layer take theirs with the router.)
+/// The only code in the state module that takes a ticket is adoption and the
+/// router, which takes one per create.
 #[test]
 fn only_adoption_takes_a_ticket_in_the_state_module() {
     let mut takers = Vec::new();
-    for file in ["terminals.rs", "host_port.rs", "host_connect.rs", "host_registry.rs", "host_adoption.rs", "types.rs"] {
+    for file in [
+        "terminals.rs",
+        "host_port.rs",
+        "host_connect.rs",
+        "host_registry.rs",
+        "host_adoption.rs",
+        "host_routing.rs",
+        "types.rs",
+    ] {
         let src = source_of(file);
         for needle in [".begin(", ".begin_adoption(", ".begin_as_quiescer("] {
             if src.contains(needle) {
@@ -653,7 +661,10 @@ fn only_adoption_takes_a_ticket_in_the_state_module() {
             }
         }
     }
-    assert_eq!(takers, vec!["host_adoption.rs: .begin_adoption(".to_string()]);
+    assert_eq!(
+        takers,
+        vec!["host_adoption.rs: .begin_adoption(".to_string(), "host_routing.rs: .begin(".to_string()]
+    );
 }
 
 // ---- registry ---------------------------------------------------------------

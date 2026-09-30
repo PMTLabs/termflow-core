@@ -212,6 +212,7 @@ fn frozen(id: u32, client: PtyHostClient) -> FrozenHost {
         client,
         epoch: 1,
         build_id: None,
+        advertised: std::time::SystemTime::UNIX_EPOCH,
         exe_in_payload: None,
     }
 }
@@ -412,4 +413,129 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
             );
         }
     }
+}
+
+// ---- restore intent by pane ---------------------------------------------------
+
+struct Intent {
+    restoring: DashMap<String, Instant>,
+    leaf_keys: DashMap<String, String>,
+    closed: DashMap<String, Instant>,
+    tables: Tables,
+}
+
+impl Intent {
+    fn new(entries: &[(&str, &str, HostChannel)]) -> Self {
+        Self {
+            restoring: DashMap::new(),
+            leaf_keys: DashMap::new(),
+            closed: DashMap::new(),
+            tables: tables(entries),
+        }
+    }
+
+    fn maps(&self) -> IntentMaps<'_> {
+        IntentMaps {
+            restoring_keys: &self.restoring,
+            restoring_leaf_keys: &self.leaf_keys,
+            closed_unowned: &self.closed,
+            host_terminals: &self.tables.host_terminals,
+            terminals: &self.tables.terminals,
+        }
+    }
+}
+
+/// The renderer names a closed pane by its leaf alone. A migrated pane waited
+/// under its old key, so the close has to land on that key: closing the leaf's
+/// own name would leave the real session to be surfaced as a recovered tab once
+/// the intent expires.
+#[test]
+fn closing_a_migrated_waiting_pane_marks_the_key_it_waited_under() {
+    let i = Intent::new(&[]);
+    let now = Instant::now();
+
+    assert!(register_restoring_leaf(&i.maps(), "tm-new", Some("tb-old"), now));
+    assert!(i.restoring.contains_key("tb-old") && !i.restoring.contains_key("tm-new"));
+
+    forget_restoring_leaf(&i.maps(), "tm-new", now);
+    assert!(i.closed.contains_key("tb-old"), "the session it waited for is the one to close");
+    assert!(!i.closed.contains_key("tm-new"));
+    assert!(i.restoring.is_empty() && i.leaf_keys.is_empty());
+
+    // A pane that waited under its own leaf is closed by that leaf.
+    assert!(register_restoring_leaf(&i.maps(), "tm-plain", None, now));
+    forget_restoring_leaf(&i.maps(), "tm-plain", now);
+    assert!(i.closed.contains_key("tm-plain") && i.restoring.is_empty());
+}
+
+/// Restoring a pane again supersedes an earlier close of it: otherwise the host
+/// resolving between registration and the pane's create would close the very
+/// session the pane is about to take.
+#[test]
+fn restoring_a_pane_again_supersedes_its_earlier_close() {
+    let i = Intent::new(&[]);
+    let now = Instant::now();
+    forget_restoring_leaf(&i.maps(), "tm-back", now);
+    assert!(unowned_close_due(&i.closed, false, "tm-back", now));
+
+    assert!(register_restoring_leaf(&i.maps(), "tm-back", None, now));
+    assert!(!unowned_close_due(&i.closed, false, "tm-back", now));
+    assert!(i.restoring.contains_key("tm-back"));
+
+    // A key that is live was never restored, so an earlier close of it stands.
+    let live = Intent::new(&[("pc-1", "tm-live", PRIMARY)]);
+    forget_restoring_leaf(&live.maps(), "tm-live", now);
+    assert!(!register_restoring_leaf(&live.maps(), "tm-live", None, now));
+    assert!(live.closed.contains_key("tm-live"));
+}
+
+#[test]
+fn leaf_keys_of_keys_nobody_waits_for_are_pruned() {
+    let i = Intent::new(&[]);
+    let now = Instant::now();
+    register_restoring_leaf(&i.maps(), "tm-a", Some("tb-a"), now);
+    register_restoring_leaf(&i.maps(), "tm-b", Some("tb-b"), now);
+    forget_restoring_key(&i.restoring, "tb-a", None); // bound
+
+    prune_restoring_leaf_keys(&i.leaf_keys, &i.restoring);
+    assert!(!i.leaf_keys.contains_key("tm-a"));
+    assert!(i.leaf_keys.contains_key("tm-b"));
+}
+
+#[test]
+fn a_pane_is_known_by_its_override_key_else_its_leaf() {
+    assert_eq!(effective_session_key("tm-leaf", None), "tm-leaf");
+    assert_eq!(effective_session_key("tm-leaf", Some("tb-old")), "tb-old");
+}
+
+#[test]
+fn orphan_verdict_separates_restoring_closed_and_stray_sessions() {
+    let i = Intent::new(&[]);
+    let now = Instant::now();
+    i.restoring.insert("tm-wait".into(), now);
+    i.closed.insert("tm-gone".into(), now);
+
+    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-wait", now), OrphanVerdict::Restoring);
+    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-gone", now), OrphanVerdict::CloseUnowned);
+    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-stray", now), OrphanVerdict::Surface);
+    // An intent nobody refreshed no longer hides a session.
+    let later = now + RESTORE_INTENT_TTL + Duration::from_secs(1);
+    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-wait", later), OrphanVerdict::Surface);
+}
+
+#[test]
+fn a_duplicate_session_is_announced_once() {
+    let flag = AtomicBool::new(false);
+    assert!(first_report(&flag));
+    assert!(!first_report(&flag));
+}
+
+#[test]
+fn only_a_reserved_claim_names_the_host_holding_a_session() {
+    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
+    assert_eq!(reserved_channel(&claims, "tm-a"), None);
+    reserve_session(&claims, "tm-a", 4, FROZEN_2);
+    assert_eq!(reserved_channel(&claims, "tm-a"), Some(FROZEN_2));
+    claim_registration(&claims, "tm-a", PRIMARY).unwrap();
+    assert_eq!(reserved_channel(&claims, "tm-a"), None, "a session already being taken over is not waiting");
 }

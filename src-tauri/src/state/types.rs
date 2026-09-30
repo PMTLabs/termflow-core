@@ -63,6 +63,10 @@ pub struct FrozenHost {
     /// can recognise itself as stale and do nothing.
     pub epoch: u64,
     pub build_id: Option<String>,
+    /// When the host's record was last written. Among older hosts, the most
+    /// recently advertised one is the preferred place for a new terminal when the
+    /// current host is unusable; a heuristic, not build chronology.
+    pub advertised: std::time::SystemTime,
     /// Whether the host process image lives inside the updater's payload, i.e.
     /// would not survive a payload swap. `None` is unknown.
     pub exe_in_payload: Option<bool>,
@@ -682,6 +686,12 @@ pub struct AppState<R: Runtime = Wry> {
     // registration on any channel exists for it, closes the session instead of
     // adopting it.
     pub closed_unowned: Arc<DashMap<String, std::time::Instant>>,
+    // Restored panes whose session key differs from their leaf (leaf -> key), so
+    // closing the pane by leaf can find the key it was waiting under.
+    pub restoring_leaf_keys: Arc<DashMap<String, String>>,
+    // Set once a session key was found registered on one host while another host
+    // also reported it, so the user is told about that only once.
+    pub duplicate_session_noticed: Arc<AtomicBool>,
     // Set true the moment a `webview_recovery` handler first claims a browser-
     // process death, and NEVER cleared: every window shares ONE WebView2
     // browser process, so one death fires N per-window `ProcessFailed`
@@ -779,6 +789,8 @@ impl<R: Runtime> Clone for AppState<R> {
             host_close_pending: self.host_close_pending.clone(),
             restoring_keys: self.restoring_keys.clone(),
             closed_unowned: self.closed_unowned.clone(),
+            restoring_leaf_keys: self.restoring_leaf_keys.clone(),
+            duplicate_session_noticed: self.duplicate_session_noticed.clone(),
             recovering: self.recovering.clone(),
             restart_in_flight: self.restart_in_flight.clone(),
             started_at: self.started_at.clone(),

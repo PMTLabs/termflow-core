@@ -13,9 +13,10 @@ use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::PtyHostClient;
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use termflow_pty_protocol::SessionMeta;
 
 /// How long a restore intent or an unowned close is remembered. Restore intent
 /// is refreshed by every keyed create, so this only reaps leaves nobody retries.
@@ -104,6 +105,18 @@ pub(super) fn release_unfinished_claim(
             }
         }
     }
+}
+
+/// The host that listed `session_key` and is waiting for a pane to take it over,
+/// when no pane has done so yet.
+pub(super) fn reserved_channel(
+    host_session_claims: &DashMap<String, HostSessionClaim>,
+    session_key: &str,
+) -> Option<HostChannel> {
+    host_session_claims
+        .get(session_key)
+        .filter(|claim| claim.state == HostSessionClaimState::Reserved)
+        .map(|claim| claim.channel)
 }
 
 // ---- session-key maps -----------------------------------------------------
@@ -317,6 +330,168 @@ pub(super) fn reap_expired_closed_unowned(closed_unowned: &DashMap<String, Insta
     for key in expired {
         forget_closed_unowned(closed_unowned, &key, Some(now));
     }
+}
+
+// ---- restore intent by pane ------------------------------------------------
+
+/// The name a pane's session has on the host: the key a migrated pane still
+/// carries, else its leaf. The one place the two are told apart.
+pub fn effective_session_key(leaf_id: &str, session_key: Option<&str>) -> String {
+    session_key.unwrap_or(leaf_id).to_string()
+}
+
+/// The maps restore intent lives in.
+pub(super) struct IntentMaps<'a> {
+    pub restoring_keys: &'a DashMap<String, Instant>,
+    pub restoring_leaf_keys: &'a DashMap<String, String>,
+    pub closed_unowned: &'a DashMap<String, Instant>,
+    pub host_terminals: &'a DashMap<String, HostChannel>,
+    pub terminals: &'a DashMap<String, Terminal>,
+}
+
+/// A persisted pane is about to mount: from now on a create for its session key
+/// is a restore and waits for the hosts. Returns whether intent was recorded (a
+/// key that is already live is not).
+pub(super) fn register_restoring_leaf(
+    maps: &IntentMaps,
+    leaf_id: &str,
+    session_key: Option<&str>,
+    now: Instant,
+) -> bool {
+    let key = effective_session_key(leaf_id, session_key);
+    if !register_restoring_key(maps.restoring_keys, maps.host_terminals, maps.terminals, &key, now) {
+        return false;
+    }
+    // The pane is being restored again, so an earlier close of it no longer
+    // stands: the session it waits for is wanted.
+    forget_closed_unowned(maps.closed_unowned, &key, None);
+    if key != leaf_id {
+        maps.restoring_leaf_keys.insert(leaf_id.to_string(), key);
+    }
+    true
+}
+
+/// The user closed a pane that never found its session. The renderer names the
+/// pane by leaf; the key it was waiting under may be a migrated one.
+pub(super) fn forget_restoring_leaf(maps: &IntentMaps, leaf_id: &str, now: Instant) {
+    let key = maps
+        .restoring_leaf_keys
+        .remove(leaf_id)
+        .map(|(_, key)| key)
+        .unwrap_or_else(|| leaf_id.to_string());
+    mark_closed_unowned(maps.restoring_keys, maps.closed_unowned, &key, now);
+}
+
+/// Forget which leaves waited under a key that is no longer waited for.
+pub(super) fn prune_restoring_leaf_keys(
+    restoring_leaf_keys: &DashMap<String, String>,
+    restoring_keys: &DashMap<String, Instant>,
+) {
+    restoring_leaf_keys.retain(|_, key| restoring_keys.contains_key(key));
+}
+
+// ---- what a host's listing does ---------------------------------------------
+
+/// The maps a host's answered listing is applied to.
+pub(super) struct ListingMaps<'a> {
+    pub host_terminals: &'a DashMap<String, HostChannel>,
+    pub terminals: &'a DashMap<String, Terminal>,
+    pub host_session_claims: &'a DashMap<String, HostSessionClaim>,
+    pub host_close_pending: &'a DashMap<String, HostChannel>,
+    pub closed_unowned: &'a DashMap<String, Instant>,
+}
+
+/// Settle the sessions `channel`'s host reported: deliver a close that was owed
+/// to it, close a session whose pane was closed before its host was known, and
+/// reserve the rest for the pane that will claim them. Returns the keys the host
+/// reported that are already registered on a different host: two hosts holding
+/// one session must be reported, but nothing is killed for it.
+pub(super) fn apply_answered_listing(
+    maps: &ListingMaps,
+    channel: HostChannel,
+    client: &PtyHostClient,
+    surviving: &[SessionMeta],
+    now: Instant,
+) -> Vec<String> {
+    // `meta.tab_id` is a SESSION key and `host_terminals` is keyed by process
+    // id, so the ownership test below must go through this map. Comparing them
+    // directly makes every live pane look unowned, which queues it for adoption
+    // and lets a concurrent create re-adopt a LIVE session at offset 0 straight
+    // into its parser.
+    let owned_sessions = sessions_by_key(maps.host_terminals, maps.terminals, channel);
+    let mut duplicates = Vec::new();
+    for meta in surviving {
+        // A close that couldn't reach the host while the pipe was down: deliver
+        // it now instead of re-adopting the session.
+        if take_pending_close(maps.host_close_pending, &meta.tab_id, channel) {
+            log::info!(
+                "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
+                meta.tab_id
+            );
+            client.close(&meta.tab_id);
+            continue;
+        }
+        let registered = session_registered_on_any_channel(maps.host_terminals, maps.terminals, &meta.tab_id);
+        if unowned_close_due(maps.closed_unowned, registered, &meta.tab_id, now) {
+            log::info!(
+                "[HOTSWAP] closing {}: its pane was closed before its host was known",
+                meta.tab_id
+            );
+            client.close(&meta.tab_id);
+            continue;
+        }
+        // Only sessions the GUI does NOT already own belong in the adoption
+        // queue. During an in-place pipe-drop recovery the live tabs are still
+        // registered; queueing them would let a concurrent create re-adopt one
+        // at offset 0 straight into its live parser.
+        if !meta.alive || owned_sessions.contains_key(&meta.tab_id) {
+            continue;
+        }
+        if registered {
+            log::error!(
+                "[HOTSWAP] host {channel:?} reports {} which is already registered on another host; \
+                 leaving both alone",
+                meta.tab_id
+            );
+            duplicates.push(meta.tab_id.clone());
+            continue;
+        }
+        reserve_session(maps.host_session_claims, &meta.tab_id, meta.pid, channel);
+    }
+    duplicates
+}
+
+/// What to do with a live session that no pane claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OrphanVerdict {
+    /// Offer it to the user as a recovered terminal.
+    Surface,
+    /// A restored pane is still waiting for it; surfacing it would put a second
+    /// owner on its session.
+    Restoring,
+    /// Its pane was closed before its host was known.
+    CloseUnowned,
+}
+
+/// Decide for a live session with no registration on any channel.
+pub(super) fn orphan_verdict(
+    restoring_keys: &DashMap<String, Instant>,
+    closed_unowned: &DashMap<String, Instant>,
+    session_key: &str,
+    now: Instant,
+) -> OrphanVerdict {
+    if unowned_close_due(closed_unowned, false, session_key, now) {
+        OrphanVerdict::CloseUnowned
+    } else if is_restoring_key(restoring_keys, session_key, now) {
+        OrphanVerdict::Restoring
+    } else {
+        OrphanVerdict::Surface
+    }
+}
+
+/// True for the first caller only: a notice that must be raised once.
+pub(super) fn first_report(reported: &AtomicBool) -> bool {
+    !reported.swap(true, Ordering::AcqRel)
 }
 
 #[cfg(test)]

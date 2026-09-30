@@ -283,6 +283,8 @@ impl<R: Runtime> AppState<R> {
             host_close_pending: Arc::new(DashMap::new()),
             restoring_keys: Arc::new(DashMap::new()),
             closed_unowned: Arc::new(DashMap::new()),
+            restoring_leaf_keys: Arc::new(DashMap::new()),
+            duplicate_session_noticed: Arc::new(AtomicBool::new(false)),
             recovering: Arc::new(AtomicBool::new(false)),
             restart_in_flight: Arc::new(AtomicBool::new(false)),
             started_at: Arc::new(std::time::Instant::now()),
@@ -1036,6 +1038,30 @@ impl<R: Runtime> AppState<R> {
             // must see EVERY channel: the registration that raced the listing
             // may have landed on a different host than the one that listed it.
             if !session_needs_surface(self.session_registered_on_any_channel(&orphan.tab_id)) { continue; }
+            // Not registered yet does not mean unwanted. A pane restored from a
+            // saved layout may still be waiting for this very session (its create
+            // is retrying while a host answers), and turning the session into a
+            // recovered tab would put a second owner on it. A session whose pane
+            // the user closed while waiting is closed rather than shown.
+            match host_registry::orphan_verdict(
+                &self.restoring_keys,
+                &self.closed_unowned,
+                &orphan.tab_id,
+                std::time::Instant::now(),
+            ) {
+                host_registry::OrphanVerdict::Surface => {}
+                host_registry::OrphanVerdict::Restoring => {
+                    log::info!("[HOTSWAP] {} is held for a restored pane that is still waiting; not surfacing it", orphan.tab_id);
+                    continue;
+                }
+                host_registry::OrphanVerdict::CloseUnowned => {
+                    log::info!("[HOTSWAP] closing {}: its pane was closed before its host was known", orphan.tab_id);
+                    if let Some(client) = self.client_for_channel(channel) {
+                        client.close(&orphan.tab_id);
+                    }
+                    continue;
+                }
+            }
             // This emission carries the authoritative PID from the host listing.
             // Reserve it so a recovery create can never degrade into a fresh spawn
             // merely because the reservation was absent.
@@ -1119,6 +1145,16 @@ impl<R: Runtime> AppState<R> {
         host_registry::frozen_client(&self.frozen_hosts, id)
     }
 
+    fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
+        host_registry::IntentMaps {
+            restoring_keys: &self.restoring_keys,
+            restoring_leaf_keys: &self.restoring_leaf_keys,
+            closed_unowned: &self.closed_unowned,
+            host_terminals: &self.host_terminals,
+            terminals: &self.terminals,
+        }
+    }
+
     /// Record that the pane owning this key is being restored and must wait
     /// for its host. Skips a key that already has a live registration.
     pub fn register_restoring_key(&self, session_key: &str) -> bool {
@@ -1129,6 +1165,26 @@ impl<R: Runtime> AppState<R> {
             session_key,
             std::time::Instant::now(),
         )
+    }
+
+    /// A persisted pane is about to mount: its session key (`session_key` if it
+    /// has a migrated one, else its leaf) is a restore from now on.
+    pub fn register_restoring_leaf(&self, leaf_id: &str, session_key: Option<&str>) -> bool {
+        host_registry::register_restoring_leaf(&self.intent_maps(), leaf_id, session_key, std::time::Instant::now())
+    }
+
+    /// The user closed a restored pane that never found its session.
+    pub fn forget_restoring_leaf(&self, leaf_id: &str) {
+        host_registry::forget_restoring_leaf(&self.intent_maps(), leaf_id, std::time::Instant::now())
+    }
+
+    /// Log and announce, once, sessions that two hosts both claim to hold.
+    pub(super) fn note_duplicate_sessions(&self, session_keys: &[String]) {
+        use tauri::Emitter;
+        if session_keys.is_empty() || !host_registry::first_report(&self.duplicate_session_noticed) {
+            return;
+        }
+        let _ = self.app_handle.emit("pty-host:duplicate-session", serde_json::json!({ "sessionKeys": session_keys }));
     }
 
     /// Extend a restore intent's life; every keyed create calls this.
@@ -1178,6 +1234,7 @@ impl<R: Runtime> AppState<R> {
         let now = std::time::Instant::now();
         host_registry::reap_expired_restoring_keys(&self.restoring_keys, now);
         host_registry::reap_expired_closed_unowned(&self.closed_unowned, now);
+        host_registry::prune_restoring_leaf_keys(&self.restoring_leaf_keys, &self.restoring_keys);
     }
 
     /// Normalise any caller-supplied terminal reference to this run's map key.

@@ -4,7 +4,8 @@
 
 use super::*;
 use crate::pty_host_client::{wire_client, PtyHostDeps};
-use crate::state::types::{HostSessionClaim, FrozenHost};
+use crate::state::host_routing::RoutingPort;
+use crate::state::types::{FrozenHost, HostSessionClaim, Terminal};
 use crate::state::{host_registry, ChannelPayload};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -56,7 +57,21 @@ impl Recorded {
             Frame::Ctrl(Control::Attach { .. } | Control::AttachAcked { .. }) => "Attach",
             Frame::Ctrl(Control::ArmDetach { .. }) => "Arm",
             Frame::Ctrl(Control::Shutdown { .. }) => "Shutdown",
+            Frame::Ctrl(Control::Close { .. }) => "Close",
             _ => "Other",
+        }
+    }
+
+    /// The session a session-addressed frame is about.
+    pub fn session(&self) -> Option<&str> {
+        match &self.frame {
+            Frame::Ctrl(
+                Control::Spawn { tab_id, .. }
+                | Control::Attach { tab_id, .. }
+                | Control::AttachAcked { tab_id, .. }
+                | Control::Close { tab_id },
+            ) => Some(tab_id),
+            _ => None,
         }
     }
 }
@@ -124,6 +139,17 @@ impl World {
 
     pub fn kinds(&self, host: &str) -> Vec<&'static str> {
         self.frames(host).into_iter().map(|(_, k)| k).collect()
+    }
+
+    /// The sessions `host` received a `kind` frame for, in order.
+    pub fn sessions(&self, host: &str, kind: &str) -> Vec<String> {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.host == host && r.kind() == kind)
+            .filter_map(|r| r.session().map(str::to_owned))
+            .collect()
     }
 
     pub fn count(&self, host: &str, kind: &str) -> usize {
@@ -215,12 +241,19 @@ pub(super) struct Inner {
     frozen: Mutex<Vec<FrozenHost>>,
     next_id: AtomicU32,
     pub claims: Arc<DashMap<String, HostSessionClaim>>,
+    pub restoring_keys: DashMap<String, std::time::Instant>,
+    pub restoring_leaf_keys: DashMap<String, String>,
+    pub closed_unowned: DashMap<String, std::time::Instant>,
+    pub host_close_pending: DashMap<String, HostChannel>,
+    pub host_terminals: DashMap<String, HostChannel>,
+    pub terminals: DashMap<String, Terminal>,
     pub discovers: AtomicUsize,
     /// Every `connect` the port was asked to make.
     pub connects: Mutex<Vec<(String, HostRole)>>,
     /// Every listing applied: the channel and how many sessions (`None` = unanswered).
     pub listings: Mutex<Vec<(HostChannel, Option<usize>)>>,
     pub disconnects: AtomicUsize,
+    pub duplicates: Mutex<Vec<String>>,
 }
 
 /// `AppState`'s stand-in: the same port, over a fake machine.
@@ -240,10 +273,17 @@ impl FakePort {
             frozen: Mutex::new(Vec::new()),
             next_id: AtomicU32::new(1),
             claims: Arc::new(DashMap::new()),
+            restoring_keys: DashMap::new(),
+            restoring_leaf_keys: DashMap::new(),
+            closed_unowned: DashMap::new(),
+            host_close_pending: DashMap::new(),
+            host_terminals: DashMap::new(),
+            terminals: DashMap::new(),
             discovers: AtomicUsize::new(0),
             connects: Mutex::new(Vec::new()),
             listings: Mutex::new(Vec::new()),
             disconnects: AtomicUsize::new(0),
+            duplicates: Mutex::new(Vec::new()),
         }))
     }
 
@@ -269,6 +309,47 @@ impl FakePort {
             HostChannel::Frozen(id) => self.0.frozen.lock().unwrap().iter().find(|h| h.id == id).map(|h| h.client.clone()),
             _ => self.current_client(),
         }
+    }
+
+    /// A pane is registered for `session_key` on `channel`, as after a create.
+    pub fn register_terminal(&self, process_id: &str, session_key: &str, channel: HostChannel) {
+        self.0.host_terminals.insert(process_id.to_owned(), channel);
+        self.0.terminals.insert(
+            process_id.to_owned(),
+            Terminal {
+                id: process_id.to_owned(),
+                pid: 0,
+                shell: "test".to_owned(),
+                name: "Terminal-test".to_owned(),
+                created_at: String::new(),
+                cols: 80,
+                rows: 24,
+                backend: crate::tmux_manager::TerminalBackend::PortablePty,
+                renderer_terminal_id: Some(session_key.to_owned()),
+                owning_tab_id: None,
+                session_key: session_key.to_owned(),
+                last_input_source: None,
+                last_input_at: None,
+                prompt_hook: false,
+                display_label: None,
+                title_color: None,
+            },
+        );
+    }
+
+    pub fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
+        host_registry::IntentMaps {
+            restoring_keys: &self.0.restoring_keys,
+            restoring_leaf_keys: &self.0.restoring_leaf_keys,
+            closed_unowned: &self.0.closed_unowned,
+            host_terminals: &self.0.host_terminals,
+            terminals: &self.0.terminals,
+        }
+    }
+
+    /// Duplicate keys reported by the listings applied so far.
+    pub fn duplicates(&self) -> Vec<String> {
+        self.0.duplicates.lock().unwrap().clone()
     }
 
     pub fn connect_count(&self, endpoint: &str) -> usize {
@@ -377,13 +458,24 @@ impl AdoptionPort for FakePort {
         Ok(Opened { client, epoch, build_id: None })
     }
 
-    fn apply_listing(&self, channel: HostChannel, _client: &PtyHostClient, sessions: Option<&[SessionMeta]>) {
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&[SessionMeta]>) {
         self.0.listings.lock().unwrap().push((channel, sessions.map(<[_]>::len)));
-        for meta in sessions.unwrap_or_default() {
-            if meta.alive {
-                host_registry::reserve_session(&self.0.claims, &meta.tab_id, meta.pid, channel);
-            }
-        }
+        let Some(sessions) = sessions else { return };
+        let duplicates = host_registry::apply_answered_listing(
+            &host_registry::ListingMaps {
+                host_terminals: &self.0.host_terminals,
+                terminals: &self.0.terminals,
+                host_session_claims: &self.0.claims,
+                host_close_pending: &self.0.host_close_pending,
+                closed_unowned: &self.0.closed_unowned,
+            },
+            channel,
+            client,
+            sessions,
+            std::time::Instant::now(),
+        );
+        self.0.duplicates.lock().unwrap().extend(duplicates);
+        host_registry::prune_pending_closes(&self.0.host_close_pending, channel);
     }
 
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String> {
@@ -397,5 +489,19 @@ impl AdoptionPort for FakePort {
 
     fn publish_frozen(&self, host: FrozenHost) {
         self.0.frozen.lock().unwrap().push(host);
+    }
+}
+
+impl RoutingPort for FakePort {
+    fn claims(&self) -> &Arc<DashMap<String, HostSessionClaim>> {
+        &self.0.claims
+    }
+
+    fn restoring_keys(&self) -> &DashMap<String, std::time::Instant> {
+        &self.0.restoring_keys
+    }
+
+    fn closed_unowned(&self) -> &DashMap<String, std::time::Instant> {
+        &self.0.closed_unowned
     }
 }
