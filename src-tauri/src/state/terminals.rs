@@ -268,6 +268,8 @@ impl<R: Runtime> AppState<R> {
             host_terminals: Arc::new(DashMap::new()),
             frozen_hosts: Arc::new(Mutex::new(Vec::new())),
             frozen_host_seq: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            host_table: super::host_table::HostTable::new(),
+            host_barrier: super::host_adoption::Barrier::new(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
             host_session_claims: Arc::new(DashMap::new()),
@@ -585,9 +587,10 @@ impl<R: Runtime> AppState<R> {
         });
     }
 
-    /// Lazily connect (spawning if needed) the PTY-host sidecar client, wiring
-    /// its inbound Stdout into the existing output broadcast and its Exit/Gap
-    /// into cleanup+emit / repaint. Idempotent.
+    /// Lazily connect (spawning if needed) the current PTY-host sidecar client,
+    /// wiring its inbound Stdout into the existing output broadcast and its
+    /// Exit/Gap into cleanup+emit / repaint, and adopt every surviving host of an
+    /// older generation beside it (`host_adoption`). Idempotent.
     ///
     /// Boxed: the on_disconnect closure built inside spawns a task that
     /// re-enters this function (reconnect_after_pipe_drop), which with an
@@ -597,296 +600,24 @@ impl<R: Runtime> AppState<R> {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
     {
-        Box::pin(self.ensure_pty_host_inner())
+        Box::pin(super::host_adoption::ensure_hosts(self))
     }
 
-    async fn ensure_pty_host_inner(&self) -> Result<(), String> {
-        {
-            if self.pty_host_client().is_some() {
-                return Ok(());
-            }
-        }
-        // Single-flight: serialize concurrent connect attempts (multi-pane
-        // startup) so the sidecar is connected exactly once.
-        let _connect_guard = self.pty_host_connecting.lock().await;
-        // Re-check under the guard — a prior holder may have connected already.
-        {
-            if self.pty_host_client().is_some() {
-                return Ok(());
-            }
-        }
-        // RP-1: install the host into the update-stable runtime dir and run it
-        // from there (outside the swapped app payload) so it survives an update.
-        let launch = crate::pty_host_client::resolve_host_launch().ok_or_else(|| {
-            "pty-host sidecar executable could not be resolved (set TERMFLOW_PTY_HOST_BIN)".to_string()
-        })?;
-        let sidecar = launch.path;
-        let pipe = crate::pty_host_client::resolve_pipe();
-        let token = crate::pty_host_client::resolve_token();
-
-        // RP-2 discovery: read a running host's advertisement (if any) BEFORE
-        // touching the wire, so we never speak an incompatible protocol at it and
-        // never force-kill sessions we can't control (design 003 §10.3, C3).
-        // No record ⇒ legacy host (or none) on the well-known pipe — v1 as today.
-        let record = crate::pty_host_client::record_path()
-            .and_then(|p| match termflow_pty_protocol::read_record(&p) {
-                Ok(r) => r,
-                Err(e) => {
-                    log::warn!("[HOTSWAP] unreadable host discovery record ({e}); treating as legacy");
-                    None
-                }
-            });
-        // Advertised host pid (if any): connect_or_spawn refuses to spawn a
-        // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
-        let record_pid = record.as_ref().map(|r| r.pid);
-        match crate::pty_host_client::host_build_disposition(record.as_ref(), launch.build_id.as_deref()) {
-            crate::pty_host_client::HostBuildDisposition::Current => {}
-            crate::pty_host_client::HostBuildDisposition::Stale { observed, expected } => log::warn!(
-                "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
-            ),
-            crate::pty_host_client::HostBuildDisposition::Unknown => log::warn!(
-                "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow"
-            ),
-        }
-        let connect_plan = crate::pty_host_client::plan_connection(record);
-        // `shutdown_control` decides whether Exit ANNOUNCES itself to the host
-        // (`Control::Shutdown`). The failure modes are asymmetric: announcing
-        // to a legacy host costs one undecodable frame, which drops the
-        // connection — teardown, for a legacy host — plus a bounded ack wait;
-        // NOT announcing to a host that needed it leaves every shell held for
-        // its retention window after the user pressed Exit. So this is false
-        // only when a record POSITIVELY says the host lacks the capability:
-        // no record (legacy, or a record lost after the host started) and a
-        // host we spawned ourselves (this build's bundled sidecar, installed
-        // under its own content hash by `resolve_host_launch`) both announce.
-        let (pipe, attach_acks, shutdown_control) = match &connect_plan {
-            crate::pty_host_client::ConnectPlan::LegacyOrNone => {
-                log::info!("[HOTSWAP] no host discovery record — legacy/none; using well-known pipe");
-                (pipe, false, true)
-            }
-            crate::pty_host_client::ConnectPlan::Bootstrap {
-                endpoint,
-                version,
-                instance_id,
-                host_caps,
-                lifecycle: _,
-            } => {
-                let acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
-                let shutdown_control =
-                    host_caps & termflow_pty_protocol::CAP_SHUTDOWN_CONTROL != 0;
-                log::info!(
-                    "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
-                     caps={host_caps:#x} endpoint={endpoint} (attach_acks={acks}, \
-                     shutdown_control={shutdown_control})"
-                );
-                (endpoint.clone(), acks, shutdown_control)
-            }
-            crate::pty_host_client::ConnectPlan::Incompatible { instance_id } => {
-                // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
-                // sidecar path; panes fall back in-process and the running host
-                // keeps serving its (old-app) sessions untouched.
-                log::error!(
-                    "[HOTSWAP] running host instance={instance_id:x} shares no protocol \
-                     version with this app — leaving its sessions untouched"
-                );
-                return Err(
-                    "a PTY host from another TermFlow version owns your terminals; \
-                     close them there or wait for it to drain before new host-owned terminals"
-                        .to_string(),
-                );
-            }
-        };
-
-        // Generation for this connection: on_disconnect only nulls `pty_host` if
-        // its generation is still current (a dead old client can't clobber a new).
-        let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
-
-        let st_exit = self.clone();
-        let st_gap = self.clone();
-        let st_disc = self.clone();
-        let deps = crate::pty_host_client::PtyHostDeps {
-            lifecycle_token: token.clone(),
-            output_tx: self.output_tx.clone(),
-            output_produced: self.output_produced.clone(),
-            on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
-                use tauri::Emitter;
-                // Mirror the in-process reader's exit path: capture cwd (from the
-                // sidecar or our own OSC tracking), clean up, notify the UI.
-                let cwd = exit_cwd
-                    .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
-                // Persist the final parser state BEFORE cleanup discards it — the
-                // periodic flush only runs every 30s, so without this the session's
-                // last moments never reach the history store. Takes the PROCESS id
-                // and derives the history key from the terminal's leaf itself.
-                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
-                st_exit.forget_host_terminal(&process_id);
-                // Ring bookkeeping is keyed by the SESSION, not the process: it is
-                // the host's own offset and lives in the host's id space.
-                st_exit.host_stream_offsets.remove(&session_key);
-                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
-                // Drop the identity lookups LAST among the removals but before the
-                // emit — a leaked entry would route a later terminal's output at a
-                // process id that no longer exists.
-                st_exit.identity.unindex(&process_id);
-                st_exit.cleanup_terminal_state(&process_id);
-                let _ = st_exit.app_handle.emit(
-                    "terminal:exit",
-                    serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
-                );
-                // Same as the in-process path: release the app window if a dialog
-                // this shell owned took it down with it (see console_window).
-                crate::console_window::unstick_all(&st_exit.app_handle);
-            }),
-            on_gap: Arc::new(move |process_id: String| {
-                st_gap.host_repaint(&process_id);
-            }),
-            // Session key -> process id. The host speaks its own id space; every
-            // inbound frame is translated here before it reaches our maps
-            // (design 014 §A3). An unknown session is DROPPED, never echoed.
-            resolve_process: {
-                let st = self.clone();
-                Arc::new(move |k: &str| st.identity.process_for_session(k))
-            },
-            on_disconnect: Arc::new(move || {
-                // Only act if THIS connection is still the current one — a stale
-                // old client's disconnect must not clobber a reconnected client.
-                if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
-                    return;
-                }
-                // Pipe died (sleep/wake, sidecar crash, …). Do NOT tear the
-                // sessions down here: the host may be alive and holding every
-                // shell (it Holds while armed / children live). Drop the dead
-                // client, then reconnect-first; only sessions the host no longer
-                // has — or a failed reconnect — are torn down.
-                log::warn!(
-                    "[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect"
-                );
-                *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                // The Settings Updates panel caches an offload verdict that is a
-                // function of this connection; tell it the answer changed.
-                {
-                    use tauri::Emitter;
-                    let _ = st_disc.app_handle.emit("pty-host:disconnected", ());
-                }
-                let st = st_disc.clone();
-                tauri::async_runtime::spawn(async move {
-                    st.reconnect_after_pipe_drop().await;
-                });
-            }),
-            stream_offsets: self.host_stream_offsets.clone(),
-        };
-
-        let (mut client, origin) =
-            crate::pty_host_client::connect_or_spawn(&sidecar, launch.build_id.as_deref(), &pipe, &token, record_pid, deps)
-                .await
-                .map_err(|e| e.to_string())?;
-        client.set_attach_acks(attach_acks);
-        client.set_shutdown_control(
-            shutdown_control || origin == crate::pty_host_client::HostConnectionOrigin::SpawnedHere,
-        );
-        client.set_lifecycle(connect_plan.retention_for(origin));
-        // Record sessions that survived a hot-swap (tab_id -> pid) so
-        // create_host_terminal reattaches instead of respawning. `None` means
-        // the host did not answer — treat as unknown, never as empty.
-        // The host this listing speaks for. Its answer settles only the closes
-        // owed to it and is compared only against the sessions it owns.
-        let listing_channel = HostChannel::Primary;
-        match client.list_sessions().await {
-            None => log::warn!(
-                "[HOTSWAP] host did not answer ListSessions during connect; \
-                 adoption queue left unchanged"
-            ),
-            Some(surviving) if surviving.is_empty() => {
-                log::info!("[HOTSWAP] host reports no surviving sessions (fresh host or clean start)");
-                // Authoritative for THIS host: nothing left for it to close.
-                self.prune_pending_closes(listing_channel);
-            }
-            Some(surviving) => {
-                log::info!(
-                    "[HOTSWAP] host holds {} surviving session(s): {}",
-                    surviving.len(),
-                    surviving
-                        .iter()
-                        .map(|m| format!("{}(pid {}, alive={})", m.tab_id, m.pid, m.alive))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                // Same translation as the recovery pass: `meta.tab_id` is a
-                // SESSION key and `host_terminals` is keyed by process id, so the
-                // ownership test below must go through this map. Comparing them
-                // directly makes every live pane look unowned, which queues it for
-                // adoption and lets a concurrent create re-adopt a LIVE session at
-                // offset 0 straight into its parser (review 007 F-1).
-                let owned_sessions = self.host_sessions_by_key(listing_channel);
-                for meta in &surviving {
-                    // A close that couldn't reach the host while the pipe was
-                    // down: deliver it now instead of re-adopting the session.
-                    if self.take_pending_close(&meta.tab_id, listing_channel) {
-                        log::info!(
-                            "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
-                            meta.tab_id
-                        );
-                        client.close(&meta.tab_id);
-                        continue;
-                    }
-                    // Only sessions the GUI does NOT already own belong in the
-                    // adoption queue. During an in-place pipe-drop recovery the
-                    // live tabs are still registered; queueing them would let a
-                    // concurrent create re-adopt one at offset 0 straight into
-                    // its live parser (review 007 F-1).
-                    if meta.alive && !owned_sessions.contains_key(&meta.tab_id) {
-                        self.reserve_host_session(&meta.tab_id, meta.pid, listing_channel);
-                    }
-                }
-                // Any remaining tombstone owed to this host names a session its
-                // (authoritative) list doesn't have — moot, drop them. Other
-                // hosts' tombstones are theirs to settle.
-                self.prune_pending_closes(listing_channel);
-            }
-        }
-        // Never leave a client published whose pipe dropped during setup — its
-        // on_disconnect fired while `pty_host` was still None, so nothing else
-        // would ever null it and every caller would hold a dead client forever
-        // (review 007 C-1b). Publish FIRST, then re-check: if the drop raced
-        // in between, we null our own publication; if it fires later, the
-        // normal generation-guarded on_disconnect nulls it.
-        *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = Some(client.clone());
-        if !client.is_alive() {
-            *self.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            return Err("pty-host connection lost during setup".to_string());
-        }
-        // Connecting is LAZY (the first host terminal gets here) and the Settings
-        // Updates panel caches `hotswap_available`, so a Settings tab restored
-        // onto Updates sampled "pty-host not connected — nothing to keep alive"
-        // at mount — seconds before the reattach — and kept Offload disabled for
-        // as long as the panel stayed open. Every window re-samples on this.
-        {
-            use tauri::Emitter;
-            let _ = self.app_handle.emit("pty-host:connected", ());
-        }
-        // A host reaches here armed for one of two reasons: our OWN prior
-        // launch armed it before an update/offload exit (`updater.rs`), or a
-        // SIBLING's update armed it as a precaution (`hotswap_arm`). Either
-        // way, the reason to stay armed while GUI-less ends the moment a live
-        // GUI is connected and has adopted whatever it holds — nothing else
-        // ever clears `armed_deadline` on the success path, so without this a
-        // later completely normal quit sees the stale arm and Holds instead
-        // of tearing down, and the NEXT launch reattaches a session the user
-        // already asked to end. Idempotent: a no-op against an unarmed host.
-        if !client.disarm().await {
-            // Not fatal: the sidecar now also spends the arm on our first frame,
-            // and the quit path disarms again. Worth saying out loud, because a
-            // silent failure here used to be the whole defect.
-            log::warn!("[HOTSWAP] adopted host did not acknowledge the disarm");
-        }
-        Ok(())
+    /// Re-run adoption for surviving hosts that were skipped, busy or never
+    /// answered, whether or not the current host is up. Boxed like
+    /// `ensure_pty_host`, and for the same reason.
+    pub fn rediscover_hosts(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(super::host_adoption::rediscover_hosts(self))
     }
 
     /// Lazily connect the elevated sidecar (plan 045), launching it via UAC on
     /// first use. Idempotent and single-flighted so two concurrent "Open admin
     /// Tab" clicks produce exactly one UAC prompt (`ElevatedHost::connecting`
     /// mirrors `pty_host_connecting`). Deliberately far simpler than
-    /// `ensure_pty_host_inner`: no discovery record, no adoption, no
+    /// `ensure_pty_host`: no discovery record, no adoption, no
     /// `list_sessions` — the elevated sidecar is always freshly launched, never
     /// a survivor from a prior run.
     ///
@@ -1918,7 +1649,7 @@ mod host_terminal_removal_source_tests {
 /// it, so a completely normal quit LATER — after the user reopened, saw a
 /// correct reattach, and simply chose Exit — still Holds instead of tearing
 /// down, and the next launch reattaches a session the user already ended.
-/// Asserted from source: `ensure_pty_host_inner` needs a live pty-host over a
+/// Asserted from source: host adoption needs a live pty-host over a
 /// real pipe/socket to exercise for real, which a unit-test process can't
 /// stand up (the `integration-tests` feature `mock_app` needs breaks the
 /// Windows test binary).
@@ -1948,7 +1679,7 @@ mod arm_lifecycle_wiring_tests {
     }
 
     fn source() -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("state").join("terminals.rs");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("state").join("host_adoption.rs");
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display()))
             .replace("\r\n", "\n")
@@ -1959,12 +1690,21 @@ mod arm_lifecycle_wiring_tests {
     /// adopted its sessions and the GUI-less hold is no longer needed.
     #[test]
     fn a_successful_connect_disarms_the_host_it_adopted() {
-        let body = fn_body(&source(), "async fn ensure_pty_host_inner");
+        let source = source();
+        let settle = fn_body(&source, "async fn settle");
         assert!(
-            body.contains("client.disarm()"),
-            "ensure_pty_host_inner must disarm the host once connected — \
-             otherwise an arm from a past update/offload outlives the update \
-             it was for. Body:\n{body}"
+            settle.contains("client.disarm()"),
+            "adoption must disarm the host once connected — \
+            otherwise an arm from a past update/offload outlives the update \
+            it was for. Body:\n{settle}"
+        );
+        // Both ways a host reaches the application — newly connected, or already
+        // connected and only re-listed — go through it.
+        let adopt = fn_body(&source, "async fn adopt<");
+        assert_eq!(
+            adopt.matches("settle(&client, deadline)").count(),
+            2,
+            "adopt must disarm-then-list a host on both the connect and the re-list path"
         );
     }
 }

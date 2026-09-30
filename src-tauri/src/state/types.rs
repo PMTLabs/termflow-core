@@ -614,6 +614,11 @@ pub struct AppState<R: Runtime = Wry> {
     pub frozen_hosts: Arc<std::sync::Mutex<Vec<FrozenHost>>>,
     /// Source of `FrozenId`s; ids are never reused within a run.
     pub frozen_host_seq: Arc<std::sync::atomic::AtomicU32>,
+    /// Admission to the hosts: who may start or adopt sessions, and when exit,
+    /// offload, update or a retirement may proceed. Never held across an `.await`.
+    pub host_table: super::host_table::HostTable,
+    /// What each surviving host answered; unanswered hosts hold restoring panes.
+    pub host_barrier: super::host_adoption::Barrier,
     /// The elevated ("Open admin Tab") sidecar's connection manager (plan
     /// 045). Lazily connected on the first elevated spawn request; torn down
     /// when the last `Elevated` `host_terminals` entry is removed.
@@ -759,6 +764,8 @@ impl<R: Runtime> Clone for AppState<R> {
             host_terminals: self.host_terminals.clone(),
             frozen_hosts: self.frozen_hosts.clone(),
             frozen_host_seq: self.frozen_host_seq.clone(),
+            host_table: self.host_table.clone(),
+            host_barrier: self.host_barrier.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
             host_session_claims: self.host_session_claims.clone(),

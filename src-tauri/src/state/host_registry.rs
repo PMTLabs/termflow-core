@@ -82,6 +82,30 @@ pub(super) fn claim_registration(
     }
 }
 
+/// Undo a claim transition whose operation never got as far as `Registered`: a
+/// taken-over Reserved claim is put back (`restore`) so a retry can claim it
+/// again, a fresh claim is removed. A claim that did reach `Registered` (or
+/// belongs to someone else by now) is left alone.
+pub(super) fn release_unfinished_claim(
+    host_session_claims: &DashMap<String, HostSessionClaim>,
+    session_key: &str,
+    restore: Option<HostSessionClaim>,
+) {
+    use dashmap::mapref::entry::Entry;
+    if let Entry::Occupied(mut o) = host_session_claims.entry(session_key.to_string()) {
+        if o.get().state == HostSessionClaimState::RegistrationInProgress {
+            match restore {
+                Some(reserved) => {
+                    o.insert(reserved);
+                }
+                None => {
+                    o.remove();
+                }
+            }
+        }
+    }
+}
+
 // ---- session-key maps -----------------------------------------------------
 
 /// Every terminal owned by `channel`, as `session_key -> process_id`. Other
@@ -160,6 +184,11 @@ pub(super) fn frozen_client(
         .iter()
         .find(|h| h.id == id)
         .map(|h| h.client.clone())
+}
+
+/// Snapshot of the registered frozen hosts.
+pub(super) fn frozen_hosts_snapshot(frozen_hosts: &Mutex<Vec<FrozenHost>>) -> Vec<FrozenHost> {
+    frozen_hosts.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 // ---- restore intent -------------------------------------------------------
