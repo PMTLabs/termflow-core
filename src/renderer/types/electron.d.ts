@@ -120,6 +120,13 @@ export interface DirUsageRow {
   lastUsedAt: number;
 }
 
+/** The answer to taking a session another window offered for a leaf. `inFlight`: nothing is on
+ *  offer yet, but the create that may offer it is still running, so ask again. */
+export type SessionHandoffTake =
+  | { status: 'taken'; processId: string }
+  | { status: 'inFlight' }
+  | { status: 'none' };
+
 export interface ElectronAPI {
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
@@ -185,6 +192,14 @@ export interface ElectronAPI {
   // Multi-window Settings routing (Tauri bridge only): open/activate Settings in
   // the current main window and focus it. See services/openSettings.ts.
   openSettingsInMainWindow?: (category?: string, detail?: string) => Promise<void>;
+  registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
+  forgetRestoringLeaf: (leafId: string) => Promise<void>;
+  /** Offer the terminal this window's create produced for the leaf to the window that has the
+   *  pane now. False (nothing offered) unless `processId` is the terminal registered for the leaf. */
+  offerSessionHandoff: (leafId: string, processId: string) => Promise<boolean>;
+  /** Take the offered terminal (single use); otherwise say whether the create that may still offer
+   *  it is running. */
+  takeSessionHandoff: (leafId: string) => Promise<SessionHandoffTake>;
   closeTerminal: (id: string) => Promise<void>;
   /** Delete persisted terminal scrollback for every renderer id NOT in keepIds (startup orphan sweep). */
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;

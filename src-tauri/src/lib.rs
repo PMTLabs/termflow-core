@@ -1,5 +1,6 @@
 pub mod sibling_coord;
 pub mod identity_index;
+pub mod session_handoff;
 pub mod state;
 pub mod console_window;
 pub mod context_menu;
@@ -872,6 +873,10 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
         commands::report_host_restore_settled,
+        commands::register_restoring_leaves,
+        commands::forget_restoring_leaf,
+        commands::offer_session_handoff,
+        commands::take_session_handoff,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,

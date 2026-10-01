@@ -27,15 +27,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// error worth a toast.
 pub const ADMIN_UAC_CANCELLED: &str = "ADMIN_UAC_CANCELLED";
 
+/// Identity of one entry in `AppState.frozen_hosts`. Minted from a counter and
+/// never reused within a run, so a stale reference to a retired host cannot
+/// resolve to a later host that took its slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FrozenId(pub u32);
+
 /// Which pty-host sidecar owns a `host_terminals` entry. `Primary` is the
 /// existing, always-on sidecar; `Elevated` is the UAC-elevated one this
-/// feature adds. The elevated sidecar's lifetime (plan 045 §4.1) is DERIVED
-/// from counting `Elevated` entries — never hand-maintained — see
+/// feature adds; `Frozen` is a surviving host of an older generation that
+/// keeps serving the shells it already holds but receives no new ones. The
+/// elevated sidecar's lifetime (plan 045 §4.1) is DERIVED from counting
+/// `Elevated` entries — never hand-maintained — see
 /// `AppState::forget_host_terminal`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostChannel {
     Primary,
     Elevated,
+    Frozen(FrozenId),
 }
 
 /// Manager for the elevated sidecar's connection lifecycle: lazy connect

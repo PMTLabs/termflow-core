@@ -13,6 +13,8 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             lifecycle: Arc::new(HostRetention::Unknown),
             alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             lifecycle_token: Arc::new("tok".into()),
+            conn: conn::ConnState::new(),
+            exe_origin: Arc::default(),
         },
         out_rx,
     )

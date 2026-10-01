@@ -1,0 +1,462 @@
+//! Admission to the pty-host(s): who may start an operation that creates or
+//! adopts host sessions, and when a lifecycle change (exit, offload, update
+//! commit) or a host's retirement may proceed.
+//!
+//! There is deliberately no blocking lock. A `std::sync::Mutex` guards a small
+//! table and is never held across an `.await` or while taking any other lock;
+//! an operation asks to `begin` and is refused at once (never queued) when the
+//! table is closing. Because nothing waits on a queue there is no writer
+//! starvation, no recursive-read deadlock and no lock order to get wrong. The
+//! one hazard left is a forgotten `Ticket`, which is RAII for that reason.
+
+use super::host_registry;
+use super::types::HostSessionClaim;
+use crate::elevated_host::HostChannel;
+use dashmap::DashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+use tokio::sync::watch;
+
+/// Prefix of the retryable error a create gets while the app is exiting or
+/// updating. Renderer callers match on it.
+pub const LIFECYCLE_BUSY: &str = "LIFECYCLE_BUSY";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuiesceReason {
+    Exit,
+    Offload,
+    Update,
+}
+
+impl QuiesceReason {
+    fn describe(self) -> &'static str {
+        match self {
+            QuiesceReason::Exit => "TermFlow is exiting",
+            QuiesceReason::Offload => "TermFlow is preparing to hand its terminals to the next version",
+            QuiesceReason::Update => "TermFlow is updating",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lifecycle {
+    Open,
+    /// `holder` tells a guard whether the quiesce it is dropping is still the
+    /// one in force.
+    Quiescing { holder: u64, reason: QuiesceReason },
+    /// Exit is sticky: the process is ending, nothing reopens admission.
+    Exiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admission {
+    Open,
+    Draining,
+    Retired,
+}
+
+/// Why `begin` said no.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Busy {
+    /// Exit, offload or update is in progress.
+    Lifecycle(QuiesceReason),
+    /// The host is being retired, or has been.
+    Host(HostChannel, Admission),
+    /// Nothing is published for this channel.
+    NoSuchHost(HostChannel),
+}
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Busy::Lifecycle(reason) => write!(f, "{LIFECYCLE_BUSY}: {}", reason.describe()),
+            Busy::Host(channel, admission) => {
+                write!(f, "terminal host {channel:?} is not accepting new sessions ({admission:?})")
+            }
+            Busy::NoSuchHost(channel) => write!(f, "terminal host {channel:?} is not connected"),
+        }
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// `drain_host` refused; try again on the next tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainRefusal {
+    /// An operation holds a ticket on the host right now.
+    InFlight,
+    NotOpen(Admission),
+    NoSuchHost,
+}
+
+struct HostSlot {
+    channel: HostChannel,
+    admission: Admission,
+    inflight: u32,
+    /// Identifies the connection published for this host. A callback that
+    /// captured an older epoch belongs to a superseded connection.
+    epoch: u64,
+}
+
+struct Inner {
+    lifecycle: Lifecycle,
+    hosts: Vec<HostSlot>,
+    /// Adoptions in flight: they target no host that is published yet, but a
+    /// quiesce must still wait for them.
+    adopting: u32,
+    next_epoch: u64,
+    next_holder: u64,
+}
+
+impl Inner {
+    fn total_inflight(&self) -> u32 {
+        self.adopting + self.hosts.iter().map(|h| h.inflight).sum::<u32>()
+    }
+
+    fn slot_mut(&mut self, channel: HostChannel) -> Option<&mut HostSlot> {
+        self.hosts.iter_mut().find(|h| h.channel == channel)
+    }
+}
+
+struct Shared {
+    inner: Mutex<Inner>,
+    /// Total tickets in flight, level-triggered so a quiesce can never miss the
+    /// moment it reaches zero.
+    inflight: watch::Sender<u32>,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn publish_inflight(&self, inner: &Inner) {
+        self.inflight.send_replace(inner.total_inflight());
+    }
+}
+
+/// Cheap to clone; every clone is the same table.
+#[derive(Clone)]
+pub struct HostTable {
+    shared: Arc<Shared>,
+}
+
+impl Default for HostTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostTable {
+    pub fn new() -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                inner: Mutex::new(Inner {
+                    lifecycle: Lifecycle::Open,
+                    hosts: Vec::new(),
+                    adopting: 0,
+                    next_epoch: 0,
+                    next_holder: 0,
+                }),
+                inflight: watch::channel(0).0,
+            }),
+        }
+    }
+
+    /// An epoch for a connection about to be made. The callbacks wired into it
+    /// capture the value; `publish` makes it the host's current one.
+    pub fn reserve_epoch(&self) -> u64 {
+        let mut inner = self.shared.lock();
+        inner.next_epoch += 1;
+        inner.next_epoch
+    }
+
+    /// Make `epoch` the current connection of `channel` and open it for
+    /// admission. Publishing again (a reconnect) supersedes the old epoch;
+    /// tickets already held on the host keep counting.
+    ///
+    /// A host that is being retired (`Draining`) or has been (`Retired`) is left
+    /// exactly as it is, and `false` is returned: reopening it would admit
+    /// creates to a host whose emptiness was just decided, and would make the
+    /// retirement's own guard (bound to the old epoch) inert.
+    pub fn publish(&self, channel: HostChannel, epoch: u64) -> bool {
+        let mut inner = self.shared.lock();
+        match inner.slot_mut(channel) {
+            Some(slot) if slot.admission != Admission::Open => false,
+            Some(slot) => {
+                slot.epoch = epoch;
+                true
+            }
+            None => {
+                inner.hosts.push(HostSlot { channel, admission: Admission::Open, inflight: 0, epoch });
+                true
+            }
+        }
+    }
+
+    /// Is `epoch` still the connection published for `channel`? A callback of a
+    /// superseded or never-published connection must do nothing.
+    pub fn is_current(&self, channel: HostChannel, epoch: u64) -> bool {
+        self.shared.lock().hosts.iter().any(|h| h.channel == channel && h.epoch == epoch)
+    }
+
+    pub fn admission(&self, channel: HostChannel) -> Option<Admission> {
+        self.shared.lock().hosts.iter().find(|h| h.channel == channel).map(|h| h.admission)
+    }
+
+    /// Start an operation that creates or attaches a session on `channel`. Never
+    /// waits: it is refused the moment the table is closing or the host is not
+    /// `Open`.
+    pub fn begin(&self, channel: HostChannel) -> Result<Ticket, Busy> {
+        let mut inner = self.shared.lock();
+        Self::check_lifecycle(&inner)?;
+        let slot = inner.slot_mut(channel).ok_or(Busy::NoSuchHost(channel))?;
+        if slot.admission != Admission::Open {
+            return Err(Busy::Host(channel, slot.admission));
+        }
+        slot.inflight += 1;
+        self.shared.publish_inflight(&inner);
+        Ok(Ticket::new(&self.shared, TicketTarget::Host(channel)))
+    }
+
+    /// Start adopting a host that is not published yet. Counted by a quiesce,
+    /// refused while one is in force: an adoption begun during exit would
+    /// publish a host nobody is left to shut down.
+    pub fn begin_adoption(&self) -> Result<Ticket, Busy> {
+        let mut inner = self.shared.lock();
+        Self::check_lifecycle(&inner)?;
+        inner.adopting += 1;
+        self.shared.publish_inflight(&inner);
+        Ok(Ticket::new(&self.shared, TicketTarget::Adoption))
+    }
+
+    /// The lifecycle owner's own operations (exit's bounded connect-and-shutdown
+    /// of a host that was never adopted) must not be refused by the quiesce they
+    /// hold. Requires the guard, so only the holder can call it.
+    pub fn begin_as_quiescer(&self, _guard: &QuiesceGuard) -> Ticket {
+        let mut inner = self.shared.lock();
+        inner.adopting += 1;
+        self.shared.publish_inflight(&inner);
+        Ticket::new(&self.shared, TicketTarget::Adoption)
+    }
+
+    fn check_lifecycle(inner: &Inner) -> Result<(), Busy> {
+        match inner.lifecycle {
+            Lifecycle::Open => Ok(()),
+            Lifecycle::Quiescing { reason, .. } => Err(Busy::Lifecycle(reason)),
+            Lifecycle::Exiting => Err(Busy::Lifecycle(QuiesceReason::Exit)),
+        }
+    }
+
+    /// Close admission and wait, outside the mutex and for at most `bound`, for
+    /// every ticket to be returned (a request can legitimately take ~10 s).
+    ///
+    /// `Exit` is sticky: it moves the table to `Exiting`, which nothing ever
+    /// reopens, and may take over from an offload or update quiesce. `Offload`
+    /// and `Update` are refused with `LIFECYCLE_BUSY` unless the table is open,
+    /// so they are mutually exclusive with each other and with Exit, and a
+    /// refused one can never reopen admission under the one that holds it.
+    ///
+    /// On timeout the guard is still returned, with `drained() == false` and the
+    /// holders listed: Exit proceeds anyway, offload and update drop the guard
+    /// (reopening the table) and refuse.
+    pub async fn quiesce(&self, reason: QuiesceReason, bound: Duration) -> Result<QuiesceGuard, Busy> {
+        let holder = {
+            let mut inner = self.shared.lock();
+            match (inner.lifecycle, reason) {
+                (Lifecycle::Open, _) | (Lifecycle::Exiting | Lifecycle::Quiescing { .. }, QuiesceReason::Exit) => {}
+                _ => return Err(Self::check_lifecycle(&inner).expect_err("not open")),
+            }
+            inner.next_holder += 1;
+            let holder = inner.next_holder;
+            inner.lifecycle = match reason {
+                QuiesceReason::Exit => Lifecycle::Exiting,
+                _ => Lifecycle::Quiescing { holder, reason },
+            };
+            holder
+        };
+        let mut inflight = self.shared.inflight.subscribe();
+        let drained = tokio::time::timeout(bound, inflight.wait_for(|n| *n == 0)).await.map(|r| r.is_ok());
+        let drained = drained.unwrap_or(false);
+        let holders = if drained {
+            Vec::new()
+        } else {
+            let inner = self.shared.lock();
+            let mut holders: Vec<(Option<HostChannel>, u32)> =
+                inner.hosts.iter().filter(|h| h.inflight > 0).map(|h| (Some(h.channel), h.inflight)).collect();
+            if inner.adopting > 0 {
+                holders.push((None, inner.adopting));
+            }
+            holders
+        };
+        Ok(QuiesceGuard { shared: self.shared.clone(), holder, drained, holders })
+    }
+
+    /// Stop admitting to an empty host so it can be retired. Fail-fast: it never
+    /// waits for a ticket, so a cleanup on a path that itself holds one cannot
+    /// stall. The guard reopens the host when dropped; `retire` keeps it closed.
+    pub fn drain_host(&self, channel: HostChannel) -> Result<DrainGuard, DrainRefusal> {
+        let mut inner = self.shared.lock();
+        let slot = inner.slot_mut(channel).ok_or(DrainRefusal::NoSuchHost)?;
+        if slot.inflight > 0 {
+            return Err(DrainRefusal::InFlight);
+        }
+        if slot.admission != Admission::Open {
+            return Err(DrainRefusal::NotOpen(slot.admission));
+        }
+        slot.admission = Admission::Draining;
+        Ok(DrainGuard { shared: self.shared.clone(), channel, epoch: slot.epoch, retired: false })
+    }
+
+    #[cfg(test)]
+    fn lifecycle(&self) -> Lifecycle {
+        self.shared.lock().lifecycle
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TicketTarget {
+    Host(HostChannel),
+    Adoption,
+}
+
+/// Permission to run one operation. Dropping it returns the slot, wakes a
+/// waiting quiesce and undoes any claim transition the operation made but did
+/// not finish, so a cancelled or failed operation cannot leave a session
+/// claimed.
+pub struct Ticket {
+    shared: Arc<Shared>,
+    target: TicketTarget,
+    claims: Vec<ClaimUndo>,
+}
+
+struct ClaimUndo {
+    claims: Arc<DashMap<String, HostSessionClaim>>,
+    session_key: String,
+    /// The Reserved claim to put back; `None` when the claim was a fresh one.
+    restore: Option<HostSessionClaim>,
+}
+
+impl Ticket {
+    fn new(shared: &Arc<Shared>, target: TicketTarget) -> Self {
+        Self { shared: shared.clone(), target, claims: Vec::new() }
+    }
+
+    /// The host this ticket was taken on; `None` for an adoption.
+    pub fn channel(&self) -> Option<HostChannel> {
+        match self.target {
+            TicketTarget::Host(channel) => Some(channel),
+            TicketTarget::Adoption => None,
+        }
+    }
+
+    /// Hand the ticket the claim transition this operation just made with
+    /// `claim_registration`: `claimed` is what it returned (`Some` when it took
+    /// over a Reserved entry). Unless the operation reaches `Registered`, dropping
+    /// the ticket puts the claim back as it was.
+    pub fn guard_claim(
+        &mut self,
+        claims: &Arc<DashMap<String, HostSessionClaim>>,
+        session_key: &str,
+        claimed: Option<(u32, HostChannel)>,
+    ) {
+        self.claims.push(ClaimUndo {
+            claims: claims.clone(),
+            session_key: session_key.to_string(),
+            restore: claimed.map(|(pid, channel)| HostSessionClaim {
+                state: super::types::HostSessionClaimState::Reserved,
+                pid,
+                process_id: None,
+                channel,
+            }),
+        });
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        {
+            let mut inner = self.shared.lock();
+            match self.target {
+                TicketTarget::Host(channel) => {
+                    if let Some(slot) = inner.slot_mut(channel) {
+                        slot.inflight = slot.inflight.saturating_sub(1);
+                    }
+                }
+                TicketTarget::Adoption => inner.adopting = inner.adopting.saturating_sub(1),
+            }
+            self.shared.publish_inflight(&inner);
+        }
+        for undo in self.claims.drain(..) {
+            host_registry::release_unfinished_claim(&undo.claims, &undo.session_key, undo.restore);
+        }
+    }
+}
+
+/// Holds the table closed. Dropping it reopens the table only if the quiesce it
+/// stands for is still the one in force.
+pub struct QuiesceGuard {
+    shared: Arc<Shared>,
+    holder: u64,
+    drained: bool,
+    holders: Vec<(Option<HostChannel>, u32)>,
+}
+
+impl QuiesceGuard {
+    /// Whether every ticket was returned within the bound.
+    pub fn drained(&self) -> bool {
+        self.drained
+    }
+
+    /// When not drained, who still held tickets (`None` = adoptions).
+    pub fn holders(&self) -> &[(Option<HostChannel>, u32)] {
+        &self.holders
+    }
+}
+
+impl Drop for QuiesceGuard {
+    fn drop(&mut self) {
+        let mut inner = self.shared.lock();
+        if matches!(inner.lifecycle, Lifecycle::Quiescing { holder, .. } if holder == self.holder) {
+            inner.lifecycle = Lifecycle::Open;
+        }
+    }
+}
+
+/// A host closed to admission while its retirement is decided.
+pub struct DrainGuard {
+    shared: Arc<Shared>,
+    channel: HostChannel,
+    epoch: u64,
+    retired: bool,
+}
+
+impl DrainGuard {
+    /// The retirement is confirmed: the host stays closed for good.
+    pub fn retire(mut self) {
+        self.retired = true;
+        let mut inner = self.shared.lock();
+        if let Some(slot) = inner.slot_mut(self.channel) {
+            if slot.epoch == self.epoch && slot.admission == Admission::Draining {
+                slot.admission = Admission::Retired;
+            }
+        }
+    }
+}
+
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        if self.retired {
+            return;
+        }
+        let mut inner = self.shared.lock();
+        if let Some(slot) = inner.slot_mut(self.channel) {
+            if slot.epoch == self.epoch && slot.admission == Admission::Draining {
+                slot.admission = Admission::Open;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod table_tests;

@@ -30,6 +30,10 @@ import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager, SavedLayout } from '../StateManager';
+
+beforeEach(() => {
+  (window as any).electronAPI = { registerRestoringLeaves: jest.fn().mockResolvedValue(undefined) };
+});
 import { getCwdSnapshot, __resetCwdSnapshots } from '../cwdSnapshot';
 
 function makeStore() {

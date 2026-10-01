@@ -14,7 +14,15 @@
 //! The client depends on a few concrete pieces (not `AppState`) so it is
 //! testable without the Windows `mock_app` crash and avoids an Arc cycle.
 
+mod conn;
+mod endpoints;
+mod discovery;
+mod exe_origin;
+pub use endpoints::{current_host_paths, HostPaths};
+pub use discovery::{discover_hosts, HostCandidate, HostRole};
+
 use crate::state::ChannelPayload;
+use conn::{cancelled, ConnState};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -146,6 +154,10 @@ pub struct PtyHostClient {
     /// leaves a permanently-dead client installed that nothing will ever null.
     alive: Arc<std::sync::atomic::AtomicBool>,
     lifecycle_token: Arc<String>,
+    /// Who ended the connection and when its stream was really released.
+    conn: Arc<ConnState>,
+    /// Where the host behind this connection runs from; see `exe_in_payload`.
+    exe_origin: Arc<exe_origin::ExeOrigin>,
 }
 
 impl PtyHostClient {
@@ -188,6 +200,49 @@ impl PtyHostClient {
     /// False once the pipe closed (reader task ended). See `alive` field doc.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    /// Close the connection for real, on purpose: both reader and writer drop
+    /// their half, so the stream is released and the host sees EOF. Dropping the
+    /// client (or `shutdown()`) cannot do that: the two halves share the stream.
+    ///
+    /// Idempotent across clones. `on_disconnect` does NOT fire for this close.
+    /// Requests still waiting are failed and the pending map is emptied.
+    /// Returns whether the stream was released within the bound.
+    pub async fn close_transport(&self) -> bool {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+        if self.conn.begin_close() {
+            self.alive.store(false, Ordering::Release);
+            self.conn.cancel();
+        }
+        self.pending.lock().unwrap().clear();
+        self.conn.halves_released(BOUND).await
+    }
+
+    /// Record that a host we spawned ourselves runs from the bundled source path
+    /// (the runtime-dir install failed): known at spawn time, no lookup needed.
+    #[cfg(any(windows, unix))]
+    fn note_bundled_fallback(&self, origin: HostConnectionOrigin, sidecar: &std::path::Path) {
+        let runtime_dir = runtime_host_dir();
+        self.exe_origin.set_bundled_fallback(exe_origin::spawned_from_bundled_fallback(
+            origin == HostConnectionOrigin::SpawnedHere,
+            sidecar,
+            runtime_dir.as_deref(),
+            cfg!(windows),
+        ));
+    }
+
+    /// Whether the host behind this connection runs from inside the Velopack
+    /// install root, where an update swap kills it. `None` means it could not be
+    /// determined, and callers must treat that as unsafe. A host this app spawned
+    /// from the bundled source path is inside the payload on every platform;
+    /// other hosts are classified on Windows only (elsewhere: `Some(false)`).
+    pub fn exe_in_payload(&self) -> Option<bool> {
+        let runtime_dir = runtime_host_dir();
+        self.exe_origin.in_payload(
+            exe_origin::velopack_root().as_deref(),
+            runtime_dir.as_deref().and_then(std::path::Path::parent),
+        )
     }
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
@@ -283,7 +338,9 @@ impl PtyHostClient {
         let req = self.next_req();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
-        if self.outbound.send(Frame::Ctrl(make(req))).is_err() {
+        // `alive` is cleared before the pending map is drained, so a request that
+        // slipped in after the drain sees it here instead of waiting out `timeout`.
+        if !self.is_alive() || self.outbound.send(Frame::Ctrl(make(req))).is_err() {
             self.pending.lock().unwrap().remove(&req);
             return None;
         }
@@ -423,6 +480,11 @@ impl PtyHostClient {
 
 /// Build a client around already-connected pipe halves. Split out so tests can
 /// drive it over an in-memory duplex without a real named pipe.
+///
+/// The connection ends exactly one way, decided by a compare-exchange from
+/// `Live`: `close_transport` (intentional, silent) or a transport failure — the
+/// reader's EOF/error or the writer's write error — which fires `on_disconnect`.
+/// Either way both tasks drop their half, which is what closes the stream.
 #[cfg(any(windows, unix))]
 pub fn wire_client<R, W>(rd: R, wr: W, deps: PtyHostDeps) -> PtyHostClient
 where
@@ -435,25 +497,59 @@ where
     let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
     let req_ctr = Arc::new(AtomicU64::new(1));
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let alive_r = alive.clone();
     let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
+    let conn = ConnState::new();
+    let end = Arc::new(ConnLoss {
+        conn: conn.clone(),
+        alive: alive.clone(),
+        pending: pending.clone(),
+        on_disconnect: deps.on_disconnect.clone(),
+    });
 
     // Writer task.
+    let mut cancel_w = conn.cancel_rx();
+    let half_w = conn.half_guard();
+    let end_w = end.clone();
     tokio::spawn(async move {
         let mut wr = wr;
-        while let Some(f) = out_rx.recv().await {
-            if write_frame(&mut wr, &f).await.is_err() {
+        let mut failed = false;
+        loop {
+            let next = tokio::select! {
+                _ = cancelled(&mut cancel_w) => break,
+                f = out_rx.recv() => f,
+            };
+            let Some(f) = next else { break };
+            let wrote = tokio::select! {
+                _ = cancelled(&mut cancel_w) => break,
+                r = write_frame(&mut wr, &f) => r,
+            };
+            if wrote.is_err() {
+                failed = true;
                 break;
             }
+        }
+        drop(wr);
+        drop(half_w);
+        if failed {
+            // A dead write side is a dead connection: stop the reader too and
+            // surface the loss, exactly as a reader EOF would.
+            end_w.lost();
         }
     });
 
     // Reader task.
     let pending_r = pending.clone();
+    let mut cancel_r = conn.cancel_rx();
+    let half_r = conn.half_guard();
     tokio::spawn(async move {
         let mut rd = rd;
+        let mut lost = false;
         loop {
-            match read_frame(&mut rd).await {
+            let next = tokio::select! {
+                _ = cancelled(&mut cancel_r) => break,
+                f = read_frame(&mut rd) => f,
+            };
+            match next {
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
                     // Ring bookkeeping stays in the HOST's id space — it is the
                     // host's own offset, and reattach replays from it.
@@ -491,13 +587,17 @@ where
                     }
                 }
                 Ok(Some(_)) => {} // GUI never receives Ctrl / Stdin
-                Ok(None) | Err(_) => break, // pipe closed
+                Ok(None) | Err(_) => {
+                    lost = true; // pipe closed
+                    break;
+                }
             }
         }
-        // Pipe closed: mark the client dead FIRST (so a concurrent
-        // ensure_pty_host can refuse to publish it), then surface the loss.
-        alive_r.store(false, Ordering::Release);
-        (deps.on_disconnect)();
+        drop(rd);
+        drop(half_r);
+        if lost {
+            end.lost();
+        }
     });
 
     PtyHostClient {
@@ -510,6 +610,35 @@ where
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
+        conn,
+        exe_origin: Arc::default(),
+    }
+}
+
+/// What to do when the transport fails (as opposed to being closed on purpose).
+/// Shared by the reader and the writer; only the one that wins the `Live -> Lost`
+/// compare-exchange acts, so `on_disconnect` fires at most once.
+#[cfg(any(windows, unix))]
+struct ConnLoss {
+    conn: Arc<ConnState>,
+    alive: Arc<std::sync::atomic::AtomicBool>,
+    pending: PendingMap,
+    on_disconnect: Arc<dyn Fn() + Send + Sync>,
+}
+
+#[cfg(any(windows, unix))]
+impl ConnLoss {
+    fn lost(&self) {
+        if !self.conn.begin_lost() {
+            return; // closed on purpose, or already lost
+        }
+        // Mark the client dead FIRST (so a concurrent ensure_pty_host can refuse
+        // to publish it), stop the other task, fail waiting requests, and only
+        // then surface the loss.
+        self.alive.store(false, Ordering::Release);
+        self.conn.cancel();
+        self.pending.lock().unwrap().clear();
+        (self.on_disconnect)();
     }
 }
 
@@ -658,7 +787,9 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
+            let paths = current_host_paths();
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                paths.record.as_deref(), paths.log.as_deref())?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -675,12 +806,29 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
-    let (rd, wr) = tokio::io::split(conn);
-    let client = wire_client(rd, wr, deps);
+    let client = wire_pipe_client(conn, deps);
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
+    client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
+}
+
+/// Wire a client over an opened pipe and record which process serves it. Every
+/// Windows connection goes through here, so a host adopted without being started
+/// (an older one left running) still has its origin found. Asked of the live
+/// connection, not a record: a record-less legacy host still has a pipe.
+#[cfg(windows)]
+pub(crate) fn wire_pipe_client(
+    conn: tokio::net::windows::named_pipe::NamedPipeClient,
+    deps: PtyHostDeps,
+) -> PtyHostClient {
+    use std::os::windows::io::AsRawHandle;
+    let server_pid = exe_origin::server_pid_of_pipe(conn.as_raw_handle());
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    client.exe_origin.set_server_pid(server_pid);
+    client
 }
 
 /// Spawn the sidecar detached from the GUI's lifetime. Returns whether it broke
@@ -693,6 +841,8 @@ fn spawn_sidecar_detached(
     build_id: Option<&str>,
     pipe: &str,
     token: &str,
+    record: Option<&std::path::Path>,
+    log_path: Option<&std::path::Path>,
 ) -> std::io::Result<bool> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -714,14 +864,12 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — Velopack treats a process whose CWD is inside
     // the swapped `current\` tree as an update blocker it may kill (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
-    let record = record_path();
     // Capture the sidecar's diagnostics. These previously went to Stdio::null(),
     // which made the host completely undiagnosable from the app side — every
     // warning it prints (failed job breakaway, serve errors, a failed CTRL+C
     // restore) vanished. Point them at a per-channel log file in the same
     // update-stable dir instead; truncated on each spawn, so it stays small.
     // Only lifecycle/error lines are written here — never session I/O.
-    let log_path = runtime_host_dir().map(|d| d.join("host.log"));
     let base = move || {
         let mut c = Command::new(sidecar);
         c.env("TERMFLOW_PTY_PIPE", pipe)
@@ -730,7 +878,7 @@ fn spawn_sidecar_detached(
         if let Some(build_id) = build_id {
             c.env("TERMFLOW_PTY_BUILD_ID", build_id);
         }
-        match log_path.as_ref().and_then(|p| std::fs::File::create(p).ok()) {
+        match log_path.and_then(|p| std::fs::File::create(p).ok()) {
             Some(f) => {
                 c.stdout(f.try_clone().expect("clone log file handle"));
                 c.stderr(f);
@@ -741,7 +889,7 @@ fn spawn_sidecar_detached(
             }
         }
         // RP-2: tell the host where to advertise itself (discovery record).
-        if let Some(ref rp) = record {
+        if let Some(rp) = record {
             c.env("TERMFLOW_PTY_RECORD", rp);
         }
         if let Some(ref wd) = workdir {
@@ -819,7 +967,9 @@ pub async fn connect_or_spawn(
         OpenOutcome::NoHost => {
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token)?;
+            let paths = current_host_paths();
+            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                paths.record.as_deref(), paths.log.as_deref())?;
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -841,6 +991,7 @@ pub async fn connect_or_spawn(
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
+    client.note_bundled_fallback(origin, sidecar);
     Ok((client, origin))
 }
 
@@ -856,6 +1007,8 @@ fn spawn_sidecar_detached(
     build_id: Option<&str>,
     pipe: &str,
     token: &str,
+    record: Option<&std::path::Path>,
+    log_path: Option<&std::path::Path>,
 ) -> std::io::Result<bool> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -864,17 +1017,22 @@ fn spawn_sidecar_detached(
     // CWD inside the app payload — a Velopack swap of the payload must not
     // disrupt the running host (design §10.1).
     let workdir = sidecar.parent().map(std::path::Path::to_path_buf);
+    if log_path.is_some() {
+        endpoints::ensure_socket_parent(pipe)?;
+    }
     let mut c = Command::new(sidecar);
     c.env("TERMFLOW_PTY_PIPE", pipe)
         .env("TERMFLOW_PTY_TOKEN", token)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(Stdio::null());
+    match log_path.and_then(|p| std::fs::File::create(p).ok()) {
+        Some(f) => { c.stdout(f.try_clone()?); c.stderr(f); }
+        None => { c.stdout(Stdio::null()); c.stderr(Stdio::null()); }
+    }
     if let Some(build_id) = build_id {
         c.env("TERMFLOW_PTY_BUILD_ID", build_id);
     }
     // RP-2: tell the host where to advertise itself (discovery record).
-    if let Some(rp) = record_path() {
+    if let Some(rp) = record {
         c.env("TERMFLOW_PTY_RECORD", rp);
     }
     if let Some(ref wd) = workdir {
@@ -917,15 +1075,9 @@ pub async fn connect_or_spawn(
 /// Windows named-pipe name for an identity. Pure, so the naming invariant is
 /// testable without touching the environment. `id.key()` is `"rel"` for the
 /// default identity, so today's name is reproduced byte for byte.
-#[cfg(windows)]
+#[cfg(all(windows, test))]
 fn pipe_for(user: &str, id: &crate::profile::ProfileIdentity) -> String {
-    format!(r"\\.\pipe\termflow-pty-host.{user}.{}", id.key())
-}
-
-/// Unix socket path for an identity. Same reasoning as `pipe_for`.
-#[cfg(unix)]
-fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String {
-    format!("{runtime_dir}/termflow-pty-host.{}.sock", id.key())
+    endpoints::qualified_pipe_for(user, id, None)
 }
 
 /// Per-user, per-identity endpoint so two users — or two profiles — on one
@@ -934,17 +1086,7 @@ fn socket_for(runtime_dir: &str, id: &crate::profile::ProfileIdentity) -> String
 /// `TERMFLOW_PTY_PIPE`, so both agree by construction (the sidecar creates the
 /// socket's parent dir on bind).
 pub fn resolve_pipe() -> String {
-    #[cfg(windows)]
-    {
-        let user = std::env::var("USERNAME")
-            .or_else(|_| std::env::var("USER"))
-            .unwrap_or_else(|_| "user".to_string());
-        pipe_for(&user, crate::profile::current())
-    }
-    #[cfg(unix)]
-    {
-        socket_for(&unix_runtime_dir(), crate::profile::current())
-    }
+    current_host_paths().endpoint
 }
 
 /// Per-user runtime directory for the Unix socket, mirroring the sidecar's
@@ -1097,6 +1239,21 @@ mod disarm_tests;
 #[cfg(test)]
 mod runtime_dir_tests;
 
+#[cfg(test)]
+mod discovery_tests;
+
+#[cfg(test)]
+mod conn_tests;
+
+#[cfg(test)]
+mod exe_origin_tests;
+
+#[cfg(test)]
+mod real_host_tests;
+
+#[cfg(test)]
+pub(crate) mod test_dirs;
+
 /// Where the running host advertises itself (RP-2 discovery). Lives in the
 /// update-stable runtime dir (per-user + per-identity, matching the pipe name's
 /// scope) so it survives updates alongside the host itself. Absent file ⇒
@@ -1105,7 +1262,7 @@ mod runtime_dir_tests;
 /// The sidecar never computes this path — the GUI passes it as
 /// `TERMFLOW_PTY_RECORD`, so scoping it here scopes the writer too.
 pub fn record_path() -> Option<std::path::PathBuf> {
-    runtime_host_dir().map(|d| d.join("host-record.json"))
+    current_host_paths().record
 }
 
 /// SHA-256 of a file's bytes.
@@ -1302,13 +1459,27 @@ pub fn resolve_host_path() -> Option<std::path::PathBuf> {
 pub struct HostLaunch {
     pub path: std::path::PathBuf,
     pub build_id: Option<String>,
+    /// Install-directory identity includes the host and the staged ConPTY pair.
+    /// Bundled fallback has no stable generation.
+    pub generation: Option<String>,
 }
 
 pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
-    let path = match runtime_host_dir() {
-        Some(base) => match install_host_into(&src, &base) {
-            Ok(dest) => dest,
+    let launch = resolve_launch_from(src, runtime_host_dir().as_deref());
+    endpoints::pin_current_paths(launch.generation.as_deref());
+    Some(launch)
+}
+
+fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) -> HostLaunch {
+    let mut generation = None;
+    let path = match base {
+        Some(base) => match install_host_into(&src, base) {
+            Ok(dest) => {
+                generation = dest.parent().and_then(|p| p.file_name())
+                    .map(|g| g.to_string_lossy().into_owned());
+                dest
+            }
             Err(e) => {
                 log::warn!(
                     "pty-host: could not install host into runtime dir ({e}); \
@@ -1329,7 +1500,7 @@ pub fn resolve_host_launch() -> Option<HostLaunch> {
         );
         e
     }).ok();
-    Some(HostLaunch { path, build_id })
+    HostLaunch { path, build_id, generation }
 }
 
 fn hex_full(digest: &[u8; 32]) -> String {

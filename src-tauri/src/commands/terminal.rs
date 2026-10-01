@@ -213,6 +213,67 @@ pub async fn report_host_restore_settled(
     Ok(())
 }
 
+/// One persisted pane about to mount: its leaf, and the session key it still
+/// carries when a migration left it different from the leaf.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoringLeaf {
+    pub leaf_id: String,
+    pub session_key: Option<String>,
+}
+
+/// Record that these persisted panes are about to mount, BEFORE any of them does.
+/// From then on a create for one of their session keys is a restore: it waits for
+/// the terminal hosts to answer instead of starting a second shell under a key a
+/// host may already hold. A key that is already live is skipped; calling this
+/// again for the same panes changes nothing. A failure must keep the affected
+/// panes from mounting — the caller retries.
+#[tauri::command]
+pub fn register_restoring_leaves(
+    state: State<'_, AppState>,
+    leaves: Vec<RestoringLeaf>,
+) -> Result<(), String> {
+    state.reap_expired_restore_intents();
+    for leaf in &leaves {
+        state.register_restoring_leaf(&leaf.leaf_id, leaf.session_key.as_deref());
+    }
+    Ok(())
+}
+
+/// A restored pane that never found its session was closed. Its session, if a
+/// host reports it later, is closed rather than adopted or shown as recovered.
+#[tauri::command]
+pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Result<(), String> {
+    state.forget_restoring_leaf(&leaf_id);
+    Ok(())
+}
+
+/// A pane moved to another window while its first create was still in flight, and
+/// the window it left won that create. That window binds nothing and offers the
+/// terminal its create produced to whichever window has the pane now.
+/// `false` (and no offer) unless `process_id` is the terminal registered for the leaf.
+#[tauri::command]
+pub fn offer_session_handoff(
+    state: State<'_, AppState>,
+    leaf_id: String,
+    process_id: String,
+) -> Result<bool, String> {
+    Ok(state.handoff_offers.offer(&state.identity, &leaf_id, &process_id, std::time::Instant::now()))
+}
+
+/// The moved pane's own create was refused because the window it left won the
+/// session: take the terminal that window offered. The offer is removed in the
+/// same step, so only one window can ever adopt it. With no live offer (or when
+/// the registered terminal has changed) the answer says whether the winner's
+/// create is still running, in which case the offer may yet arrive.
+#[tauri::command]
+pub fn take_session_handoff(
+    state: State<'_, AppState>,
+    leaf_id: String,
+) -> Result<crate::session_handoff::HandoffTake, String> {
+    Ok(state.handoff_offers.take(&state.identity, &leaf_id, std::time::Instant::now()))
+}
+
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane
 /// currently lives in. Without it, dialogs a console program parents to
 /// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open
@@ -390,21 +451,30 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         elevated,
     } = req;
 
-    // Which sidecar this spawn targets, and its connected client. The rest of
-    // this function (reattach-claim, registration, scrollback staging, the
-    // actual `Spawn` frame) is IDENTICAL for both — only how we get a client,
-    // and what happens if we can't, differs.
-    let (channel, client) = if elevated {
+    // The host addresses this terminal by its SESSION key, which is the leaf for
+    // anything created on this build and the old `tb-` id for a migrated one.
+    let session_key_overridden = session_key.is_some();
+    let session_key = crate::state::effective_session_key(&id, session_key.as_deref());
+
+    // Which sidecar this spawn targets, its connected client, and whether the
+    // session already lives there (`Some(pid)`: attach to it instead of
+    // spawning). The rest of this function (registration, scrollback staging,
+    // the actual `Spawn` frame) is IDENTICAL for both sidecars — only how we get
+    // a client, and what happens if we can't, differs. The ticket keeps the host
+    // admitting this create until it is done.
+    let (channel, client, claimed_pid, _ticket) = if elevated {
         // Plan 045 R7: an elevated request never falls back in-process — that
         // would put an unprivileged shell behind an "Administrator" badge, a
         // lie the user cannot see. Every failure here returns `Err` directly.
         // NOT wrapped: `ensure_elevated_host` returns the UAC-cancel sentinel
         // verbatim so the renderer can recognise it and stay silent (AC6).
         state.ensure_elevated_host().await?;
-        match state.elevated_host.client_clone() {
-            Some(c) => (crate::elevated_host::HostChannel::Elevated, c),
+        let client = match state.elevated_host.client_clone() {
+            Some(c) => c,
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
-        }
+        };
+        let claimed = state.claim_host_registration(&session_key, crate::elevated_host::HostChannel::Elevated)?;
+        (crate::elevated_host::HostChannel::Elevated, client, claimed.map(|(pid, _)| pid), None)
     } else {
         // Deliberately off (the `TERMFLOW_PTY_HOST=0` kill-switch — the only way to
         // land here now that every supported OS is default-on): in-process is the
@@ -412,22 +482,24 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         if !crate::pty_host_client::enabled() {
             return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled");
         }
-        // Ensure the sidecar is up FIRST (single-flight). If unavailable, fall back
-        // to the in-process path immediately — no host state is registered.
-        if let Err(e) = state.ensure_pty_host().await {
-            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e);
-        }
-        match state.pty_host_clone() {
-            Some(c) => (crate::elevated_host::HostChannel::Primary, c),
-            None => {
-                return host_fallback(
-                    state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd,
-                    name.as_deref(),
-                    "pty-host not connected",
-                )
+        // Ensure the hosts are up, pick the one this create belongs on, and take
+        // its admission. A refusal (the app is exiting or updating, or the session
+        // may be on a host that has not answered yet) is returned as it is: it must
+        // NOT fall back in-process, which would hide a running shell or start a
+        // second one under the same key. Only "no host is usable" does.
+        match state.place_create(&session_key, session_key_overridden).await? {
+            crate::state::Placement::Attach { channel, client, pid, ticket } => (channel, client, Some(pid), Some(ticket)),
+            crate::state::Placement::Spawn { channel, client, ticket } => (channel, client, None, Some(ticket)),
+            crate::state::Placement::InProcess { reason } => {
+                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason);
             }
         }
     };
+    // The session's claim is held from here on. A window that asked for the same
+    // leaf and was refused asks this mark whether to keep waiting for the offer
+    // this create may make when it returns; it must outlast the host round trip
+    // below, which the claim's own state does not (`Registered` comes first).
+    let _create_in_flight = state.handoff_offers.begin_create(&id);
 
     // The injected-hook decision (interactive PowerShell). Command-suggest's
     // renderer-side prompt gate reads this back over the API to re-arm on reload.
@@ -440,11 +512,6 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // Reattach path: the sidecar still holds this session (survived a hot-swap).
     // Restore the real pid, register routing BEFORE attach releases replay
     // bytes, then nudge a repaint so a live TUI redraws.
-    // The host addresses this terminal by its SESSION key, which is the leaf for
-    // anything created on this build and the old `tb-` id for a migrated one.
-    let session_key = session_key.unwrap_or_else(|| id.clone());
-
-    let claimed_pid = state.claim_host_registration(&session_key)?;
     if let Some(pid) = claimed_pid {
         let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
         let process_id = ident.process_id.clone();
@@ -1082,11 +1149,17 @@ mod scrollback_restore_tests {
     #[test]
     fn surfacing_an_orphan_reserves_the_listed_pid_for_reattach() {
         let (_app, state) = mock_state();
-        state.surface_host_orphans(vec![termflow_pty_protocol::SessionMeta {
-            tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
-        }]);
+        state.surface_host_orphans(
+            vec![termflow_pty_protocol::SessionMeta {
+                tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
+            }],
+            crate::elevated_host::HostChannel::Primary,
+        );
 
-        assert_eq!(state.claim_host_registration("S"), Ok(Some(4242)));
+        assert_eq!(
+            state.claim_host_registration("S", crate::elevated_host::HostChannel::Primary),
+            Ok(Some((4242, crate::elevated_host::HostChannel::Primary)))
+        );
     }
 
     #[test]
@@ -1098,6 +1171,7 @@ mod scrollback_restore_tests {
             state: HostSessionClaimState::Registered,
             pid: 4242,
             process_id: Some("pc-replacement".into()),
+            channel: crate::elevated_host::HostChannel::Primary,
         });
 
         state.forget_host_session_claim_if_owner("S", "pc-stale-exit");
@@ -1652,3 +1726,37 @@ mod root_leaf_reservation_tests {
     }
 }
 
+/// The hand-off answers "ask again" while a create for the leaf is running, and
+/// only `spawn_routed` knows that. The mark has to start once the session's claim
+/// is held (a refused create would otherwise mark itself) and has to cover the
+/// registration and host round trip that follow it.
+#[cfg(test)]
+mod create_in_flight_mark_tests {
+    use crate::automation_engine::test_host::strip_comments;
+
+    fn spawn_routed_body() -> String {
+        let source = strip_comments(include_str!("terminal.rs"));
+        let start = source.find("async fn spawn_routed(").expect("spawn_routed is defined here");
+        let end = source[start..].find("struct HostIdentity").expect("spawn_routed is followed by HostIdentity");
+        source[start..start + end].to_string()
+    }
+
+    #[test]
+    fn spawn_routed_marks_its_create_in_flight_after_the_claim_and_before_registering() {
+        let body = spawn_routed_body();
+        let marks: Vec<_> = body.match_indices("handoff_offers.begin_create(").map(|(at, _)| at).collect();
+        assert_eq!(marks.len(), 1, "exactly one mark, held for the whole create");
+        let at = marks[0];
+        let after = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is called in spawn_routed"));
+        assert!(after("place_create(") < at, "marked only once the host placement holds the claim");
+        assert!(after("claim_host_registration(") < at, "the elevated claim comes before the mark too");
+        assert!(at < after("register_host_terminal("), "marked before the terminal is registered");
+        assert!(at < after("attach_confirmed("), "marked before the slow attach round trip");
+        assert!(at < after("spawn_session("), "marked before the slow spawn round trip");
+        let line = body[body[..at].rfind('\n').map_or(0, |n| n + 1)..].lines().next().unwrap();
+        assert!(
+            line.contains("let _create_in_flight ="),
+            "bound to a named guard, not dropped at once: {line}"
+        );
+    }
+}

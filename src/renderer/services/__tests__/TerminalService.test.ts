@@ -3,6 +3,20 @@
  */
 import { terminalService } from '../TerminalService';
 
+// A create is authorized by this window's tree, including in direct service tests.
+beforeEach(() => {
+  const ids = [
+    'tm-adopt-1', 'tm-owner-leaf', 'tb-solo-1', 'tm-migrated-leaf', 'tm-admin-leaf',
+    'tm-fresh-leaf', 'tm-singleflight-1', 'tm-singleflight-2', 'tm-singleflight-3',
+    'tm-reassert', 'tm-spawn-1',
+  ];
+  (window as any).__REDUX_STORE__ = { getState: () => ({ panes: { treesByTabId: {
+    'tb-service-test': { id: 'pn-test', type: 'split', children: ids.map(terminalId => ({
+      id: terminalId, type: 'terminal', terminalId,
+    })) },
+  } } }) };
+});
+
 describe('TerminalService.getTerminalIdForProcess', () => {
   it('returns the terminalId mapped to a given processId', () => {
     terminalService.registerExistingTerminal('tm-getpid-1', 'pc-getpid-1');

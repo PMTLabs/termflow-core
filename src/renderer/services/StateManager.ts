@@ -38,6 +38,8 @@ import { setLayoutBaseline, clearLayoutBaseline } from './layoutBaseline';
 /** Beyond this the fit/minimap maths degenerates; finite is not the same as sane. */
 const WORLD_LIMIT = 1e6;
 
+class RestoreRegistrationError extends Error {}
+
 const isRect = (r: any): boolean =>
   !!r
   && ['x', 'y', 'w', 'h'].every((k) => typeof r[k] === 'number' && Number.isFinite(r[k]))
@@ -413,7 +415,10 @@ class StateManagerClass {
       seedRestoredCwds(appState.terminalCwds);
 
       // Clear any existing state first
+      const generation = ++this.loadGeneration;
       this.clearCurrentState(dispatch);
+      if (!await this.registerRestoringTrees(appState, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
 
       // Reattach to any PTYs that survived this reload BEFORE creating tabs/panes.
       // The backend (Rust) keeps PTYs alive across a renderer reload; without this,
@@ -425,6 +430,7 @@ class StateManagerClass {
       // Reads appState directly (not the global tabPanes map), so it doesn't need
       // restoreTabPanesInPlace to have run yet.
       await this.reconcileExistingTerminals(appState);
+      if (generation !== this.loadGeneration) return false;
 
       // Orphan sweep: drop persisted scrollback for any terminal no longer in a
       // saved layout (closed tabs, crashed sessions, force-kills).
@@ -447,6 +453,7 @@ class StateManagerClass {
         // Skips itself if the backend cannot say which windows are live.
         try {
           const liveIds = (await window.electronAPI?.listWindowSessionIds?.()) ?? [];
+          if (generation !== this.loadGeneration) return false;
           sweepOrphanSessions(localStorage, liveIds);
         } catch (e) {
           console.warn('StateManager: orphan session sweep skipped:', e);
@@ -463,6 +470,7 @@ class StateManagerClass {
             );
           } else {
             await window.electronAPI?.pruneTerminalHistory?.([...keep.ids]);
+            if (generation !== this.loadGeneration) return false;
           }
         } catch (e) {
           console.warn('StateManager: history prune skipped:', e);
@@ -564,8 +572,9 @@ class StateManagerClass {
       return true;
     } catch (error) {
       console.error('Failed to restore state:', error);
-      // Clear corrupted state
-      localStorage.removeItem(this.STATE_KEY);
+      // A transport failure is not corrupt saved data, so it is kept rather than deleted. Nothing
+      // offers to retry: the caller opens a default tab, and the next periodic save replaces it.
+      if (!(error instanceof RestoreRegistrationError)) localStorage.removeItem(this.STATE_KEY);
       return false;
     }
   }
@@ -1031,7 +1040,8 @@ class StateManagerClass {
       // plus the per-tab focus/maximize/canvas restores a `SavedLayout` never
       // carries — is `populateWorkspace` (extracted verbatim from this method;
       // see its own header for the invariants it preserves).
-      this.populateWorkspace(sanitizedLayout, dispatch);
+      if (!await this.populateWorkspace(sanitizedLayout, dispatch, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
 
       // plan/025 §2.5: the newly loaded layout becomes the "clean" reference
       // for dirty tracking. Best-effort for the same reason as the snapshot
@@ -1058,6 +1068,44 @@ class StateManagerClass {
     }
   }
 
+  /** Register persisted leaf identities before either the mirror or Redux can mount them. */
+  private async registerRestoringTrees(
+    data: { paneTree?: any; tabPanes?: Record<string, any>; treesByTabId?: Record<string, any> },
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
+    const leaves = new Map<string, { leafId: string; sessionKey?: string | null }>();
+    const walk = (node: any): void => {
+      if (!node) return;
+      if (node.type === 'terminal' && node.terminalId) {
+        leaves.set(node.terminalId, { leafId: node.terminalId, sessionKey: node.sessionKey });
+      }
+      if (Array.isArray(node.children)) node.children.forEach(walk);
+    };
+    walk(data.paneTree);
+    Object.values(data.tabPanes ?? {}).forEach(walk);
+    Object.values(data.treesByTabId ?? {}).forEach(walk);
+    if (!leaves.size) return isCurrent();
+
+    const deadline = Date.now() + 90_000;
+    let delay = 1000;
+    while (isCurrent()) {
+      try {
+        await window.electronAPI.registerRestoringLeaves([...leaves.values()]);
+        return isCurrent();
+      } catch (error) {
+        if (!isCurrent()) return false;
+        if (Date.now() >= deadline) {
+          throw new RestoreRegistrationError('Waiting for terminal host: could not register restored panes, so none of them were loaded.');
+        }
+        console.warn('StateManager: restored panes remain unmounted until host registration succeeds:', error);
+        await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
+        if (!isCurrent()) return false;
+        delay = Math.min(delay * 2, 8000);
+      }
+    }
+    return false;
+  }
+
   /**
    * Populate Redux with a workspace description — tabs, per-tab trees,
    * activation, and (when present) the per-tab focus/maximize/canvas restores
@@ -1073,7 +1121,7 @@ class StateManagerClass {
    * the generation re-check all stay in the CALLERS (§0.3) — this method only
    * ever runs once a caller has already decided it owns the transaction.
    */
-  private populateWorkspace(
+  private async populateWorkspace(
     data: {
       tabs: any[];
       activeTabId: string | null;
@@ -1087,7 +1135,10 @@ class StateManagerClass {
       canvas?: CanvasPersisted;
     },
     dispatch: Dispatch,
-  ): void {
+    isCurrent: () => boolean,
+  ): Promise<boolean> {
+    if (!await this.registerRestoringTrees(data, isCurrent)) return false;
+    if (!isCurrent()) return false;
     // Load layout tabs. Review 109 H2: a tab must never be renderable without
     // its authoritative tree, or TerminalContainer's seed effects manufacture
     // a `terminalId: tab.id` root and can spawn a PTY the real tree later
@@ -1209,6 +1260,7 @@ class StateManagerClass {
         if (canvas) dispatch(hydrateCanvas(canvas));
       }
     }
+    return true;
   }
 
   /**
@@ -1298,7 +1350,8 @@ class StateManagerClass {
         return false;
       }
 
-      this.populateWorkspace(snapshot, dispatch);
+      if (!await this.populateWorkspace(snapshot, dispatch, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
 
       // Committed — only NOW is the slot spent. Reverting is not itself
       // undoable, which is why this consumes rather than leaves it.
@@ -1475,6 +1528,10 @@ class StateManagerClass {
           ? sanitizedLayout.treesByTabId[targetTabId]
           : sanitizedLayout.paneTree ?? undefined;
       const tree = savedTree === undefined ? undefined : remintCollisions(savedTree);
+      const generation = this.loadGeneration;
+      const isCurrent = () => generation === this.loadGeneration && !this.replacementInFlight;
+      if (!await this.registerRestoringTrees({ paneTree: tree }, isCurrent)) return false;
+      if (!isCurrent()) return false;
 
       // 3. Install the tab: patch durable fields in place if it already
       // exists — `removeTab` + `addTab` would destroy the tree the very next

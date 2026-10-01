@@ -196,6 +196,9 @@ mod tests {
     /// version, which is what this pins.
     #[test]
     fn process_cwd_with_a_shared_system_matches_the_owned_scan() {
+        // Both resolutions walk the foreground chain, from snapshots taken at different
+        // moments; a real-host test's child appearing between them would make them differ.
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let pid = std::process::id();
         let sys = System::new_all();
         assert_eq!(get_process_cwd_with(&sys, pid), get_process_cwd(pid));
@@ -203,6 +206,9 @@ mod tests {
 
     #[test]
     fn process_cwd_resolves_for_current_process() {
+        // A real-host test running at the same time would be a descendant of this
+        // process and be picked by the foreground walk; wait for it to finish.
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         // The test binary has no child processes, so the foreground walk returns
         // the test pid itself; its cwd must equal the process's working directory.
         let pid = std::process::id();
