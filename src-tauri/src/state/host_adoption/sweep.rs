@@ -7,7 +7,7 @@
 //! is tried again rather than counted as done.
 
 use super::panes::{live_client, surface_orphans, PanePort};
-use super::reconnect::{reconnect_disconnected, FrozenReconnect};
+use super::reconnect::reconnect_disconnected;
 use super::{rediscover_hosts, HostChannel, PtyHostClient};
 use crate::state::reattach::plan_reattach;
 
@@ -33,10 +33,8 @@ pub(in crate::state) async fn sweep<P: PanePort>(port: &P) -> bool {
     let mut complete = true;
     // Registered hosts whose connection is down get their reconnect again; only
     // one that is back, or found dead and dropped, counts as settled.
-    for outcome in reconnect_disconnected(port).await {
-        if !matches!(outcome, FrozenReconnect::Reconnected | FrozenReconnect::GaveUp { dropped: true }) {
-            complete = false;
-        }
+    if !reconnect_disconnected(port).await {
+        complete = false;
     }
     // Hosts discovery knows that the registry does not, whether or not the current
     // host is up, and any whose listing was never answered.

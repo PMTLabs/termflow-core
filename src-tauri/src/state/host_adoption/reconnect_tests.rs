@@ -7,6 +7,7 @@ use super::reconnect::FrozenReconnect;
 use super::*;
 use crate::state::host_lifecycle::{offload_refusal, owned_hosts_now, OwnedHost};
 use crate::state::host_table::QuiesceReason;
+use crate::state::source_scan::{fn_body, production};
 
 const CURRENT: &str = "cur";
 const SEC: Duration = Duration::from_secs(1);
@@ -424,6 +425,63 @@ async fn a_stale_relist_of_the_current_host_does_not_overwrite_a_newer_resolved(
     assert!(port.barrier().wait_resolved(Duration::ZERO).await.is_ok());
 }
 
+// ---- a drop while a reconnect runs ------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_connection_that_drops_during_its_own_reconnect_is_reconnected_again() {
+    // Every connection to h1 answers its first listing (the adoption's) and then goes
+    // silent, so a reconnect spends its second listing waiting on a connection that
+    // is about to die.
+    let h1 = HostSpec { list: ListBehavior::AnswerFirst(1), ..holding(&[("k1", 11)]) };
+    let (world, port) = adopted(HostSpec::default(), &[("h1", h1)]).await;
+    let id = frozen_id(&port, "h1");
+    port.register_terminal("pc-1", "k1", HostChannel::Frozen(id));
+    let lost = epoch_of(&port, id);
+    drop_connection(&world, "h1").await;
+    let reconnect = tokio::spawn({
+        let port = port.clone();
+        async move { reconnect_frozen(&port, id, lost, &[500, 1000]).await }
+    });
+    tokio::time::sleep(secs(2)).await;
+    let second = epoch_of(&port, id);
+    assert_ne!(second, lost, "the reconnect has made its connection and is listing on it");
+    assert!(!reconnect.is_finished());
+
+    // That connection drops. Its drop's own reconnect finds the first one running.
+    world.kill_connections("h1");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(reconnect_frozen(&port, id, second, &[500, 1000]).await, FrozenReconnect::Inert);
+
+    // The running one does not report the host reconnected on a connection that is
+    // already dead: it goes round again for the newer drop.
+    assert_eq!(reconnect.await.unwrap(), FrozenReconnect::Reconnected);
+    assert_eq!(port.connect_count("h1"), 3, "the adoption, the reconnect, and the reconnect the drop asked for");
+    let host = port.frozen_hosts().into_iter().find(|h| h.id == id).unwrap();
+    assert!(host.client.is_alive(), "the host ends connected");
+    assert!(port.0.table.is_current(HostChannel::Frozen(id), host.epoch));
+    assert!(torn_down(&port).is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reconnect_asked_for_while_one_runs_is_not_run_a_second_time_when_the_host_is_back() {
+    let (world, port) = adopted(HostSpec::default(), &[("h1", holding(&[("k1", 11)]))]).await;
+    let id = frozen_id(&port, "h1");
+    let lost = epoch_of(&port, id);
+    drop_connection(&world, "h1").await;
+    world.set_unreachable("h1", true);
+    let reconnect = tokio::spawn({
+        let port = port.clone();
+        async move { reconnect_frozen(&port, id, lost, &[500, 1000, 2000]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The sweep asks for the same host while it is backing off.
+    assert_eq!(reconnect_frozen(&port, id, lost, &[500]).await, FrozenReconnect::Inert);
+    world.set_unreachable("h1", false);
+
+    assert_eq!(reconnect.await.unwrap(), FrozenReconnect::Reconnected);
+    assert_eq!(port.connect_count("h1"), 3, "one attempt that failed and one that connected, no pass for the note left behind");
+}
 // ---- the application wiring --------------------------------------------------------------------
 
 fn source_of(file: &str) -> String {
@@ -433,24 +491,21 @@ fn source_of(file: &str) -> String {
         .replace("\r\n", "\n")
 }
 
-fn body_after(src: &str, signature: &str) -> String {
-    let start = src.find(signature).unwrap_or_else(|| panic!("`{signature}` not found"));
-    src[start..].chars().take(2200).collect()
-}
-
 /// `AppState` is what the fake ports stand in for, and it cannot be built in a
 /// unit test: pin the two places it hands a dropped connection and the periodic
 /// tick to the flows tested above.
 #[test]
 fn a_dropped_older_host_and_the_sweep_reach_the_per_host_flows() {
-    let port = source_of("host_port.rs");
-    let disconnect = body_after(&port, "fn frozen_disconnect(");
+    // The bodies of the functions themselves, not a stretch of text after their
+    // names: a call in the next function must not satisfy these.
+    let port = production(&source_of("host_port.rs"));
+    let disconnect = fn_body(&port, "fn frozen_disconnect(");
     assert!(disconnect.contains("frozen_connection_lost(") && disconnect.contains("reconnect_frozen(&st, id, epoch,"));
     // The primary's own drop handler recovers the primary only.
-    assert!(body_after(&port, "fn primary_disconnect(").contains("reconnect_after_pipe_drop()"));
+    assert!(fn_body(&port, "fn primary_disconnect(").contains("reconnect_after_pipe_drop()"));
 
-    let terminals = source_of("terminals.rs");
-    assert!(body_after(&terminals, "async fn run_host_restore_sweep(").contains("host_adoption::sweep(self)"));
-    assert!(body_after(&terminals, "pub async fn reconnect_after_pipe_drop(").contains("host_adoption::reconnect_primary(self,"));
+    let terminals = production(&source_of("terminals.rs"));
+    assert!(fn_body(&terminals, "async fn run_host_restore_sweep(").contains("host_adoption::sweep(self)"));
+    assert!(fn_body(&terminals, "pub async fn reconnect_after_pipe_drop(").contains("host_adoption::reconnect_primary(self,"));
 }
 

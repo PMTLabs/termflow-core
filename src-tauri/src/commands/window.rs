@@ -817,8 +817,10 @@ mod quit_teardown_wiring_tests {
     fn disarm_then_exit_announces_the_exit_to_every_host() {
         let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
         let stripped = strip_line_comments(&body);
-        let hosts_at = stripped.find(".exit_hosts()").unwrap_or_else(|| {
-            panic!("the quit must release every owned host via `exit_hosts()`. Body:\n{body}")
+        // Awaited: a future that is dropped releases nothing, and the exit would go
+        // ahead with every host still held.
+        let hosts_at = stripped.find(".exit_hosts().await").unwrap_or_else(|| {
+            panic!("the quit must release every owned host via `exit_hosts().await`. Body:\n{body}")
         });
         let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
         assert!(hosts_at < exit_at, "the hosts are released BEFORE exit(0). Body:\n{body}");
@@ -948,14 +950,19 @@ mod quit_teardown_wiring_tests {
             live.find(needle)
                 .unwrap_or_else(|| panic!("`{needle}` not found in reachable body:\n{live}"))
         };
-        let offload_at = pos("offload_preflight");
+        let preflight_at = pos("local_terminals_refusal");
+        let admission_at = pos(".begin_relaunch()");
         let arm_at = pos("arm_detach");
         let flush_at = pos("flush_all_windows");
         let spawn_at = pos("spawn_relaunch");
         let exit_at = pos(".exit(");
         assert!(
-            offload_at < arm_at && arm_at < flush_at && flush_at < spawn_at && spawn_at < exit_at,
-            "restart_keeping_terminals must offload_preflight -> arm_detach -> \
+            preflight_at < admission_at
+                && admission_at < arm_at
+                && arm_at < flush_at
+                && flush_at < spawn_at
+                && spawn_at < exit_at,
+            "restart_keeping_terminals must local_terminals_refusal -> begin_relaunch -> arm_detach -> \
              flush_all_windows -> spawn_relaunch -> exit, in that order, reachably. Body:\n{live}"
         );
 
@@ -1085,9 +1092,10 @@ mod quit_teardown_wiring_tests {
                 .unwrap_or_else(|| panic!("`{needle}` not found in body:\n{body}"))
         };
         let latch_at = pos("restart_in_flight.swap(true");
-        let preflight_at = pos("offload_preflight");
+        // The first thing it looks at, and the first thing it changes.
+        let preflight_at = pos("local_terminals_refusal");
         assert!(
-            latch_at < preflight_at,
+            latch_at < preflight_at && latch_at < pos(".begin_relaunch()"),
             "the in-flight latch must be taken before the preflight. Body:\n{body}"
         );
         assert!(

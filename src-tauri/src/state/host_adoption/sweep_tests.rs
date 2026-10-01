@@ -8,6 +8,7 @@ use super::*;
 use crate::state::host_registry;
 use crate::state::host_routing::{place, Placement};
 use std::time::Instant as StdInstant;
+use super::reconnect::SWEEP_RECONNECT_WAIT;
 
 const CURRENT: &str = "cur";
 const SEC: Duration = Duration::from_secs(1);
@@ -180,4 +181,42 @@ async fn orphan_sweep_does_not_surface_a_restoring_key_on_a_frozen_host() {
     }
     assert_eq!(world.sessions("h1", "Attach"), vec!["tm-wait".to_string()]);
     assert_eq!(world.count_everywhere("Spawn"), 0, "no Spawn frame for the key, on any host");
+}
+
+// ---- a host that cannot be connected ----------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_host_that_cannot_be_connected_does_not_stall_the_sweep_of_the_others() {
+    // "stuck" is registered and its process is alive, but nothing can connect to it:
+    // its reconnect takes the better part of a minute to give up. "ok" is connected
+    // and holds a session no pane claims.
+    let (world, port) = machine(
+        HostSpec::default(),
+        &[("stuck", holding(&[("k9", 9)])), ("ok", holding(&[("tm-stray", 6)]))],
+    );
+    ensure_hosts(&port).await.unwrap();
+    tokio::time::sleep(SEC).await;
+    port.0.claims.clear();
+    world.kill_connections("stuck");
+    world.set_unreachable("stuck", true);
+    tokio::time::sleep(SEC).await;
+    assert!(!port.frozen_hosts().iter().find(|h| h.endpoint == "stuck").unwrap().client.is_alive());
+
+    let tick = tokio::time::Instant::now();
+    let complete = sweep(&port).await;
+    let took = tick.elapsed();
+
+    assert!(!complete, "the host that could not be reached means the sweep is not done");
+    assert!(took >= SWEEP_RECONNECT_WAIT, "it gave the reconnect its chance first: {took:?}");
+    assert!(took < SWEEP_RECONNECT_WAIT + secs(2), "and then went on instead of waiting out the whole backoff: {took:?}");
+    assert_eq!(recovered(&port), vec!["tm-stray".to_string()], "the host that could be reached was swept in the same tick");
+
+    // The reconnect carries on by itself, and the next tick does not start another.
+    assert!(!sweep(&port).await);
+    assert_eq!(world.count("stuck", "List"), 1, "only the adoption listed it");
+    world.set_unreachable("stuck", false);
+    tokio::time::sleep(secs(60)).await;
+    let stuck = port.frozen_hosts().into_iter().find(|h| h.endpoint == "stuck").unwrap();
+    assert!(stuck.client.is_alive(), "it is back once it can be reached");
+    assert!(sweep(&port).await, "and a later tick finds everything in hand");
 }

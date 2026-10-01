@@ -13,6 +13,8 @@ mod history;
 mod render;
 mod engine_host;
 mod reattach;
+#[cfg(test)]
+mod source_scan;
 
 pub use types::*;
 pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, strip_cursor_state_tail, tail_text_with};

@@ -270,6 +270,7 @@ impl<R: Runtime> AppState<R> {
             frozen_host_seq: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             host_table: super::host_table::HostTable::new(),
             host_barrier: super::host_adoption::Barrier::new(),
+            sibling_hold: Arc::default(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
             handoff_offers: crate::session_handoff::HandoffOffers::new(),
@@ -1147,8 +1148,7 @@ impl<R: Runtime> AppState<R> {
     /// local jiggle can't — there is no local master). Returns true if handled.
     pub fn host_repaint(&self, id: &str) -> bool {
         // `id` is the PROCESS id (our map key); the host only knows this terminal
-        // by its session key, so the nudge is addressed in the host's id space
-        // (design 014 §A2).
+        // by its session key, so the nudge is addressed in the host's id space.
         host_registry::route_repaint(&self.host_terminals, &self.terminals, id, &|c| self.client_for_channel(c))
     }
 

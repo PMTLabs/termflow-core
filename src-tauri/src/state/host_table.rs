@@ -246,9 +246,10 @@ impl HostTable {
         Ok(Ticket::new(&self.shared, TicketTarget::Adoption))
     }
 
-    /// The lifecycle owner's own operations (exit's bounded connect-and-shutdown
-    /// of a host that was never adopted) must not be refused by the quiesce they
-    /// hold. Requires the guard, so only the holder can call it.
+    /// An operation of the lifecycle owner that a quiesce must wait for, and that
+    /// the quiesce it holds must not refuse: an offload's arm, which an exit taking
+    /// the table over waits out before it releases the hosts. Requires the guard,
+    /// so only the holder can call it.
     pub fn begin_as_quiescer(&self, _guard: &QuiesceGuard) -> Ticket {
         let mut inner = self.shared.lock();
         inner.adopting += 1;

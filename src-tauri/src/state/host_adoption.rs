@@ -81,6 +81,9 @@ struct Entry {
     retry_pending: bool,
     /// A reconnect of this host is running. At most one is, whoever asks.
     reconnecting: bool,
+    /// Someone asked for a reconnect while one was running: the connection it was
+    /// about to replace is not the one that dropped last.
+    reconnect_again: bool,
 }
 
 struct BarrierShared {
@@ -133,6 +136,7 @@ impl Barrier {
                         resolution: Resolution::Unresolved("not connected yet".into()),
                         retry_pending: false,
                         reconnecting: false,
+                        reconnect_again: false,
                     });
                 }
             }
@@ -199,6 +203,7 @@ impl Barrier {
                     resolution,
                     retry_pending: false,
                     reconnecting: false,
+                    reconnect_again: false,
                 }),
             }
         }
@@ -235,15 +240,18 @@ impl Barrier {
     }
 
     /// Claim the right to reconnect `key`. `None` when a reconnect of it is
-    /// already running. The claim is released when the guard is dropped.
+    /// already running; that one is told (see [`ReconnectGuard::rerun`]) that
+    /// another was asked for. The claim is released when the guard is dropped.
     pub fn begin_reconnect(&self, key: &str) -> Option<ReconnectGuard<'_>> {
         if let Some(entry) = self.lock().iter_mut().find(|e| e.key == key) {
             if entry.reconnecting {
+                entry.reconnect_again = true;
                 return None;
             }
             entry.reconnecting = true;
+            entry.reconnect_again = false;
         }
-        Some(ReconnectGuard { barrier: self, key: key.to_owned() })
+        Some(ReconnectGuard { barrier: self, key: key.to_owned(), released: false })
     }
 
     pub fn unresolved(&self) -> Vec<UnresolvedHost> {
@@ -285,12 +293,33 @@ impl Barrier {
 pub struct ReconnectGuard<'a> {
     barrier: &'a Barrier,
     key: String,
+    released: bool,
+}
+
+impl ReconnectGuard<'_> {
+    /// Was a reconnect asked for while this one ran? If so the claim is kept and
+    /// the caller must run again; if not the claim is released here, in the same
+    /// step, so a request cannot slip in between the answer and the release.
+    pub fn rerun(&mut self) -> bool {
+        let mut entries = self.barrier.lock();
+        let Some(entry) = entries.iter_mut().find(|e| e.key == self.key) else { return false };
+        if std::mem::take(&mut entry.reconnect_again) {
+            return true;
+        }
+        entry.reconnecting = false;
+        self.released = true;
+        false
+    }
 }
 
 impl Drop for ReconnectGuard<'_> {
     fn drop(&mut self) {
+        if self.released {
+            return;
+        }
         if let Some(entry) = self.barrier.lock().iter_mut().find(|e| e.key == self.key) {
             entry.reconnecting = false;
+            entry.reconnect_again = false;
         }
     }
 }

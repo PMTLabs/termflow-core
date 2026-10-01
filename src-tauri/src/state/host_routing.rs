@@ -58,12 +58,17 @@ fn pending(reason: impl std::fmt::Display) -> String {
     format!("{HOST_OWNERSHIP_PENDING}: {reason}")
 }
 
+/// The live connection of `channel`. A host whose connection dropped stays
+/// registered while it is reconnected, but there is nothing to attach through in
+/// the meantime: attaching on the dead client would "succeed", and the reconnect
+/// that follows would never attach a session registered after it began.
 fn client_of<P: AdoptionPort>(port: &P, channel: HostChannel) -> Option<PtyHostClient> {
     match channel {
         HostChannel::Primary => port.current_client(),
         HostChannel::Frozen(id) => port.frozen_hosts().into_iter().find(|h| h.id == id).map(|h| h.client),
         HostChannel::Elevated => None,
     }
+    .filter(PtyHostClient::is_alive)
 }
 
 /// The host a fresh session is created on: the current host while it is

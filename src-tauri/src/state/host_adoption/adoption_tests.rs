@@ -2,6 +2,7 @@ use super::fake_hosts::*;
 use super::*;
 use crate::state::host_registry;
 use crate::state::host_table::{Admission, QuiesceReason};
+use crate::state::source_scan::production;
 use crate::state::types::HostSessionClaimState;
 use std::sync::atomic::Ordering;
 use termflow_pty_protocol::SpawnSpec;
@@ -787,34 +788,69 @@ fn no_ticket_for_input_resize_close() {
     }
 }
 
-/// The only code in the state module that takes a ticket is adoption and the
-/// router, which takes one per create.
-#[test]
-fn only_adoption_takes_a_ticket_in_the_state_module() {
+/// Every file under `dir` (relative to `src`) that is production code, as
+/// `(path relative to src, production text)`.
+fn production_files_under(dir: &str, out: &mut Vec<(String, String)>) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut entries: Vec<_> = std::fs::read_dir(root.join(dir))
+        .unwrap_or_else(|e| panic!("cannot read {dir} ({e})"))
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let relative = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        if path.is_dir() {
+            production_files_under(&relative, out);
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let is_test_file = name.ends_with("_tests.rs") || matches!(name.as_str(), "tests.rs" | "fake_hosts.rs" | "source_scan.rs");
+        if name.ends_with(".rs") && !is_test_file {
+            out.push((relative, production(&std::fs::read_to_string(&path).unwrap())));
+        }
+    }
+}
+
+/// Which files take an admission ticket, and by which call.
+fn ticket_takers(sources: &[(String, String)]) -> Vec<String> {
     let mut takers = Vec::new();
-    for file in [
-        "terminals.rs",
-        "host_port.rs",
-        "host_connect.rs",
-        "host_registry.rs",
-        "host_adoption.rs",
-        "host_adoption/panes.rs",
-        "host_adoption/reconnect.rs",
-        "host_adoption/sweep.rs",
-        "host_routing.rs",
-        "types.rs",
-    ] {
-        let src = source_of(file);
+    for (file, text) in sources {
         for needle in [".begin(", ".begin_adoption(", ".begin_as_quiescer("] {
-            if src.contains(needle) {
+            if text.contains(needle) {
                 takers.push(format!("{file}: {needle}"));
             }
         }
     }
+    takers
+}
+
+/// The only code under `state` and `commands` that takes a ticket is adoption, the
+/// router (one per create) and the lifecycle's hold, which registers an arm as an
+/// operation in flight so that an exit waits for it. The files are found by
+/// walking the directories, so a new one that takes a ticket is seen.
+#[test]
+fn only_adoption_takes_a_ticket_in_the_state_module() {
+    let mut sources = Vec::new();
+    for dir in ["state", "commands"] {
+        production_files_under(dir, &mut sources);
+    }
+    for expected in ["state/host_adoption.rs", "state/host_lifecycle.rs", "state/terminals.rs", "commands/terminal.rs"] {
+        assert!(sources.iter().any(|(file, _)| file == expected), "{expected} was not scanned: the census would be vacuous");
+    }
     assert_eq!(
-        takers,
-        vec!["host_adoption.rs: .begin_adoption(".to_string(), "host_routing.rs: .begin(".to_string()]
+        ticket_takers(&sources),
+        vec![
+            "state/host_adoption.rs: .begin_adoption(".to_string(),
+            "state/host_lifecycle.rs: .begin_as_quiescer(".to_string(),
+            "state/host_routing.rs: .begin(".to_string(),
+        ]
     );
+}
+
+#[test]
+fn a_planted_ticket_taker_is_seen() {
+    let planted = [("commands/terminal.rs".to_string(), production("fn sneaky(s: &S) { let _t = s.host_table.begin(c); }"))];
+    assert_eq!(ticket_takers(&planted), vec!["commands/terminal.rs: .begin(".to_string()]);
 }
 
 // ---- registry ---------------------------------------------------------------

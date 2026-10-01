@@ -232,6 +232,19 @@ impl PtyHostClient {
         ));
     }
 
+    /// Say what the OS would report as this host's image path, for a connection
+    /// with no real process behind it.
+    #[cfg(test)]
+    pub(crate) fn inject_exe_image(&self, image: Option<std::path::PathBuf>) {
+        self.exe_origin.inject_image_lookup(image);
+    }
+
+    /// Decide `exe_in_payload`'s answer outright.
+    #[cfg(test)]
+    pub(crate) fn inject_exe_verdict(&self, verdict: Option<bool>) {
+        self.exe_origin.inject_verdict(verdict);
+    }
+
     /// Whether the host behind this connection runs from inside the Velopack
     /// install root, where an update swap kills it. `None` means it could not be
     /// determined, and callers must treat that as unsafe. A host this app spawned

@@ -536,6 +536,10 @@ pub(super) fn apply_answered_listing(
                 meta.tab_id
             );
             client.close(&meta.tab_id);
+            // The host may still list the session for a moment after being told to
+            // close it. A listing taken in that moment must close it again, not
+            // hand it back to the user as a recovered terminal.
+            maps.closed_unowned.insert(meta.tab_id.clone(), now);
             continue;
         }
         let registered = session_registered_on_any_channel(maps.host_terminals, maps.terminals, &meta.tab_id);

@@ -12,6 +12,7 @@ use super::{
 };
 use crate::elevated_host::FrozenId;
 use crate::state::host_table::{Admission, DrainRefusal, QuiesceReason};
+use futures::future::join_all;
 use std::time::Duration;
 use termflow_pty_protocol::SessionMeta;
 use tokio::time::Instant;
@@ -47,10 +48,10 @@ pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_m
     let channel = HostChannel::Primary;
     // This whole pass runs in the HOST's id space: `plan_reattach` matches
     // against `SessionMeta.tab_id` and `host_stream_offsets` is keyed the
-    // same way. `host_terminals` is keyed by our `pc-` process id since
-    // design 014, so comparing the two directly matches NOTHING and sends
-    // every live terminal to teardown — i.e. a transient pipe drop
-    // (sleep/wake) would destroy every shell. Translate once, here.
+    // same way. `host_terminals` is keyed by our `pc-` process id, so comparing
+    // the two directly matches NOTHING and sends every live terminal to
+    // teardown — i.e. a transient pipe drop (sleep/wake) would destroy every
+    // shell. Translate once, here.
     let initial_by_session = port.panes_on(channel);
     // Do not return when the app currently owns no tabs: the host can still
     // hold live sessions which must be recovered into visible terminals.
@@ -135,19 +136,53 @@ fn standing<P: PanePort>(port: &P, id: FrozenId) -> Standing {
 /// host's panes are closed, as for the primary. If the host's process is also
 /// gone it is dropped from the registry, as if retired, so that it never stays
 /// "owned but disconnected" and blocks an offload or update until the next start.
+///
+/// Only one reconnect of a host runs. The connection it makes can itself drop
+/// before the pass is over; that drop's own reconnect finds this one running and
+/// leaves a note, and this one then runs again for the newer connection instead
+/// of leaving the host unreachable until the next sweep.
 pub(in crate::state) async fn reconnect_frozen<P: PanePort>(
     port: &P,
     id: FrozenId,
     lost_epoch: u64,
     backoff_ms: &[u64],
 ) -> FrozenReconnect {
-    let channel = HostChannel::Frozen(id);
     let Some(host) = registered(port, id) else { return FrozenReconnect::Inert };
-    if !port.table().is_current(channel, lost_epoch) || host.client.is_alive() {
+    if !port.table().is_current(HostChannel::Frozen(id), lost_epoch) || host.client.is_alive() {
         return FrozenReconnect::Inert;
     }
     let key = barrier_key(&host.endpoint);
-    let Some(_claim) = port.barrier().begin_reconnect(&key) else { return FrozenReconnect::Inert };
+    let Some(mut claim) = port.barrier().begin_reconnect(&key) else { return FrozenReconnect::Inert };
+    let mut reconnected = None;
+    loop {
+        let outcome = match (reconnect_frozen_pass(port, id, &key, backoff_ms).await, reconnected) {
+            // The host is back already: the earlier pass did the work.
+            (FrozenReconnect::Inert, Some(earlier)) => earlier,
+            (outcome, _) => outcome,
+        };
+        if outcome != FrozenReconnect::Reconnected || !claim.rerun() {
+            return outcome;
+        }
+        log::info!(
+            "[GEN] terminal host {} dropped again while it was being reconnected; reconnecting again",
+            host.endpoint
+        );
+        reconnected = Some(outcome);
+    }
+}
+
+/// One full pass of [`reconnect_frozen`], for the claim it holds.
+async fn reconnect_frozen_pass<P: PanePort>(
+    port: &P,
+    id: FrozenId,
+    key: &str,
+    backoff_ms: &[u64],
+) -> FrozenReconnect {
+    let channel = HostChannel::Frozen(id);
+    let Some(host) = registered(port, id) else { return FrozenReconnect::Inert };
+    if host.client.is_alive() {
+        return FrozenReconnect::Inert;
+    }
 
     // The panes this host owned before the attempt: the only ones whose fate its
     // answer may decide.
@@ -174,7 +209,7 @@ pub(in crate::state) async fn reconnect_frozen<P: PanePort>(
         };
         match outcome {
             Ok(adopted) => {
-                port.barrier().finish(&key, &host.endpoint, HostRole::Frozen, adopted.resolution);
+                port.barrier().finish(key, &host.endpoint, HostRole::Frozen, adopted.resolution);
                 let Some(client) = registered(port, id).map(|h| h.client) else { return FrozenReconnect::Inert };
                 let still_current = || port.table().is_current(channel, adopted.epoch) && client.is_alive();
                 match list_with_retries(&client).await {
@@ -225,7 +260,7 @@ pub(in crate::state) async fn reconnect_frozen<P: PanePort>(
     for process_id in before.values().filter(|p| still_owned.values().any(|o| o == *p)) {
         port.teardown_pane(process_id);
     }
-    let dropped = gone && drop_dead_host(port, id, &key, &host.endpoint);
+    let dropped = gone && drop_dead_host(port, id, key, &host.endpoint);
     FrozenReconnect::GaveUp { dropped }
 }
 
@@ -247,13 +282,34 @@ fn drop_dead_host<P: PanePort>(port: &P, id: FrozenId, key: &str, endpoint: &str
     true
 }
 
+/// How long one sweep waits for the reconnects it started before it goes on to
+/// the hosts it can reach. A reconnect of a host that is alive but cannot be
+/// connected takes minutes of backoff, and nothing else the sweep does depends on it.
+pub(in crate::state) const SWEEP_RECONNECT_WAIT: Duration = Duration::from_secs(10);
+
 /// Reconnect every registered older host whose connection is down: the sweep's
-/// answer to a host whose own reconnect gave up, or never started.
-pub(in crate::state) async fn reconnect_disconnected<P: PanePort>(port: &P) -> Vec<FrozenReconnect> {
-    let mut outcomes = Vec::new();
+/// answer to a host whose own reconnect gave up, or never started. The hosts are
+/// reconnected side by side, each on its own task, and waited for at most
+/// [`SWEEP_RECONNECT_WAIT`] altogether; one still going then carries on by itself
+/// (a reconnect of a host is single-flight, so the next sweep does not start a
+/// second). True when every host was settled in time: back, or found dead and
+/// dropped.
+pub(in crate::state) async fn reconnect_disconnected<P: PanePort>(port: &P) -> bool {
+    let mut running = Vec::new();
     for host in port.frozen_hosts().into_iter().filter(|h| !h.client.is_alive()) {
         let Some(epoch) = port.table().epoch(HostChannel::Frozen(host.id)) else { continue };
-        outcomes.push(reconnect_frozen(port, host.id, epoch, RECONNECT_BACKOFF_MS).await);
+        let port = port.clone();
+        running.push(tokio::spawn(async move {
+            reconnect_frozen(&port, host.id, epoch, RECONNECT_BACKOFF_MS).await
+        }));
     }
-    outcomes
+    match tokio::time::timeout(SWEEP_RECONNECT_WAIT, join_all(running)).await {
+        Ok(outcomes) => outcomes.into_iter().all(|outcome| {
+            matches!(outcome, Ok(FrozenReconnect::Reconnected | FrozenReconnect::GaveUp { dropped: true }))
+        }),
+        Err(_) => {
+            log::warn!("[GEN] some terminal hosts are still being reconnected; the sweep goes on without them");
+            false
+        }
+    }
 }

@@ -5,6 +5,7 @@
 use super::*;
 use crate::pty_host_client::{wire_client, PtyHostDeps};
 use super::panes::PanePort;
+use crate::state::host_lifecycle::SiblingSlot;
 use crate::state::host_routing::RoutingPort;
 use crate::state::types::{FrozenHost, HostSessionClaim, Terminal};
 use crate::state::{host_registry, ChannelPayload};
@@ -43,6 +44,11 @@ pub(super) struct HostSpec {
     pub refused: bool,
     /// Never acknowledges an arm: the request is received and ignored.
     pub no_arm_ack: bool,
+    /// How long an arm is acknowledged after it was received.
+    pub arm_delay: Duration,
+    /// How long a session that was told to close is still listed. A real host
+    /// reaps the session after it hears the close, not before.
+    pub close_lag: Duration,
 }
 
 impl Default for HostSpec {
@@ -54,6 +60,8 @@ impl Default for HostSpec {
             unreachable: false,
             refused: false,
             no_arm_ack: false,
+            arm_delay: Duration::ZERO,
+            close_lag: Duration::ZERO,
         }
     }
 }
@@ -226,15 +234,19 @@ async fn serve(
                     ListBehavior::SilentFor(d) => Instant::now() >= world_start + *d,
                     ListBehavior::AnswerFirst(n) => listings <= *n,
                 };
-                // A session the host was told to close is no longer listed.
-                answers.then(|| Response::SessionList { req, sessions: still_open(&spec.sessions, &log, &host) })
+                // A session the host was told to close is no longer listed once its
+                // close has taken effect.
+                answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &host) })
             }
             Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => Some(Response::Spawned { req, tab_id, pid: 4242 }),
             Frame::Ctrl(Control::AttachAcked { req, tab_id, .. }) => {
                 Some(Response::AttachAck { req, tab_id, alive: true, tail_offset: 0 })
             }
             Frame::Ctrl(Control::ArmDetach { .. }) if spec.no_arm_ack => None,
-            Frame::Ctrl(Control::ArmDetach { req, .. }) => Some(Response::ArmAck { req, deadline_ms: 0 }),
+            Frame::Ctrl(Control::ArmDetach { req, .. }) => {
+                tokio::time::sleep(spec.arm_delay).await;
+                Some(Response::ArmAck { req, deadline_ms: 0 })
+            }
             Frame::Ctrl(Control::Shutdown { req, .. }) => Some(Response::ShutdownAck { req }),
             _ => None,
         };
@@ -252,11 +264,21 @@ async fn serve(
     });
 }
 
-/// The sessions of `all` that `host` has not been sent a `Close` for.
-fn still_open(all: &[SessionMeta], log: &Mutex<Vec<Recorded>>, host: &str) -> Vec<SessionMeta> {
+/// The sessions of `spec` that `host` has not closed yet: one is gone `close_lag`
+/// after the `Close` for it was received.
+fn still_open(spec: &HostSpec, log: &Mutex<Vec<Recorded>>, host: &str) -> Vec<SessionMeta> {
     let log = log.lock().unwrap();
-    all.iter()
-        .filter(|s| !log.iter().any(|r| r.host == host && r.kind() == "Close" && r.session() == Some(s.tab_id.as_str())))
+    let now = Instant::now();
+    spec.sessions
+        .iter()
+        .filter(|s| {
+            !log.iter().any(|r| {
+                r.host == host
+                    && r.kind() == "Close"
+                    && r.session() == Some(s.tab_id.as_str())
+                    && now.duration_since(r.at) >= spec.close_lag
+            })
+        })
         .cloned()
         .collect()
 }
@@ -323,9 +345,12 @@ pub(super) struct Inner {
     /// was made visible.
     pub admission_when_published: Mutex<Vec<Option<crate::state::host_table::Admission>>>,
     pub frozen_admission_when_published: Mutex<Vec<Option<crate::state::host_table::Admission>>>,
-    /// Where a host's executable is said to run from, by endpoint; a host with no
-    /// entry is outside the install root.
+    /// Where a host's executable is said to run from, by endpoint, for the hosts a
+    /// test decided it for; any other host is classified from an image path in the
+    /// runtime directory, as a real one would be.
     pub exe_origins: Mutex<HashMap<String, Option<bool>>>,
+    /// The hold a sibling's arm keeps.
+    pub sibling_slot: SiblingSlot,
 }
 
 /// `AppState`'s stand-in: the same port, over a fake machine.
@@ -361,6 +386,7 @@ impl FakePort {
             admission_when_published: Mutex::new(Vec::new()),
             frozen_admission_when_published: Mutex::new(Vec::new()),
             exe_origins: Mutex::new(HashMap::new()),
+            sibling_slot: SiblingSlot::default(),
         }))
     }
 
@@ -375,6 +401,20 @@ impl FakePort {
     /// Say where the host on `endpoint` runs from (`None` = could not be told).
     pub fn set_exe_origin(&self, endpoint: &str, in_payload: Option<bool>) {
         self.0.exe_origins.lock().unwrap().insert(endpoint.to_owned(), in_payload);
+        let live = self.current_client().into_iter().filter(|_| endpoint == self.0.current_endpoint).chain(
+            self.frozen_hosts().into_iter().filter(|h| h.endpoint == endpoint).map(|h| h.client),
+        );
+        for client in live {
+            client.inject_exe_verdict(in_payload);
+        }
+    }
+
+    /// What the OS would say about a host started from the runtime directory, where
+    /// the app installs the hosts it starts. Without one (no data directory) the
+    /// lookup finds nothing.
+    fn installed_host_image() -> Option<std::path::PathBuf> {
+        crate::pty_host_client::runtime_host_dir()
+            .map(|dir| dir.join("0123456789abcdef").join("termflow-pty-host.exe"))
     }
 
     /// Give the host on `channel` a retention promise, as a discovery record would.
@@ -558,6 +598,10 @@ impl AdoptionPort for FakePort {
         };
         let client = wire_client(rd, wr, self.deps(on_disconnect));
         client.set_attach_acks(true);
+        client.inject_exe_image(Self::installed_host_image());
+        if let Some(verdict) = self.0.exe_origins.lock().unwrap().get(endpoint) {
+            client.inject_exe_verdict(*verdict);
+        }
         Ok(Opened { client, epoch, build_id: None })
     }
 

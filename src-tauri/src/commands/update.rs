@@ -56,7 +56,7 @@ pub fn connected_host_retention(state: State<'_, AppState>) -> ConnectedHostRete
 /// it cannot reach another instance at all. It used to run the sibling check
 /// too, which is why running `rel` while `rel.alt` was alive refused with
 /// "Updating would close it and lose its terminals" — a message about an update
-/// this command does not perform (design 014 §B1.2).
+/// this command does not perform.
 pub fn offload_preflight(state: &AppState) -> Result<(), String> {
     hotswap_preflight(state)
 }
@@ -79,13 +79,15 @@ pub fn update_preflight(state: &AppState) -> Result<(), String> {
     crate::sibling_coord::describe_unarmable(&siblings).map_or(Ok(()), Err)
 }
 
-/// The Settings preflight for Offload & Close.
+/// The Settings preflight for the update affordance.
 ///
-/// Both this and `restart_for_update` call `offload_preflight`, so the verdict
-/// the panel SHOWS cannot disagree with the one the button ENFORCES. They did
-/// disagree: this command ran only `hotswap_preflight` while the button ran the
-/// sibling check as well, so the panel green-lit an action that then refused as
-/// a toast after the click (design 014 §B4).
+/// It shares `update_preflight` with the update's own check, so the two judge
+/// the same things, but they are not the same question. This is a snapshot of
+/// what is known (`owned_hosts_now`): no discovery, no waiting. The action itself
+/// closes admission and looks again (`begin_update`), so it can still refuse what
+/// this approved: an operation that does not drain within the bound, or a host
+/// discovered or still unanswered by then. The panel can be green and the click
+/// refuse; the refusal is never the other way round.
 #[tauri::command]
 pub fn update_available(state: State<'_, AppState>) -> Result<(), String> {
     update_preflight(&state)
@@ -95,8 +97,12 @@ pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
     // Every host this instance owns must be able to keep its shells alive; the
     // refusal names the ones that cannot.
     crate::state::offload_refusal(&state.owned_hosts_now())?;
-    // Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap
-    // would kill those shells. Only proceed when every terminal will survive.
+    local_terminals_refusal(state)
+}
+
+/// Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap would
+/// kill those shells. Only proceed when every terminal will survive.
+fn local_terminals_refusal(state: &AppState) -> Result<(), String> {
     let has_local = state
         .terminals
         .iter()
@@ -240,7 +246,7 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // exits this process — it performs no payload swap and cannot reach another
     // instance. The check that used to be here justified itself with "whatever
     // swaps the binary", which is a rebuild this command does not perform, and
-    // it is what made a live `rel.alt` refuse `rel`'s offload (design 014 §B1.2).
+    // it is what made a live `rel.alt` refuse `rel`'s offload.
     offload_preflight(&state)?;
     // Close admission first, then look again at what every owned host can do: a
     // create in flight would otherwise land on a host after it was armed.
@@ -278,13 +284,19 @@ pub enum FlushPolicy {
     Skip,
 }
 
-/// Restart THIS process while the pty-host keeps every terminal alive
-/// (plan 044): arm the same local hold `restart_for_update` uses (so a bad
-/// arm refuses exactly like an offload would) → optional flush → spawn a
-/// successor (`termflow.exe … --relaunch-after <our pid>`) → exit. Unlike
+/// Restart THIS process while the pty-host keeps every terminal alive: arm the
+/// local hold (the current host must arm, as for an offload) → optional flush →
+/// spawn a successor (`termflow.exe … --relaunch-after <our pid>`) → exit. Unlike
 /// `restart_for_update`, this always relaunches — offload leaves the user to
 /// reopen the app by hand, which is fine for a deliberate update but not for
 /// an unplanned webview death or an impatient tray click.
+///
+/// This is the way out of a hollow process, so it is stricter than nothing and
+/// laxer than an offload: it arms every host it is connected to and goes ahead
+/// without one it cannot reach (that host is left as a crash would leave it, for
+/// the successor to take back), and without waiting for a create that is stuck.
+/// A host that merely will not arm is not allowed to stop the restart either,
+/// except the current one.
 ///
 /// If the spawn fails we must NOT exit: doing so would leave the user with no
 /// process at all, armed or otherwise. The hold is *asked* to release (a
@@ -317,8 +329,8 @@ pub async fn restart_keeping_terminals(
         keep: false,
     };
 
-    offload_preflight(&state)?;
-    let mut hold = state.begin_offload().await?;
+    local_terminals_refusal(&state)?;
+    let mut hold = state.begin_relaunch().await?;
     let token = crate::pty_host_client::resolve_token();
     hold.arm_detach(
         termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
@@ -326,7 +338,7 @@ pub async fn restart_keeping_terminals(
         Some(termflow_pty_protocol::ArmDetachPurpose::Local),
     )
     .await?;
-    log::info!("[RECOVERY] armed the hot-swap hold on every host");
+    log::info!("[RECOVERY] armed the hot-swap hold on every connected host");
 
     if flush == FlushPolicy::Renderer {
         flush_all_windows(&app).await;
@@ -524,22 +536,27 @@ mod preflight_wiring_tests {
         // The sibling site must stay UNLABELLED — a different profile's update
         // must never install a deadline on terminals its user never touched. The
         // handler no longer arms anything itself: it asks `sibling_arm`, which arms
-        // every owned host through the one shared `arm_hosts`, passing no purpose.
+        // through a hold and passes no purpose.
         assert!(
             read_all("api_server/system.rs").is_empty(),
             "api_server/system.rs must arm through `sibling_arm`, not call arm_detach itself"
         );
-        let lifecycle = std::fs::read_to_string(root.join("state/host_lifecycle.rs")).unwrap();
-        let sibling_arm = fn_body(&lifecycle.replace("\r\n", "\n"), "async fn sibling_arm");
-        let call_at = sibling_arm.find("arm_hosts(").expect("sibling_arm arms through arm_hosts");
-        let call = &sibling_arm[call_at..sibling_arm[call_at..].find(".await").map_or(sibling_arm.len(), |i| call_at + i)];
+        let lifecycle = std::fs::read_to_string(root.join("state/host_lifecycle.rs")).unwrap().replace("\r\n", "\n");
+        let sibling_calls = arm_detach_args(&fn_body(&lifecycle, "async fn sibling_arm"));
+        assert_eq!(sibling_calls.len(), 1, "sibling_arm: expected exactly one arm_detach call");
         assert!(
-            !call.contains("ArmDetachPurpose") && call.trim_end().ends_with("None)"),
-            "a sibling-armed hold must carry no purpose (an explicit None), got: {call}"
+            !sibling_calls[0].contains("ArmDetachPurpose") && sibling_calls[0].trim_end().ends_with("None"),
+            "a sibling-armed hold must carry no purpose (an explicit None), got: {}",
+            sibling_calls[0]
         );
-        // The shared arm passes the caller's purpose through untouched.
-        let shared = arm_detach_args(&lifecycle);
-        assert_eq!(shared.len(), 1, "host_lifecycle.rs: expected exactly one arm_detach call");
+        // The hold's arm hands the caller's purpose to the shared arm untouched, and
+        // the shared arm to the host.
+        let hold_arm = fn_body(&lifecycle, "pub async fn arm_detach");
+        // (" arm_hosts(" with its space: `disarm_hosts(` ends the same way.)
+        assert_eq!(hold_arm.matches(" arm_hosts(").count(), 2, "{hold_arm}");
+        assert_eq!(hold_arm.matches("purpose).await").count(), 2, "every arm forwards the purpose: {hold_arm}");
+        let shared = arm_detach_args(&fn_body(&lifecycle, "async fn arm_hosts"));
+        assert_eq!(shared.len(), 1, "arm_hosts: expected exactly one arm_detach call");
         assert!(shared[0].contains("purpose"), "the shared arm must forward its purpose: {}", shared[0]);
     }
 

@@ -5,8 +5,8 @@
 use super::fake_hosts::*;
 use super::*;
 use crate::state::host_lifecycle::{
-    begin_offload, begin_update, connected_retention, exit_hosts, owned_hosts, owned_hosts_now, sibling_arm,
-    sibling_disarm, update_mode_of, update_refusal, LifecyclePort, SiblingArm, EXIT_QUIESCE_BOUND,
+    begin_offload, begin_relaunch, begin_update, connected_retention, exit_hosts, owned_hosts, owned_hosts_now, sibling_arm,
+    sibling_disarm, update_mode_of, update_refusal, LifecyclePort, SiblingArm, SiblingSlot, EXIT_QUIESCE_BOUND,
     HOLD_QUIESCE_BOUND,
 };
 use crate::state::host_routing::{place, Placement};
@@ -35,8 +35,8 @@ impl LifecyclePort for FakePort {
         "tok".to_string()
     }
 
-    fn exe_origin(&self, endpoint: &str, _client: &PtyHostClient) -> Option<bool> {
-        self.0.exe_origins.lock().unwrap().get(endpoint).copied().unwrap_or(Some(false))
+    fn sibling_slot(&self) -> &SiblingSlot {
+        &self.0.sibling_slot
     }
 }
 
@@ -157,7 +157,7 @@ async fn exit_attempts_unreachable_compatible_host_within_3s_and_logs_by_name() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn exit_connect_is_not_refused_by_its_own_quiesce() {
+async fn exit_reaches_a_host_it_never_adopted_although_its_own_quiesce_refuses_every_adoption() {
     let (world, port) = adopted(&[]).await;
     undiscovered_until_now(&world, &port, "legacy", HostSpec::default());
 
@@ -166,13 +166,16 @@ async fn exit_connect_is_not_refused_by_its_own_quiesce() {
 
     // Exit's quiesce is sticky, so an ordinary adoption is refused for good...
     assert!(matches!(port.table().begin_adoption(), Err(Busy::Lifecycle(_))));
-    // ...yet the attempt on the host that was never adopted got through.
+    // ...yet the host that was never adopted was reached, once, over a bare
+    // connection that asks nothing of admission, and released.
     assert_eq!(world.kinds("legacy"), ["Disarm", "Shutdown", "Eof"]);
     assert_eq!(port.connect_count("legacy"), 1);
+    assert_eq!(port.0.disconnects.load(std::sync::atomic::Ordering::SeqCst), 0, "closing a connection on purpose is not a loss");
+    assert!(port.frozen_hosts().is_empty());
 }
 
 #[tokio::test(start_paused = true)]
-async fn exit_disarms_a_reachable_previously_unresolved_armed_host_without_shutdown_capability_and_it_exits() {
+async fn exit_disarms_and_closes_an_unresolved_armed_host_that_cannot_hear_a_shutdown() {
     let (world, port) = adopted(&[]).await;
     // An older host an earlier offload left armed: its record lists no shutdown
     // control, so `shutdown()` is a no-op for it and only the disarm releases it.
@@ -193,7 +196,7 @@ async fn exit_disarms_a_reachable_previously_unresolved_armed_host_without_shutd
     assert_eq!(
         world.kinds("armed"),
         ["Disarm", "Eof"],
-        "disarmed so it stops holding for 900 s, no shutdown frame it cannot hear, then closed so it exits"
+        "disarmed so it stops holding for 900 s, no shutdown frame it cannot hear, then the stream closed"
     );
     assert!(report.problems().next().is_none(), "{:?}", report.hosts);
 }
@@ -477,10 +480,14 @@ async fn retention_worst_of() {
 
 #[tokio::test(start_paused = true)]
 async fn normal_unmarked_update_stays_offload_for_runtime_dir_hosts() {
-    // Every fake host reports a runtime-dir origin unless told otherwise.
+    // Nothing here decides a verdict: each fake host is classified from the image
+    // path the OS would report for a host started in the runtime directory, by the
+    // same code a real connection goes through.
+    assert!(crate::pty_host_client::runtime_host_dir().is_some(), "this machine has no data directory to install hosts in");
     let (world, port) = adopted(&[("h1", HostSpec::default()), ("h2", HostSpec::default())]).await;
     let hosts = owned_hosts_now(&port);
     assert_eq!(hosts.len(), 3);
+    assert!(hosts.iter().all(|h| h.exe_in_payload == Some(false)), "{:?}", hosts.iter().map(|h| h.exe_in_payload).collect::<Vec<_>>());
 
     assert_eq!(update_mode_of(&hosts), (UpdateMode::Offload, vec![]));
     assert_eq!(update_refusal(&hosts), Ok(()));
@@ -491,6 +498,25 @@ async fn normal_unmarked_update_stays_offload_for_runtime_dir_hosts() {
     for host in [CURRENT, "h1", "h2"] {
         assert_eq!(arm_frames(&world, host).len(), 1, "{host} is armed");
     }
+}
+
+/// Where a host runs from is told from the image path the OS reports for the
+/// process behind the connection. When that lookup finds nothing the origin is
+/// unknown, and an unknown origin is not offloaded.
+#[cfg(windows)]
+#[tokio::test(start_paused = true)]
+async fn a_host_whose_image_path_cannot_be_read_blocks_an_update() {
+    let (_world, port) = adopted(&[("h1", HostSpec::default())]).await;
+    assert_eq!(update_refusal(&owned_hosts_now(&port)), Ok(()));
+    for host in port.frozen_hosts() {
+        host.client.inject_exe_image(None);
+    }
+
+    let hosts = owned_hosts_now(&port);
+
+    let (mode, reasons) = update_mode_of(&hosts);
+    assert_eq!(mode, UpdateMode::Full);
+    assert!(matches!(&reasons[..], [FullReason::HostOriginUnknown(name)] if name.contains("h1")), "{reasons:?}");
 }
 
 #[tokio::test(start_paused = true)]
@@ -589,4 +615,234 @@ async fn sibling_arm_failure_rolls_back_the_hosts_it_armed() {
 
     assert!(reason.contains("h1"), "{reason}");
     assert_eq!(since(&world, CURRENT, before[0]), ["Arm", "Disarm"]);
+}
+
+// ---- the owned set and incompatible hosts -------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn an_incompatible_host_on_the_current_endpoint_is_neither_owned_nor_touched() {
+    // With the generation gate off the current endpoint is shared across versions:
+    // the host there may speak no protocol we do.
+    let world = World::new();
+    world.add_host(CURRENT, HostSpec::default());
+    let port = FakePort::new(&world, CURRENT);
+    let mut alien = current();
+    alien.record = Some(record(CURRENT, 99, 99));
+    port.set_candidates(vec![alien]);
+
+    assert!(owned_hosts(&port).await.is_empty(), "a host with no shared protocol is never owned");
+    let report = exit_hosts(&port).await;
+    tokio::time::sleep(SEC).await;
+
+    assert_eq!(port.connect_count(CURRENT), 0, "exit did not even connect to it");
+    assert!(world.kinds(CURRENT).is_empty(), "and sent it no frame: {:?}", world.kinds(CURRENT));
+    assert!(report.hosts.is_empty(), "{:?}", report.hosts);
+}
+
+// ---- exit and a hold that is arming --------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn exit_waits_for_an_arm_in_flight_and_ends_every_host_disarmed_then_shut_down() {
+    let slow_to_ack = HostSpec { arm_delay: secs(2), ..HostSpec::default() };
+    let (world, port) = adopted(&[("h1", slow_to_ack)]).await;
+    let hosts = [CURRENT, "h1"];
+    let before = marks(&world, &hosts);
+    let mut hold = begin_offload(&port).await.unwrap();
+    let arming = tokio::spawn(async move {
+        let armed = hold.arm_detach(600, "tok", Some(ArmDetachPurpose::Local)).await;
+        (armed, hold)
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(world.count("h1", "Arm"), 1, "the arm is out and h1's acknowledgement is still 2 s away");
+
+    // The user quits meanwhile: exit takes the table over from the offload.
+    let report = exit_hosts(&port).await;
+    tokio::time::sleep(SEC).await;
+
+    let (armed, _hold) = arming.await.unwrap();
+    let refusal = armed.expect_err("an arm that exit overtook did not happen");
+    assert!(refusal.starts_with(LIFECYCLE_BUSY), "{refusal}");
+    for (host, from) in hosts.iter().zip(before) {
+        assert_eq!(
+            since(&world, host, from),
+            ["Arm", "Disarm", "Disarm", "Shutdown", "Eof"],
+            "{host}: the arm is undone, then exit's disarm and shutdown come last, so the host is not left armed"
+        );
+    }
+    assert!(report.drained, "exit waited for the arm instead of going ahead of it");
+    assert!(report.problems().next().is_none(), "{:?}", report.hosts);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_arm_that_starts_after_exit_began_is_refused_and_sends_nothing() {
+    let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
+    let hosts = [CURRENT, "h1"];
+    let before = marks(&world, &hosts);
+    let mut hold = begin_offload(&port).await.unwrap();
+
+    exit_hosts(&port).await;
+    tokio::time::sleep(SEC).await;
+    let refusal = hold
+        .arm_detach(600, "tok", Some(ArmDetachPurpose::Local))
+        .await
+        .expect_err("the offload lost the table to exit");
+
+    assert!(refusal.starts_with(LIFECYCLE_BUSY), "{refusal}");
+    assert_eq!(world.count_everywhere("Arm"), 0, "no host was asked to arm after it was released");
+    for (host, from) in hosts.iter().zip(before) {
+        assert_eq!(since(&world, host, from), ["Disarm", "Shutdown", "Eof"], "{host}");
+    }
+}
+
+// ---- a hold that is dropped ------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_hold_dropped_while_armed_disarms_its_hosts_before_admission_reopens() {
+    let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
+    let before = marks(&world, &[CURRENT, "h1"]);
+    let mut hold = begin_offload(&port).await.unwrap();
+    hold.arm_detach(600, "tok", Some(ArmDetachPurpose::Local)).await.unwrap();
+
+    // A path that neither released nor committed it.
+    drop(hold);
+    assert!(
+        matches!(port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_))),
+        "admission is not reopened while the hosts are still armed"
+    );
+    tokio::time::sleep(SEC).await;
+
+    assert_eq!(since(&world, CURRENT, before[0]), ["Arm", "Disarm"]);
+    assert_eq!(since(&world, "h1", before[1]), ["Arm", "Disarm"]);
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "and it is reopened once they are released");
+}
+
+// ---- restarting this process ------------------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn a_relaunch_arms_the_hosts_it_reaches_and_is_not_stopped_by_the_ones_it_cannot() {
+    let (world, port) = adopted(&[
+        ("up", HostSpec::default()),
+        ("down", HostSpec::default()),
+        ("mute", HostSpec { list: ListBehavior::Never, ..HostSpec::default() }),
+        ("deaf", HostSpec { no_arm_ack: true, ..HostSpec::default() }),
+    ])
+    .await;
+    world.kill_connections("down");
+    tokio::time::sleep(SEC).await;
+    let hosts = [CURRENT, "up", "down", "mute", "deaf"];
+    let before = marks(&world, &hosts);
+    let refused = begin_offload(&port).await.err().expect("an offload refuses with a host disconnected");
+    assert!(refused.contains("down"), "{refused}");
+
+    let mut hold = begin_relaunch(&port).await.expect("a restart is not an offload");
+    hold.arm_detach(600, "tok", Some(ArmDetachPurpose::Local))
+        .await
+        .expect("a host that will not arm does not stop the restart");
+
+    for host in [CURRENT, "up", "mute"] {
+        assert_eq!(arm_frames(&world, host), [(600, Some(ArmDetachPurpose::Local))], "{host} is armed");
+    }
+    assert!(arm_frames(&world, "down").is_empty(), "nothing can be asked of a host with no connection");
+    assert_eq!(since(&world, "deaf", before[4]), ["Arm", "Disarm"], "the host that did not acknowledge is released again");
+    assert_eq!(since(&world, CURRENT, before[0]).last(), Some(&"Arm"), "and the others stay armed");
+    assert_eq!(since(&world, "up", before[1]).last(), Some(&"Arm"));
+    hold.commit();
+    assert!(matches!(port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_))));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_relaunch_needs_the_current_host_and_is_not_held_up_by_an_operation_in_flight() {
+    let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
+
+    // A create that never finishes: an offload refuses, a restart does not wait for it.
+    let _stuck = port.table().begin(HostChannel::Frozen(port.frozen_ids()[0])).unwrap();
+    let started = Instant::now();
+    let hold = begin_relaunch(&port).await.expect("a stuck create does not stop the restart");
+    assert!(started.elapsed() >= HOLD_QUIESCE_BOUND, "it still gave the operation its chance first");
+    drop(hold);
+
+    // Without the current host there is nothing it could keep alive.
+    port.drop_current();
+    let err = begin_relaunch(&port).await.err().expect("no current host");
+    assert_eq!(err, "pty-host not connected — nothing to keep alive");
+    assert!(port.table().begin(HostChannel::Frozen(port.frozen_ids()[0])).is_ok(), "and admission is reopened");
+    assert_eq!(world.count_everywhere("Arm"), 0);
+}
+
+// ---- a sibling's arm holds admission ---------------------------------------------
+
+#[tokio::test(start_paused = true)]
+async fn sibling_arm_refuses_a_connected_host_that_has_not_listed() {
+    let (world, port) = adopted(&[("mute", HostSpec { list: ListBehavior::Never, ..HostSpec::default() })]).await;
+
+    let SiblingArm::Refused(reason) = sibling_arm(&port, 600).await else { panic!("what it holds is not known") };
+
+    assert!(reason.contains("mute") && reason.contains("not reported"), "{reason}");
+    assert_eq!(world.count_everywhere("Arm"), 0);
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "a refused arm does not keep admission closed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_siblings_arm_is_not_undone_by_a_reconnect_and_its_disarm_reopens_admission() {
+    let (world, port) = adopted(&[("h1", holding(&[("k1", 11)]))]).await;
+    let hosts = [CURRENT, "h1"];
+    let before = marks(&world, &hosts);
+    assert_eq!(sibling_arm(&port, 600).await, SiblingArm::Armed(2));
+
+    // h1's connection drops and the sweep goes to reconnect it: a reconnect lists the
+    // host, which disarms it first.
+    world.kill_connections("h1");
+    tokio::time::sleep(SEC).await;
+    assert!(!sweep(&port).await, "the host could not be reconnected while admission is held");
+    assert_eq!(port.connect_count("h1"), 1, "no connection was made to it");
+    for (host, from) in hosts.iter().zip(&before) {
+        assert!(!since(&world, host, *from).contains(&"Disarm"), "{host} was disarmed: {:?}", since(&world, host, *from));
+    }
+    assert!(matches!(port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_))));
+    let refused = place(&port, "tm-new", false).await.err().expect("no create while a sibling's arm is in force");
+    assert!(refused.starts_with(LIFECYCLE_BUSY), "{refused}");
+
+    // The sibling's update fails and it releases us. h1 is down, so it cannot hear it.
+    assert!(!sibling_disarm(&port).await, "h1 has no connection to acknowledge on");
+    assert_eq!(since(&world, CURRENT, before[0]).last(), Some(&"Disarm"), "the host that can hear it is released");
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "and admission is open again");
+    tokio::time::sleep(secs(2)).await;
+    assert_eq!(port.connect_count("h1"), 2, "the reconnect went ahead once the hold ended");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_siblings_arm_ends_with_its_window_and_a_repeated_arm_is_one_hold() {
+    let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
+    let hosts = [CURRENT, "h1"];
+    let before = marks(&world, &hosts);
+
+    // The same request twice (the caller retries) arms twice and holds once.
+    assert_eq!(sibling_arm(&port, 600).await, SiblingArm::Armed(2));
+    assert_eq!(sibling_arm(&port, 600).await, SiblingArm::Armed(2));
+    for (host, from) in hosts.iter().zip(&before) {
+        assert_eq!(since(&world, host, *from), ["Arm", "Arm"], "{host}");
+    }
+    assert!(sibling_disarm(&port).await);
+    for (host, from) in hosts.iter().zip(&before) {
+        assert_eq!(since(&world, host, *from), ["Arm", "Arm", "Disarm"], "{host}");
+    }
+    assert!(port.table().begin(HostChannel::Primary).is_ok());
+
+    // A sibling that never disarms (it crashed) does not keep this instance closed
+    // for good: the hold ends with the window it armed.
+    let before = marks(&world, &hosts);
+    assert_eq!(sibling_arm(&port, 30).await, SiblingArm::Armed(2));
+    assert!(matches!(port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_))));
+    tokio::time::sleep(secs(31)).await;
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "admission reopened when the window ended");
+    for (host, from) in hosts.iter().zip(&before) {
+        assert_eq!(since(&world, host, *from), ["Arm", "Disarm"], "{host}");
+    }
+
+    // The expiry of an arm that was disarmed or replaced does nothing to the next one.
+    assert_eq!(sibling_arm(&port, 30).await, SiblingArm::Armed(2));
+    tokio::time::sleep(secs(20)).await;
+    assert_eq!(sibling_arm(&port, 600).await, SiblingArm::Armed(2));
+    tokio::time::sleep(secs(20)).await;
+    assert!(matches!(port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_))), "the older window's end did not release it");
 }

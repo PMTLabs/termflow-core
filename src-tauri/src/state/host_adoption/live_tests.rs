@@ -153,3 +153,88 @@ async fn a_tombstone_owed_to_one_host_survives_another_hosts_listing() {
     assert_eq!(t.host_close_pending.get("k1").map(|c| *c.value()), Some(h1), "h2's answer cannot settle h1's close");
     assert_eq!(world.count_everywhere("Close"), 0);
 }
+
+/// A real host reaps a session after it has heard the close, not before it. A
+/// listing taken in between still has the session, and what it is shown must not
+/// be handed back to the user as a recovered terminal.
+#[tokio::test(start_paused = true)]
+async fn a_listing_taken_just_after_a_deferred_close_does_not_bring_the_pane_back() {
+    let lagging = HostSpec { close_lag: Duration::from_secs(5), ..holding(&[("k1", 11), ("k2", 12)]) };
+    let (world, port) = adopted(&[("h1", lagging)]).await;
+    let h1 = channel_of(&port, "h1");
+    port.register_terminal("pc-1", "k1", h1);
+    port.register_terminal("pc-2", "k2", h1);
+    let t = &port.0;
+    let lost_epoch = t.table.epoch(h1).expect("published");
+    world.kill_connections("h1");
+    tokio::time::sleep(SEC).await;
+
+    // The user closes k1's pane while the host's pipe is down.
+    host_registry::route_close(&t.host_close_pending, h1, "k1", port.client_for(h1));
+    t.host_terminals.remove("pc-1");
+    t.terminals.remove("pc-1");
+
+    // The reconnect delivers the close, then lists the host again at once.
+    let outcome = reconnect_frozen(&port, frozen_id(h1), lost_epoch, &[500]).await;
+    assert_eq!(outcome, super::reconnect::FrozenReconnect::Reconnected);
+    tokio::time::sleep(SEC).await;
+
+    assert!(port.0.recovered.lock().unwrap().is_empty(), "the pane the user closed was not offered back");
+    assert_eq!(
+        world.sessions("h1", "Close"),
+        vec!["k1".to_string(), "k1".to_string()],
+        "the close was delivered, and repeated when the host still listed the session"
+    );
+    assert_eq!(world.sessions("h1", "Attach"), vec!["k2".to_string()], "the pane that is still open was reattached");
+
+    // Once the host has reaped it, nothing mentions k1 any more.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    let client = port.client_for(h1).expect("connected");
+    let listed: Vec<String> = client.list_sessions().await.expect("answered").into_iter().map(|s| s.tab_id).collect();
+    assert_eq!(listed, vec!["k2".to_string()]);
+}
+
+fn production_of(file: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("state").join(file);
+    crate::state::source_scan::production(&std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {} ({e})", path.display())))
+}
+
+/// `AppState` cannot be built in a unit test, so its live operations are read from
+/// source: each must hand the router the channel of the terminal it was asked
+/// about, not a client chosen up front. A write to an older host's pane that went to
+/// the primary instead would pass every test above, which call the router directly.
+#[test]
+fn appstates_live_operations_route_each_terminal_to_its_own_hosts_client() {
+    use crate::state::source_scan::fn_body;
+    let terminals = production_of("terminals.rs");
+
+    for (signature, route) in [
+        ("pub fn host_write(", "route_write("),
+        ("pub fn host_resize(", "route_resize("),
+        ("pub fn host_repaint(", "route_repaint("),
+    ] {
+        let body = fn_body(&terminals, signature);
+        let call = &body[body.find(route).unwrap_or_else(|| panic!("{signature} no longer routes: {body}"))..];
+        // The closure the router asks for a channel's client with: `&|c| self.client_for_channel(c)`.
+        let closure = &call[call.find("&|").unwrap_or_else(|| panic!("no closure passed on: {call}")) + 2..];
+        let param = &closure[..closure.find('|').expect("a closure parameter")];
+        assert!(
+            closure[param.len() + 1..].trim_start().starts_with(&format!("self.client_for_channel({})", param.trim())),
+            "{signature} must resolve the channel it is given, not pick a client itself: {call}"
+        );
+        assert!(!body.contains("HostChannel::Primary") && !body.contains("pty_host_clone"), "{signature}: {body}");
+    }
+
+    // A close is owed to the channel that owns the pane, and the client it goes
+    // through is that channel's.
+    let close = fn_body(&terminals, "pub fn host_close(");
+    assert!(close.contains("self.host_channel_for(id)"), "{close}");
+    let route_close = &close[close.find("route_close(").expect("host_close routes the close")..];
+    assert!(route_close.contains("channel, &session_key, self.client_for_channel(channel))"), "{route_close}");
+
+    // And the channel's client is the registered host's for an older host.
+    let client_for_channel = fn_body(&terminals, "fn client_for_channel(");
+    assert!(client_for_channel.contains("HostChannel::Frozen(id) => self.frozen_client(id)"), "{client_for_channel}");
+    assert_eq!(client_for_channel.matches("pty_host_clone()").count(), 1, "the primary's client is for the primary only");
+    assert!(fn_body(&terminals, "fn host_channel_for(").contains("self.host_terminals.get(id)"));
+}

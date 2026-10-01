@@ -16,14 +16,14 @@
 
 use super::host_adoption::{barrier_key, AdoptionPort};
 use super::host_connect::connect_existing;
-use super::host_table::{Admission, QuiesceGuard, QuiesceReason, LIFECYCLE_BUSY};
+use super::host_table::{Admission, Busy, HostTable, QuiesceGuard, QuiesceReason, LIFECYCLE_BUSY};
 use super::types::{AppState, FrozenHost};
 use super::update_survival::{describe_reasons, effective_mode, FullReason, HostOrigin, UpdateMode};
 use crate::elevated_host::HostChannel;
 use crate::pty_host_client::{HostCandidate, HostRetention, HostRole, PtyHostClient, PtyHostDeps};
 use futures::future::join_all;
 use std::future::Future;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Runtime;
@@ -36,7 +36,9 @@ pub(super) const EXIT_QUIESCE_BOUND: Duration = Duration::from_secs(5);
 /// How long an offload or update waits for the same operations before it gives
 /// up and refuses. Longer than exit's: a spawn can legitimately take ~10 s.
 pub(super) const HOLD_QUIESCE_BOUND: Duration = Duration::from_secs(12);
-/// One attempt, connect included, to reach a host exit holds no connection to.
+/// One attempt, connect and announcement included, to reach a host exit holds no
+/// connection to. Closing the stream afterwards has its own bound
+/// (`PtyHostClient::close_transport`), so an attempt can take a little longer.
 pub(super) const EXIT_REACH_BOUND: Duration = Duration::from_secs(3);
 
 const NOT_CONNECTED: &str = "pty-host not connected — nothing to keep alive";
@@ -53,6 +55,8 @@ pub(super) trait LifecyclePort: AdoptionPort {
     fn exe_origin(&self, _endpoint: &str, client: &PtyHostClient) -> Option<bool> {
         client.exe_in_payload()
     }
+    /// Where the hold a sibling's arm request took is kept until its disarm.
+    fn sibling_slot(&self) -> &SiblingSlot;
 }
 
 // ---- the owned set --------------------------------------------------------
@@ -114,8 +118,13 @@ fn collect<P: LifecyclePort>(port: &P, discovered: &[HostCandidate]) -> Vec<Owne
             .find(|u| barrier_key(&u.endpoint) == barrier_key(endpoint))
             .map(|u| u.reason.clone())
     };
+    // A host with no shared protocol is never owned, wherever it sits: the current
+    // endpoint is shared across versions when the generation gate is off.
     let found = |endpoint: &str| {
-        discovered.iter().find(|c| barrier_key(&c.endpoint) == barrier_key(endpoint)).cloned()
+        discovered
+            .iter()
+            .find(|c| c.compatible() && barrier_key(&c.endpoint) == barrier_key(endpoint))
+            .cloned()
     };
     let mut hosts: Vec<OwnedHost> = Vec::new();
 
@@ -234,15 +243,21 @@ pub fn offload_refusal(hosts: &[OwnedHost]) -> Result<(), String> {
     if let Some(reason) = disconnected_refusal(hosts).or_else(|| unresolved_refusal(hosts)) {
         return Err(reason);
     }
+    hotswap_refusal(hosts)
+}
+
+/// Hosts that cannot outlive this process: one that could not break away from a
+/// kill-on-close job dies with the app, armed or not.
+fn hotswap_refusal(hosts: &[OwnedHost]) -> Result<(), String> {
     let bound: Vec<&OwnedHost> =
         hosts.iter().filter(|h| h.client.as_ref().is_some_and(|c| !c.survives_hotswap())).collect();
-    if !bound.is_empty() {
-        return Err(format!(
-            "hot-swap unavailable: the sidecar could not break away from a kill-on-close job ({})",
-            names(&bound)
-        ));
+    if bound.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    Err(format!(
+        "hot-swap unavailable: the sidecar could not break away from a kill-on-close job ({})",
+        names(&bound)
+    ))
 }
 
 pub(super) fn origins(hosts: &[OwnedHost]) -> Vec<HostOrigin> {
@@ -343,10 +358,16 @@ fn named_clients(hosts: &[OwnedHost]) -> Result<Vec<Named>, String> {
 
 /// Admission to the hosts is closed and every owned host has been checked: an
 /// offload or update may now arm them. Dropping it reopens admission; `commit`
-/// keeps it closed for the rest of the process.
+/// keeps it closed for the rest of the process. A hold dropped while hosts are
+/// still armed by it disarms them first: admission is not reopened over a host
+/// nobody will release.
 pub struct Hold {
-    guard: QuiesceGuard,
+    /// Taken by `commit` (forgotten) and by `Drop` (kept until the disarm is done).
+    guard: Option<QuiesceGuard>,
+    table: HostTable,
     hosts: Vec<OwnedHost>,
+    /// Hosts in `hosts` that may fail to arm without failing the hold.
+    tolerated: Vec<String>,
     armed: Vec<Named>,
 }
 
@@ -363,32 +384,110 @@ impl Hold {
 
     /// Arm every owned host, or none: if one refuses, those already armed are
     /// disarmed before the error is returned.
+    ///
+    /// Exit may take the table over from this hold at any moment, and a host that
+    /// is armed when it is shut down holds its shells for the whole arm window
+    /// (armed wins over the shutdown). So the arm is registered as an operation in
+    /// flight, which exit waits for, and is refused, or undone before it returns,
+    /// when exit is in force: exit's disarm and shutdown always come after any arm.
     pub async fn arm_detach(
         &mut self,
         timeout_secs: u64,
         token: &str,
         purpose: Option<ArmDetachPurpose>,
     ) -> Result<(), String> {
-        let hosts = named_clients(&self.hosts)?;
-        arm_hosts(&hosts, timeout_secs, token, purpose).await?;
-        self.armed = hosts;
+        let named = named_clients(&self.hosts)?;
+        let guard = self.guard.as_ref().expect("a hold keeps its guard until it ends");
+        let _in_flight = self.table.begin_as_quiescer(guard);
+        refuse_if_exiting(&self.table)?;
+        let (optional, required): (Vec<Named>, Vec<Named>) =
+            named.into_iter().partition(|(name, _)| self.tolerated.contains(name));
+        arm_hosts(&required, timeout_secs, token, purpose).await?;
+        let mut armed = required;
+        // Each of the others stands on its own: one that will not arm is released
+        // again and left out, and the rest stay armed.
+        let results = join_all(optional.iter().map(|host| async move {
+            arm_hosts(std::slice::from_ref(host), timeout_secs, token, purpose).await
+        }))
+        .await;
+        for (host, result) in optional.into_iter().zip(results) {
+            match result {
+                Ok(()) => armed.push(host),
+                Err(e) => log::warn!("[HOTSWAP] continuing without arming every host: {e}"),
+            }
+        }
+        if let Err(exiting) = refuse_if_exiting(&self.table) {
+            disarm_hosts(&armed).await;
+            return Err(exiting);
+        }
+        self.armed = armed;
         Ok(())
     }
 
     /// The offload or update will not happen: put the hosts back as they were and
-    /// reopen admission.
-    pub async fn release(self) {
-        if !self.armed.is_empty() {
-            disarm_hosts(&self.armed).await;
-        }
+    /// reopen admission. True when every host acknowledged the disarm.
+    pub async fn release(mut self) -> bool {
+        let armed = std::mem::take(&mut self.armed);
+        armed.is_empty() || disarm_hosts(&armed).await
     }
 
     /// The process is about to exit armed. Admission stays closed until it does:
     /// reopening it would let a terminal be created on a host nobody will release.
-    pub fn commit(self) {
+    pub fn commit(mut self) {
+        self.armed.clear();
         // Dropping the guard is what reopens the table.
-        std::mem::forget(self.guard);
+        if let Some(guard) = self.guard.take() {
+            std::mem::forget(guard);
+        }
     }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        if self.armed.is_empty() {
+            return;
+        }
+        log::error!("[HOTSWAP] a hold was dropped while hosts were still armed; disarming them");
+        let armed = std::mem::take(&mut self.armed);
+        let guard = self.guard.take();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    disarm_hosts(&armed).await;
+                    drop(guard);
+                });
+            }
+            Err(_) => log::error!("[HOTSWAP] no runtime to disarm on; the hosts keep their detach window"),
+        }
+    }
+}
+
+/// An arm must not go ahead once exit is in force.
+fn refuse_if_exiting(table: &HostTable) -> Result<(), String> {
+    match table.lifecycle_reason() {
+        Some(QuiesceReason::Exit) => Err(Busy::Lifecycle(QuiesceReason::Exit).to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// Close admission and wait for the operations in flight. With `strict` set, an
+/// operation still in flight at the bound refuses (admission reopens); otherwise
+/// the caller goes ahead anyway, as exit does.
+async fn close_admission<P: LifecyclePort>(
+    port: &P,
+    reason: QuiesceReason,
+    strict: bool,
+) -> Result<QuiesceGuard, String> {
+    let guard = port.table().quiesce(reason, HOLD_QUIESCE_BOUND).await.map_err(|busy| busy.to_string())?;
+    if !guard.drained() {
+        log::warn!("[GEN] {reason:?}: operations still in flight on {:?}", guard.holders());
+        if strict {
+            return Err(format!(
+                "{LIFECYCLE_BUSY}: other terminal operations are still in progress; try again in a moment"
+            ));
+        }
+    }
+    Ok(guard)
 }
 
 /// Close admission for an offload or an update commit and check that every owned
@@ -396,14 +495,10 @@ impl Hold {
 /// change is in force, and refuses (naming the host) when any owned host is
 /// disconnected, has not reported its terminals, or cannot survive.
 async fn begin_hold<P: LifecyclePort>(port: &P, reason: QuiesceReason) -> Result<Hold, String> {
-    let guard = port.table().quiesce(reason, HOLD_QUIESCE_BOUND).await.map_err(|busy| busy.to_string())?;
-    if !guard.drained() {
-        log::warn!("[GEN] {reason:?}: operations still in flight on {:?}; refusing", guard.holders());
-        return Err(format!("{LIFECYCLE_BUSY}: terminals are still being created; try again in a moment"));
-    }
+    let guard = close_admission(port, reason, true).await?;
     let hosts = owned_hosts(port).await;
     offload_refusal(&hosts)?;
-    Ok(Hold { guard, hosts, armed: Vec::new() })
+    Ok(Hold { guard: Some(guard), table: port.table().clone(), hosts, tolerated: Vec::new(), armed: Vec::new() })
 }
 
 pub(super) async fn begin_offload<P: LifecyclePort>(port: &P) -> Result<Hold, String> {
@@ -412,6 +507,28 @@ pub(super) async fn begin_offload<P: LifecyclePort>(port: &P) -> Result<Hold, St
 
 pub(super) async fn begin_update<P: LifecyclePort>(port: &P) -> Result<Hold, String> {
     begin_hold(port, QuiesceReason::Update).await
+}
+
+/// Close admission to restart this process while the hosts keep every terminal
+/// alive (recovery from a dead webview, the tray's restart). That restart is the
+/// only way out of a hollow process, so it is not held up by a host that cannot
+/// be reached: it needs the current host, and arms every other host it is
+/// connected to without failing when one of those will not arm. A host it holds
+/// no connection to is left as it is, exactly as if the GUI had crashed. An
+/// operation still in flight at the bound does not stop it either.
+pub(super) async fn begin_relaunch<P: LifecyclePort>(port: &P) -> Result<Hold, String> {
+    let guard = close_admission(port, QuiesceReason::Offload, false).await?;
+    let owned = owned_hosts_now(port);
+    let Some(primary) = owned.iter().find(|h| h.channel == Some(HostChannel::Primary) && h.connected()) else {
+        return Err(NOT_CONNECTED.to_string());
+    };
+    hotswap_refusal(std::slice::from_ref(primary))?;
+    let (hosts, skipped): (Vec<OwnedHost>, Vec<OwnedHost>) = owned.into_iter().partition(OwnedHost::connected);
+    for host in &skipped {
+        log::warn!("[RECOVERY] {} is not connected; leaving it as it is", host.name());
+    }
+    let tolerated = hosts.iter().filter(|h| h.channel != Some(HostChannel::Primary)).map(OwnedHost::name).collect();
+    Ok(Hold { guard: Some(guard), table: port.table().clone(), hosts, tolerated, armed: Vec::new() })
 }
 
 // ---- exit -----------------------------------------------------------------
@@ -481,12 +598,12 @@ async fn release_host(name: &str, client: &PtyHostClient, deadline: Option<Insta
     problem
 }
 
-/// Reach a host exit holds no connection to, once, within [`EXIT_REACH_BOUND`],
-/// and release it. The attempt takes the lifecycle owner's own ticket: the quiesce
-/// exit holds refuses every other adoption, this one included.
-async fn reach_and_release<P: LifecyclePort>(port: &P, guard: Option<&QuiesceGuard>, host: &OwnedHost) -> HostExit {
+/// Reach a host exit holds no connection to, once, and release it. The connect and
+/// the announcement share [`EXIT_REACH_BOUND`]; closing the stream afterwards has
+/// its own bound. The connection is a bare one that asks nothing of admission,
+/// which exit's own quiesce keeps closed to every adoption.
+async fn reach_and_release<P: LifecyclePort>(port: &P, host: &OwnedHost) -> HostExit {
     let name = host.name();
-    let _ticket = guard.map(|guard| port.table().begin_as_quiescer(guard));
     let deadline = Instant::now() + EXIT_REACH_BOUND;
     let problem = match tokio::time::timeout_at(deadline, port.connect_for_exit(&host.candidate)).await {
         Err(_) => Some(format!("it did not accept a connection within {} s", EXIT_REACH_BOUND.as_secs())),
@@ -503,14 +620,14 @@ async fn reach_and_release<P: LifecyclePort>(port: &P, guard: Option<&QuiesceGua
     HostExit { name, problem }
 }
 
-async fn exit_one<P: LifecyclePort>(port: &P, guard: Option<&QuiesceGuard>, host: &OwnedHost) -> HostExit {
+async fn exit_one<P: LifecyclePort>(port: &P, host: &OwnedHost) -> HostExit {
     match &host.client {
         Some(client) => {
             let name = host.name();
             let problem = release_host(&name, client, None).await;
             HostExit { name, problem }
         }
-        None => reach_and_release(port, guard, host).await,
+        None => reach_and_release(port, host).await,
     }
 }
 
@@ -533,7 +650,7 @@ pub(super) async fn exit_hosts<P: LifecyclePort>(port: &P) -> ExitReport {
         log::warn!("quit: exiting although operations are still in flight on {holders:?}");
     }
     let owned = owned_hosts(port).await;
-    let hosts = join_all(owned.iter().map(|host| exit_one(port, guard.as_ref(), host))).await;
+    let hosts = join_all(owned.iter().map(|host| exit_one(port, host))).await;
     ExitReport { drained, hosts }
 }
 
@@ -552,34 +669,94 @@ pub enum SiblingArm {
     Failed(String),
 }
 
-/// Arm every host this instance owns so its shells outlive another instance's
-/// update. It refuses when any owned host cannot be reached, or runs from inside
-/// the install root (or from somewhere unknown), because the update would kill
-/// it: arming it would only pretend the shells were safe.
-pub(super) async fn sibling_arm<P: LifecyclePort>(port: &P, timeout_secs: u64) -> SiblingArm {
-    let hosts = owned_hosts(port).await;
-    if hosts.is_empty() {
-        return SiblingArm::NothingToArm;
+/// The hold a sibling's arm request keeps from the arm to its disarm, with a
+/// number that tells the expiry of one arm from the next.
+#[derive(Default)]
+pub struct SiblingSlot {
+    held: std::sync::Mutex<Option<(u64, Hold)>>,
+    arms: AtomicU64,
+}
+
+impl SiblingSlot {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(u64, Hold)>> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner())
     }
-    if let Some(reason) = disconnected_refusal(&hosts) {
-        return SiblingArm::Refused(reason);
+
+    fn take(&self) -> Option<(u64, Hold)> {
+        self.lock().take()
     }
-    if let Err(reason) = update_refusal(&hosts) {
-        return SiblingArm::Refused(reason);
+
+    fn take_if(&self, arm: u64) -> Option<Hold> {
+        let mut held = self.lock();
+        match held.as_ref() {
+            Some((current, _)) if *current == arm => held.take().map(|(_, hold)| hold),
+            _ => None,
+        }
     }
-    let named = match named_clients(&hosts) {
-        Ok(named) => named,
-        Err(reason) => return SiblingArm::Refused(reason),
-    };
-    match arm_hosts(&named, timeout_secs, &port.arm_token(), None).await {
-        Ok(()) => SiblingArm::Armed(named.len()),
-        Err(e) => SiblingArm::Failed(e),
+
+    fn keep(&self, hold: Hold) -> u64 {
+        let arm = self.arms.fetch_add(1, Ordering::AcqRel) + 1;
+        *self.lock() = Some((arm, hold));
+        arm
     }
 }
 
-/// Release the detach window `sibling_arm` set on every owned host. True only if
-/// every one acknowledged; true too when there is nothing to disarm.
+/// Arm every host this instance owns so its shells outlive another instance's
+/// update. It refuses when any owned host cannot be reached or has not reported
+/// its terminals, or runs from inside the install root (or from somewhere
+/// unknown), because the update would kill it: arming it would only pretend the
+/// shells were safe.
+///
+/// Admission stays closed until the sibling's disarm, or until the arm window
+/// ends: a re-list or a reconnect disarms the host it talks to, which would undo
+/// the arm made for the other instance's update.
+pub(super) async fn sibling_arm<P: LifecyclePort>(port: &P, timeout_secs: u64) -> SiblingArm {
+    let slot = port.sibling_slot();
+    let mut hold = match slot.take() {
+        // A repeated request arms the same window again.
+        Some((_, hold)) => hold,
+        None => {
+            let guard = match close_admission(port, QuiesceReason::Update, true).await {
+                Ok(guard) => guard,
+                Err(reason) => return SiblingArm::Refused(reason),
+            };
+            let hosts = owned_hosts(port).await;
+            if hosts.is_empty() {
+                return SiblingArm::NothingToArm;
+            }
+            if let Some(reason) = disconnected_refusal(&hosts).or_else(|| unresolved_refusal(&hosts)) {
+                return SiblingArm::Refused(reason);
+            }
+            if let Err(reason) = update_refusal(&hosts) {
+                return SiblingArm::Refused(reason);
+            }
+            Hold { guard: Some(guard), table: port.table().clone(), hosts, tolerated: Vec::new(), armed: Vec::new() }
+        }
+    };
+    let armed = hold.hosts.len();
+    if let Err(e) = hold.arm_detach(timeout_secs, &port.arm_token(), None).await {
+        hold.release().await;
+        return SiblingArm::Failed(e);
+    }
+    let arm = slot.keep(hold);
+    let port = port.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
+        if let Some(hold) = port.sibling_slot().take_if(arm) {
+            log::warn!("[HOTSWAP] the detach window armed for a sibling ended; reopening admission");
+            hold.release().await;
+        }
+    });
+    SiblingArm::Armed(armed)
+}
+
+/// Release the detach window `sibling_arm` set on every owned host and reopen
+/// admission. True only if every one acknowledged; true too when there is nothing
+/// to disarm.
 pub(super) async fn sibling_disarm<P: LifecyclePort>(port: &P) -> bool {
+    if let Some((_, hold)) = port.sibling_slot().take() {
+        return hold.release().await;
+    }
     let hosts: Vec<Named> =
         owned_hosts_now(port).into_iter().filter_map(|h| h.client.clone().map(|c| (h.name(), c))).collect();
     disarm_hosts(&hosts).await
@@ -612,6 +789,10 @@ impl<R: Runtime> LifecyclePort for AppState<R> {
     fn arm_token(&self) -> String {
         crate::pty_host_client::resolve_token()
     }
+
+    fn sibling_slot(&self) -> &SiblingSlot {
+        &self.sibling_hold
+    }
 }
 
 impl<R: Runtime> AppState<R> {
@@ -638,6 +819,12 @@ impl<R: Runtime> AppState<R> {
     /// Close admission and check the hosts for an update commit.
     pub async fn begin_update(&self) -> Result<Hold, String> {
         begin_update(self).await
+    }
+
+    /// Close admission to restart this process with the hosts armed; see
+    /// [`begin_relaunch`].
+    pub async fn begin_relaunch(&self) -> Result<Hold, String> {
+        begin_relaunch(self).await
     }
 
     /// Arm every owned host for a sibling's update; see [`sibling_arm`].
