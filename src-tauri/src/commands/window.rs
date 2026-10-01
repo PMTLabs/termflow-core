@@ -3,7 +3,7 @@
 //! Split out of the former `commands.rs`.
 
 use tauri::State;
-use crate::state::AppState;
+use crate::state::{AppState, CloseBounds};
 use super::menu::refresh_menu;
 
 /// The window label that API/MCP-created terminals currently route to (normalized to
@@ -173,27 +173,33 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 /// Deliberately NOT used by `restart_for_update` or the updater: those arm on
 /// purpose and exit so terminals survive the swap.
 pub fn disarm_then_exit(app: &tauri::AppHandle) {
-    use tauri::Manager as _;
-
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        // Every pty-host this instance owns — the current one and any older one
-        // that survived an update, connected or not — is released, not just the
-        // primary; see `AppState::exit_hosts`. Clone out of the `State` borrow
-        // before awaiting.
-        let state = app.try_state::<AppState>().map(|s| s.inner().clone());
-        if let Some(state) = &state {
-            state.exit_hosts().await;
-        }
-        // Plan 045 AC9: the elevated sidecar is never armed for detach and never
-        // restored elevated, so unlike the primary above it always tears down
-        // here rather than being disarmed. A no-op if no admin tab was ever
-        // opened this run.
-        if let Some(elevated) = state.map(|s| s.elevated_host.clone()) {
-            elevated.shutdown().await;
-        }
+        close_all_hosts(&app, None).await;
         app.exit(0);
     });
+}
+
+/// Everything a quit does to the shells' hosts, short of exiting: release every
+/// pty-host this instance owns — the current one and any older one that survived
+/// an update, connected or not, not just the primary; see `AppState::exit_hosts`
+/// — then the elevated sidecar. That one is never armed for detach and never
+/// restored elevated, so unlike the others it always tears down rather than
+/// being disarmed. A no-op if no admin tab was ever opened this run.
+///
+/// With `bounds`, the hosts get that long and no more, for a caller that has
+/// something else waiting for it (an update that has started its updater).
+pub(crate) async fn close_all_hosts(app: &tauri::AppHandle, bounds: Option<CloseBounds>) {
+    use tauri::Manager as _;
+
+    // Clone out of the `State` borrow before awaiting.
+    let state = app.try_state::<AppState>().map(|s| s.inner().clone());
+    if let Some(state) = &state {
+        state.exit_hosts_within(bounds).await;
+    }
+    if let Some(elevated) = state.map(|s| s.elevated_host.clone()) {
+        elevated.shutdown().await;
+    }
 }
 
 /// Ask every window to persist its state — including the spec 045 §3.3 cwd
@@ -209,16 +215,20 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
 /// outright, so a tab offloaded/updated between autosave ticks came back on
 /// relaunch with no persisted cwd and fell through to whatever directory
 /// `CreateProcess` picked with none given (reported: `C:\Windows`).
-pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
+///
+/// Returns whether THIS call is what marked the application as exiting. A caller
+/// that backs out afterwards (an update that is abandoned) may clear the mark only
+/// then: otherwise it would clear a quit's.
+pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) -> bool {
     use tauri::{Emitter, Manager as _};
 
-    let Some(state) = app.try_state::<AppState>() else { return };
+    let Some(state) = app.try_state::<AppState>() else { return false };
 
     // A second Quit while a flush is in flight means "I am done waiting" — the
     // caller's own exit still proceeds; there is just nothing further to await.
-    if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if !mark_exiting(&state.exiting) {
         log::info!("flush_all_windows: already flushing; not waiting again.");
-        return;
+        return false;
     }
 
     let expected: Vec<String> = app
@@ -228,14 +238,14 @@ pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
         .cloned()
         .collect();
     if expected.is_empty() {
-        return;
+        return true;
     }
 
     state.flush_acks.clear();
     if let Err(e) = app.emit("app:flush-session", ()) {
         // Nothing will ack, so do not make the caller wait out the timeout.
         log::warn!("flush_all_windows: could not ask windows to flush ({e}); continuing.");
-        return;
+        return true;
     }
 
     let acks = state.flush_acks.clone();
@@ -251,6 +261,13 @@ pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
             FLUSH_TIMEOUT.as_millis()
         );
     }
+    true
+}
+
+/// Mark the application as exiting. True when this call set the mark, false when
+/// it was already set.
+fn mark_exiting(exiting: &std::sync::atomic::AtomicBool) -> bool {
+    !exiting.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
 pub fn flush_then_exit(app: &tauri::AppHandle) {
@@ -290,6 +307,16 @@ mod flush_tests {
     use dashmap::DashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// Whoever's swap set the mark is the only one that may take it back: an update
+    /// that backs out after a quit marked the application must leave the quit's mark.
+    #[test]
+    fn only_the_call_that_set_the_exit_mark_owns_it() {
+        let exiting = std::sync::atomic::AtomicBool::new(false);
+        assert!(mark_exiting(&exiting), "the first call sets it");
+        assert!(!mark_exiting(&exiting), "a second one finds it set and owns nothing");
+        assert!(exiting.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn a_window_that_never_acks_does_not_wedge_the_quit() {
@@ -782,21 +809,26 @@ mod quit_teardown_wiring_tests {
     /// would never run.
     #[test]
     fn disarm_then_exit_shuts_down_the_elevated_host_before_exiting() {
-        let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
+        let window = source("commands/window.rs");
+        let quit = strip_line_comments(&fn_body(&window, "pub fn disarm_then_exit"));
+        let closes_at = quit.find("close_all_hosts(").unwrap_or_else(|| {
+            panic!("the quit must close the hosts through `close_all_hosts`. Body:\n{quit}")
+        });
+        let exit_at = quit.find(".exit(").expect("disarm_then_exit must still exit");
+        assert!(closes_at < exit_at, "the hosts are closed BEFORE exit(0). Body:\n{quit}");
+
+        let body = fn_body(&window, "pub(crate) async fn close_all_hosts");
         let stripped = strip_line_comments(&body);
         assert!(
             stripped.contains("elevated_host") && stripped.contains("elevated.shutdown("),
-            "disarm_then_exit must tear down state.elevated_host. Body:\n{body}"
+            "close_all_hosts must tear down state.elevated_host. Body:\n{body}"
         );
         // Named receiver: the primary host now has a `.shutdown(` of its own on
         // this path, so the bare method name would match that call instead and
         // pin nothing about the elevated host.
-        let shutdown_at = stripped.find("elevated.shutdown(").expect("checked above");
-        let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
         assert!(
-            shutdown_at < exit_at,
-            "elevated_host.shutdown() must be awaited BEFORE exit(0) — after would \
-             never run, the process is already gone. Body:\n{body}"
+            !has_process_exit(&stripped),
+            "close_all_hosts must not exit: the update closes the hosts and exits itself. Body:\n{body}"
         );
     }
 
@@ -815,15 +847,20 @@ mod quit_teardown_wiring_tests {
     /// and before the stream is closed.
     #[test]
     fn disarm_then_exit_announces_the_exit_to_every_host() {
-        let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
-        let stripped = strip_line_comments(&body);
+        let window = source("commands/window.rs");
+        let close = strip_line_comments(&fn_body(&window, "pub(crate) async fn close_all_hosts"));
         // Awaited: a future that is dropped releases nothing, and the exit would go
         // ahead with every host still held.
-        let hosts_at = stripped.find(".exit_hosts().await").unwrap_or_else(|| {
-            panic!("the quit must release every owned host via `exit_hosts().await`. Body:\n{body}")
+        let hosts_at = close.find(".exit_hosts_within(bounds).await").unwrap_or_else(|| {
+            panic!("the quit must release every owned host via `exit_hosts_within(..).await`. Body:\n{close}")
         });
-        let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
-        assert!(hosts_at < exit_at, "the hosts are released BEFORE exit(0). Body:\n{body}");
+        let elevated_at = close.find("elevated.shutdown(").expect("the elevated host is torn down too");
+        assert!(hosts_at < elevated_at, "the owned hosts are released first. Body:\n{close}");
+        let quit = strip_line_comments(&fn_body(&window, "pub fn disarm_then_exit"));
+        assert!(
+            quit.contains("close_all_hosts(&app, None).await"),
+            "a quit closes the hosts without a bound, and waits for it. Body:\n{quit}"
+        );
 
         let release = strip_line_comments(&fn_body(
             &source("state/host_lifecycle.rs"),

@@ -229,7 +229,7 @@ fn disconnected_refusal(hosts: &[OwnedHost]) -> Option<String> {
 }
 
 /// Hosts whose terminals are not known yet.
-fn unresolved_refusal(hosts: &[OwnedHost]) -> Option<String> {
+pub(super) fn unresolved_refusal(hosts: &[OwnedHost]) -> Option<String> {
     let waiting: Vec<&OwnedHost> = hosts.iter().filter(|h| h.unresolved.is_some()).collect();
     if waiting.is_empty() {
         return None;
@@ -380,6 +380,11 @@ pub struct Hold {
 }
 
 impl Hold {
+    /// The hosts this hold looked at when it closed admission.
+    pub fn hosts(&self) -> &[OwnedHost] {
+        &self.hosts
+    }
+
     /// The mode an update would have to run in, given where the hosts run from.
     pub fn update_mode(&self) -> (UpdateMode, Vec<FullReason>) {
         update_mode_of(&self.hosts)
@@ -529,6 +534,17 @@ pub(super) async fn begin_update<P: LifecyclePort>(port: &P) -> Result<Hold, Str
     begin_hold(port, QuiesceReason::Update).await
 }
 
+/// Close admission for an update that closes every terminal. Nothing is armed,
+/// so no host has to be reachable, resolved or able to survive: the hold only
+/// stops terminals being created while the owned set is looked at again, and
+/// whoever holds it decides from [`Hold::hosts`] whether to go ahead. Fails fast
+/// with `LIFECYCLE_BUSY` like [`begin_update`].
+pub(super) async fn begin_full_update<P: LifecyclePort>(port: &P) -> Result<Hold, String> {
+    let guard = close_admission(port, QuiesceReason::Update, HOLD_QUIESCE_BOUND, true).await?;
+    let hosts = owned_hosts(port).await;
+    Ok(Hold { guard: Some(guard), table: port.table().clone(), hosts, tolerated: Vec::new(), armed: Vec::new() })
+}
+
 /// Close admission to restart this process while the hosts keep every terminal
 /// alive (recovery from a dead webview, the tray's restart). That restart is the
 /// only way out of a hollow process, so it is not held up by a host that cannot
@@ -607,9 +623,14 @@ async fn release_host(name: &str, client: &PtyHostClient, deadline: Option<Insta
         problem
     };
     let problem = match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, announce)
-            .await
-            .unwrap_or_else(|_| Some("it did not acknowledge in time".to_string())),
+        Some(deadline) => tokio::time::timeout_at(deadline, announce).await.unwrap_or_else(|_| {
+            // The stream is closed below all the same, and a host that never heard
+            // the shutdown reads that as a crash.
+            log::warn!(
+                "quit: {name} did not acknowledge in time; it may treat the close as a crash and keep its terminals"
+            );
+            Some("it did not acknowledge in time".to_string())
+        }),
         None => announce.await,
     };
     if !client.close_transport().await {
@@ -640,15 +661,30 @@ async fn reach_and_release<P: LifecyclePort>(port: &P, host: &OwnedHost) -> Host
     HostExit { name, problem }
 }
 
-async fn exit_one<P: LifecyclePort>(port: &P, host: &OwnedHost) -> HostExit {
+async fn exit_one<P: LifecyclePort>(port: &P, host: &OwnedHost, per_host: Option<Duration>) -> HostExit {
     match &host.client {
         Some(client) => {
             let name = host.name();
-            let problem = release_host(&name, client, None).await;
+            let problem = release_host(&name, client, per_host.map(|bound| Instant::now() + bound)).await;
             HostExit { name, problem }
         }
         None => reach_and_release(port, host).await,
     }
+}
+
+fn not_in_time(bounds: Option<CloseBounds>) -> String {
+    let secs = bounds.map_or(0, |b| b.total.as_secs());
+    format!("it was not released within {secs} s")
+}
+
+/// How long closing every host may take when something is waiting for it: an
+/// update that has already started the updater cannot wait on a wedged host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloseBounds {
+    /// What one connected host gets to acknowledge its disarm and shutdown.
+    pub per_host: Duration,
+    /// What all of them get together, discovery of the ones not yet met included.
+    pub total: Duration,
 }
 
 /// Everything a quit does to the pty-hosts. Takes the sticky exit quiesce
@@ -657,6 +693,13 @@ async fn exit_one<P: LifecyclePort>(port: &P, host: &OwnedHost) -> HostExit {
 /// connected gets one bounded attempt, and a failure is logged by host name.
 /// The exit goes ahead even if operations are still in flight at the deadline.
 pub(super) async fn exit_hosts<P: LifecyclePort>(port: &P) -> ExitReport {
+    exit_hosts_within(port, None).await
+}
+
+/// [`exit_hosts`] with the time it may take bounded when `bounds` is given. The
+/// exit quiesce may take over from an update's: a full update closes the hosts
+/// under the admission it already holds, and nothing reopens it afterwards.
+pub(super) async fn exit_hosts_within<P: LifecyclePort>(port: &P, bounds: Option<CloseBounds>) -> ExitReport {
     let guard = match port.table().quiesce(QuiesceReason::Exit, EXIT_QUIESCE_BOUND).await {
         Ok(guard) => Some(guard),
         Err(busy) => {
@@ -669,8 +712,36 @@ pub(super) async fn exit_hosts<P: LifecyclePort>(port: &P) -> ExitReport {
         let holders = guard.as_ref().map(QuiesceGuard::holders).unwrap_or_default();
         log::warn!("quit: exiting although operations are still in flight on {holders:?}");
     }
-    let owned = owned_hosts(port).await;
-    let hosts = join_all(owned.iter().map(|host| exit_one(port, host))).await;
+    let per_host = bounds.map(|b| b.per_host);
+    let deadline = bounds.map(|b| Instant::now() + b.total);
+    // Within the bound, if there is one, for both the looking and the releasing.
+    async fn within<T>(deadline: Option<Instant>, work: impl Future<Output = T>) -> Option<T> {
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, work).await.ok(),
+            None => Some(work.await),
+        }
+    }
+    let owned = within(deadline, owned_hosts(port)).await;
+    let hosts = match owned {
+        None => {
+            log::error!("quit: the terminal hosts could not even be listed in time; going ahead");
+            vec![HostExit { name: "the terminal hosts".to_string(), problem: Some(not_in_time(bounds)) }]
+        }
+        Some(owned) => {
+            match within(deadline, join_all(owned.iter().map(|host| exit_one(port, host, per_host)))).await {
+                Some(hosts) => hosts,
+                None => {
+                    // A host that has not heard the shutdown reads the end of the
+                    // connection as a crash and keeps its terminals for a while.
+                    let names = owned.iter().map(OwnedHost::name).collect::<Vec<_>>().join(", ");
+                    log::error!(
+                        "quit: not every terminal host was released in time; any that did not hear the shutdown may keep its terminals as after a crash: {names}"
+                    );
+                    owned.iter().map(|h| HostExit { name: h.name(), problem: Some(not_in_time(bounds)) }).collect()
+                }
+            }
+        }
+    };
     ExitReport { drained, hosts }
 }
 
@@ -833,6 +904,11 @@ impl<R: Runtime> AppState<R> {
         exit_hosts(self).await
     }
 
+    /// [`exit_hosts`] with its time bounded; see [`exit_hosts_within`].
+    pub async fn exit_hosts_within(&self, bounds: Option<CloseBounds>) -> ExitReport {
+        exit_hosts_within(self, bounds).await
+    }
+
     /// Close admission and check the hosts for an offload.
     pub async fn begin_offload(&self) -> Result<Hold, String> {
         begin_offload(self).await
@@ -841,6 +917,12 @@ impl<R: Runtime> AppState<R> {
     /// Close admission and check the hosts for an update commit.
     pub async fn begin_update(&self) -> Result<Hold, String> {
         begin_update(self).await
+    }
+
+    /// Close admission for an update that closes every terminal; see
+    /// [`begin_full_update`].
+    pub async fn begin_full_update(&self) -> Result<Hold, String> {
+        begin_full_update(self).await
     }
 
     /// Close admission to restart this process with the hosts armed; see

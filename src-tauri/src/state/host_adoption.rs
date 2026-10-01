@@ -878,3 +878,5 @@ mod retire_real_tests;
 // The lifecycle tests drive the same fake hosts through `host_lifecycle`.
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod update_full_tests;

@@ -6,10 +6,12 @@
 //! a host whose origin could not be determined has to be assumed to be inside.
 //! Either forces a full restart even when the release itself allows offloading.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// How an update treats the terminals that are running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum UpdateMode {
     /// The hosts are armed and keep the shells alive across the swap.
     Offload,
@@ -17,8 +19,10 @@ pub enum UpdateMode {
     Full,
 }
 
-/// Why an update has to be a full restart.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Why an update has to be a full restart. Crosses to the renderer as
+/// `{ kind, host? }` and comes back inside a confirmation unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "host", rename_all = "camelCase")]
 pub enum FullReason {
     /// The release says it cannot be offloaded from this version.
     Marker,

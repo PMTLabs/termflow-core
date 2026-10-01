@@ -30,7 +30,18 @@ import { SnippetsPanel } from './SnippetsPanel';
 import { AboutLegalPanel } from './AboutLegalPanel';
 import { AutomationsPanel } from './Automations/AutomationsPanel';
 import { offloadRetentionCopy } from './offloadRetentionCopy';
-import type { ConnectedHostRetention } from '../../api/tauri-bridge';
+import type {
+    ConnectedHostRetention,
+    UpdateAvailability,
+    UpdateConfirmation,
+    UpdateMarkerMode,
+} from '../../api/tauri-bridge';
+import {
+    confirmTokenFor,
+    fullUpdateDialogLead,
+    fullUpdateDialogTitle,
+    fullUpdateReasonLines,
+} from './fullUpdateCopy';
 import {
     discardAutomationEditorDraft,
     isAutomationEditorDirty,
@@ -239,6 +250,29 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // can. Sharing one string is what let the panel show one verdict while
     // the button enforced another (014 B4).
     const [updateBlockedReason, setUpdateBlockedReason] = useState<string | null>(null);
+    // What the update would do: `full` closes every terminal and says why. Whether
+    // it may run at all is the backend's verdict above, never decided here.
+    const [updateAvailability, setUpdateAvailability] = useState<UpdateAvailability | null>(null);
+    // The mode follows the release notes of the last update check, so a sample taken
+    // before that check finished can be superseded by one taken after it.
+    const updateAvailabilityGenRef = useRef(0);
+    // What the last update check said the release asks for. It is handed to every
+    // availability sample, so a sample never depends on which call finished first;
+    // cleared whenever a check finds no release.
+    const checkedMarkerModeRef = useRef<UpdateMarkerMode | undefined>(undefined);
+    const refreshUpdateAvailability = useCallback(async () => {
+        const gen = ++updateAvailabilityGenRef.current;
+        try {
+            const availability = await window.electronAPI?.updateAvailable?.(checkedMarkerModeRef.current);
+            if (gen !== updateAvailabilityGenRef.current) return;
+            setUpdateBlockedReason(null);
+            setUpdateAvailability(availability ?? null);
+        } catch (err) {
+            if (gen !== updateAvailabilityGenRef.current) return;
+            setUpdateBlockedReason(String(err));
+            setUpdateAvailability(null);
+        }
+    }, []);
     const refreshHotswapPreflight = useCallback(async () => {
         try {
             await window.electronAPI?.hotswapAvailable?.();
@@ -246,13 +280,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         } catch (err) {
             setHotswapBlockedReason(String(err));
         }
-        try {
-            await window.electronAPI?.updateAvailable?.();
-            setUpdateBlockedReason(null);
-        } catch (err) {
-            setUpdateBlockedReason(String(err));
-        }
-    }, []);
+        await refreshUpdateAvailability();
+    }, [refreshUpdateAvailability]);
     // Velopack auto-update status. 'unavailable'/'notInstalled' ⇒ this build has
     // no updater (or isn't a Velopack install) → the check-for-updates block hides.
     const [updateStatus, setUpdateStatus] = useState<{ state: string; version?: string }>({ state: 'unavailable' });
@@ -263,18 +292,34 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         if (!window.electronAPI?.checkForUpdates) return;
         setCheckingUpdate(true);
         try {
-            setUpdateStatus(await window.electronAPI.checkForUpdates());
+            const status = await window.electronAPI.checkForUpdates();
+            setUpdateStatus(status);
+            // The check is what says which way the release wants to be applied, so a
+            // sample taken before it finished judged the wrong mode: take it again.
+            checkedMarkerModeRef.current = status.state === 'available' ? status.markerMode : undefined;
+            void refreshUpdateAvailability();
         } catch {
+            checkedMarkerModeRef.current = undefined;
             setUpdateStatus({ state: 'notInstalled' });
         } finally {
             setCheckingUpdate(false);
         }
-    }, []);
-    const doUpdateAndRestart = useCallback(async () => {
+    }, [refreshUpdateAvailability]);
+    // The update that must close every terminal answers `needsConfirmation` with what
+    // it would close; nothing is closed until the user agrees to exactly that.
+    const [fullUpdateConfirmation, setFullUpdateConfirmation] = useState<UpdateConfirmation | null>(null);
+    const runUpdate = useCallback(async (confirmation?: UpdateConfirmation) => {
         setApplyingUpdate(true);
         try {
-            await window.electronAPI?.updateAndRestart?.();
-            // Success exits the process during the call.
+            const result = await window.electronAPI?.updateAndRestart?.(
+                confirmation ? confirmTokenFor(confirmation) : undefined,
+            );
+            // `started`: the process exits during the call.
+            if (result?.outcome === 'started') return;
+            setApplyingUpdate(false);
+            // What is true now differs from what was agreed to (or nothing was yet):
+            // ask again about this, never act on the earlier answer.
+            if (result?.outcome === 'needsConfirmation') setFullUpdateConfirmation(result);
         } catch (err) {
             setApplyingUpdate(false);
             dispatch(addToast({ message: `Update failed: ${String(err)}`, type: 'error' }));
@@ -1994,12 +2039,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     <label className="setting-label">Application updates</label>
                     {updateStatus.state === 'available' ? (
                         <>
-                            <p className="help-text">
-                                Version <strong>{updateStatus.version}</strong> is available. Updating keeps
-                                your terminals running — they reattach to the new version automatically.
-                            </p>
+                            {updateAvailability?.mode === 'full' ? (
+                                <div data-testid="update-full-notice">
+                                    <p className="help-text">
+                                        Version <strong>{updateStatus.version}</strong> is available. This update
+                                        closes <strong>all terminals</strong> when it is applied; you are asked to
+                                        confirm first.
+                                    </p>
+                                    {fullUpdateReasonLines(updateAvailability.reasons).map((line) => (
+                                        <p key={line} className="help-text" style={{ marginTop: 4 }}>{line}</p>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="help-text">
+                                    Version <strong>{updateStatus.version}</strong> is available. Updating keeps
+                                    your terminals running — they reattach to the new version automatically.
+                                </p>
+                            )}
                             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                                <button className="save-btn apply-btn" onClick={doUpdateAndRestart} disabled={applyingUpdate || !!updateBlockedReason}>
+                                <button className="save-btn apply-btn" onClick={() => void runUpdate()} disabled={applyingUpdate || !!updateBlockedReason}>
                                     {applyingUpdate ? 'Updating…' : `Update to ${updateStatus.version} & Restart`}
                                 </button>
                                 <button className="link-btn" onClick={() => void refreshUpdateStatus()} disabled={checkingUpdate || applyingUpdate}>
@@ -2011,6 +2069,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                     ⚠ {updateBlockedReason}
                                 </p>
                             )}
+                            <ConfirmDialog
+                                isOpen={fullUpdateConfirmation !== null}
+                                destructive
+                                title={fullUpdateDialogTitle(fullUpdateConfirmation?.version ?? '')}
+                                message={fullUpdateConfirmation && (
+                                    <div data-testid="update-full-dialog">
+                                        <p>{fullUpdateDialogLead(fullUpdateConfirmation)}</p>
+                                        {fullUpdateReasonLines(fullUpdateConfirmation.reasons).map((line) => (
+                                            <p key={line} style={{ marginTop: 8 }}>{line}</p>
+                                        ))}
+                                    </div>
+                                )}
+                                onConfirm={() => {
+                                    const agreed = fullUpdateConfirmation;
+                                    setFullUpdateConfirmation(null);
+                                    if (agreed) void runUpdate(agreed);
+                                }}
+                                onCancel={() => setFullUpdateConfirmation(null)}
+                                confirmText="Close terminals & update"
+                                cancelText="Cancel"
+                            />
                         </>
                     ) : (
                         <p className="help-text">

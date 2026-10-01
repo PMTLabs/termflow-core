@@ -33,6 +33,7 @@ pub mod elevated_host;
 pub mod commands;
 #[cfg(feature = "velopack-updates")]
 pub mod updater;
+pub mod update_policy;
 pub mod open_commands;
 pub mod api_server;
 pub mod event_bus;

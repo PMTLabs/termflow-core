@@ -12,8 +12,14 @@
 //! - The apply uses `wait_exit_then_apply_updates` + a graceful Tauri exit
 //!   (NOT `process::exit`), so tab/session state is flushed before we quit and
 //!   the relaunched app can reattach by `tab_id` (C5).
+//! - A release whose notes ask for it (or a host that cannot outlive the swap)
+//!   makes the update close every terminal instead; that transaction is
+//!   `state::update_full`, and this file only supplies the download and the
+//!   updater launch it is given.
 #![cfg(feature = "velopack-updates")]
 
+use crate::commands::UpdateRestart;
+use crate::state::{ConfirmToken, FullRun, Target};
 use velopack::{sources::GithubSource, UpdateCheck, UpdateInfo, UpdateManager, VelopackApp};
 
 /// The GitHub repository the Velopack release feed is published to.
@@ -41,26 +47,48 @@ pub fn check_status() -> crate::commands::UpdateStatus {
         Err(_) => return crate::commands::UpdateStatus::NotInstalled,
     };
     match um.check_for_updates() {
+        // The mode rides on the answer; the download that follows may find a
+        // different release and decides.
         Ok(UpdateCheck::UpdateAvailable(info)) => crate::commands::UpdateStatus::Available {
             version: info.TargetFullRelease.Version.clone(),
+            marker_mode: release_mode(&um, &info),
         },
         Ok(_) => crate::commands::UpdateStatus::UpToDate,
         Err(_) => crate::commands::UpdateStatus::NotInstalled,
     }
 }
 
-/// Check + download in one blocking step. `Ok(Some(info))` if an update was
-/// fetched and is ready to apply; `Ok(None)` if already up to date.
-fn check_and_download() -> Result<Option<UpdateInfo>, String> {
+/// What the release's own notes ask of an update from the running version.
+fn release_mode(um: &UpdateManager, info: &UpdateInfo) -> crate::update_policy::UpdateMode {
+    crate::update_policy::update_mode(
+        &um.get_current_version_as_string(),
+        Some(&info.TargetFullRelease.NotesMarkdown),
+    )
+}
+
+/// The file the update crate starts to apply an update, when this is an install.
+pub fn update_exe_path() -> Option<std::path::PathBuf> {
+    velopack::locator::auto_locate_app_manifest(velopack::locator::LocationContext::FromCurrentExe)
+        .ok()
+        .map(|locator| locator.get_update_path())
+}
+
+/// A release that is available and the mode its notes ask for, or `None` if
+/// already up to date. Nothing is downloaded.
+fn check() -> Result<Option<(UpdateInfo, crate::update_policy::UpdateMode)>, String> {
     let um = manager()?;
     match um.check_for_updates().map_err(|e| e.to_string())? {
         UpdateCheck::UpdateAvailable(info) => {
-            um.download_updates(&info, None)
-                .map_err(|e| e.to_string())?;
-            Ok(Some(*info))
+            let mode = release_mode(&um, &info);
+            Ok(Some((*info, mode)))
         }
         _ => Ok(None),
     }
+}
+
+/// Fetch the package for `info`; blocking.
+fn download(info: &UpdateInfo) -> Result<(), String> {
+    manager()?.download_updates(info, None).map_err(|e| e.to_string())
 }
 
 /// Launch the updater and let THIS process exit gracefully (bounded wait), then
@@ -79,39 +107,76 @@ fn apply(info: UpdateInfo) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Full transactional update: preflight → download → arm the PTY host → apply →
-/// graceful exit. Refuses (without arming) if a hot-swap can't keep terminals
-/// alive, so nothing is lost.
-pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), String> {
-    // Fresh survivability preflight immediately before we commit (H1): if any
-    // terminal is in-process / the sidecar can't survive, refuse now.
-    log::info!("[UPDATE] update_and_restart: running survivability preflight");
-    crate::commands::hotswap_preflight(state)?;
+/// Full transactional update: download → either close every terminal (when the
+/// release or a host that cannot survive the swap demands it, and the user has
+/// agreed) or arm the PTY host → apply → graceful exit. An offload refuses
+/// (without arming) if a hot-swap can't keep terminals alive, so nothing is lost.
+pub async fn update_and_restart(
+    state: &crate::state::AppState,
+    confirm: Option<ConfirmToken>,
+) -> Result<UpdateRestart, String> {
+    // Check off the async runtime. The release's own notes decide which way it is
+    // applied, and whether the checks that only an offload needs come first.
+    let checked = tokio::task::spawn_blocking(check)
+        .await
+        .map_err(|e| e.to_string())??;
+    let (info, marker_mode) = match checked {
+        Some(checked) => checked,
+        None => return Err("no update available".to_string()),
+    };
+    let target = Target { version: info.TargetFullRelease.Version.clone(), marker_mode };
+
+    // An offload refuses before it costs a download. Skipped when the release or a
+    // host that cannot outlive the swap makes this a full update: that is not
+    // subject to these, and has its own checks once it is downloaded.
+    let offload = marker_mode == crate::update_policy::UpdateMode::Offload
+        && crate::state::update_refusal(&state.owned_hosts_now()).is_ok();
+    // Fresh survivability preflight (H1): if any terminal is in-process / the
+    // sidecar can't survive, refuse now.
+    if offload {
+        log::info!("[UPDATE] update_and_restart: running survivability preflight");
+        crate::commands::hotswap_preflight(state)?;
+    }
     // Siblings are CHECKED here but not armed until after the download. Velopack
     // kills every process under the install root, so a sibling loses its GUI to
     // our apply — but its pty-host lives outside that root and survives, so its
     // shells only die if it never armed. Refusing outright (the old behaviour)
     // was a coordination gap, not a safety floor (design 014 §B1).
     let own = crate::profile::current().key();
-    let siblings = crate::net_ports::live_siblings_now(&own)
-        .map_err(|e| format!("cannot enumerate sibling instances: {e}"))?;
-    if let Some(reason) = crate::sibling_coord::describe_unarmable(&siblings) {
-        log::warn!("[UPDATE] refused: {reason}");
-        return Err(reason);
+    if offload {
+        let siblings = crate::net_ports::live_siblings_now(&own)
+            .map_err(|e| format!("cannot enumerate sibling instances: {e}"))?;
+        if let Some(reason) = crate::sibling_coord::describe_unarmable(&siblings) {
+            log::warn!("[UPDATE] refused: {reason}");
+            return Err(reason);
+        }
     }
 
-    // Check + download off the async runtime.
-    let info = tokio::task::spawn_blocking(check_and_download)
+    // Download off the async runtime.
+    let package = info.clone();
+    tokio::task::spawn_blocking(move || download(&package))
         .await
         .map_err(|e| e.to_string())??;
-    let info = match info {
-        Some(i) => i,
-        None => return Err("no update available".to_string()),
+    log::info!("[UPDATE] downloaded {}", target.version);
+
+    let info = match state
+        .run_full_update(&target, confirm, info, |info| async move {
+            tokio::task::spawn_blocking(move || apply(info))
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r)
+        })
+        .await?
+    {
+        FullRun::Offload(info) => info,
+        FullRun::NeedsConfirmation(needed) => return Ok(UpdateRestart::NeedsConfirmation(needed)),
+        FullRun::Exited => return Ok(UpdateRestart::Started),
     };
-    log::info!(
-        "[UPDATE] downloaded {}; arming host before apply",
-        info.TargetFullRelease.Version
-    );
+
+    // The download can take minutes: look again at this instance's terminals now
+    // that it is done, in case one was opened in-process meanwhile.
+    crate::commands::hotswap_preflight(state)?;
+    log::info!("[UPDATE] arming host before apply");
 
     // Close admission to the hosts and look again at every one this instance owns,
     // now that the download is done: a host that dropped, or a create still in
@@ -197,12 +262,12 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         .await;
         return Err(e);
     }
-    // Apply succeeded, so Velopack's kill-and-swap (if it reached a sibling at
-    // all) has already happened — any sibling still standing was never touched
-    // and must not be left holding a 600s window it will never use. A sibling
-    // that WAS killed is unreachable here (best-effort, same as the rollback
-    // paths above) but self-disarms on its own next reconnect (state.rs
-    // `ensure_pty_host_inner`) — the two paths cover each other.
+    // `apply` only started the updater: it waits for this process to exit before
+    // it swaps anything, so no sibling has been touched yet. Release the siblings
+    // now, best-effort like the rollback paths above, so one whose app the swap
+    // never reaches is not left holding a 600s window it will never use. One that
+    // cannot be reached expires its own window, and self-disarms on its own next
+    // reconnect (state.rs `ensure_pty_host_inner`) — the two paths cover each other.
     let _ = crate::sibling_coord::disarm_siblings(
         &siblings,
         &armed_siblings,
@@ -220,7 +285,7 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // Admission stays closed until the process is gone.
     hold.commit();
     state.app_handle.exit(0);
-    Ok(())
+    Ok(UpdateRestart::Started)
 }
 
 /// The success path used to arm siblings and then just exit — nothing ever

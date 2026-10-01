@@ -2,7 +2,7 @@
 //! seed. Split out of the former `commands.rs`.
 
 use super::window::flush_all_windows;
-use crate::state::AppState;
+use crate::state::{Availability, AppState, ConfirmToken, Confirmation};
 use tauri::State;
 
 /// Lifecycle retention reported by the hosts this app is currently connected to:
@@ -79,18 +79,33 @@ pub fn update_preflight(state: &AppState) -> Result<(), String> {
     crate::sibling_coord::describe_unarmable(&siblings).map_or(Ok(()), Err)
 }
 
-/// The Settings preflight for the update affordance.
+/// The Settings preflight for the update affordance, and the mode the update
+/// would run in: `offload` keeps the terminals running, `full` closes them all
+/// and lists why.
 ///
-/// It shares `update_preflight` with the update's own check, so the two judge
-/// the same things, but they are not the same question. This is a snapshot of
-/// what is known (`owned_hosts_now`): no discovery, no waiting. The action itself
-/// closes admission and looks again (`begin_update`), so it can still refuse what
-/// this approved: an operation that does not drain within the bound, or a host
-/// discovered or still unanswered by then. The panel can be green and the click
-/// refuse; the refusal is never the other way round.
+/// An offload shares `update_preflight` with the update's own check, so the two
+/// judge the same things, but they are not the same question. This is a snapshot
+/// of what is known (`owned_hosts_now`): no discovery, no waiting. The action
+/// itself closes admission and looks again (`begin_update`), so it can still
+/// refuse what this approved: an operation that does not drain within the bound,
+/// or a host discovered or still unanswered by then. The panel can be green and
+/// the click refuse; the refusal is never the other way round, provided the
+/// release's mode is passed in. Asked before any check has found the release, the
+/// verdict is the offload's, and the caller asks again once the check resolves.
+///
+/// A full update is not subject to the offload's refusals (an in-process shell, a
+/// disconnected host); only a running sibling instance still stops it. The mode is
+/// the one the update check reported for the release (`marker_mode`); with no check
+/// yet, or none that found a release, it is an offload. The download decides for
+/// good, and the confirmation is bound to what it found.
 #[tauri::command]
-pub fn update_available(state: State<'_, AppState>) -> Result<(), String> {
-    update_preflight(&state)
+pub fn update_available(
+    state: State<'_, AppState>,
+    marker_mode: Option<crate::update_policy::UpdateMode>,
+) -> Result<Availability, String> {
+    state.update_availability(marker_mode.unwrap_or(crate::update_policy::UpdateMode::Offload), || {
+        update_preflight(&state)
+    })
 }
 
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
@@ -206,11 +221,14 @@ async fn sample_at_prompt(hook: bool, pid: u32) -> bool {
 /// Update availability, surfaced to the "Check for updates" UI. `Unavailable`
 /// means this build has no updater compiled in (store flavor / feature off).
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UpdateStatus {
     NotInstalled,
     UpToDate,
-    Available { version: String },
+    /// `marker_mode` is what the release's own notes ask for. It travels with the
+    /// check that found the release, so whoever asks `update_available` next hands
+    /// it back and the answer never depends on which command ran first.
+    Available { version: String, marker_mode: crate::update_policy::UpdateMode },
     Unavailable,
 }
 
@@ -230,17 +248,36 @@ pub async fn check_for_updates() -> UpdateStatus {
     }
 }
 
-/// Download + arm + apply a Velopack update, keeping terminals alive. Always
-/// registered; a store/no-updater build returns a stable "not available" error.
+/// What `update_and_restart` came to when it returned without an error.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum UpdateRestart {
+    /// The updater is running and the app is exiting.
+    Started,
+    /// The update closes every terminal and the user has not agreed to this yet, or
+    /// what was agreed to has changed. Nothing was done. Send the same call again
+    /// with `confirm` made from this: `targetVersion` is the `version` here, the
+    /// other fields keep their names.
+    NeedsConfirmation(Confirmation),
+}
+
+/// Download + apply a Velopack update. An offload arms the hosts and keeps
+/// terminals alive; an update that has to close them (see `update_available`)
+/// answers `needsConfirmation` until `confirm` matches what is then true.
+/// Always registered; a store/no-updater build returns a stable "not available"
+/// error.
 #[tauri::command]
-pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn update_and_restart(
+    state: State<'_, AppState>,
+    confirm: Option<ConfirmToken>,
+) -> Result<UpdateRestart, String> {
     #[cfg(feature = "velopack-updates")]
     {
-        crate::updater::update_and_restart(&state).await
+        crate::updater::update_and_restart(&state, confirm).await
     }
     #[cfg(not(feature = "velopack-updates"))]
     {
-        let _ = state;
+        let _ = (state, confirm);
         Err("in-app updates aren't available in this build (managed by the store)".to_string())
     }
 }
@@ -346,14 +383,22 @@ pub async fn restart_keeping_terminals(
     .await?;
     log::info!("[RECOVERY] armed the hot-swap hold on every connected host");
 
-    if flush == FlushPolicy::Renderer {
-        flush_all_windows(&app).await;
-    }
+    let flushed_by_us = if flush == FlushPolicy::Renderer {
+        flush_all_windows(&app).await
+    } else {
+        false
+    };
 
     let pid = match crate::relaunch::spawn_relaunch() {
         Ok(pid) => pid,
         Err(e) => {
             log::error!("[RECOVERY] relaunch spawn failed: {e}; releasing the hold");
+            // The flush marked this process as exiting; take that back only if the
+            // mark is ours, so the restore sweep keeps running and a later Quit
+            // still saves the windows.
+            if flushed_by_us {
+                state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             // Disarms every host that was armed (an unacknowledged one is logged by
             // name: it may keep holding its detach window while this GUI is still
             // connected) and lets creates through again.
@@ -486,6 +531,22 @@ mod preflight_wiring_tests {
             body.contains("offload_preflight"),
             "Offload must still guard THIS instance's terminals. Body:\n{body}"
         );
+    }
+
+    /// A relaunch that fails to start takes back the exit mark its own window flush
+    /// set (and only that one), or the restore sweep would skip every tick and a
+    /// later Quit would exit without saving the windows.
+    #[test]
+    fn a_failed_relaunch_takes_back_only_the_exit_mark_its_flush_set() {
+        let body = fn_body(include_str!("update.rs"), "async fn restart_keeping_terminals");
+        let flush = body.find("let flushed_by_us").expect("the flush result must be kept");
+        let spawn_err = body.find("relaunch spawn failed").expect("spawn failure branch");
+        let reset = body.find("exiting.store(false").expect("the failure branch must clear the mark");
+        assert!(flush < spawn_err && spawn_err < reset, "reset belongs in the spawn-failure branch:
+{body}");
+        let guard = body[spawn_err..reset].rfind("if flushed_by_us").expect("guarded by ownership");
+        assert!(guard < reset - spawn_err, "the reset must be guarded by `flushed_by_us`:
+{body}");
     }
 
     /// The argument list of every `arm_detach` call in a file, excluding this

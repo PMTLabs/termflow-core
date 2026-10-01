@@ -72,6 +72,27 @@ pub fn describe_unarmable(siblings: &[InstanceRecord]) -> Option<String> {
     ))
 }
 
+/// Why an update that closes every terminal must not proceed while other TermFlow
+/// instances are running, or `None` when there are none.
+///
+/// Unlike [`describe_unarmable`], being reachable is no help: a full update does
+/// not arm anyone, and the updater kills every process under the install root,
+/// so a sibling that is still running would lose its window. Its terminals too
+/// if its pty-host runs from inside that folder; a host outside it keeps them
+/// (held, as after a crash), but the user would still find the window gone.
+pub fn describe_live_siblings(siblings: &[InstanceRecord]) -> Option<String> {
+    if siblings.is_empty() {
+        return None;
+    }
+    let mut live: Vec<String> = siblings.iter().map(|s| format!("{} (pid {})", s.profile, s.pid)).collect();
+    live.sort();
+    Some(format!(
+        "Cannot update while another TermFlow instance is running: {}. \
+         The update would close that instance's window as well. Close it and try again.",
+        live.join(", ")
+    ))
+}
+
 /// The base URL for a sibling's API.
 ///
 /// **From the RECORD's port, never the configured one.** `default_api_port()`
@@ -304,6 +325,19 @@ mod tests {
         .expect("must block");
         assert!(msg.contains("rel.elevated.high"), "got: {msg}");
         assert!(!msg.contains("rel.alt"), "a reachable sibling must not be named: {msg}");
+    }
+
+    /// A full update arms nobody, so a sibling that could be armed is still in the
+    /// way: every live one is named, reachable or not.
+    #[test]
+    fn a_full_update_is_blocked_by_every_live_sibling_reachable_or_not() {
+        assert_eq!(describe_live_siblings(&[]), None);
+        let msg = describe_live_siblings(&[
+            rec("rel.alt", 41, Some(42035), Some("tok")),
+            rec("rel.elevated.high", 9, None, None),
+        ])
+        .expect("a reachable sibling still blocks a full update");
+        assert!(msg.contains("rel.alt (pid 41)") && msg.contains("rel.elevated.high (pid 9)"), "{msg}");
     }
 
     /// The record's port wins. A configured-port URL would address whichever

@@ -28,8 +28,45 @@ export interface EffectiveEndpoints {
 export type UpdateStatus =
   | { state: 'notInstalled' }
   | { state: 'upToDate' }
-  | { state: 'available'; version: string }
+  | { state: 'available'; version: string; markerMode: UpdateMarkerMode }
   | { state: 'unavailable' };
+
+/** What a release's own notes ask of an update, as the check that found it reports it. */
+export type UpdateMarkerMode = 'offload' | 'full';
+
+/** Why an update has to close every terminal (mirrors the Rust `FullReason`). */
+export type FullUpdateReason =
+  | { kind: 'marker' }
+  | { kind: 'hostInPayload'; host: string }
+  | { kind: 'hostOriginUnknown'; host: string };
+
+/** What `updateAvailable` says an update would do (mirrors the Rust `Availability`). */
+export interface UpdateAvailability {
+  mode: 'offload' | 'full';
+  reasons: FullUpdateReason[];
+}
+
+/** What a full update closes and why, handed back by `updateAndRestart` for the user to agree to. */
+export interface UpdateConfirmation {
+  version: string;
+  shellCount: number;
+  /** At least one host did not say what it holds: `shellCount` is a lower bound. */
+  unknown: boolean;
+  reasons: FullUpdateReason[];
+}
+
+/** The agreement sent back with `updateAndRestart`; `targetVersion` is the confirmation's `version`. */
+export interface UpdateConfirmToken {
+  targetVersion: string;
+  shellCount: number;
+  unknown: boolean;
+  reasons: FullUpdateReason[];
+}
+
+/** What `updateAndRestart` resolves to (mirrors the Rust `UpdateRestart`). */
+export type UpdateRestart =
+  | { outcome: 'started' }
+  | ({ outcome: 'needsConfirmation' } & UpdateConfirmation);
 
 /** Retention policy of the PTY host the app is connected to, not a discovery record. */
 export type ConnectedHostRetention =
@@ -177,13 +214,19 @@ interface ElectronAPI {
   /// kills every process under the install root. Rejects naming any sibling that
   /// cannot be prepared. Deliberately separate from hotswapAvailable — the two
   /// verdicts differ, and sharing one made the panel disagree with the button.
-  updateAvailable: () => Promise<void>;
+  /// Resolves with the mode the update would run in; `full` closes every terminal
+  /// and lists why. Still rejects with the reason when the update cannot run.
+  /// `markerMode` is the one the update check reported for the release; leave it out
+  /// when no check has found one yet.
+  updateAvailable: (markerMode?: UpdateMarkerMode) => Promise<UpdateAvailability>;
   /// Check for a Velopack update. `unavailable` = no updater in this build.
   checkForUpdates: () => Promise<UpdateStatus>;
   /// The running app's version (from the Tauri config at build time).
   getAppVersion: () => Promise<string>;
-  /// Download + arm + apply a Velopack update, keeping terminals alive.
-  updateAndRestart: () => Promise<void>;
+  /// Download + apply a Velopack update. Offload keeps terminals alive; an update
+  /// that must close them resolves `needsConfirmation` until called again with the
+  /// `confirm` made from that answer. `started` means the app is exiting.
+  updateAndRestart: (confirm?: UpdateConfirmToken) => Promise<UpdateRestart>;
   getActiveTabAndPane: () => Promise<any>;
   createTerminalInTab: (tabId: string, paneId: string, profile: string, name: string) => Promise<any>;
   getTabs: () => Promise<any>;
@@ -767,16 +810,15 @@ const tauriBridge: ElectronAPI = {
   },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
   connectedHostRetention: async () => invoke<ConnectedHostRetention>('connected_host_retention'),
-  updateAvailable: async () => {
-    await invoke('update_available');
-  },
+  updateAvailable: async (markerMode) =>
+    invoke<UpdateAvailability>('update_available', { markerMode: markerMode ?? null }),
 
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
   renameTerminalHistory: async (from: string, to: string) => {
     await invoke('rename_terminal_history', { from, to });
   },
   checkForUpdates: async () => invoke<UpdateStatus>('check_for_updates'),
-  updateAndRestart: async () => { await invoke('update_and_restart'); },
+  updateAndRestart: async (confirm) => invoke<UpdateRestart>('update_and_restart', { confirm: confirm ?? null }),
   // `@tauri-apps/api/app`'s getVersion() is exactly this invoke; calling it
   // directly avoids importing the app module (whose image.cjs can't load in
   // the jsdom test environment).
