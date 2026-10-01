@@ -8,10 +8,8 @@ use termflow_pty_protocol::{read_frame, write_frame, Control, Data, Frame, Respo
 async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_connection() {
     let table = HostTable::new();
     let channels = [HostChannel::Primary, HostChannel::Frozen(FrozenId(7))];
-    let identity = crate::identity_index::IdentityIndex::new();
     let owners = Arc::new(DashMap::new());
-    for (key, process, channel) in [("tm-new", "pc-new", channels[0]), ("tm-old", "pc-old", channels[1])] {
-        identity.index(process, Some(key), key);
+    for (_key, process, channel) in [("tm-new", "pc-new", channels[0]), ("tm-old", "pc-old", channels[1])] {
         owners.insert(process.to_string(), channel);
     }
     let offsets = Arc::new(DashMap::new());
@@ -23,12 +21,14 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
         assert!(table.publish(channel, epoch));
         let (stream, server) = tokio::io::duplex(4096);
         let (rd, wr) = tokio::io::split(stream);
-        let (ix, hosts, admission) = (identity.clone(), owners.clone(), table.clone());
+        let (key, process) = if channel == channels[0] { ("tm-new", "pc-new") } else { ("tm-old", "pc-old") };
+        table.routes().register(channel, key, process, epoch);
+        let (hosts, admission) = (owners.clone(), table.clone());
         let (gaps, exits) = (events.clone(), events.clone());
         let deps = PtyHostDeps {
             lifecycle_token: "test".into(), output_tx: output_tx.clone(),
             output_produced: Arc::new(AtomicU64::new(0)), stream_offsets: offsets.clone(),
-            resolve_process: Arc::new(move |key| resolve_inbound(&hosts, &ix, &admission, channel, epoch, key)),
+            resolve_process: Arc::new(move |key| resolve_inbound(&hosts, &admission, channel, epoch, key)),
             on_gap: Arc::new(move |process| gaps.lock().unwrap().push(("gap", process))),
             on_exit: Arc::new(move |process, _, _| exits.lock().unwrap().push(("exit", process))),
             on_disconnect: Arc::new(|| {}),
@@ -101,7 +101,7 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
 fn real_host_dependencies_scope_inbound_resolution_to_channel_and_epoch() {
     use crate::state::source_scan::{fn_body, production};
     let port = production(include_str!("../host_port.rs"));
-    assert!(fn_body(&port, "fn host_deps(").contains("host_registry::resolve_inbound(&st.host_terminals, &st.identity, &st.host_table, channel, epoch, k)"));
+    assert!(fn_body(&port, "fn host_deps(").contains("host_registry::resolve_inbound(&st.host_terminals, &st.host_table, channel, epoch, k)"));
     assert!(fn_body(&port, "async fn connect_current(").contains("HostChannel::Primary, my_gen"));
     let frozen = fn_body(&port, "async fn connect_frozen(");
     assert!(frozen.contains("HostChannel::Frozen(id),") && frozen.contains("epoch,"));

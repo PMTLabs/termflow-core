@@ -131,6 +131,7 @@ pub(super) async fn reattach_listed<P: PanePort>(
             client.close(&a.tab_id);
             continue;
         };
+        port.register_route(channel, &a.tab_id, &process_id);
         match client.attach_confirmed(&a.tab_id, a.from_offset).await {
             Some(true) => log::info!(
                 "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",

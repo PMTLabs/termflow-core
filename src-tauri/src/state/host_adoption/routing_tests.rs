@@ -74,15 +74,15 @@ enum Did {
 
 /// Do what `spawn_routed` does with a placement: send the frame to the host the
 /// placement names.
-async fn execute(session_key: &str, placement: Placement) -> Did {
+async fn execute(_requested_key: &str, placement: Placement) -> Did {
     match placement {
-        Placement::Attach { channel, client, pid, ticket } => {
-            client.attach_confirmed(session_key, 0).await;
+        Placement::Attach { channel, client, pid, ticket, session_key } => {
+            client.attach_confirmed(&session_key, 0).await;
             drop(ticket);
             Did::Attached(channel, pid)
         }
-        Placement::Spawn { channel, client, ticket } => {
-            client.spawn_session(session_key, &spawn_spec()).await.unwrap();
+        Placement::Spawn { channel, client, ticket, session_key } => {
+            client.spawn_session(&session_key, &spawn_spec()).await.unwrap();
             drop(ticket);
             Did::Spawned(channel)
         }
@@ -95,6 +95,12 @@ async fn create(port: &FakePort, key: &str, overridden: bool) -> Did {
         Ok(placement) => execute(key, placement).await,
         Err(e) => panic!("create refused: {e}"),
     }
+}
+
+fn assert_spawn_key(world: &World, host: &str, leaf: &str) {
+    let keys = world.sessions(host, "Spawn");
+    assert_eq!(keys.len(), 1, "exactly one Spawn on {host}");
+    assert_eq!(crate::state::parse_session_key(&keys[0]), crate::state::SessionKeyKind::V2 { owner_leaf: leaf });
 }
 
 fn is_pending(err: &str) -> bool {
@@ -204,7 +210,7 @@ async fn an_unclaimed_restore_spawns_once_every_host_answered_and_the_intent_is_
     restore(&port, "tm-brand-new", None);
 
     assert_eq!(create(&port, "tm-brand-new", false).await, Did::Spawned(HostChannel::Primary));
-    assert_eq!(world.sessions(CURRENT, "Spawn"), vec!["tm-brand-new".to_string()], "on the current host");
+    assert_spawn_key(&world, CURRENT, "tm-brand-new");
     assert_eq!(world.count("h1", "Spawn"), 0);
     assert!(!port.0.restoring_keys.contains_key("tm-brand-new"), "a later create is not held by a spent intent");
 }
@@ -254,7 +260,7 @@ async fn fresh_tab_during_unresolved_adoption_spawns_on_current_promptly() {
         .await
         .expect("a fresh tab must not wait for the unresolved host");
     assert_eq!(did, Did::Spawned(HostChannel::Primary));
-    assert_eq!(world.sessions(CURRENT, "Spawn"), vec!["tm-fresh".to_string()]);
+    assert_spawn_key(&world, CURRENT, "tm-fresh");
     assert!(
         world.kinds("h1").iter().all(|k| matches!(*k, "Disarm" | "List")),
         "the old host saw only its lifecycle frame and listings: {:?}",
@@ -269,7 +275,7 @@ async fn a_new_tab_spawns_on_the_current_host_only_and_leaves_the_old_hosts_sess
     assert_eq!(create(&port, "tm-new", false).await, Did::Spawned(HostChannel::Primary));
     tokio::time::sleep(SEC).await;
 
-    assert_eq!(world.sessions(CURRENT, "Spawn"), vec!["tm-new".to_string()]);
+    assert_spawn_key(&world, CURRENT, "tm-new");
     assert_eq!(world.count("h1", "Spawn"), 0);
     assert_eq!(world.count("h1", "Attach"), 0);
     assert_eq!(world.count("h1", "Close"), 0);
@@ -399,7 +405,7 @@ async fn falls_back_frozen_then_in_process() {
 
     let did = create(&port, "tm-fresh", false).await;
     assert_eq!(did, Did::Spawned(HostChannel::Frozen(FrozenId(1))));
-    assert_eq!(world.sessions("h1", "Spawn"), vec!["tm-fresh".to_string()], "the Spawn reached the older host");
+    assert_spawn_key(&world, "h1", "tm-fresh");
     assert_eq!(world.count(CURRENT, "Spawn"), 0);
 
     // Nothing usable anywhere: in-process.
@@ -645,7 +651,7 @@ fn spawn_routed_has_no_other_pty_host_clone() {
     }
     // A refusal is returned as it is; it is never turned into an in-process shell.
     assert!(
-        body.contains("state.place_create(&session_key, session_key_overridden).await?"),
+        body.contains("state.place_process_create(&id, session_key.as_deref()).await?"),
         "the router's refusals (LIFECYCLE_BUSY, host-ownership-pending) must propagate with `?`"
     );
     // The client acted on is the one the placement carries.
@@ -663,5 +669,8 @@ fn the_router_takes_one_ticket_per_create() {
     let routing = source_of("host_routing.rs");
     let production = &routing[..routing.find("#[cfg(test)]").unwrap_or(routing.len())];
     assert_eq!(production.matches(".begin(").count(), 1);
-    assert!(fn_body(production, "pub(super) async fn place<").contains("port.table().begin(channel)"));
+    assert!(fn_body(production, "pub(super) async fn place_for_leaf<").contains("begin_ticket(port, channel)"));
+    assert_eq!(fn_body(production, "pub(super) async fn place_for_leaf<").matches("begin_ticket(").count(), 1);
+    assert_eq!(fn_body(production, "fn place_elevated_create(").matches("begin_ticket(").count(), 1);
+    assert!(fn_body(production, "fn begin_ticket<").contains("port.table().begin(channel)"));
 }

@@ -44,6 +44,22 @@ function called(calls: Call[], method: Call["method"], url: string): boolean {
 }
 
 describe("createMcpServer tool wiring", () => {
+    it("round-trips opaque process and session identities through terminal detail", async () => {
+        const processId = "pc-0123456789ab4cde8fab0123456789ab";
+        const sessionKey = "tm-original~0123456789ab4cde8fab0123456789ac";
+        const detail = { id: processId, processId, terminalId: "tm-recovered", sessionKey };
+        const { api, calls } = makeFakeApi({ [`/terminals/${processId}`]: detail });
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => processId }));
+        try {
+            const result: any = await client.callTool({ name: "get_terminal_detail", arguments: { terminalId: "me" } });
+            expect(result.isError).toBeFalsy();
+            expect(JSON.parse(result.content[0].text)).toEqual(detail);
+            expect(calls).toEqual([{ method: "get", url: `/terminals/${processId}` }]);
+        } finally {
+            await client.close();
+        }
+    });
+
     it("get_my_terminal proxies GET /terminals/<callerId>", async () => {
         const { api, calls } = makeFakeApi();
         const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));

@@ -120,14 +120,16 @@ async fn answered_relist_superseded_before_consumption_cannot_reserve_or_settle_
     use crate::state::host_routing::{place, Placement};
     let session_key = "stale-shell";
     match place(&port, session_key, true).await.unwrap() {
-        Placement::Spawn { channel, client, ticket } => {
+        Placement::Spawn { channel, client, ticket, session_key } => {
             assert_eq!(channel, HostChannel::Primary);
-            assert_eq!(client.spawn_session(session_key, &spawn_spec()).await, Ok(4242));
+            assert_eq!(client.spawn_session(&session_key, &spawn_spec()).await, Ok(4242));
             drop(ticket);
         }
         _ => panic!("a stale claim must not turn a fresh session into an attach"),
     }
-    assert_eq!(world.sessions(CURRENT, "Spawn"), ["stale-shell"]);
+    let spawned = world.sessions(CURRENT, "Spawn");
+    assert_eq!(spawned.len(), 1);
+    assert!(spawned[0].starts_with("stale-shell~"));
     assert_eq!(world.count_everywhere("Attach"), 0);
     old.close_transport().await;
     replacement.client.close_transport().await;

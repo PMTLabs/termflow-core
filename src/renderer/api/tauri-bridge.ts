@@ -454,9 +454,8 @@ const tauriBridge: ElectronAPI = {
       // Tauri maps camelCase JS keys onto snake_case Rust parameters, so this
       // reaches `create_terminal(… owning_tab_id: Option<String>)`.
       owningTabId,
-      // The pty-host session key for a MIGRATED pane, whose host session is
-      // still keyed by its old `tb-` id. Undefined for every pane created on
-      // this build, where the host key follows the leaf (design 014 A2.1).
+      // Exact persisted/recovered host key, including legacy sessions. Without
+      // an override the backend discovers own-leaf sessions or mints a new key.
       sessionKey,
       // Plan 045: spawn against the elevated sidecar instead of the primary one.
       elevated,

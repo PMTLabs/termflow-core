@@ -312,6 +312,7 @@ impl<R: Runtime> AppState<R> {
             sibling_hold: Arc::default(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
+            ids: super::IdAllocator::default(),
             handoff_offers: crate::session_handoff::HandoffOffers::new(),
             host_session_claims: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
@@ -611,6 +612,7 @@ impl<R: Runtime> AppState<R> {
     /// `state::source_tests::host_terminals_is_only_removed_through_forget_host_terminal`
     /// pins that nothing else does.
     pub fn forget_host_terminal(&self, id: &str) {
+        self.host_table.routes().remove_process(id);
         let Some((_, channel)) = self.host_terminals.remove(id) else {
             return;
         };
@@ -741,6 +743,10 @@ impl<R: Runtime> AppState<R> {
         log::info!("[ADMIN] elevated pty-host connected and verified (pid {})", launched.pid);
 
         let my_gen = self.elevated_host.bump_gen();
+        let epoch = self.host_table.reserve_epoch();
+        if !self.host_table.publish(HostChannel::Elevated, epoch) {
+            return Err("elevated terminal host is not admitting sessions".to_string());
+        }
         let (rd, wr) = tokio::io::split(stream);
 
         let st_exit = self.clone();
@@ -775,7 +781,9 @@ impl<R: Runtime> AppState<R> {
             on_gap: Arc::new(move |process_id: String| {
                 st_gap.host_repaint(&process_id);
             }),
-            resolve_process: Arc::new(move |k: &str| st_resolve.identity.process_for_session(k)),
+            resolve_process: Arc::new(move |k: &str| host_registry::resolve_inbound(
+                &st_resolve.host_terminals, &st_resolve.host_table, HostChannel::Elevated, epoch, k,
+            )),
             // Plan 045 §5 / R6: the elevated channel is NEVER reconnected — a
             // held session recovering into a re-prompted or nonexistent UAC
             // flow would be worse than just ending it. Every terminal still
@@ -788,6 +796,7 @@ impl<R: Runtime> AppState<R> {
                     "[ADMIN] elevated pty-host pipe dropped; ending its session(s) \
                      (no auto-relaunch, no re-prompt)"
                 );
+                st_disc.host_table.routes().remove_channel(HostChannel::Elevated);
                 st_disc.elevated_host.clear_client();
                 let elevated_ids: Vec<String> = st_disc
                     .host_terminals

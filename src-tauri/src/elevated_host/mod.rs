@@ -40,7 +40,7 @@ pub struct FrozenId(pub u32);
 /// elevated sidecar's lifetime (plan 045 §4.1) is DERIVED from counting
 /// `Elevated` entries — never hand-maintained — see
 /// `AppState::forget_host_terminal`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostChannel {
     Primary,
     Elevated,

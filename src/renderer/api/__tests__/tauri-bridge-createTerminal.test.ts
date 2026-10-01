@@ -36,6 +36,18 @@ beforeEach(() => {
 });
 
 describe('tauriBridge restore intent contract', () => {
+  it('round-trips full process ids and exact recovered session overrides', async () => {
+    const processId = 'pc-0123456789ab4cde8fab0123456789ab';
+    const sessionKey = 'tm-original~0123456789ab4cde8fab0123456789ac';
+    invokeMock.mockResolvedValueOnce(processId);
+    await expect(tauriBridge.createTerminal('default', 'Recovered', undefined, 'tm-recovered', 80, 24, 'tb-owner', sessionKey)).resolves.toBe(processId);
+    const create = invokeMock.mock.calls.find(([cmd]) => cmd === 'create_terminal');
+    expect(create?.[1]).toMatchObject({ tabId: 'tm-recovered', sessionKey, owningTabId: 'tb-owner' });
+    invokeMock.mockClear();
+    await tauriBridge.registerRestoringLeaves([{ leafId: 'tm-recovered', sessionKey }]);
+    expect(invokeMock).toHaveBeenCalledWith('register_restoring_leaves', { leaves: [{ leafId: 'tm-recovered', sessionKey }] });
+  });
+
   it('registers modern and migrated leaves with camelCase argument keys', async () => {
     const leaves = [{ leafId: 'tm-modern' }, { leafId: 'tm-migrated', sessionKey: 'tb-legacy' }];
     await tauriBridge.registerRestoringLeaves(leaves);

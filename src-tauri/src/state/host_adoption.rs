@@ -378,6 +378,7 @@ pub(super) fn frozen_connection_lost(
     if !table.is_current(channel, epoch) || table.admission(channel) == Some(Admission::Retired) {
         return false;
     }
+    table.routes().remove_channel(channel);
     barrier.mark_lost(&barrier_key(endpoint), "connection lost");
     true
 }
@@ -912,6 +913,8 @@ mod reconnect_tests;
 mod sweep_tests;
 #[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod incarnation_tests;
 #[cfg(test)]
 mod retire_tests;
 #[cfg(test)]

@@ -1436,8 +1436,8 @@ class StateManagerClass {
       // leaf, deliberately. There, preserving the old key is required: the
       // pty-host has no rename verb and the session being renamed is OURS.
       // Here the id collides precisely because the session belongs to another
-      // tab's LIVE terminal — carrying the key would make this fresh spawn
-      // overwrite `session_to_process` and steal that terminal's output.
+      // tab's LIVE terminal — carrying the key would request that terminal's
+      // session rather than a genuinely new shell.
       //
       // Every re-mint is recorded in `remintedIds` because a terminal id is a
       // KEY, not just a value: `terminalCwds` is keyed by it, and seeding the
@@ -1491,14 +1491,9 @@ class StateManagerClass {
             // this id", and the whole reason we are re-minting is that some
             // OTHER tab's still-running terminal is the one the host knows by
             // it. Claiming it here is not a harmless label: the spawn path
-            // forwards `sessionKey` to `create_terminal`, and the backend's
-            // `register_host_terminal` indexes `session_to_process` with an
-            // unconditional insert — so the fresh spawn would take over the
-            // live terminal's routing key and every inbound frame for the
-            // ORIGINAL, still-visible terminal would be delivered to this new
-            // process instead. A re-minted leaf is by definition a terminal
-            // whose identity is already taken, so it must start a genuinely
-            // new session.
+            // forwards `sessionKey` to `create_terminal` as an exact restore
+            // override. A re-minted leaf is a new terminal, not an alias for
+            // another tab's session, so it must start a genuinely new shell.
             //
             // `seededForTabId` goes with it. It records which tab a leaf was
             // seeded FOR, and this leaf is being installed into `targetTabId`

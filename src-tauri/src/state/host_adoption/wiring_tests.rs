@@ -32,7 +32,7 @@ pub(crate) async fn exercise_generations(current: String, candidates: Vec<HostCa
         let spec = SpawnSpec { shell: "test-shell".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 };
         let old_session_key = "tm-old";
         match place(&port, old_session_key, true).await.unwrap() {
-            Placement::Attach { channel: target, client, pid, ticket } => {
+            Placement::Attach { channel: target, client, pid, ticket, .. } => {
                 assert_eq!(target, channel, "the old shell must attach on the frozen host");
                 assert_eq!(pid, shell.pid, "attach retains the old process identity");
                 assert_eq!(client.attach_confirmed(old_session_key, shell.tail_offset).await, Some(true));
@@ -44,14 +44,16 @@ pub(crate) async fn exercise_generations(current: String, candidates: Vec<HostCa
         assert_eq!(world.count(&current, "Attach"), 0);
         let session_key = "tm-new";
         match place(&port, session_key, false).await.unwrap() {
-            Placement::Spawn { channel, client, ticket } => {
+            Placement::Spawn { channel, client, ticket, session_key } => {
                 assert_eq!(channel, HostChannel::Primary);
-                assert_eq!(client.spawn_session(session_key, &spec).await.unwrap(), 4242);
+                assert_eq!(client.spawn_session(&session_key, &spec).await.unwrap(), 4242);
                 drop(ticket);
             }
             _ => panic!("a fresh create must spawn on the current host"),
         }
-        assert_eq!(world.sessions(&current, "Spawn"), ["tm-new"]);
+        let spawned = world.sessions(&current, "Spawn");
+        assert_eq!(spawned.len(), 1);
+        assert!(spawned[0].starts_with("tm-new~"));
         assert_eq!(world.count(&old, "Spawn"), 0);
         assert_eq!(frozen.client.list_sessions().await.unwrap().as_slice(), std::slice::from_ref(&shell), "old pid and ring unchanged");
         assert_eq!(*world.started_processes.lock().unwrap(), Vec::<String>::new(), "both hosts adopted, no duplicate process");

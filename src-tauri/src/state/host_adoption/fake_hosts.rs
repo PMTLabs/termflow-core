@@ -493,6 +493,10 @@ pub(super) fn record(endpoint: &str, proto_min: u16, proto_max: u16) -> HostReco
 pub(super) struct Inner {
     pub world: Arc<World>,
     pub table: HostTable,
+    pub ids: crate::state::IdAllocator,
+    pub output: tokio::sync::broadcast::Sender<ChannelPayload>,
+    pub exits: Mutex<Vec<String>>,
+    pub offsets: Arc<DashMap<String, u64>>,
     pub barrier: Barrier,
     flight: tokio::sync::Mutex<()>,
     candidates: Mutex<Vec<HostCandidate>>,
@@ -599,10 +603,19 @@ impl Default for FullKnobs {
 pub(super) struct FakePort(pub Arc<Inner>);
 
 impl FakePort {
+    pub fn with_ids(mut self, ids: crate::state::IdAllocator) -> Self {
+        Arc::get_mut(&mut self.0).expect("inject before cloning the port").ids = ids;
+        self
+    }
+
     pub fn new(world: &Arc<World>, current_endpoint: &str) -> Self {
         Self(Arc::new(Inner {
             world: world.clone(),
             table: HostTable::new(),
+            ids: crate::state::IdAllocator::default(),
+            output: tokio::sync::broadcast::channel(128).0,
+            exits: Mutex::new(Vec::new()),
+            offsets: Arc::new(DashMap::new()),
             barrier: Barrier::new(),
             flight: tokio::sync::Mutex::new(()),
             candidates: Mutex::new(Vec::new()),
@@ -699,6 +712,7 @@ impl FakePort {
 
     /// A pane is registered for `session_key` on `channel`, as after a create.
     pub fn register_terminal(&self, process_id: &str, session_key: &str, channel: HostChannel) {
+        self.register_route(channel, session_key, process_id);
         self.0.host_terminals.insert(process_id.to_owned(), channel);
         self.0.terminals.insert(
             process_id.to_owned(),
@@ -741,16 +755,20 @@ impl FakePort {
         self.0.connects.lock().unwrap().iter().filter(|(e, _)| e == endpoint).count()
     }
 
-    fn deps(&self, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
+    fn deps(&self, channel: HostChannel, epoch: u64, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
+        let resolve = self.clone();
+        let exits = self.clone();
         PtyHostDeps {
             lifecycle_token: "tok".into(),
-            output_tx: tokio::sync::broadcast::channel::<ChannelPayload>(16).0,
+            output_tx: self.0.output.clone(),
             output_produced: Arc::new(AtomicU64::new(0)),
-            on_exit: Arc::new(|_, _, _| {}),
+            on_exit: Arc::new(move |process, _, _| exits.0.exits.lock().unwrap().push(process)),
             on_gap: Arc::new(|_| {}),
-            resolve_process: Arc::new(|k: &str| Some(k.to_string())),
+            resolve_process: Arc::new(move |k: &str| host_registry::resolve_inbound(
+                &resolve.0.host_terminals, &resolve.0.table, channel, epoch, k,
+            )),
             on_disconnect,
-            stream_offsets: Arc::new(DashMap::new()),
+            stream_offsets: self.0.offsets.clone(),
         }
     }
 }
@@ -844,7 +862,8 @@ impl AdoptionPort for FakePort {
                 self.0.table.reserve_epoch(),
             ),
         };
-        let client = wire_client(rd, wr, self.deps(on_disconnect));
+        let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));
+        let client = wire_client(rd, wr, self.deps(channel, epoch, on_disconnect));
         client.set_attach_acks(true);
         client.inject_exe_image(Self::installed_host_image());
         if let Some(verdict) = self.0.exe_origins.lock().unwrap().get(endpoint) {
@@ -922,6 +941,7 @@ impl PanePort for FakePort {
 
     fn teardown_pane(&self, process_id: &str) {
         self.0.torn_down.lock().unwrap().push(process_id.to_owned());
+        self.0.table.routes().remove_process(process_id);
         self.0.host_terminals.remove(process_id);
         self.0.terminals.remove(process_id);
     }
@@ -932,6 +952,7 @@ impl PanePort for FakePort {
 
     fn forget_host(&self, id: FrozenId) {
         let channel = HostChannel::Frozen(id);
+        self.0.table.routes().remove_channel(channel);
         self.0.frozen.lock().unwrap().retain(|h| h.id != id);
         host_registry::prune_pending_closes(&self.0.host_close_pending, channel);
         host_registry::forget_reserved_claims_on(&self.0.claims, channel);
@@ -949,5 +970,15 @@ impl RoutingPort for FakePort {
 
     fn closed_unowned(&self) -> &DashMap<String, std::time::Instant> {
         &self.0.closed_unowned
+    }
+
+    fn ids(&self) -> &crate::state::IdAllocator {
+        &self.0.ids
+    }
+
+    fn surface_ambiguous(&self, keys: &[String]) {
+        for key in keys {
+            self.announce_recovered(key);
+        }
     }
 }

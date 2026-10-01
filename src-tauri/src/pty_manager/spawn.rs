@@ -3,7 +3,6 @@ use crate::tmux_manager::TerminalBackend;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::thread;
 use tauri::Emitter;
-use uuid::Uuid;
 use super::cwd::exit_cwd_for;
 use super::spawn_spec::{FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV, PS_CWD_INTEGRATION, identity_env_value, loopback_no_proxy_env};
 
@@ -65,6 +64,14 @@ fn find_utf8_boundary(data: &[u8]) -> usize {
     0
 }
 
+/// Prepare both local identities before any PTY or child can be created. The
+/// shell reads the durable leaf when present, not the per-run process handle.
+fn local_identity(ids: &crate::state::IdAllocator, leaf: Option<&str>) -> Result<(String, String), String> {
+    let process = ids.mint_process_id()?;
+    let shell_identity = identity_env_value(leaf, &process).to_string();
+    Ok((process, shell_identity))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_terminal(
     app_state: AppState,
@@ -106,6 +113,7 @@ pub fn spawn_terminal(
     // session's content (the scrollback-persistence "ratchet" bug).
     history_seed: Option<String>,
 ) -> Result<String, String> {
+    let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
     // Plan 049: sideload modern ConPTY once, before the first pseudoconsole opens.
     #[cfg(windows)]
     {
@@ -161,12 +169,10 @@ pub fn spawn_terminal(
     // Stable per-terminal id, generated before the command is built so it can be
     // injected into the child env (TERMFLOW_TERMINAL_ID) — an in-terminal agent
     // reads it to identify its own terminal to the MCP server ("me" / get_my_terminal).
-    let raw_uuid = Uuid::new_v4().to_string().replace("-", "");
-    let id = format!("pc-{}", &raw_uuid[..9]);
 
     cmd_builder.env("TERM", "xterm-256color");
     cmd_builder.env("COLORTERM", "truecolor");
-    cmd_builder.env("TERMFLOW_TERMINAL_ID", identity_env_value(renderer_terminal_id.as_deref(), &id));
+    cmd_builder.env("TERMFLOW_TERMINAL_ID", shell_identity);
 
     // Identify ourselves — and stop leaking the identity of whatever terminal the
     // APP was launched from. Same inheritance mechanism as COLORTERM above, but
@@ -404,6 +410,25 @@ fn kill_process_tree_blocking(pid: u32) {
 
 #[cfg(test)]
 mod reader_wiring_tests {
+    #[test]
+    fn local_identity_creation_preserves_injected_uuid_bits_and_durable_shell_identity() {
+        let uuid = uuid::Uuid::parse_str("01234567-89ab-4cde-8fab-0123456789ab").unwrap();
+        let ids = crate::state::IdAllocator::new(move || Ok(uuid));
+        let (process, shell) = super::local_identity(&ids, Some("tm-leaf")).unwrap();
+        assert_eq!(process, "pc-0123456789ab4cde8fab0123456789ab");
+        assert_eq!(shell, "tm-leaf");
+        let (headless_process, headless_shell) = super::local_identity(&ids, None).unwrap();
+        assert_eq!(headless_process, process);
+        assert_eq!(headless_shell, headless_process);
+    }
+
+    #[test]
+    fn local_identity_creation_returns_no_identity_on_rng_failure() {
+        let ids = crate::state::IdAllocator::new(|| Err("random source failed".into()));
+        assert_eq!(super::local_identity(&ids, Some("tm-leaf")), Err("random source failed".into()));
+        assert_eq!(super::local_identity(&ids, None), Err("random source failed".into()));
+    }
+
     /// Spellings that drain a reader without going through the pump.
     fn private_read_spellings(code: &str) -> Vec<&'static str> {
         [".read(", ".read_exact(", ".read_to_end(", ".read_to_string(", ".bytes()", "io::copy("]

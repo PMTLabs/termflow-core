@@ -112,7 +112,7 @@ impl<R: Runtime> AppState<R> {
             // (design 014 §A3). An unknown session is DROPPED, never echoed.
             resolve_process: {
                 let st = self.clone();
-                Arc::new(move |k: &str| host_registry::resolve_inbound(&st.host_terminals, &st.identity, &st.host_table, channel, epoch, k))
+                Arc::new(move |k: &str| host_registry::resolve_inbound(&st.host_terminals, &st.host_table, channel, epoch, k))
             },
             on_disconnect,
             stream_offsets: self.host_stream_offsets.clone(),
@@ -134,6 +134,7 @@ impl<R: Runtime> AppState<R> {
             // client, then reconnect-first; only sessions the host no longer
             // has — or a failed reconnect — are torn down.
             log::warn!("[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect");
+            st_disc.host_table.routes().remove_channel(HostChannel::Primary);
             *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
             // The Settings Updates panel caches an offload verdict that is a
             // function of this connection; tell it the answer changed.
@@ -408,6 +409,7 @@ impl<R: Runtime> PanePort for AppState<R> {
 
     fn forget_host(&self, id: FrozenId) {
         let channel = HostChannel::Frozen(id);
+        self.host_table.routes().remove_channel(channel);
         self.remove_frozen_host(id);
         // What was owed to a host that no longer exists can never be delivered,
         // and a session reserved on it is gone with it.

@@ -137,9 +137,8 @@ pub struct Terminal {
     /// has no rename verb, so a renamed leaf would orphan a live session
     /// (design 014 §A2).
     ///
-    /// `== renderer_terminal_id` for anything created on this build. It differs
-    /// ONLY for a terminal migrated from a pre-014 build, where it keeps the old
-    /// `tb-` key so an already-armed session still reattaches after the upgrade.
+    /// New hosted shells use `<leaf>~<32 hex>`. Restored shells keep their
+    /// exact key, including legacy keys and keys recovered under a new leaf.
     ///
     /// Empty when deserialising a pre-014 payload; callers treat empty as
     /// "fall back to the leaf".
@@ -200,16 +199,6 @@ pub fn session_key_of(t: &Terminal) -> String {
         return t.session_key.clone();
     }
     t.renderer_terminal_id.clone().unwrap_or_else(|| t.id.clone())
-}
-
-/// Mint a process id: `pc-` + 9 chars, matching the renderer's `utils/id.ts`
-/// shape so every id space looks alike apart from its prefix.
-///
-/// PER RUN, deliberately. A process id identifies one PTY run and must not
-/// survive a restart — that is exactly what makes `tm-` (the durable leaf) the
-/// id MCP hands out to agents instead (design 014 §A3).
-pub fn mint_process_id() -> String {
-    format!("pc-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..9])
 }
 
 fn default_terminal_cols() -> u16 {
@@ -632,6 +621,8 @@ pub struct AppState<R: Runtime = Wry> {
     /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
     /// type so it is unit-testable without a Tauri AppHandle.
     pub identity: crate::identity_index::IdentityIndex,
+    /// Shared injectable source of opaque shell-run identities.
+    pub ids: super::IdAllocator,
     /// Shells a window created for a pane that had already moved away, waiting for
     /// the window that has the pane to take them (single use, short TTL).
     pub handoff_offers: crate::session_handoff::HandoffOffers,
@@ -784,6 +775,7 @@ impl<R: Runtime> Clone for AppState<R> {
             sibling_hold: self.sibling_hold.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
+            ids: self.ids.clone(),
             handoff_offers: self.handoff_offers.clone(),
             host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
@@ -1016,9 +1008,8 @@ mod terminal_identity_serde_tests {
         }
     }
 
-    /// Design 014 §A2: the four spaces must be simultaneously representable and
-    /// must survive a round trip. `session_key` differs from the leaf ONLY for a
-    /// terminal migrated from a pre-014 build, which is the case pinned here.
+    /// The identity spaces round-trip independently, including exact legacy
+    /// session keys whose renderer leaf has changed.
     #[test]
     fn every_identity_round_trips_including_a_migrated_session_key() {
         let mut t = sample();
@@ -1058,11 +1049,10 @@ mod terminal_identity_serde_tests {
 
     #[test]
     fn mint_process_id_is_prefixed_and_unique() {
-        let a = super::mint_process_id();
-        let b = super::mint_process_id();
-        assert!(a.starts_with("pc-"), "got {a}");
+        let a = crate::state::mint_process_id().unwrap();
+        let b = crate::state::mint_process_id().unwrap();
+        assert!(regex::Regex::new(r"^pc-[0-9a-f]{32}$").unwrap().is_match(&a), "got {a}");
         assert_ne!(a, b, "two mints must not collide");
-        assert_eq!(a.len(), "pc-".len() + 9, "9 chars after the prefix, matching utils/id.ts");
     }
 
     /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would

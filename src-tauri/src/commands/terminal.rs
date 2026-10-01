@@ -61,10 +61,8 @@ pub async fn create_terminal(
     // `resolve_api_spawn_identity`, distinct from `owning_tab_id` (option A).
     // Optional so a renderer that predates P0-A still works.
     owning_tab_id: Option<String>,
-    // The pty-host session key for a MIGRATED pane (design 014 §A2.1). `None`
-    // means the host key follows the leaf, which is the case for every pane
-    // created on this build. Threaded through so a pane whose leaf the migration
-    // rewrote still reattaches to its already-armed session.
+    // Exact persisted or recovered host key. Absence lets the backend discover
+    // an own-leaf session or mint a fresh key for this shell run.
     session_key: Option<String>,
     // Plan 045: spawn this pane against the UAC-elevated sidecar instead of the
     // primary one. `None` (an older renderer bundle) means false — this
@@ -400,12 +398,9 @@ pub(crate) struct SpawnRequest {
     /// Since design 014 this is NO LONGER the map key, the sidecar session id or
     /// the screen key — those are the process id and the session key below.
     pub leaf_id: String,
-    /// What the pty-host knows this session as, when it differs from the leaf.
-    ///
-    /// `None` means "same as the leaf", which is the case for everything created
-    /// on this build. It is `Some` only for a terminal migrated from a pre-014
-    /// build, whose host session is still keyed by the old `tb-` id and would be
-    /// orphaned by a rename — the protocol has no rename verb (design 014 §A2).
+    /// Exact persisted or recovered host key. A new shell always gets a fresh
+    /// random suffix; an existing shell keeps its key because the host has no
+    /// rename operation.
     pub session_key: Option<String>,
     /// The pane-tree tab that owns this terminal, when known to the caller.
     pub owning_tab_id: Option<String>,
@@ -453,18 +448,14 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         elevated,
     } = req;
 
-    // The host addresses this terminal by its SESSION key, which is the leaf for
-    // anything created on this build and the old `tb-` id for a migrated one.
-    let session_key_overridden = session_key.is_some();
-    let session_key = crate::state::effective_session_key(&id, session_key.as_deref());
-
     // Which sidecar this spawn targets, its connected client, and whether the
     // session already lives there (`Some(pid)`: attach to it instead of
     // spawning). The rest of this function (registration, scrollback staging,
     // the actual `Spawn` frame) is IDENTICAL for both sidecars — only how we get
     // a client, and what happens if we can't, differs. The ticket keeps the host
     // admitting this create until it is done.
-    let (channel, client, claimed_pid, _ticket) = if elevated {
+    let (process_id, channel, client, claimed_pid, _ticket, session_key) = if elevated {
+        let process_id = state.ids.mint_process_id()?;
         // Plan 045 R7: an elevated request never falls back in-process — that
         // would put an unprivileged shell behind an "Administrator" badge, a
         // lie the user cannot see. Every failure here returns `Err` directly.
@@ -475,8 +466,11 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             Some(c) => c,
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
         };
-        let claimed = state.claim_host_registration(&session_key, crate::elevated_host::HostChannel::Elevated)?;
-        (crate::elevated_host::HostChannel::Elevated, client, claimed.map(|(pid, _)| pid), None)
+        match state.place_elevated_create(&id, session_key.as_deref(), client)? {
+            crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
+            crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
+            crate::state::Placement::InProcess { .. } => unreachable!("elevated creates never run in-process"),
+        }
     } else {
         // Deliberately off (the `TERMFLOW_PTY_HOST=0` kill-switch — the only way to
         // land here now that every supported OS is default-on): in-process is the
@@ -489,9 +483,10 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         // may be on a host that has not answered yet) is returned as it is: it must
         // NOT fall back in-process, which would hide a running shell or start a
         // second one under the same key. Only "no host is usable" does.
-        match state.place_create(&session_key, session_key_overridden).await? {
-            crate::state::Placement::Attach { channel, client, pid, ticket } => (channel, client, Some(pid), Some(ticket)),
-            crate::state::Placement::Spawn { channel, client, ticket } => (channel, client, None, Some(ticket)),
+        let (process_id, placement) = state.place_process_create(&id, session_key.as_deref()).await?;
+        match placement {
+            crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
+            crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
             crate::state::Placement::InProcess { reason } => {
                 return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason);
             }
@@ -515,8 +510,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // Restore the real pid, register routing BEFORE attach releases replay
     // bytes, then nudge a repaint so a live TUI redraws.
     if let Some(pid) = claimed_pid {
-        let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
-        let process_id = ident.process_id.clone();
+        let ident = host_identity_for_process(&process_id, &session_key, Some(&id), owning_tab_id.as_deref());
         register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
         state.host_session_registered(&session_key, &process_id);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
@@ -544,8 +538,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // BEFORE spawning, so early output (shell banner / first prompt / OSC cwd)
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
-    let ident = host_identity(&session_key, Some(&id), owning_tab_id.as_deref());
-    let process_id = ident.process_id.clone();
+    let ident = host_identity_for_process(&process_id, &session_key, Some(&id), owning_tab_id.as_deref());
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
     state.host_session_registered(&session_key, &process_id);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
@@ -633,15 +626,20 @@ pub(crate) struct HostIdentity {
 
 /// Derive the four identities for a hosted terminal.
 ///
-/// `session_key` is the host's; `leaf` is the renderer's. They are equal for
-/// anything created on this build and differ only after a migration.
-fn host_identity(
+/// `session_key` is the host's opaque key; `leaf` is the renderer's durable id.
+#[cfg(test)]
+fn host_identity(session_key: &str, leaf: Option<&str>, owning_tab_id: Option<&str>) -> HostIdentity {
+    host_identity_for_process(&crate::state::mint_process_id().unwrap(), session_key, leaf, owning_tab_id)
+}
+
+fn host_identity_for_process(
+    process_id: &str,
     session_key: &str,
     leaf: Option<&str>,
     owning_tab_id: Option<&str>,
 ) -> HostIdentity {
     HostIdentity {
-        process_id: crate::state::mint_process_id(),
+        process_id: process_id.to_string(),
         leaf: leaf.map(str::to_string),
         owner: resolve_owner(session_key, leaf, owning_tab_id),
         session_key: session_key.to_string(),
@@ -699,9 +697,10 @@ fn register_host_terminal(
     let owner = ident.owner.clone();
     state.init_screen(id, rows, cols);
     state.host_terminals.insert(id.to_string(), channel);
-    // Index BEFORE the terminal becomes observable: the pty-host translates every
-    // inbound frame through `process_for_session`, so a frame arriving between the
-    // spawn and this call would be dropped as an unknown session.
+    // Register before Spawn/Attach can release early output or replay bytes.
+    if let Some(epoch) = state.host_table.epoch(channel) {
+        state.host_table.routes().register(channel, &ident.session_key, id, epoch);
+    }
     state.identity.index(id, leaf.as_deref(), &ident.session_key);
     state.terminals.insert(
         id.to_string(),
@@ -1364,9 +1363,10 @@ mod host_identity_tests {
     }
 
     #[test]
-    fn the_session_key_still_tracks_the_leaf_so_reattach_survives() {
-        let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
-        assert_eq!(h.session_key, "tm-9f2c1a4b7", "the sidecar reattach key must not move");
+    fn the_exact_session_key_is_preserved_so_reattach_survives() {
+        let key = "tm-9f2c1a4b7~0123456789ab4cde8fab0123456789ab";
+        let h = host_identity(key, Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
+        assert_eq!(h.session_key, key, "the sidecar reattach key must not move");
         assert_eq!(h.leaf.as_deref(), Some("tm-9f2c1a4b7"));
         assert_eq!(h.owner.as_deref(), Some("tb-4e8d0c2f1"));
     }
@@ -1762,8 +1762,8 @@ mod create_in_flight_mark_tests {
         assert_eq!(marks.len(), 1, "exactly one mark, held for the whole create");
         let at = marks[0];
         let after = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is called in spawn_routed"));
-        assert!(after("place_create(") < at, "marked only once the host placement holds the claim");
-        assert!(after("claim_host_registration(") < at, "the elevated claim comes before the mark too");
+        assert!(after("place_process_create(") < at, "marked only once the host placement holds the claim");
+        assert!(after("place_elevated_create(") < at, "the elevated claim comes before the mark too");
         assert!(at < after("register_host_terminal("), "marked before the terminal is registered");
         assert!(at < after("attach_confirmed("), "marked before the slow attach round trip");
         assert!(at < after("spawn_session("), "marked before the slow spawn round trip");

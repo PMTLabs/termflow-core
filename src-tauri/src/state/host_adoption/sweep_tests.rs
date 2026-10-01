@@ -170,7 +170,7 @@ async fn orphan_sweep_does_not_surface_a_restoring_key_on_a_frozen_host() {
     // The waiting pane still gets its own session: an Attach to the older host, no Spawn anywhere.
     let session_key = "tm-wait";
     match place(&port, session_key, false).await {
-        Ok(Placement::Attach { channel, client, pid, ticket }) => {
+        Ok(Placement::Attach { channel, client, pid, ticket, .. }) => {
             assert_eq!((channel, pid), (h1, 5));
             client.attach_confirmed(session_key, 0).await;
             drop(ticket);

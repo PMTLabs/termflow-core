@@ -161,19 +161,20 @@ pub(super) fn session_registered_on_any_channel(
 /// A duplicate key on another host must not feed or end the registered shell.
 pub(super) fn resolve_inbound(
     host_terminals: &DashMap<String, HostChannel>,
-    identity: &crate::identity_index::IdentityIndex,
     table: &super::host_table::HostTable,
     channel: HostChannel,
     epoch: u64,
     session_key: &str,
 ) -> Option<String> {
-    if !table.is_current(channel, epoch)
-        || table.admission(channel) == Some(super::host_table::Admission::Retired)
-    {
-        return None;
+    let current = table.is_current(channel, epoch)
+        && table.admission(channel) != Some(super::host_table::Admission::Retired);
+    let process = table.routes().resolve(channel, session_key, epoch, current)?;
+    if host_terminals.get(&process).is_some_and(|owner| *owner == channel) {
+        Some(process)
+    } else {
+        table.routes().record_drop();
+        None
     }
-    let process = identity.process_for_session(session_key)?;
-    host_terminals.get(&process).is_some_and(|owner| *owner == channel).then_some(process)
 }
 
 // ---- pending closes -------------------------------------------------------

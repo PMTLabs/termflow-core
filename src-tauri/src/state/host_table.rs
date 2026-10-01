@@ -123,6 +123,7 @@ impl Inner {
 
 struct Shared {
     inner: Mutex<Inner>,
+    routes: super::HostRoutes,
     /// Total tickets in flight, level-triggered so a quiesce can never miss the
     /// moment it reaches zero.
     inflight: watch::Sender<u32>,
@@ -162,8 +163,13 @@ impl HostTable {
                     next_holder: 0,
                 }),
                 inflight: watch::channel(0).0,
+                routes: super::HostRoutes::default(),
             }),
         }
+    }
+
+    pub fn routes(&self) -> &super::HostRoutes {
+        &self.shared.routes
     }
 
     /// An epoch for a connection about to be made. The callbacks wired into it
@@ -187,6 +193,9 @@ impl HostTable {
         match inner.slot_mut(channel) {
             Some(slot) if slot.admission != Admission::Open => false,
             Some(slot) => {
+                if slot.epoch != epoch {
+                    self.routes().remove_channel(channel);
+                }
                 slot.epoch = epoch;
                 true
             }
