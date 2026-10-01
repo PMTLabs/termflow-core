@@ -20,6 +20,7 @@ import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminals } from '../Canvas/CanvasHiddenBadge';
+import { PreviousHostForTerminals } from './HostGenerationMarker';
 import { resolveTabProcessIds } from '../../services/tabProcessIds';
 import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
@@ -415,6 +416,11 @@ const TabItem: React.FC<TabItemProps> = ({
         {tab.elevated && (
           <span className="tab-admin-badge" title="Running as Administrator">🛡️</span>
         )}
+        {/* A standing property of the tab, like the admin badge, and in the same leading group for
+            the same reason: the trailing badges sit under the absolutely positioned close button,
+            which would hide this one and take its clicks. Clears once the shell is replaced on the
+            current host. */}
+        <PreviousHostForTerminals terminalIds={tabTerminalIds} />
         <span
           key={tab.activityTick ?? 0}
           className="tab-title"

@@ -1,7 +1,7 @@
 //! Host image-path classification. The path-shape table runs on every OS (forward
 //! slashes parse as separators on both); the live-connection lookups are
 //! Windows-only.
-use super::exe_origin::{classify_exe, path_within, spawned_from_bundled_fallback};
+use super::exe_origin::{classify_exe, generation_of_build_id, generation_of_image, path_within, spawned_from_bundled_fallback};
 use super::*;
 use std::path::Path;
 
@@ -204,6 +204,96 @@ fn the_bundled_fallback_decision() {
     assert!(decide(true, sibling, Some(runtime)), "a sibling dir is not the runtime dir");
     assert!(!decide(false, bundled, Some(runtime)), "an adopted host's origin is not ours to claim");
     assert!(!decide(false, bundled, None));
+}
+
+// --- generation of an image ----------------------------------------------
+
+const INSTALL_BASE: &str = "C:/Users/u/AppData/Local/app.termflow.desktop/host/rel";
+const GENERATION: &str = "0123456789abcdef";
+
+fn generation(image: &str, base: &str) -> Option<String> {
+    generation_of_image(Path::new(image), Path::new(base), true)
+}
+
+/// Only `<install base>/<generation>/<exe>` names a generation. The bundled copy,
+/// the legacy layout without a generation directory, another profile's install
+/// base and a longer path sharing the base's prefix name none, so none of them
+/// can be mistaken for the running build's.
+#[test]
+fn only_an_image_one_generation_dir_below_the_install_base_names_a_generation() {
+    let installed = format!("{INSTALL_BASE}/{GENERATION}/termflow-pty-host.exe");
+    assert_eq!(generation(&installed, INSTALL_BASE).as_deref(), Some(GENERATION));
+    assert_eq!(
+        generation(&installed.replace(GENERATION, &GENERATION.to_uppercase()), &INSTALL_BASE.to_uppercase())
+            .as_deref(),
+        Some(GENERATION),
+        "case differences are not differences on Windows, and the name is normalised"
+    );
+
+    for (image, base) in [
+        (format!("{INSTALL_BASE}/termflow-pty-host.exe"), INSTALL_BASE),
+        (format!("{INSTALL_BASE}/current/termflow-pty-host.exe"), INSTALL_BASE),
+        (format!("{INSTALL_BASE}/{GENERATION}/bin/termflow-pty-host.exe"), INSTALL_BASE),
+        (format!("{INSTALL_BASE}2/{GENERATION}/termflow-pty-host.exe"), INSTALL_BASE),
+        (format!("{INSTALL_BASE}/{GENERATION}/termflow-pty-host.exe"), "C:/elsewhere/host/rel"),
+        ("C:/Users/u/AppData/Local/TermFlow/current/termflow-pty-host.exe".to_string(), INSTALL_BASE),
+    ] {
+        assert_eq!(generation(&image, base), None, "{image} under {base}");
+    }
+}
+
+/// Only the first 16 hex digits of a full digest name a generation, and only when they are
+/// hex: the install directory is named by the first 8 bytes of the host file's digest.
+#[test]
+fn a_build_id_names_a_generation_by_its_first_sixteen_hex_digits() {
+    let full = format!("{GENERATION}{}", "f".repeat(48));
+    assert_eq!(generation_of_build_id(&full).as_deref(), Some(GENERATION));
+    assert_eq!(generation_of_build_id(&full.to_uppercase()).as_deref(), Some(GENERATION));
+    for unusable in ["", "0123456789abcde", "0123456789abcdeg", "not a digest at all..."] {
+        assert_eq!(generation_of_build_id(unusable), None, "{unusable:?}");
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_windows_client_reports_a_generation_only_from_an_image_it_can_place() {
+    let base = crate::pty_host_client::runtime_host_dir().expect("a per-user runtime dir");
+    let (client, _server, _c) = conn_tests::wired();
+    let digest = format!("{GENERATION}{}", "f".repeat(48));
+    client.set_advertised_build_id(Some(digest));
+
+    client.inject_exe_image(Some(base.join(GENERATION).join("termflow-pty-host")));
+    assert_eq!(client.host_generation().as_deref(), Some(GENERATION));
+
+    client.inject_exe_image(Some(std::path::PathBuf::from("/opt/termflow/termflow-pty-host")));
+    assert_eq!(client.host_generation(), None, "an image outside the install base");
+    // The ConPTY pair is part of a Windows generation, so the digest is not a substitute
+    // for an image that could not be read.
+    client.inject_exe_image(None);
+    assert_eq!(client.host_generation(), None, "a failed lookup");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_client_off_windows_reports_the_generation_its_host_advertised() {
+    let (client, _server, _c) = conn_tests::wired();
+    assert_eq!(client.host_generation(), None, "nothing advertised");
+    client.set_advertised_build_id(Some(format!("{GENERATION}{}", "f".repeat(48))));
+    assert_eq!(client.host_generation().as_deref(), Some(GENERATION));
+    client.set_advertised_build_id(Some("garbage".to_string()));
+    assert_eq!(client.host_generation(), None);
+}
+
+#[tokio::test]
+async fn only_a_host_this_app_started_is_marked_as_spawned_here() {
+    let bundled = Path::new("/definitely/not/the/runtime/dir/termflow-pty-host");
+    let (spawned, _server, _c) = conn_tests::wired();
+    spawned.note_bundled_fallback(HostConnectionOrigin::SpawnedHere, bundled);
+    assert!(spawned.spawned_here());
+
+    let (adopted, _server, _c) = conn_tests::wired();
+    adopted.note_bundled_fallback(HostConnectionOrigin::Adopted, bundled);
+    assert!(!adopted.spawned_here(), "finding a running host is not starting it");
 }
 
 // --- client level -------------------------------------------------------

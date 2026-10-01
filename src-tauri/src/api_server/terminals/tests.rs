@@ -58,7 +58,7 @@
     /// its own object; it does not.
     #[test]
     fn the_shared_identity_payload_carries_no_canvas_node_block() {
-        let v = terminal_identity_json(&identity_sample(), "ui");
+        let v = terminal_identity_json(&identity_sample(), "ui", crate::state::Marker::Current);
         assert!(
             v.get("node").is_none(),
             "the node block must be merged at the get_terminal call site, not here —              otherwise list_terminals pays for it on every entry"
@@ -70,7 +70,7 @@
     /// every existing API/MCP client (D4).
     #[test]
     fn an_identity_response_carries_all_three_ids_under_exact_keys() {
-        let v = terminal_identity_json(&identity_sample(), "ui");
+        let v = terminal_identity_json(&identity_sample(), "ui", crate::state::Marker::Current);
         assert_eq!(v["id"], json!("pc-abc123def"));
         assert_eq!(v["processId"], json!("pc-abc123def"));
         assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
@@ -78,6 +78,18 @@
         assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
         assert_eq!(v["mode"], json!("ui"));
         assert_eq!(v["promptHook"], json!(true));
+    }
+
+    /// The marker the tab strip draws is read from this key. A terminal on an older
+    /// host says so, and one on the running build's says that too: the key is
+    /// never left out for the reader to default.
+    #[test]
+    fn an_identity_response_says_which_generation_serves_the_terminal() {
+        use crate::state::Marker;
+        let previous = terminal_identity_json(&identity_sample(), "ui", Marker::Previous);
+        assert_eq!(previous["generation"], json!("previous"));
+        let current = terminal_identity_json(&identity_sample(), "ui", Marker::Current);
+        assert_eq!(current["generation"], json!("current"));
     }
 
     /// Design 011 §7 test 5 asserted `leaf == owner` for a renderer-created tab
@@ -91,7 +103,7 @@
         let mut t = identity_sample();
         t.renderer_terminal_id = Some("tm-9f2c1a4b7".into());
         t.owning_tab_id = Some("tb-4e8d0c2f1".into());
-        let v = terminal_identity_json(&t, "ui");
+        let v = terminal_identity_json(&t, "ui", crate::state::Marker::Current);
         assert_eq!(v["terminalId"], json!("tm-9f2c1a4b7"));
         assert_eq!(v["owningTabId"], json!("tb-4e8d0c2f1"));
         assert_ne!(v["terminalId"], v["owningTabId"]);
@@ -105,7 +117,7 @@
         let mut t = identity_sample();
         t.renderer_terminal_id = None;
         t.owning_tab_id = None;
-        let v = terminal_identity_json(&t, "ui");
+        let v = terminal_identity_json(&t, "ui", crate::state::Marker::Current);
         assert_eq!(v["terminalId"], json!(null));
         assert_eq!(v["tabId"], json!(null));
         assert_eq!(v["owningTabId"], json!(null));

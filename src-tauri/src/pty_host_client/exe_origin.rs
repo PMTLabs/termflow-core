@@ -19,6 +19,12 @@ pub(super) struct ExeOrigin {
     /// This app spawned the host itself from the bundled source path because the
     /// runtime-dir install failed. That copy runs from inside the payload.
     bundled_fallback: AtomicBool,
+    /// This app started the host behind the connection, from its own resolved
+    /// host binary, rather than finding one already running.
+    spawned_here: AtomicBool,
+    /// The build id the host advertised in its record, when there was one. Off
+    /// Windows it names the host's generation (see `generation`).
+    advertised_build_id: std::sync::Mutex<Option<String>>,
     /// What the OS lookup would have answered (tests, which have no real host
     /// behind a connection): the classification itself is not replaced.
     #[cfg(test)]
@@ -39,6 +45,18 @@ impl ExeOrigin {
 
     pub(super) fn set_bundled_fallback(&self, v: bool) {
         self.bundled_fallback.store(v, Ordering::Release);
+    }
+
+    pub(super) fn set_spawned_here(&self, v: bool) {
+        self.spawned_here.store(v, Ordering::Release);
+    }
+
+    pub(super) fn spawned_here(&self) -> bool {
+        self.spawned_here.load(Ordering::Acquire)
+    }
+
+    pub(super) fn set_advertised_build_id(&self, build_id: Option<String>) {
+        *self.advertised_build_id.lock().unwrap_or_else(|e| e.into_inner()) = build_id;
     }
 
     #[cfg(test)]
@@ -74,13 +92,47 @@ impl ExeOrigin {
     }
 
     /// The host's image path: asked of the OS from the connection's server pid.
-    #[cfg(windows)]
+    /// Only Windows can ask; elsewhere there is no answer.
     fn image(&self) -> Option<PathBuf> {
         #[cfg(test)]
         if let Some(image) = self.image_lookup.lock().unwrap().clone() {
             return image;
         }
-        self.server_pid().and_then(image_path_of)
+        #[cfg(windows)]
+        {
+            self.server_pid().and_then(image_path_of)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// The generation of the host behind this connection, when it can be shown.
+    /// `None` is "cannot be shown", which callers must not read as any particular
+    /// generation.
+    ///
+    /// Where the host runs from says it: the image sits in its generation's
+    /// install directory. Only Windows can look the image up. Elsewhere there is no
+    /// ConPTY pair, so the generation is the host file's digest alone, whose first
+    /// 16 hex digits the host's record advertises as its build id. On Windows the
+    /// pair is part of the generation and the build id proves nothing about it, so
+    /// there it is never consulted.
+    pub(super) fn generation(&self, install_base: Option<&Path>) -> Option<String> {
+        if let Some(image) = self.image() {
+            return generation_of_image(image.as_path(), install_base?, cfg!(windows));
+        }
+        self.generation_from_build_id()
+    }
+
+    #[cfg(windows)]
+    fn generation_from_build_id(&self) -> Option<String> {
+        None
+    }
+
+    #[cfg(not(windows))]
+    fn generation_from_build_id(&self) -> Option<String> {
+        generation_of_build_id(self.advertised_build_id.lock().unwrap_or_else(|e| e.into_inner()).as_deref()?)
     }
 
     #[cfg(windows)]
@@ -151,6 +203,32 @@ pub(super) fn classify_exe(
         return Some(false);
     }
     Some(velopack_root.is_some_and(|root| path_within(image, root, case_insensitive)))
+}
+
+/// The generation of a host with no ConPTY pair, from its advertised build id: the
+/// install directory is named by the first 8 bytes of the host file's digest, and
+/// the build id is that digest in full.
+#[cfg_attr(windows, allow(dead_code))]
+pub(super) fn generation_of_build_id(build_id: &str) -> Option<String> {
+    let prefix = build_id.get(..16)?.to_ascii_lowercase();
+    super::discovery::valid_generation(&prefix).then_some(prefix)
+}
+
+/// The generation a host image belongs to: `<install_base>/<generation>/<exe>`,
+/// where the directory name is a generation (16 lowercase hex digits) and
+/// `install_base` is where the app installs hosts. An image anywhere else (the
+/// bundled copy, another profile's directory) names no generation.
+pub(super) fn generation_of_image(
+    image: &Path,
+    install_base: &Path,
+    case_insensitive: bool,
+) -> Option<String> {
+    let dir = image.parent()?;
+    let name = dir.file_name()?.to_str()?.to_ascii_lowercase();
+    let parent = dir.parent()?;
+    let same_base = path_within(parent, install_base, case_insensitive)
+        && path_within(install_base, parent, case_insensitive);
+    (same_base && super::discovery::valid_generation(&name)).then_some(name)
 }
 
 /// Component-aware containment (`TermFlowOther` is not inside `TermFlow`) over

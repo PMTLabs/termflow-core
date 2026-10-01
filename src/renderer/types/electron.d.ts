@@ -87,6 +87,12 @@ export interface FabricStatus {
 }
 
 /**
+ * Whether the host serving a terminal belongs to the running build. `previous` also covers a
+ * host whose generation cannot be shown, so it is never read as `current` by default.
+ */
+export type HostGeneration = 'current' | 'previous';
+
+/**
  * One live terminal process as reported by `GET /api/processes`.
  * `id` is the backend processId (matches TerminalService `process.id`, NOT the
  * UI terminalId stored on pane nodes). `currentApp.name` is the foreground
@@ -212,6 +218,9 @@ export interface ElectronAPI {
   /** Batched `getTerminalCwd`, keyed by process id. One process scan for all of
    *  them — see the `get_terminal_cwds` command for why that matters. */
   getTerminalCwds?: (processIds: string[]) => Promise<Record<string, string | null>>;
+  /** Which terminals run on a host older than this build, by renderer leaf id. Changes are
+   *  announced by the `terminal:generations` event; see `services/hostGeneration.ts`. */
+  getTerminalGenerations?: () => Promise<Record<string, HostGeneration>>;
   /** Backlog 011 + design 006: drain the reattach prompt-gate seed for a terminal
    *  id — `{promptHook, atPrompt}` once if it was reattached after a core-restart
    *  hot-swap, else `null`. Lets the renderer re-seed the command-suggest gate the

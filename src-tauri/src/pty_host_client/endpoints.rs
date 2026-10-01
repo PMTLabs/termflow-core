@@ -120,6 +120,22 @@ pub(super) fn pin_current_paths(generation: Option<&str>) {
     pin_from_env(&CURRENT_PATHS, generation, |name| std::env::var(name).ok());
 }
 
+/// The running build's host generation, pinned with the paths at the first launch
+/// resolution. Unlike the paths it does not depend on the naming gate: a gate-off
+/// build still has a generation, and a host of the same one is not an older host.
+static CURRENT_GENERATION: OnceLock<Option<String>> = OnceLock::new();
+
+pub(super) fn pin_current_generation(generation: Option<&str>) {
+    CURRENT_GENERATION.get_or_init(|| generation.map(str::to_owned));
+}
+
+/// Generation of the host this build launches, or `None` when no launch resolved
+/// yet or the host could not be installed (the bundled fallback has no stable
+/// generation).
+pub fn running_generation() -> Option<String> {
+    CURRENT_GENERATION.get().cloned().flatten()
+}
+
 /// Pin `cell` for a launch with `generation`, reading the naming gate from `env`.
 /// The whole of `pin_current_paths` but the process-wide cell and the real
 /// environment, so the gate can be exercised without touching either.

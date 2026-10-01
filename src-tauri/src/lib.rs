@@ -918,6 +918,7 @@ pub fn run() {
         commands::write_terminal,
         commands::resize_terminal,
         commands::get_terminal_size,
+        commands::get_terminal_generations,
         commands::get_shell_profiles,
         commands::read_legal_document,
         // Snippets import/export (plan/029 §8.3). Tauri IPC only by design (D10) —
