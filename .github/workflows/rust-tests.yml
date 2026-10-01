@@ -16,9 +16,7 @@ name: Rust Tests
 
 on:
   push:
-    branches: [ main, develop ]
-  pull_request:
-    branches: [ main, develop ]
+    branches: [ master, main, develop ]
 
 jobs:
   rust-test:
