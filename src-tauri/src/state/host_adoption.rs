@@ -899,6 +899,8 @@ pub(super) use sweep::sweep;
 #[cfg(test)]
 mod fake_hosts;
 #[cfg(test)]
+mod fake_hosts_gate_tests;
+#[cfg(test)]
 pub(crate) mod wiring_tests;
 #[cfg(test)]
 mod adoption_tests;

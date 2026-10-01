@@ -46,10 +46,44 @@ pub(super) struct ListGate {
     pub after_answer: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+/// A reusable one-shot hold with observable arrival and bounded waits.
+#[derive(Default)]
+pub(super) struct EventGate {
+    reached: AtomicUsize,
+    changed: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl EventGate {
+    pub fn count(&self) -> usize { self.reached.load(Ordering::SeqCst) }
+
+    pub async fn wait_reached(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.count() >= count { return; }
+                changed.await;
+            }
+        }).await.expect("gate was not reached");
+    }
+
+    pub fn release(&self) { self.release.notify_one(); }
+
+    async fn hold(&self) {
+        self.reached.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
+        self.release.notified().await;
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct HostSpec {
     pub sessions: Vec<SessionMeta>,
     pub list: ListBehavior,
+    /// Request-kind holds. Close has no wire reply, so its hold is after application.
+    pub reply_gates: HashMap<&'static str, Arc<EventGate>>,
     /// How long connecting takes.
     pub connect_delay: Duration,
     /// The endpoint exists but nothing can be connected to it: the host is busy
@@ -74,6 +108,7 @@ impl Default for HostSpec {
         Self {
             sessions: Vec::new(),
             list: ListBehavior::Answer,
+            reply_gates: HashMap::new(),
             connect_delay: Duration::ZERO,
             unreachable: false,
             refused: false,
@@ -137,8 +172,13 @@ struct Ended {
     listed_dead: bool,
 }
 
+type Injection = (Frame, Option<Arc<EventGate>>);
+type InjectionSender = tokio::sync::mpsc::UnboundedSender<Injection>;
+type InjectionReceiver = tokio::sync::mpsc::UnboundedReceiver<Injection>;
+
 pub(super) struct World {
     started: Instant,
+    connections: Mutex<HashMap<(String, usize), InjectionSender>>,
     hosts: Mutex<HashMap<String, (HostSpec, Vec<AbortHandle>)>>,
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
@@ -155,6 +195,7 @@ impl World {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             started: Instant::now(),
+            connections: Mutex::new(HashMap::new()),
             hosts: Mutex::new(HashMap::new()),
             log: Arc::new(Mutex::new(Vec::new())),
             ended: Arc::new(Mutex::new(Vec::new())),
@@ -202,13 +243,16 @@ impl World {
         }
     }
 
-    fn open(&self, endpoint: &str) -> Option<DuplexStream> {
+    pub fn open(&self, endpoint: &str) -> Option<DuplexStream> {
         let mut hosts = self.hosts.lock().unwrap();
         let (spec, tasks) = hosts.get_mut(endpoint)?;
         if spec.unreachable {
             return None;
         }
         let (client, server) = duplex(64 * 1024);
+        let connection = self.connections.lock().unwrap().keys().filter(|(host, _)| host == endpoint).count();
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.connections.lock().unwrap().insert((endpoint.to_owned(), connection), inject_tx);
         let task = tokio::spawn(serve(
             endpoint.to_owned(),
             spec.clone(),
@@ -216,7 +260,7 @@ impl World {
             self.log.clone(),
             self.ended.clone(),
             self.begun.clone(),
-            server,
+            (server, inject_rx),
         ));
         tasks.push(task.abort_handle());
         Some(client)
@@ -265,6 +309,18 @@ impl World {
         self.log.lock().unwrap().iter().filter(|r| r.host == host).map(|r| r.frame.clone()).collect()
     }
 
+    /// Deliver on an exact connection, even when Close already removed the key.
+    pub fn inject_frame(&self, host: &str, connection: usize, frame: Frame, gate: Option<Arc<EventGate>>) {
+        self.connections.lock().unwrap().get(&(host.to_owned(), connection))
+            .expect("unknown host connection").send((frame, gate)).expect("connection ended");
+    }
+
+    pub fn frames_for_session(&self, host: &str, key: &str) -> Vec<Frame> {
+        self.log.lock().unwrap().iter()
+            .filter(|r| r.host == host && r.session() == Some(key))
+            .map(|r| r.frame.clone()).collect()
+    }
+
     pub fn first_at(&self, host: &str, kind: &str) -> Option<Instant> {
         self.frames(host).into_iter().find(|(_, k)| *k == kind).map(|(at, _)| at)
     }
@@ -277,12 +333,34 @@ async fn serve(
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
     begun: Arc<Mutex<Vec<(String, SessionMeta)>>>,
-    server: DuplexStream,
+    connection: (DuplexStream, InjectionReceiver),
 ) {
-    let (mut rd, mut wr) = tokio::io::split(server);
+    let (server, mut injections) = connection;
+    let (mut rd, wr) = tokio::io::split(server);
+    let wr = Arc::new(tokio::sync::Mutex::new(wr));
+    let event_writer = wr.clone();
+    let events = async move {
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let mut deliveries = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                injection = injections.recv() => {
+                    let Some((frame, gate)) = injection else { break; };
+                    let writer = event_writer.clone();
+                    deliveries.push(async move {
+                        if let Some(gate) = gate { gate.hold().await; }
+                        write_frame(&mut *writer.lock().await, &frame).await
+                    });
+                }
+                _ = deliveries.next(), if !deliveries.is_empty() => {}
+            }
+        }
+    };
+    let requests = async {
     let mut listings = 0usize;
     while let Ok(Some(frame)) = read_frame(&mut rd).await {
         log.lock().unwrap().push(Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() });
+        let kind = Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() }.kind();
         let reply = match frame {
             Frame::Ctrl(Control::Disarm { .. } | Control::Shutdown { .. }) if spec.no_release_ack => None,
             Frame::Ctrl(Control::Disarm { req }) => Some(Response::DisarmAck { req }),
@@ -320,6 +398,7 @@ async fn serve(
             Frame::Ctrl(Control::Shutdown { req, .. }) => Some(Response::ShutdownAck { req }),
             _ => None,
         };
+        if let Some(gate) = spec.reply_gates.get(kind) { gate.hold().await; }
         if let Some(reply) = reply {
             let gate = match &spec.list {
                 ListBehavior::GatedAfter { answered, gate } if listings > *answered && matches!(&reply, Response::SessionList { .. }) => Some(gate),
@@ -329,7 +408,7 @@ async fn serve(
                 gate.reached.notify_one();
                 gate.release.notified().await;
             }
-            if write_frame(&mut wr, &Frame::Resp(reply)).await.is_err() {
+            if write_frame(&mut *wr.lock().await, &Frame::Resp(reply)).await.is_err() {
                 break;
             }
             // On a current-thread runtime this runs before the reader/adopter
@@ -341,6 +420,8 @@ async fn serve(
             }
         }
     }
+    };
+    tokio::select! { _ = requests => {}, _ = events => {} }
     // The client closed the stream (or died): what a real host reacts to.
     log.lock().unwrap().push(Recorded {
         host,
