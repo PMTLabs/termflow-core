@@ -6,7 +6,10 @@
 //! the agreement is bound to what is then true: the release that was downloaded,
 //! how many shells are running, whether that count is known, and why the update
 //! has to close them. If any of it differs once creation has been stopped, the
-//! user is asked again and nothing has happened.
+//! user is asked again and nothing has happened. The one exception is a full
+//! update that has stopped being required by then (a host that forced it is gone):
+//! it carries on as an offload, which keeps every terminal, rather than asking the
+//! user to confirm closing them.
 //!
 //! Three stages, only the last of which cannot be undone:
 //! 1. *prepare* looks, stops nothing. It refuses what cannot work (other
@@ -54,8 +57,9 @@ const SCOPE_LIST_BOUND: Duration = Duration::from_secs(3);
 /// once.
 const UPDATER_SEARCH: Duration = Duration::from_secs(2);
 /// How long it must have been running before it is believed to be: starting a
-/// process succeeds long before the updater has found out that it cannot apply
-/// anything (a locked file, a bad package).
+/// process succeeds before the updater has had any chance to notice a problem of
+/// its own (it starts by waiting for this process to exit, so it cannot yet have
+/// touched a file), and a process that dies at once is not worth trusting.
 const UPDATER_SETTLE: Duration = Duration::from_millis(750);
 
 // ---- what the user agrees to -----------------------------------------------
@@ -288,8 +292,9 @@ where
     // closed without one, and a host treats a connection that just ends as a crash:
     // it keeps its shells for a while, and one that runs outside the folder the
     // updater replaces can be adopted again by the new version. A full update then
-    // has not closed everything. Each such host is named in the log (see
-    // `exit_hosts_within`), and the bound is what keeps the app from outliving the
+    // has not closed everything. A host that misses its shutdown inside the bound is
+    // logged by name where the closure notices it (see `exit_hosts_within`; a host
+    // whose listing never came back is only counted), and the bound is what keeps the app from outliving the
     // updater's wait for it.
     hold.commit();
     log::info!("[UPDATE] updater running; closing every terminal host and exiting");

@@ -197,6 +197,30 @@ describe('full update flow in the Updates panel', () => {
         expect(dialog()).toBeNull();
     });
 
+    it('the dialog and the agreement come from the backend answer, not from what the panel had checked', async () => {
+        // The panel checked 9.9.9 with a marker reason; the release that was
+        // downloaded is another one, with another reason.
+        const otherReasons = [{ kind: 'hostOriginUnknown', host: 'host-7' }];
+        api.updateAndRestart.mockResolvedValueOnce({
+            outcome: 'needsConfirmation',
+            version: '9.9.8',
+            shellCount: 2,
+            unknown: false,
+            reasons: otherReasons,
+        });
+        await renderPanel();
+        await click(updateButton());
+
+        expect(dialogText()).toContain('9.9.8');
+        expect(dialogText()).not.toContain('9.9.9');
+
+        await click(confirmBtn());
+
+        expect(api.updateAndRestart.mock.calls[1]).toStrictEqual([
+            { targetVersion: '9.9.8', shellCount: 2, unknown: false, reasons: otherReasons },
+        ]);
+    });
+
     it('Cancel closes the dialog and calls the backend no more', async () => {
         api.updateAndRestart.mockResolvedValueOnce(needsConfirmation(3));
         await renderPanel();

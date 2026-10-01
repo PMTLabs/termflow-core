@@ -735,7 +735,7 @@ pub(super) async fn exit_hosts_within<P: LifecyclePort>(port: &P, bounds: Option
                     // connection as a crash and keeps its terminals for a while.
                     let names = owned.iter().map(OwnedHost::name).collect::<Vec<_>>().join(", ");
                     log::error!(
-                        "quit: not every terminal host was released in time; any that did not hear the                          shutdown may keep its terminals as after a crash: {names}"
+                        "quit: not every terminal host was released in time; any that did not hear the shutdown may keep its terminals as after a crash: {names}"
                     );
                     owned.iter().map(|h| HostExit { name: h.name(), problem: Some(not_in_time(bounds)) }).collect()
                 }

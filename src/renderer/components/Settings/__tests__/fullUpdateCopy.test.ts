@@ -67,6 +67,10 @@ describe('dialog copy', () => {
   it('words an unanswered host as a lower bound', () => {
     expect(fullUpdateDialogLead({ ...base, shellCount: 2, unknown: true })).toContain('At least 2 terminals will be closed.');
     expect(fullUpdateDialogLead({ ...base, shellCount: 0, unknown: true })).not.toMatch(/\b0\b/);
+    // Nothing running and nothing unknown: it must not say it closes everything and then that none are closed.
+    const none = fullUpdateDialogLead({ ...base, shellCount: 0, unknown: false });
+    expect(none).toBe('This update restarts TermFlow. No terminals are running, so nothing will be lost.');
+    expect(none).not.toMatch(/closes ALL/);
   });
 
   it('names the version being installed in the title', () => {

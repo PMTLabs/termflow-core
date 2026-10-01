@@ -35,6 +35,9 @@ export const fullUpdateDialogTitle = (version: string): string =>
 
 /** The sentence that says what the user is agreeing to, with the count. */
 export const fullUpdateDialogLead = ({ shellCount, unknown }: UpdateConfirmation): string => {
+  if (shellCount === 0 && !unknown) {
+    return 'This update restarts TermFlow. No terminals are running, so nothing will be lost.';
+  }
   const count = terminalCountCopy(shellCount, unknown);
   const sentence = `${count.charAt(0).toUpperCase()}${count.slice(1)}`;
   return `This update closes ALL terminals and everything running in them. ${sentence} will be closed.`;

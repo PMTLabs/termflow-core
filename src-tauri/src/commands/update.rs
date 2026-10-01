@@ -383,14 +383,22 @@ pub async fn restart_keeping_terminals(
     .await?;
     log::info!("[RECOVERY] armed the hot-swap hold on every connected host");
 
-    if flush == FlushPolicy::Renderer {
-        flush_all_windows(&app).await;
-    }
+    let flushed_by_us = if flush == FlushPolicy::Renderer {
+        flush_all_windows(&app).await
+    } else {
+        false
+    };
 
     let pid = match crate::relaunch::spawn_relaunch() {
         Ok(pid) => pid,
         Err(e) => {
             log::error!("[RECOVERY] relaunch spawn failed: {e}; releasing the hold");
+            // The flush marked this process as exiting; take that back only if the
+            // mark is ours, so the restore sweep keeps running and a later Quit
+            // still saves the windows.
+            if flushed_by_us {
+                state.exiting.store(false, std::sync::atomic::Ordering::SeqCst);
+            }
             // Disarms every host that was armed (an unacknowledged one is logged by
             // name: it may keep holding its detach window while this GUI is still
             // connected) and lets creates through again.
@@ -523,6 +531,22 @@ mod preflight_wiring_tests {
             body.contains("offload_preflight"),
             "Offload must still guard THIS instance's terminals. Body:\n{body}"
         );
+    }
+
+    /// A relaunch that fails to start takes back the exit mark its own window flush
+    /// set (and only that one), or the restore sweep would skip every tick and a
+    /// later Quit would exit without saving the windows.
+    #[test]
+    fn a_failed_relaunch_takes_back_only_the_exit_mark_its_flush_set() {
+        let body = fn_body(include_str!("update.rs"), "async fn restart_keeping_terminals");
+        let flush = body.find("let flushed_by_us").expect("the flush result must be kept");
+        let spawn_err = body.find("relaunch spawn failed").expect("spawn failure branch");
+        let reset = body.find("exiting.store(false").expect("the failure branch must clear the mark");
+        assert!(flush < spawn_err && spawn_err < reset, "reset belongs in the spawn-failure branch:
+{body}");
+        let guard = body[spawn_err..reset].rfind("if flushed_by_us").expect("guarded by ownership");
+        assert!(guard < reset - spawn_err, "the reset must be guarded by `flushed_by_us`:
+{body}");
     }
 
     /// The argument list of every `arm_detach` call in a file, excluding this

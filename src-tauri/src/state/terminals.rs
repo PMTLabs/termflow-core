@@ -21,11 +21,12 @@ fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> 
     pending_windows == 0 && !already_released
 }
 
-/// What the 60 s sweep does at a tick. The sweep is the only retry there is for
-/// hosts and sessions that were not reachable at start-up, so it must outlive
-/// anything that is merely *trying* to exit: a quit's flush or an update that backs
-/// out sets `exiting` for a while and clears it again. Only the sticky exit
-/// quiesce means the process is going away for good.
+/// What the 60 s sweep does at a tick. The sweep is the periodic retry for hosts
+/// and sessions that were not reachable at start-up (the router retries creates
+/// on its own), so it must outlive anything that is merely *trying* to exit: an
+/// update that backs out clears the `exiting` mark its own flush set. A Quit never
+/// clears the mark; only the sticky exit quiesce means the process is going away
+/// for good.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SweepTick {
     Run,
