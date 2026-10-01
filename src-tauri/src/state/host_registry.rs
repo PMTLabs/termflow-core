@@ -192,6 +192,36 @@ pub(super) fn forget_reserved_claims_on(
         .retain(|_, claim| !(claim.state == HostSessionClaimState::Reserved && claim.channel == channel));
 }
 
+/// Drop the claims a host's answered listing shows to be moot: a session it
+/// reserved that the host no longer lists alive. Nothing will ever take it over,
+/// and while the claim stands the host looks occupied. A claim whose registration
+/// is in progress is a create that is taking the session right now and is left to
+/// finish; so is a registered one, which `on_exit` retires.
+pub(super) fn drop_stale_reserved_claims(
+    host_session_claims: &DashMap<String, HostSessionClaim>,
+    channel: HostChannel,
+    listed: &[SessionMeta],
+) {
+    host_session_claims.retain(|key, claim| {
+        !(claim.state == HostSessionClaimState::Reserved
+            && claim.channel == channel
+            && !listed.iter().any(|s| s.alive && s.tab_id == *key))
+    });
+}
+
+/// Claims on `channel` that a pane has not finished taking over (reserved for a
+/// pane that has not come, or a registration in progress). A registered claim has
+/// its pane in `host_terminals` and is counted there.
+pub(super) fn unfinished_claims_on(
+    host_session_claims: &DashMap<String, HostSessionClaim>,
+    channel: HostChannel,
+) -> usize {
+    host_session_claims
+        .iter()
+        .filter(|c| c.channel == channel && c.state != HostSessionClaimState::Registered)
+        .count()
+}
+
 // ---- live operations on a terminal ------------------------------------------
 
 /// Where `id` lives: the host that owns it and the name that host knows it by.

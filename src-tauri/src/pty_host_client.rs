@@ -388,9 +388,16 @@ impl PtyHostClient {
     /// must never treat that like an authoritative empty list, or a stale
     /// recovery pass would tear down live panes on a transport failure.
     pub async fn list_sessions(&self) -> Option<Vec<SessionMeta>> {
+        self.list_sessions_within(std::time::Duration::from_secs(10)).await
+    }
+
+    /// `list_sessions` with an explicit deadline. A request that times out is
+    /// removed from the pending map, so asking again and again of a host that never
+    /// answers does not accumulate entries there; a late reply is discarded.
+    pub async fn list_sessions_within(&self, timeout: std::time::Duration) -> Option<Vec<SessionMeta>> {
         let token = self.lifecycle_token.to_string();
         match self
-            .request(move |req| Control::ListSessions {
+            .request_within(timeout, move |req| Control::ListSessions {
                 req,
                 token: Some(token),
             })
@@ -399,6 +406,12 @@ impl PtyHostClient {
             Some(Response::SessionList { sessions, .. }) => Some(sessions),
             _ => None,
         }
+    }
+
+    /// Requests sent and not yet answered.
+    #[cfg(test)]
+    pub(crate) fn pending_requests(&self) -> usize {
+        self.pending.lock().unwrap().len()
     }
 
     /// Arm the hot-swap hold; returns the epoch-ms deadline on ack.

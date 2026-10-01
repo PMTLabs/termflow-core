@@ -305,3 +305,80 @@ fn lifecycle_busy_text_starts_with_the_retryable_prefix() {
     }
     assert!(!Busy::NoSuchHost(OLD).to_string().starts_with(LIFECYCLE_BUSY));
 }
+
+// ---- retirement ------------------------------------------------------------
+
+#[tokio::test]
+async fn a_drained_host_retires_while_the_table_is_open() {
+    let table = table_with_hosts();
+    assert!(table.drain_host(OLD).unwrap().retire_when_open());
+    assert_eq!(table.admission(OLD), Some(Admission::Retired));
+    assert_eq!(table.begin(OLD).err(), Some(Busy::Host(OLD, Admission::Retired)));
+}
+
+/// Exit, offload and update each take the hosts over: a retirement that was about
+/// to commit finds the table closed and leaves the host to them, open again, so
+/// the lifecycle change sees exactly the hosts it expected.
+#[tokio::test]
+async fn retirement_is_refused_once_a_lifecycle_change_took_the_table() {
+    for reason in [QuiesceReason::Exit, QuiesceReason::Offload, QuiesceReason::Update] {
+        let table = table_with_hosts();
+        let drain = table.drain_host(OLD).unwrap();
+        let _guard = quiesced_now(&table, reason).unwrap();
+
+        assert!(!drain.retire_when_open(), "{reason:?}");
+        assert_eq!(table.admission(OLD), Some(Admission::Open), "{reason:?}: the host is back as it was");
+        assert!(is_lifecycle_busy(&table.begin(OLD).err().unwrap()), "{reason:?}: and still closed by the lifecycle change");
+    }
+}
+
+#[tokio::test]
+async fn a_host_has_one_ticker_and_its_handle_gives_the_place_back() {
+    let table = table_with_hosts();
+    let first = table.start_ticker(OLD).expect("the first ticker");
+    assert!(table.start_ticker(OLD).is_none(), "one per host");
+    assert!(table.start_ticker(PRIMARY).is_some(), "another host has its own");
+    // A reconnect replaces the connection, not the ticker.
+    table.publish(OLD, table.reserve_epoch());
+    assert!(table.start_ticker(OLD).is_none());
+    drop(first);
+    assert!(table.start_ticker(OLD).is_some(), "a ticker that ended can be started again");
+}
+
+#[tokio::test]
+async fn no_ticker_is_started_for_a_host_that_is_closing_or_unknown() {
+    let table = table_with_hosts();
+    assert!(table.start_ticker(HostChannel::Frozen(FrozenId(9))).is_none());
+    let drain = table.drain_host(OLD).unwrap();
+    assert!(table.start_ticker(OLD).is_none());
+    drop(drain);
+    assert!(table.start_ticker(OLD).is_some());
+}
+
+#[tokio::test]
+async fn a_nudge_reaches_only_the_ticker_of_that_host_and_is_remembered() {
+    let table = table_with_hosts();
+    let old = table.start_ticker(OLD).unwrap();
+    let primary = table.start_ticker(PRIMARY).unwrap();
+
+    // Nudged while the ticker is busy: the next wait ends at once.
+    table.nudge_ticker(OLD);
+    old.nudged().now_or_never().expect("a nudge made while nobody waited is not lost");
+    assert!(old.nudged().now_or_never().is_none(), "and is spent by it");
+    assert!(primary.nudged().now_or_never().is_none(), "the other host's ticker was not woken");
+    // No ticker, no effect.
+    table.nudge_ticker(HostChannel::Frozen(FrozenId(9)));
+}
+
+#[tokio::test]
+async fn inflight_counts_the_tickets_of_that_host_only() {
+    let table = table_with_hosts();
+    assert_eq!(table.inflight(OLD), 0);
+    let held = table.begin(OLD).unwrap();
+    let other = table.begin(PRIMARY).unwrap();
+    assert_eq!((table.inflight(OLD), table.inflight(PRIMARY)), (1, 1));
+    drop(held);
+    assert_eq!((table.inflight(OLD), table.inflight(PRIMARY)), (0, 1));
+    drop(other);
+    assert_eq!(table.inflight(HostChannel::Frozen(FrozenId(9))), 0);
+}

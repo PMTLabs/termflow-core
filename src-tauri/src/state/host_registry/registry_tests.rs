@@ -473,10 +473,11 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
             &["pub(super) fn take_pending_close(", "pub(super) fn prune_pending_closes("],
         ),
         (
-            // Claims listed by a host that is gone for good are dropped as a set; every
-            // other claim leaves through its owner-guarded or transaction-guarded path.
+            // Claims listed by a host that is gone for good, or that its answered
+            // listing shows to be moot, are dropped as a set; every other claim
+            // leaves through its owner-guarded or transaction-guarded path.
             &["host_session_claims.retain(", "host_session_claims.clear("],
-            &["pub(super) fn forget_reserved_claims_on("],
+            &["pub(super) fn forget_reserved_claims_on(", "pub(super) fn drop_stale_reserved_claims("],
         ),
     ];
 
@@ -631,4 +632,64 @@ fn only_a_reserved_claim_names_the_host_holding_a_session() {
     assert_eq!(reserved_channel(&claims, "tm-a"), Some(FROZEN_2));
     claim_registration(&claims, "tm-a", PRIMARY).unwrap();
     assert_eq!(reserved_channel(&claims, "tm-a"), None, "a session already being taken over is not waiting");
+}
+
+// ---- claims a host's listing shows to be moot ---------------------------------
+
+fn claim_in(state: HostSessionClaimState, channel: HostChannel) -> HostSessionClaim {
+    HostSessionClaim { state, pid: 7, process_id: None, channel }
+}
+
+fn listed(key: &str, alive: bool) -> SessionMeta {
+    SessionMeta { tab_id: key.into(), pid: 7, head_offset: 0, tail_offset: 0, alive }
+}
+
+#[test]
+fn an_answered_listing_drops_a_reserved_claim_for_a_session_that_is_absent_or_dead() {
+    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
+    for key in ["live", "absent", "dead"] {
+        claims.insert(key.into(), claim_in(HostSessionClaimState::Reserved, FROZEN_1));
+    }
+    drop_stale_reserved_claims(&claims, FROZEN_1, &[listed("live", true), listed("dead", false)]);
+
+    assert!(claims.contains_key("live"), "its session is still running");
+    assert!(!claims.contains_key("absent"), "a session the host no longer has");
+    assert!(!claims.contains_key("dead"), "a session the host lists as ended");
+}
+
+#[test]
+fn a_listing_never_drops_a_claim_that_is_being_registered_or_is_registered() {
+    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
+    claims.insert("taking".into(), claim_in(HostSessionClaimState::RegistrationInProgress, FROZEN_1));
+    claims.insert("held".into(), claim_in(HostSessionClaimState::Registered, FROZEN_1));
+    drop_stale_reserved_claims(&claims, FROZEN_1, &[]);
+
+    assert!(claims.contains_key("taking"), "a create is taking this session right now");
+    assert!(claims.contains_key("held"), "its pane retires it when the session exits");
+}
+
+#[test]
+fn a_hosts_listing_only_settles_the_claims_of_that_host() {
+    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
+    claims.insert("on-1".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_1));
+    claims.insert("on-2".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_2));
+    claims.insert("on-primary".into(), claim_in(HostSessionClaimState::Reserved, PRIMARY));
+    drop_stale_reserved_claims(&claims, FROZEN_1, &[]);
+
+    assert!(!claims.contains_key("on-1"));
+    assert!(claims.contains_key("on-2"), "another older host's session is not in this answer");
+    assert!(claims.contains_key("on-primary"));
+}
+
+#[test]
+fn unfinished_claims_are_counted_per_host_and_exclude_registered_ones() {
+    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
+    claims.insert("reserved".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_1));
+    claims.insert("taking".into(), claim_in(HostSessionClaimState::RegistrationInProgress, FROZEN_1));
+    claims.insert("registered".into(), claim_in(HostSessionClaimState::Registered, FROZEN_1));
+    claims.insert("elsewhere".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_2));
+
+    assert_eq!(unfinished_claims_on(&claims, FROZEN_1), 2);
+    assert_eq!(unfinished_claims_on(&claims, FROZEN_2), 1);
+    assert_eq!(unfinished_claims_on(&claims, PRIMARY), 0);
 }

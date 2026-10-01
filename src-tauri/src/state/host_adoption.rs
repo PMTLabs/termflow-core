@@ -84,6 +84,11 @@ struct Entry {
     /// Someone asked for a reconnect while one was running: the connection it was
     /// about to replace is not the one that dropped last.
     reconnect_again: bool,
+    /// The host was retired: it is being shut down on purpose and must not be
+    /// adopted again while its process is still discoverable. Whatever else is
+    /// recorded about it (an outcome, a `forget`), the mark stays until `sync`
+    /// finds the host gone.
+    retired: bool,
 }
 
 struct BarrierShared {
@@ -137,6 +142,7 @@ impl Barrier {
                         retry_pending: false,
                         reconnecting: false,
                         reconnect_again: false,
+                        retired: false,
                     });
                 }
             }
@@ -192,6 +198,8 @@ impl Barrier {
         {
             let mut entries = self.lock();
             match entries.iter_mut().find(|e| e.key == key) {
+                // A retired host's answer is moot: nothing waits for it.
+                Some(entry) if entry.retired => {}
                 Some(entry) => {
                     entry.resolution = resolution;
                     entry.retry_pending = false;
@@ -204,6 +212,7 @@ impl Barrier {
                     retry_pending: false,
                     reconnecting: false,
                     reconnect_again: false,
+                    retired: false,
                 }),
             }
         }
@@ -214,8 +223,39 @@ impl Barrier {
     /// holds the panes that wait for the hosts to answer. A later discovery that
     /// still finds its endpoint tracks it again and finds it gone again.
     pub fn forget(&self, key: &str) {
-        self.lock().retain(|e| e.key != key);
+        self.lock().retain(|e| e.key != key || e.retired);
         self.notify();
+    }
+
+    /// The host was retired. It no longer holds anything a pane could wait for,
+    /// and no round adopts it again; the mark goes once the host's process is no
+    /// longer discovered (`sync`).
+    pub fn mark_retired(&self, key: &str, endpoint: &str) {
+        {
+            let mut entries = self.lock();
+            match entries.iter_mut().find(|e| e.key == key) {
+                Some(entry) => {
+                    entry.resolution = Resolution::Resolved;
+                    entry.retry_pending = false;
+                    entry.retired = true;
+                }
+                None => entries.push(Entry {
+                    key: key.to_owned(),
+                    endpoint: endpoint.to_owned(),
+                    role: HostRole::Frozen,
+                    resolution: Resolution::Resolved,
+                    retry_pending: false,
+                    reconnecting: false,
+                    reconnect_again: false,
+                    retired: true,
+                }),
+            }
+        }
+        self.notify();
+    }
+
+    pub fn is_retired(&self, key: &str) -> bool {
+        self.lock().iter().any(|e| e.key == key && e.retired)
     }
 
     /// An attempt on a host that was never tracked failed: there is nothing to
@@ -397,6 +437,9 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
     /// dropped during setup, which nothing would ever clear.
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String>;
     fn publish_frozen(&self, host: FrozenHost);
+    /// A frozen host was adopted and published (or reconnected under the same
+    /// id): the moment to start watching it for emptiness.
+    fn frozen_adopted(&self, _id: FrozenId) {}
 }
 
 fn frozen_for<P: AdoptionPort>(port: &P, key: &str) -> Option<FrozenHost> {
@@ -421,7 +464,7 @@ async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<Vec<Session
             log::warn!("[GEN] host did not acknowledge the disarm");
         }
         for attempt in 0..LIST_ATTEMPTS {
-            if let Ok(Some(sessions)) = tokio::time::timeout(LIST_ATTEMPT_TIMEOUT, client.list_sessions()).await {
+            if let Some(sessions) = client.list_sessions_within(LIST_ATTEMPT_TIMEOUT).await {
                 return Some(sessions);
             }
             if !client.is_alive() {
@@ -527,6 +570,7 @@ async fn adopt<P: AdoptionPort>(
                 frozen_connection_lost(port.table(), port.barrier(), id, epoch, &candidate.endpoint);
                 return Err(Failure::ConnectionLost);
             }
+            port.frozen_adopted(id);
             (channel, epoch)
         }
         _ => {
@@ -736,6 +780,8 @@ async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
                 HostRole::Current => current = Some(candidate),
                 // Never owned, so never connected to.
                 HostRole::Frozen if !candidate.compatible() => {}
+                // Retired on purpose and on its way out.
+                HostRole::Frozen if port.barrier().is_retired(&key) => {}
                 HostRole::Frozen => frozen.push((candidate, role)),
             }
         }
@@ -825,6 +871,10 @@ mod reconnect_tests;
 mod sweep_tests;
 #[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod retire_tests;
+#[cfg(test)]
+mod retire_real_tests;
 // The lifecycle tests drive the same fake hosts through `host_lifecycle`.
 #[cfg(test)]
 mod lifecycle_tests;

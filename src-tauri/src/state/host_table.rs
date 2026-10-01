@@ -15,7 +15,7 @@ use crate::elevated_host::HostChannel;
 use dashmap::DashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 
 /// Prefix of the retryable error a create gets while the app is exiting or
 /// updating. Renderer callers match on it.
@@ -96,6 +96,9 @@ struct HostSlot {
     /// Identifies the connection published for this host. A callback that
     /// captured an older epoch belongs to a superseded connection.
     epoch: u64,
+    /// The retirement ticker watching this host, while one runs. A host has at
+    /// most one, however often its connection is replaced.
+    ticker: Option<Arc<Notify>>,
 }
 
 struct Inner {
@@ -188,7 +191,7 @@ impl HostTable {
                 true
             }
             None => {
-                inner.hosts.push(HostSlot { channel, admission: Admission::Open, inflight: 0, epoch });
+                inner.hosts.push(HostSlot { channel, admission: Admission::Open, inflight: 0, epoch, ticker: None });
                 true
             }
         }
@@ -207,6 +210,11 @@ impl HostTable {
     /// The epoch of the connection currently published for `channel`.
     pub fn epoch(&self, channel: HostChannel) -> Option<u64> {
         self.shared.lock().hosts.iter().find(|h| h.channel == channel).map(|h| h.epoch)
+    }
+
+    /// Tickets in flight on `channel` right now.
+    pub fn inflight(&self, channel: HostChannel) -> u32 {
+        self.shared.lock().hosts.iter().find(|h| h.channel == channel).map_or(0, |h| h.inflight)
     }
 
     /// Why admission is closed right now: `None` while the table is open.
@@ -325,6 +333,29 @@ impl HostTable {
         Ok(DrainGuard { shared: self.shared.clone(), channel, epoch: slot.epoch, retired: false })
     }
 
+    /// Claim the one retirement ticker of `channel`. `None` when the host is not
+    /// open for admission or already has a ticker. Dropping the handle frees the
+    /// place, so a ticker that ends for any reason can be started again.
+    pub fn start_ticker(&self, channel: HostChannel) -> Option<TickerHandle> {
+        let mut inner = self.shared.lock();
+        let slot = inner.slot_mut(channel)?;
+        if slot.admission != Admission::Open || slot.ticker.is_some() {
+            return None;
+        }
+        let wake = Arc::new(Notify::new());
+        slot.ticker = Some(wake.clone());
+        Some(TickerHandle { shared: self.shared.clone(), channel, wake })
+    }
+
+    /// Ask the ticker of `channel`, if any, to look at the host now instead of at
+    /// its next tick. Remembered if the ticker is busy at the moment.
+    pub fn nudge_ticker(&self, channel: HostChannel) {
+        let wake = self.shared.lock().hosts.iter().find(|h| h.channel == channel).and_then(|h| h.ticker.clone());
+        if let Some(wake) = wake {
+            wake.notify_one();
+        }
+    }
+
     #[cfg(test)]
     fn lifecycle(&self) -> Lifecycle {
         self.shared.lock().lifecycle
@@ -440,6 +471,32 @@ impl Drop for QuiesceGuard {
     }
 }
 
+/// The place of a host's retirement ticker. Held by the ticker task for as long
+/// as it runs.
+pub struct TickerHandle {
+    shared: Arc<Shared>,
+    channel: HostChannel,
+    wake: Arc<Notify>,
+}
+
+impl TickerHandle {
+    /// Resolves when someone asked for the host to be looked at now.
+    pub async fn nudged(&self) {
+        self.wake.notified().await;
+    }
+}
+
+impl Drop for TickerHandle {
+    fn drop(&mut self) {
+        let mut inner = self.shared.lock();
+        if let Some(slot) = inner.slot_mut(self.channel) {
+            if slot.ticker.as_ref().is_some_and(|t| Arc::ptr_eq(t, &self.wake)) {
+                slot.ticker = None;
+            }
+        }
+    }
+}
+
 /// A host closed to admission while its retirement is decided.
 pub struct DrainGuard {
     shared: Arc<Shared>,
@@ -458,6 +515,24 @@ impl DrainGuard {
                 slot.admission = Admission::Retired;
             }
         }
+    }
+
+    /// Confirm the retirement of a host that is merely empty, and only while no
+    /// exit, offload or update has closed the table. Decided under the same lock
+    /// as the table's lifecycle, so a retirement can never be committed after one
+    /// of those took the hosts over: they then release the host themselves. When
+    /// refused the host is reopened, as if the guard had been dropped.
+    pub fn retire_when_open(mut self) -> bool {
+        let mut inner = self.shared.lock();
+        let open = inner.lifecycle == Lifecycle::Open;
+        if let Some(slot) = inner.slot_mut(self.channel) {
+            if open && slot.epoch == self.epoch && slot.admission == Admission::Draining {
+                slot.admission = Admission::Retired;
+                self.retired = true;
+                return true;
+            }
+        }
+        false
     }
 }
 
