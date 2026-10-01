@@ -645,14 +645,16 @@ fn fn_body(src: &str, signature: &str) -> String {
 fn spawn_routed_has_no_other_pty_host_clone() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("commands").join("terminal.rs");
     let commands = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
-    let body = fn_body(&commands, "pub(crate) async fn spawn_routed(");
+    let wrapper = fn_body(&commands, "pub(crate) async fn spawn_routed(");
+    assert!(wrapper.contains("state.admit_mount(&leaf).await?"));
+    let body = fn_body(&commands, "async fn run_create(");
 
     for forbidden in ["pty_host_clone(", "ensure_pty_host("] {
         assert!(!body.contains(forbidden), "spawn_routed must not select a host itself (found `{forbidden}`)");
     }
     // A refusal is returned as it is; it is never turned into an in-process shell.
     assert!(
-        body.contains("state.place_process_create(&id, session_key.as_deref()).await?"),
+        body.contains("state.place_process_create(&id, session_key.as_deref(), cg).await?"),
         "the router's refusals (LIFECYCLE_BUSY, host-ownership-pending) must propagate with `?`"
     );
     // The client acted on is the one the placement carries.
@@ -670,8 +672,8 @@ fn the_router_takes_one_ticket_per_create() {
     let routing = source_of("host_routing.rs");
     let production = &routing[..routing.find("#[cfg(test)]").unwrap_or(routing.len())];
     assert_eq!(production.matches(".begin(").count(), 1);
-    assert!(fn_body(production, "pub(super) async fn place_for_leaf<").contains("begin_ticket(port, channel)"));
-    assert_eq!(fn_body(production, "pub(super) async fn place_for_leaf<").matches("begin_ticket(").count(), 1);
+    assert!(fn_body(production, "pub(super) async fn place_owned<").contains("begin_ticket(port, channel)"));
+    assert_eq!(fn_body(production, "pub(super) async fn place_owned<").matches("begin_ticket(").count(), 1);
     assert_eq!(fn_body(production, "fn place_elevated_create(").matches("begin_ticket(").count(), 1);
     assert!(fn_body(production, "fn begin_ticket<").contains("port.table().begin(channel)"));
 }

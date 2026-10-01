@@ -231,8 +231,10 @@ fn appstates_live_operations_route_each_terminal_to_its_own_hosts_client() {
     // through is that channel's.
     let close = fn_body(&terminals, "pub fn host_close(");
     assert!(close.contains("self.host_channel_for(id)"), "{close}");
-    let route_close = &close[close.find("route_close(").expect("host_close routes the close")..];
-    assert!(route_close.contains("self.host_table.keys(), channel, &session_key)"), "{route_close}");
+    assert!(close.contains("self.close_process(id, super::CloseStorage::Preserve)"), "{close}");
+    let owners = production_of("host_keys/owners.rs");
+    let ending = fn_body(&owners, "pub fn end_process(");
+    assert!(ending.contains("stage.channel, &stage.key, close"), "{ending}");
 
     // And the channel's client is the registered host's for an older host.
     let client_for_channel = fn_body(&terminals, "fn client_for_channel(");

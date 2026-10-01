@@ -82,6 +82,8 @@ impl EventGate {
 #[derive(Clone)]
 pub(super) struct HostSpec {
     pub sessions: Vec<SessionMeta>,
+    /// Keep Spawn-created sessions in later listings, including before replies.
+    pub track_spawns: bool,
     pub list: ListBehavior,
     /// Request-kind holds. Close has no wire reply, so its hold is after application.
     pub reply_gates: HashMap<&'static str, Arc<EventGate>>,
@@ -108,6 +110,7 @@ impl Default for HostSpec {
     fn default() -> Self {
         Self {
             sessions: Vec::new(),
+            track_spawns: false,
             list: ListBehavior::Answer,
             reply_gates: HashMap::new(),
             connect_delay: Duration::ZERO,
@@ -387,7 +390,10 @@ async fn serve(
                 // close has taken effect.
                 answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &ended, &begun, &host) })
             }
-            Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => Some(Response::Spawned { req, tab_id, pid: 4242 }),
+            Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => {
+                if spec.track_spawns { begun.lock().unwrap().push((host.clone(), meta(&tab_id, 4242))); }
+                Some(Response::Spawned { req, tab_id, pid: 4242 })
+            }
             Frame::Ctrl(Control::AttachAcked { req, tab_id, .. }) => {
                 Some(Response::AttachAck { req, tab_id, alive: true, tail_offset: 0 })
             }
@@ -457,7 +463,9 @@ fn still_open(
             }) && !ended_here(&s.tab_id).is_some_and(|e| !e.listed_dead)
         })
         .map(|s| SessionMeta { alive: s.alive && ended_here(&s.tab_id).is_none(), ..s.clone() })
-        .chain(begun.into_iter().filter(|s| ended_here(&s.tab_id).is_none()))
+        .chain(begun.into_iter().filter(|s| ended_here(&s.tab_id).is_none()
+            && !log.iter().any(|r| r.host == host && r.kind() == "Close" && r.session() == Some(s.tab_id.as_str())
+                && now.duration_since(r.at) >= spec.close_lag)))
         .collect()
 }
 
@@ -497,6 +505,9 @@ pub(super) struct Inner {
     pub ids: crate::state::IdAllocator,
     pub output: tokio::sync::broadcast::Sender<ChannelPayload>,
     pub exits: Mutex<Vec<String>>,
+    pub persisted: Mutex<Vec<String>>,
+    pub killed: Mutex<Vec<String>>,
+    pub deleted: Mutex<Vec<String>>,
     pub offsets: Arc<DashMap<String, u64>>,
     pub barrier: Barrier,
     flight: tokio::sync::Mutex<()>,
@@ -614,6 +625,9 @@ impl FakePort {
             ids: crate::state::IdAllocator::default(),
             output: tokio::sync::broadcast::channel(128).0,
             exits: Mutex::new(Vec::new()),
+            persisted: Mutex::new(Vec::new()),
+            killed: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
             offsets: Arc::new(DashMap::new()),
             barrier: Barrier::new(),
             flight: tokio::sync::Mutex::new(()),
@@ -747,6 +761,24 @@ impl FakePort {
         );
     }
 
+    pub fn end_owner(&self, process: &str, kind: crate::state::EndKind) -> bool {
+        let ended = self.table().keys().end_process(process, kind, |leaf| {
+            match kind {
+                crate::state::EndKind::Exit => self.0.persisted.lock().unwrap().push(process.into()),
+                crate::state::EndKind::Close(crate::state::CloseStorage::Delete) => self.0.deleted.lock().unwrap().push(leaf.into()),
+                _ => {}
+            }
+            self.0.host_terminals.remove(process);
+            self.0.terminals.remove(process);
+        });
+        if let Some(ended) = ended {
+            if matches!(ended.shell.stage, crate::state::ShellStage::Local) && matches!(kind, crate::state::EndKind::Close(_)) {
+                self.0.killed.lock().unwrap().push(process.into());
+            }
+            true
+        } else { false }
+    }
+
     pub fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
         host_registry::IntentMaps {
             restoring_keys: &self.0.restoring_keys,
@@ -765,14 +797,20 @@ impl FakePort {
         self.0.connects.lock().unwrap().iter().filter(|(e, _)| e == endpoint).count()
     }
 
-    fn deps(&self, channel: HostChannel, epoch: u64, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
+    pub(super) fn deps(&self, channel: HostChannel, epoch: u64, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
         let resolve = self.clone();
         let exits = self.clone();
         PtyHostDeps {
             lifecycle_token: "tok".into(),
             output_tx: self.0.output.clone(),
             output_produced: Arc::new(AtomicU64::new(0)),
-            on_exit: Arc::new(move |process, _, _| exits.0.exits.lock().unwrap().push(process)),
+            on_exit: Arc::new(move |process, _, _| {
+                if exits.table().keys().owns_process(&process) {
+                    if exits.table().keys().note_exit(&process) && exits.end_owner(&process, crate::state::EndKind::Exit) {
+                        exits.0.exits.lock().unwrap().push(process);
+                    }
+                } else { exits.0.exits.lock().unwrap().push(process); }
+            }),
             on_gap: Arc::new(|_| {}),
             resolve_process: Arc::new(move |k: &str| host_registry::resolve_inbound(
                 &resolve.0.host_terminals, &resolve.0.table, channel, epoch, k,
@@ -947,6 +985,13 @@ impl PanePort for FakePort {
     }
 
     fn teardown_pane(&self, process_id: &str) {
+        if self.table().keys().owns_process(process_id) {
+            if self.table().keys().note_exit(process_id) && self.end_owner(process_id, crate::state::EndKind::Exit) {
+                self.0.torn_down.lock().unwrap().push(process_id.into());
+            }
+            return;
+        }
+        if !self.0.terminals.contains_key(process_id) { return; }
         self.0.torn_down.lock().unwrap().push(process_id.to_owned());
         self.0.table.keys().exit_process(process_id);
         self.0.host_terminals.remove(process_id);

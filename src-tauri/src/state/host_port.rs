@@ -80,21 +80,8 @@ impl<R: Runtime> AppState<R> {
                 // sidecar or our own OSC tracking), clean up, notify the UI.
                 let cwd = exit_cwd
                     .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
-                // Persist the final parser state BEFORE cleanup discards it — the
-                // periodic flush only runs every 30s, so without this the session's
-                // last moments never reach the history store. Takes the PROCESS id
-                // and derives the history key from the terminal's leaf itself.
-                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
-                st_exit.forget_host_terminal(&process_id);
-                // Ring bookkeeping is keyed by the SESSION, not the process: it is
-                // the host's own offset and lives in the host's id space.
-                st_exit.host_stream_offsets.remove(&session_key);
-                st_exit.retire_host_process(&process_id);
-                // Drop the identity lookups LAST among the removals but before the
-                // emit — a leaked entry would route a later terminal's output at a
-                // process id that no longer exists.
-                st_exit.identity.unindex(&process_id);
-                st_exit.cleanup_terminal_state(&process_id);
+                let _ = session_key;
+                if !st_exit.exit_process(&process_id) { return; }
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
                     serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),

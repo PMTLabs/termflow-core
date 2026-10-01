@@ -414,6 +414,8 @@ impl Ticket {
         })
     }
 
+    pub(crate) fn key_stage(&self) -> Option<KeyStage> { self.stages.last().cloned() }
+
     pub fn complete_key(&self, process: &str) -> bool {
         self.stages.last().is_some_and(|s| self.shared.keys.complete(s, process))
     }

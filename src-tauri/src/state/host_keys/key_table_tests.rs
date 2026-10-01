@@ -144,11 +144,16 @@ fn session_lifecycle_has_one_authority_and_one_wire_close_sender() {
     // AppHandle construction is not portable; lock the production command's
     // wiring to the same Ticket transitions exercised with real wire frames.
     let command = scanned.iter().find(|(p, _)| p == "commands/terminal.rs").unwrap();
-    let body = fn_body(&command.1, "async fn spawn_routed(");
+    let body = fn_body(&command.1, "async fn run_create(");
     assert!(body.find("ticket.publish_key(").unwrap() < body.find("register_host_terminal(").unwrap());
     let failure = &body[body.find("Err(e) =>").unwrap()..];
-    assert!(failure.find("ticket.abort_key()").unwrap() < failure.find("state.cleanup_terminal_state(").unwrap());
-    assert!(failure.find("state.cleanup_terminal_state(").unwrap() < failure.find("host_fallback(").unwrap());
+    assert!(failure.find("state.cleanup_terminal_maps(").unwrap() < failure.find("host_fallback(").unwrap());
+    let local = scanned.iter().find(|(p, _)| p == "pty_manager/spawn.rs").unwrap();
+    let spawn = fn_body(&local.1, concat!("fn spawn_", "terminal("));
+    assert!(spawn.find("keys.restage_shell(").unwrap() < spawn.find("openpty(").unwrap());
+    let owners = scanned.iter().find(|(p, _)| p == "state/host_keys/owners.rs").unwrap();
+    let stage = fn_body(&owners.1, "fn set_stage(");
+    assert!(stage.find("self.release_stage(").unwrap() < stage.find("*target = Some(").unwrap());
     let fallback = fn_body(&command.1, "fn host_fallback(");
     assert!(fallback.contains(concat!("pty_manager::spawn_", "terminal(")));
     let table = scanned.iter().find(|(p, _)| p == "state/host_table.rs").unwrap();

@@ -237,15 +237,15 @@ async fn same_key_on_another_channel_and_on_a_superseded_epoch_is_dropped() {
 fn process_allocator_and_host_spawn_wiring_have_no_short_id_reconstruction() {
     use crate::state::source_scan::{fn_body, production};
     let commands = production(include_str!("../../commands/terminal.rs"));
-    let body = fn_body(&commands, "async fn spawn_routed(");
-    assert!(body.contains("state.place_process_create(&id, session_key.as_deref()).await?"));
+    let body = fn_body(&commands, "async fn run_create(");
+    assert!(body.contains("state.place_process_create(&id, session_key.as_deref(), cg).await?"));
     let local = production(include_str!("../../pty_manager/spawn.rs"));
     let local_body = fn_body(&local, "fn spawn_terminal(");
     assert!(local_body.contains("local_identity(&app_state.ids, renderer_terminal_id.as_deref())?"));
     assert!(local_body.find("local_identity(").unwrap() < local_body.find("openpty(").unwrap());
     assert!(fn_body(&local, "fn local_identity(").contains("ids.mint_process_id()?"));
     let routing = production(include_str!("../host_routing.rs"));
-    assert!(fn_body(&routing, "async fn place_process<").contains("port.ids().mint_process_id()?"));
+    assert!(fn_body(&routing, "async fn place_process_create(").contains("self.ids.mint_process_id()?"));
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     fn scan(path: &std::path::Path, hits: &mut Vec<String>) {
         for entry in std::fs::read_dir(path).unwrap() {

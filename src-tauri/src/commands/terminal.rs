@@ -118,15 +118,9 @@ pub async fn create_terminal(
     // the only path that can ever claim a `tb-` root leaf, and there is nobody left
     // to contend with.
     //
-    // The claim is NOT a lock: `try_claim` returning `None` on contention only
-    // logs the warning below and this call still proceeds to spawn. It does not
-    // serialise this path against itself, and a re-entrant renderer call (e.g. a
-    // double Restart click) still reaches `spawn_terminal` twice. Review 109 H1:
-    // the real fix for that is a single-flight guard on the RENDERER side, keyed
-    // by leaf id (see `TerminalService.createTerminal`), which this call trusts
-    // to have already prevented a second in-flight create for the same leaf from
-    // reaching here. This claim remains a tripwire that turns a contested
-    // ordering into an observable log line, not an enforcement mechanism.
+    // This claim is a diagnostic, not a lock. Backend admission below joins
+    // concurrent creates of the same leaf even when they came from different
+    // renderer windows; the renderer's own single-flight is not the authority.
     let root_leaf_owner = root_leaf_owner_to_reserve(tab_id.as_deref(), owning_tab_id.as_deref());
     // Held to the end of this command (and dropped on the sidecar path's early
     // return) — releasing it before `spawn_terminal` has registered would reopen
@@ -136,8 +130,7 @@ pub async fn create_terminal(
         if claim.is_none() {
             log::warn!(
                 "create_terminal: root leaf {owner} is already claimed by an in-flight create; \
-                 proceeding because a renderer create owns its pane, but this is the contested \
-                 ordering external review 101 F1 describes"
+                 joining the leaf's backend placement"
             );
         }
         claim
@@ -193,6 +186,7 @@ pub async fn create_terminal(
         tab_id,
         owning_tab_id,
         history_prefix.clone(),
+        None,
     )?;
 
     if let Some(prefix) = history_prefix {
@@ -297,7 +291,8 @@ pub fn adopt_console_window(
 ) -> Result<(), String> {
     // Not registered (yet, or already gone) — nothing to adopt, and not an error:
     // the renderer fires this optimistically off its own binding lifecycle.
-    let Some(pid) = state.terminals.get(&terminal_id).map(|t| t.pid) else {
+    let Some(process) = state.host_table.keys().resolve_process(&terminal_id, false) else { return Ok(()) };
+    let Some(pid) = state.terminals.get(&process).map(|t| t.pid) else {
         return Ok(());
     };
     #[cfg(windows)]
@@ -336,7 +331,8 @@ pub fn set_terminal_owning_tab(
     renderer_terminal_id: String,
     owning_tab_id: String,
 ) -> Result<(), String> {
-    if !crate::state::retarget_owning_tab(&state.terminals, &renderer_terminal_id, &owning_tab_id)? {
+    let target = match state.metadata_leaf(&renderer_terminal_id)? { Some(leaf) => leaf, None => return Ok(()) };
+    if !crate::state::retarget_owning_tab(&state.terminals, &target, &owning_tab_id)? {
         log::debug!(
             "set_terminal_owning_tab: no live terminal carries leaf {renderer_terminal_id}"
         );
@@ -361,7 +357,8 @@ pub fn set_terminal_display_label(
     renderer_terminal_id: String,
     label: Option<String>,
 ) -> Result<(), String> {
-    if !crate::state::set_display_label(&state.terminals, &renderer_terminal_id, label.as_deref())? {
+    let target = match state.metadata_leaf(&renderer_terminal_id)? { Some(leaf) => leaf, None => return Ok(()) };
+    if !crate::state::set_display_label(&state.terminals, &target, label.as_deref())? {
         log::debug!(
             "set_terminal_display_label: no live terminal carries leaf {renderer_terminal_id}"
         );
@@ -378,7 +375,8 @@ pub fn set_terminal_title_color(
     renderer_terminal_id: String,
     title_color: Option<String>,
 ) -> Result<(), String> {
-    if !crate::state::set_title_color(&state.terminals, &renderer_terminal_id, title_color.as_deref())? {
+    let target = match state.metadata_leaf(&renderer_terminal_id)? { Some(leaf) => leaf, None => return Ok(()) };
+    if !crate::state::set_title_color(&state.terminals, &target, title_color.as_deref())? {
         log::debug!(
             "set_terminal_title_color: no live terminal carries leaf {renderer_terminal_id}"
         );
@@ -422,10 +420,8 @@ pub(crate) struct SpawnRequest {
 /// THE spawn decision, for every caller.
 ///
 /// Host-owned when the PTY-host sidecar is enabled and reachable, in-process
-/// otherwise. The app terminalId IS the stable leaf (the reattach key), so the
-/// sidecar session, the output broadcast id, and the vt100 screen key all align —
-/// live routing works with no change to the output pipeline, and reattach-by-leaf
-/// after a hot-swap is consistent.
+/// otherwise. Admission is keyed by the durable leaf; output and process effects
+/// use the shell's allocated process id, and host effects use its exact key.
 ///
 /// **This function is the only place that makes that choice.** The
 /// `pty_host_client::enabled()` gate used to sit in the *caller*
@@ -434,6 +430,17 @@ pub(crate) struct SpawnRequest {
 /// for as long as one was alive (plan 019). A new spawn site must call this, not
 /// `pty_manager::spawn_terminal`; `api_spawn_routing_tests` enforces that.
 pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<String, String> {
+    let leaf = req.leaf_id.clone();
+    let cg = match state.admit_mount(&leaf).await? {
+        Ok(cg) => cg,
+        Err(existing) => return Ok(existing),
+    };
+    let _placement = crate::state::CreateGuard::new(state, &leaf, cg);
+    let result = run_create(state, req, cg).await;
+    result
+}
+
+async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<String, String> {
     let SpawnRequest {
         leaf_id: id,
         session_key,
@@ -466,7 +473,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             Some(c) => c,
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
         };
-        match state.place_elevated_create(&id, session_key.as_deref(), client)? {
+        match state.place_elevated_create(&id, session_key.as_deref(), client, cg, &process_id)? {
             crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
             crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
             crate::state::Placement::InProcess { .. } => unreachable!("elevated creates never run in-process"),
@@ -476,23 +483,25 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         // land here now that every supported OS is default-on): in-process is the
         // intended behaviour, not a degraded one.
         if !crate::pty_host_client::enabled() {
-            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled");
+            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled", cg);
         }
         // Ensure the hosts are up, pick the one this create belongs on, and take
         // its admission. A refusal (the app is exiting or updating, or the session
         // may be on a host that has not answered yet) is returned as it is: it must
         // NOT fall back in-process, which would hide a running shell or start a
         // second one under the same key. Only "no host is usable" does.
-        let (process_id, placement) = state.place_process_create(&id, session_key.as_deref()).await?;
+        let (process_id, placement) = state.place_process_create(&id, session_key.as_deref(), cg).await?;
         match placement {
             crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
             crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
             crate::state::Placement::InProcess { reason } => {
-                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason);
+                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason, cg);
             }
         }
     };
     let ticket = ticket.expect("hosted placement has admission");
+    let staged = crate::state::StagedShell { process: process_id.clone(),
+        stage: crate::state::ShellStage::Hosted(ticket.key_stage().expect("hosted key staged")) };
     if !ticket.publish_key(&process_id) {
         return Err("host-ownership-pending: staged session changed before publication".into());
     }
@@ -534,7 +543,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             None => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, legacy attach)"),
         }
         client.nudge_repaint(&session_key, cols, rows);
-        ticket.complete_key(&process_id);
+        state.complete_create(&id, cg, &staged);
         return Ok(process_id);
     }
 
@@ -577,23 +586,25 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     }
     match spawned {
         Ok(pid) => {
-            ticket.complete_key(&process_id);
             if let Some(mut t) = state.terminals.get_mut(&process_id) {
                 t.pid = pid;
             }
+            state.complete_create(&id, cg, &staged);
             Ok(process_id)
         }
         Err(e) => {
             // Undo the provisional registration. Clean up by the PROCESS id —
             // that is what was registered.
-            ticket.abort_key();
-            state.cleanup_terminal_state(&process_id);
+            state.cleanup_terminal_maps(&process_id);
             if channel == crate::elevated_host::HostChannel::Elevated {
+                if let Some(shell) = state.host_table.keys().abort_create(&id, cg) {
+                    state.dispose_staged(&shell);
+                }
                 // Never host_fallback for an elevated request (R7): fail visibly
                 // instead of silently spawning an unprivileged shell.
                 Err(format!("elevated spawn failed: {e}"))
             } else {
-                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e)
+                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e, cg)
             }
         }
     }
@@ -779,6 +790,7 @@ fn host_fallback(
     cwd: Option<String>,
     name: Option<&str>,
     reason: &str,
+    cg: u64,
 ) -> Result<String, String> {
     // A sidecar that is switched OFF is not a failure but an explicit
     // `TERMFLOW_PTY_HOST=0`, so warning here would fire on every single spawn
@@ -808,6 +820,7 @@ fn host_fallback(
         Some(leaf),
         owner,
         history_prefix.clone(),
+        Some(cg),
     )?;
     if let Some(prefix) = history_prefix {
         state.replay_prefix.insert(fallback_id.clone(), prefix);
@@ -944,6 +957,8 @@ pub async fn write_terminal(
     id: String,
     data: String,
 ) -> Result<(), String> {
+    let id = state.host_table.keys().resolve_process(&id, false)
+        .ok_or_else(|| "Terminal not found".to_string())?;
     // Host-owned terminals: forward keystrokes to the sidecar (still tag the
     // user-input source below).
     if !state.host_write(&id, data.as_bytes()) {
@@ -975,6 +990,8 @@ pub async fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
+    let id = state.host_table.keys().resolve_process(&id, false)
+        .ok_or_else(|| "Terminal not found".to_string())?;
     // Host-owned terminals: forward the resize to the sidecar, update dims, and
     // keep the authoritative vt100 parser in sync (else /snapshot hydration
     // reports new dims against an old-sized screen).
@@ -1042,68 +1059,11 @@ pub async fn close_terminal(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
-    // Timed alongside `[SPAWN]` so a close/open pair can be read as one sequence:
-    // whether the cost sits in this command or in the sidecar's answer to the
-    // NEXT spawn tells you which side to look at.
-    let close_started = std::time::Instant::now();
-
-    // Get the terminal info to retrieve the PID + renderer id.
-    let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
-        (terminal.pid, terminal.renderer_terminal_id.clone())
+    if state.close_process(&id, crate::state::CloseStorage::Delete) {
+        Ok(())
     } else {
-        return Err("Terminal not found".to_string());
-    };
-
-    // Host-owned: tell the sidecar to close the session (it kills the child);
-    // otherwise kill the local process tree.
-    if !state.host_close(&id) {
-        // Kill the process tree (parent and all children)
-        crate::pty_manager::kill_process_tree(pid);
+        Err("Terminal not found".to_string())
     }
-
-    // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
-    // the old inline cleanup leaked). Dropping the pty also EOFs the reader.
-    //
-    // Explicit user close: drop this terminal's persisted scrollback so a closed
-    // tab never reappears on the next restart (shell-exit keeps it — see
-    // cleanup_terminal_state). Both run under the per-terminal persist guard
-    // (review 062): the kill above EOFs the reader, whose exit-path persist could
-    // otherwise clone the screen, render for milliseconds, and re-upsert the row
-    // AFTER this delete. With the guard, either the persist finishes first (row
-    // recreated, then deleted here) or it starts after cleanup and no-ops on the
-    // missing terminal — delete semantics hold in both orders.
-    {
-        let guard_arc = state.history_persist_guard(&id);
-        let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
-        state.cleanup_terminal_state(&id);
-        if let Some(tab_id) = tab_id {
-            state.history_store.delete(&tab_id);
-            // ...and the canvas wires that named it. Nothing else ever deleted an edge on
-            // a terminal's death, so `canvas_edges` grew for the life of the profile and
-            // every `get_graph` deserialised the accumulated history.
-            //
-            // Keyed on the RENDERER id, which is the id space edges use — the same one
-            // `history_store` is keyed by, and deliberately not `id` (the backend handle).
-            // Targeted deletion rather than `prune_edges`: pruning takes a liveness set and
-            // would reap a restored-but-unspawned peer's edges, which is precisely the bug
-            // `get_graph` stopped filtering to avoid.
-            match state.canvas_store.delete_edges_for(&tab_id) {
-                Ok(0) => {}
-                Ok(n) => log::info!("Deleted {} canvas edge(s) for terminal {}", n, tab_id),
-                // Non-fatal: the terminal is closing either way, and a canvas store that
-                // cannot answer must not fail the close.
-                Err(e) => log::warn!("Failed to delete canvas edges for {}: {}", tab_id, e),
-            }
-        }
-    }
-
-    log::info!(
-        "Closed terminal {} with PID {} in {}ms",
-        id,
-        pid,
-        close_started.elapsed().as_millis()
-    );
-    Ok(())
 }
 
 // Scrollback-persistence ratchet regression tests (partial-scrollback bug):

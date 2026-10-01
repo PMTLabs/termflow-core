@@ -866,9 +866,11 @@ mod tests {
         #[test]
         fn closing_a_terminal_deletes_its_edges() {
             let terminal = include_str!("commands/terminal.rs").replace("\r\n", "\n");
+            assert!(crate::state::source_scan::fn_body(&terminal, "async fn close_terminal(").contains("CloseStorage::Delete"));
+            let ending = include_str!("state/owner_lifecycle.rs").replace("\r\n", "\n");
             assert!(
-                terminal.contains("canvas_store.delete_edges_for(&tab_id)"),
-                "close_terminal must delete the closed terminal's edges"
+                crate::state::source_scan::fn_body(&ending, "fn end_shell(").contains("canvas_store.delete_edges_for(leaf)"),
+                "the shared close ending must delete the closed terminal's edges"
             );
             // ...and it must stay the TARGETED delete, crate-wide -- not just in the file
             // close_terminal happens to live in after the commands.rs split. `prune_edges`

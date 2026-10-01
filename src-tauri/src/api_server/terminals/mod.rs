@@ -486,17 +486,9 @@ pub(crate) async fn delete_terminal(
     // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
-    let id = state.resolve_ref(&id);
-    // Take the pid first (guard drops at end of statement, before cleanup).
-    let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
+    if !state.close_process(&id, crate::state::CloseStorage::Preserve) {
         return Json(json!({ "error": "Terminal not found" }));
-    };
-    // Parity with the UI close path: host-owned → tell the sidecar to close the
-    // session; otherwise kill the local shell tree. Then clean up every map.
-    if !state.host_close(&id) {
-        crate::pty_manager::kill_process_tree(pid);
     }
-    state.cleanup_terminal_state(&id);
     Json(json!({ "status": "ok" }))
 }
 
@@ -524,6 +516,9 @@ pub(crate) async fn resize_terminal(
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
+    if state.host_table.keys().resolve_process(&id, false).is_none() {
+        return Json(json!({ "error": "Terminal not found" })).into_response();
+    }
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Host-owned terminals resize via the sidecar.
@@ -640,6 +635,9 @@ pub(crate) fn write_data_to_terminal(
     data: &str,
 ) -> Result<(), (StatusCode, String)> {
     use std::io::Write;
+    if state.host_table.keys().resolve_process(id, false).is_none() {
+        return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
+    }
     // Host-owned terminals: forward to the sidecar.
     if state.host_write(id, data.as_bytes()) {
         emit_external_activity(state, id);

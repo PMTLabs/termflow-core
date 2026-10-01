@@ -61,11 +61,11 @@ pub(super) trait RoutingPort: AdoptionPort {
 
 /// Claim the fresh key before publishing a shell. The live collision check is a
 /// defensive redraw, not the uniqueness proof: the UUID retains 122 random bits.
-pub(super) fn claim_fresh_session<P: RoutingPort>(port: &P, leaf: &str, channel: HostChannel) -> Result<KeyStage, String> {
+fn claim_fresh_owned<P: RoutingPort>(port: &P, leaf: &str, channel: HostChannel, owner: Option<(u64, &str)>) -> Result<KeyStage, String> {
     loop {
         let key = port.ids().mint_session_key(leaf)?;
         if port.table().keys().occupied(channel, &key) { continue; }
-        match port.table().keys().stage(channel, &key, StageMode::Spawn) {
+        match stage_key(port, leaf, owner, channel, &key, StageMode::Spawn) {
             Ok((stage, _)) => return Ok(stage),
             Err(e) if e.starts_with("host-session-contended:") => continue,
             Err(e) => return Err(e),
@@ -148,11 +148,7 @@ fn unresolved_hosts<P: AdoptionPort>(port: &P) -> Option<String> {
 /// must not fall back in-process), `host-ownership-pending:` for a keyed create
 /// whose session may be on a host that has not answered, or the contention error
 /// of a session another create already holds.
-pub(super) async fn place_for_leaf<P: RoutingPort>(
-    port: &P,
-    leaf: &str,
-    override_key: Option<&str>,
-) -> Result<Placement, String> {
+pub(super) async fn place_owned<P: RoutingPort>(port: &P, leaf: &str, override_key: Option<&str>, owner: Option<(u64, &str)>) -> Result<Placement, String> {
     let session_key = override_key.unwrap_or(leaf);
     // Exit, offload and update commit close admission to every host. Say so up
     // front: once exit has begun closing the hosts none of them is a usable target
@@ -221,7 +217,7 @@ pub(super) async fn place_for_leaf<P: RoutingPort>(
             }
         };
         let Some(selected) = selected else {
-            let stage = claim_fresh_session(port, leaf, channel)?;
+            let stage = claim_fresh_owned(port, leaf, channel, owner)?;
             let key = stage.key.clone();
             ticket.guard_key(stage);
             surface_ambiguity(port, leaf);
@@ -230,7 +226,7 @@ pub(super) async fn place_for_leaf<P: RoutingPort>(
             return Ok(Placement::Spawn { channel, client, ticket, session_key: key });
         };
         let (_, selected) = selected;
-        let (stage, pid) = port.table().keys().stage(channel, &selected, StageMode::Attach)?;
+        let (stage, pid) = stage_key(port, leaf, owner, channel, &selected, StageMode::Attach)?;
         ticket.guard_key(stage);
         settle(port, session_key);
         log::info!("[GEN] attaching {selected} on {channel:?} (pid {pid})");
@@ -242,12 +238,11 @@ pub(super) async fn place_for_leaf<P: RoutingPort>(
     }
 }
 
-/// Allocate the process identity before placement can claim a host key. Kept
-/// on the same port as placement so failures are testable without an AppHandle.
-pub(super) async fn place_process<P: RoutingPort>(port: &P, leaf: &str, override_key: Option<&str>) -> Result<(String, Placement), String> {
-    let process = port.ids().mint_process_id()?;
-    let placement = place_for_leaf(port, leaf, override_key).await?;
-    Ok((process, placement))
+fn stage_key<P: RoutingPort>(port: &P, leaf: &str, owner: Option<(u64, &str)>, channel: HostChannel, key: &str, mode: StageMode) -> Result<(KeyStage, u32), String> {
+    if let Some((cg, process)) = owner {
+        let (stage, pid, _) = port.table().keys().stage_shell(leaf, cg, process, Some((channel, key, mode)))?;
+        Ok((stage.expect("hosted stage"), pid))
+    } else { port.table().keys().stage(channel, key, mode) }
 }
 
 /// Take admission once, for either a normal or elevated placement.
@@ -284,26 +279,40 @@ impl<R: Runtime> RoutingPort for AppState<R> {
 }
 
 impl<R: Runtime> AppState<R> {
-    pub(crate) fn place_elevated_create(&self, leaf: &str, override_key: Option<&str>, client: PtyHostClient) -> Result<Placement, String> {
+    pub(crate) fn place_elevated_create(&self, leaf: &str, override_key: Option<&str>, client: PtyHostClient, cg: u64, process: &str) -> Result<Placement, String> {
         let channel = HostChannel::Elevated;
         let mut ticket = begin_ticket(self, channel).map_err(|e| e.to_string())?;
         if let Some((owner, key)) = self.host_table.keys().candidate(leaf, override_key) {
             if owner != channel { return Err(pending("session belongs to a different terminal host")); }
-            let (stage, pid) = self.host_table.keys().stage(channel, &key, StageMode::Attach)?;
+            let (stage, pid) = stage_key(self, leaf, Some((cg, process)), channel, &key, StageMode::Attach)?;
             ticket.guard_key(stage);
             return Ok(Placement::Attach { channel, client, pid, ticket, session_key: key });
         }
-        let stage = claim_fresh_session(self, leaf, channel)?;
+        let stage = claim_fresh_owned(self, leaf, channel, Some((cg, process)))?;
         let key = stage.key.clone();
         ticket.guard_key(stage);
         surface_ambiguity(self, leaf);
         Ok(Placement::Spawn { channel, client, ticket, session_key: key })
     }
 
-    /// Decide where the create goes; see [`place_for_leaf`].
-    pub(crate) async fn place_process_create(&self, leaf: &str, override_key: Option<&str>) -> Result<(String, Placement), String> {
-        place_process(self, leaf, override_key).await
+    /// Allocate before key staging, then place under the leaf's admission.
+    pub(crate) async fn place_process_create(&self, leaf: &str, override_key: Option<&str>, cg: u64) -> Result<(String, Placement), String> {
+        let process = self.ids.mint_process_id()?;
+        let placement = place_owned(self, leaf, override_key, Some((cg, &process))).await?;
+        Ok((process, placement))
     }
+}
+
+#[cfg(test)]
+pub(super) async fn place_for_leaf<P: RoutingPort>(port: &P, leaf: &str, override_key: Option<&str>) -> Result<Placement, String> {
+    place_owned(port, leaf, override_key, None).await
+}
+
+#[cfg(test)]
+pub(super) async fn place_process<P: RoutingPort>(port: &P, leaf: &str, override_key: Option<&str>) -> Result<(String, Placement), String> {
+    let process = port.ids().mint_process_id()?;
+    let placement = place_for_leaf(port, leaf, override_key).await?;
+    Ok((process, placement))
 }
 
 #[cfg(test)]

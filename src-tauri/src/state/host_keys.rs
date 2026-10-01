@@ -9,6 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, atomic::{AtomicBool, Ordering}};
 use termflow_pty_protocol::{Control, Frame};
 use tokio::sync::mpsc::UnboundedSender;
 
+mod owners;
+pub use owners::{Admission as CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
+
 pub const ENDING_CAP: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +51,7 @@ struct Inner {
     keys: HashMap<(HostChannel, String), Record>,
     channels: HashMap<HostChannel, Channel>,
     sequence: u64,
+    owners: HashMap<String, owners::Row>,
     cap: usize,
 }
 
@@ -61,7 +65,7 @@ impl Default for HostKeys {
 impl HostKeys {
     pub fn new(routes: HostRoutes) -> Self {
         Self { inner: Arc::new(Mutex::new(Inner {
-            keys: HashMap::new(), channels: HashMap::new(), sequence: 0, cap: ENDING_CAP,
+            keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(), cap: ENDING_CAP,
         })), routes }
     }
 
@@ -125,6 +129,12 @@ impl HostKeys {
 
     pub fn publish(&self, stage: &KeyStage, process: &str, epoch: u64) -> bool {
         let inner = self.lock();
+        if let Some(row) = inner.owners.values().find(|r| r.cg == stage.cg) {
+            if !matches!(&row.state, OwnerState::Placing { stage: Some(shell), .. }
+                if shell.process == process && matches!(&shell.stage, ShellStage::Hosted(h) if h.channel == stage.channel && h.key == stage.key)) {
+                return false;
+            }
+        }
         if inner.keys.get(&(stage.channel, stage.key.clone())).is_some_and(|r| r.state == KeyState::Held(stage.cg)) {
             self.routes.register(stage.channel, &stage.key, process, epoch);
             true
@@ -141,6 +151,8 @@ impl HostKeys {
 
     pub fn complete(&self, stage: &KeyStage, process: &str) -> bool {
         let mut inner = self.lock();
+        // A leaf-owned stage completes its row and key together.
+        if inner.owners.values().any(|r| r.cg == stage.cg) { return false; }
         let Some(record) = inner.keys.get_mut(&(stage.channel, stage.key.clone())) else { return false };
         if record.state != KeyState::Held(stage.cg) { return false; }
         record.state = KeyState::Bound(process.to_string());
@@ -149,6 +161,9 @@ impl HostKeys {
 
     pub fn abort(&self, stage: &KeyStage) {
         let mut inner = self.lock();
+        // The placement guard owns rollback of a leaf-owned stage. A ticket
+        // dropping first must not retire its key separately from its owner row.
+        if inner.owners.values().any(|r| r.cg == stage.cg) { return; }
         let address = (stage.channel, stage.key.clone());
         if !inner.keys.get(&address).is_some_and(|r| r.state == KeyState::Held(stage.cg)) { return; }
         self.routes.remove_key(stage.channel, &stage.key);
@@ -209,6 +224,13 @@ impl HostKeys {
 
     fn apply_exit(&self, inner: &mut Inner, channel: HostChannel, key: &str) {
         let address = (channel, key.to_string());
+        if let Some(row) = inner.owners.values_mut().find(|r| owners::shell_of(&r.state).is_some_and(|s|
+            matches!(&s.stage, ShellStage::Hosted(h) if h.channel == channel && h.key == key))) {
+            match &mut row.state {
+                OwnerState::Registered(_) | OwnerState::Closing(_) => return,
+                OwnerState::Placing { staged_exited, .. } => *staged_exited = true,
+            }
+        }
         if let Some(KeyState::Held(_) | KeyState::Bound(_) | KeyState::Ending { close: CloseState::None, .. }) = inner.keys.get(&address).map(|r| &r.state) {
             self.routes.remove_key(channel, key);
             Self::end(inner, channel, key, CloseState::None);
@@ -217,6 +239,7 @@ impl HostKeys {
 
     pub fn exit_process(&self, process: &str) {
         let mut inner = self.lock();
+        if inner.owners.values().any(|r| owners::shell_of(&r.state).is_some_and(|s| s.process == process)) { return; }
         let keys: Vec<_> = inner.keys.iter().filter(|(_, r)| r.state == KeyState::Bound(process.to_string()))
             .map(|(k, _)| k.clone()).collect();
         self.routes.remove_process(process);
@@ -346,3 +369,5 @@ impl HostKeys {
 
 #[cfg(test)]
 mod key_table_tests;
+#[cfg(test)]
+mod owner_table_tests;

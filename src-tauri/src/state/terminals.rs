@@ -729,12 +729,8 @@ impl<R: Runtime> AppState<R> {
                 use tauri::Emitter;
                 let cwd = exit_cwd
                     .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
-                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
-                st_exit.forget_host_terminal(&process_id);
-                st_exit.host_stream_offsets.remove(&session_key);
-                st_exit.retire_host_process(&process_id);
-                st_exit.identity.unindex(&process_id);
-                st_exit.cleanup_terminal_state(&process_id);
+                let _ = session_key;
+                if !st_exit.exit_process(&process_id) { return; }
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
                     serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
@@ -793,18 +789,7 @@ impl<R: Runtime> AppState<R> {
     /// session banner. (Split out of the formerly-destructive on_disconnect.)
     pub fn teardown_host_terminal(&self, id: &str) {
         use tauri::Emitter;
-        self.persist_terminal_history(id, chrono::Utc::now().timestamp_millis());
-        // Resolve the session key BEFORE `cleanup_terminal_state` drops the record
-        // it lives on. `host_stream_offsets` is the HOST's ring bookkeeping and is
-        // keyed by the session, not by our process id — removing it by `id` leaks
-        // the entry (design 014 §A2).
-        let session_key = self.session_key_for(id);
-        self.forget_host_terminal(id);
-        if let Some(key) = session_key {
-            self.host_stream_offsets.remove(&key);
-            self.retire_host_process(id);
-        }
-        self.cleanup_terminal_state(id);
+        if !self.exit_process(id) { return; }
         let _ = self.app_handle.emit(
             "terminal:exit",
             serde_json::json!({ "id": id, "exitCode": -1, "cwd": serde_json::Value::Null }),
@@ -1066,12 +1051,7 @@ impl<R: Runtime> AppState<R> {
     /// the "that is a tab id, use `owningTabId`" rejection lives at the MCP
     /// layer, where the agent that made the mistake actually reads the message.
     pub fn resolve_ref(&self, id: &str) -> String {
-        if id.starts_with("tm-") {
-            if let Some(process_id) = self.identity.process_for_leaf(id) {
-                return process_id;
-            }
-        }
-        id.to_string()
+        self.host_table.keys().resolve_process(id, false).unwrap_or_else(|| id.to_string())
     }
 
     /// The pty-host session key for one of OUR process ids.
@@ -1105,56 +1085,8 @@ impl<R: Runtime> AppState<R> {
     /// An ending that cannot reach the host stays pending and is delivered
     /// before the next connection lists sessions.
     pub fn host_close(&self, id: &str) -> bool {
-        use tauri::Emitter;
-        let Some(channel) = self.host_channel_for(id) else {
-            return false;
-        };
-        // Resolve BEFORE the removals below drop the record we read it from.
-        let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
-        // ...and the cwd for the same reason, one step further out: every caller runs
-        // `cleanup_terminal_state` the moment this returns, and that drops `terminal_cwds`.
-        // It is the directory the shell died in, which is what a restart-in-place resumes in:
-        // the pane survives an API close, so this is not dead weight.
-        let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, id);
-        // Pending closes are replayed against the HOST later, so they are recorded
-        // in the host id space, and against the host that owns the session: the
-        // tombstone carries its channel.
-        host_registry::route_close(self.host_table.keys(), channel, &session_key);
-        self.forget_host_terminal(id);
-        self.host_stream_offsets.remove(&session_key);
-        self.retire_host_process(id);
-
-        // Announce the end HERE, because nothing downstream will.
-        //
-        // The sidecar does send an `Exit` frame for a session it closes — but it arrives
-        // ~a second later, over the pipe, and by then the caller has already run
-        // `cleanup_terminal_state`, which calls `identity.unindex`. `route_inbound` then
-        // fails to resolve the session key and DROPS the frame
-        // (`pty_host_client.rs`, "dropping Exit for unknown session"). So a host-owned
-        // close emitted nothing at all: the renderer never saw `pty:exit`, and an
-        // API/MCP-closed pane sat there with a dead shell, no session-closed banner, no
-        // ended tint and no `markTabExited`. The in-process twin has always announced —
-        // `kill_process_tree` EOFs the reader thread, which emits from `pty_manager.rs` —
-        // so this makes the two paths indistinguishable to the renderer, which is the
-        // point: it is the same event, and only the plumbing under it differs.
-        //
-        // Regression from `3eb571d` (host sessions keyed apart from process ids). Before it
-        // the `Exit` frame was passed straight through with no lookup, so this close DID reach the UI.
-        //
-        // `exitCode: 0` and the payload shape are copied from that in-process emit rather
-        // than invented, for the same reason: a deliberate close produces no status either
-        // way, and a second spelling of "closed" is a second thing to keep in agreement.
-        //
-        // Emitting unconditionally — including on the pipe-down branch above, where the
-        // close is only QUEUED. The terminal is over as far as this GUI is concerned the
-        // moment its state is torn down, and a deferred delivery to the host does not
-        // change that. Harmless if a future caller skips `cleanup_terminal_state` and the
-        // host's own `Exit` therefore does resolve: `markSessionClosed` is idempotent by
-        // construction, so the duplicate lands on the state it already produced.
-        let _ = self
-            .app_handle
-            .emit("terminal:exit", host_exit_payload(id, exit_cwd));
-        true
+        if self.host_channel_for(id).is_none() { return false; }
+        self.close_process(id, super::CloseStorage::Preserve)
     }
 
     /// If `id` is host-owned, force a repaint via a sidecar resize-nudge (the
@@ -1255,6 +1187,16 @@ impl<R: Runtime> AppState<R> {
     /// EOFs the reader thread's cloned reader — that's what unblocks and ends
     /// the reader thread on an explicit close.
     pub fn cleanup_terminal_state(&self, id: &str) {
+        if self.host_table.keys().owns_process(id) {
+            self.exit_process(id);
+        } else {
+            self.cleanup_terminal_maps(id);
+            self.retire_host_process(id);
+            self.forget_host_terminal(id);
+        }
+    }
+
+    pub(crate) fn cleanup_terminal_maps(&self, id: &str) {
         // FIRST STATEMENT, before anything is removed: the Automations engine keys its per-terminal
         // state by the durable `tm-` LEAF, and `terminals[id]` is the ONLY place that mapping lives.
         // `IdentityIndex` maps leaf -> process and never the reverse, and the sidecar exit path has
@@ -1264,7 +1206,9 @@ impl<R: Runtime> AppState<R> {
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
         let leaf = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone());
         if let Some(leaf) = leaf {
-            self.automations.runtime.forget_terminal(&leaf);
+            let owns_leaf = matches!(self.host_table.keys().owner_state(&leaf),
+                Some((_, super::OwnerState::Registered(s) | super::OwnerState::Closing(s))) if s.process == id);
+            if owns_leaf { self.automations.runtime.forget_terminal(&leaf); }
         }
         // `dirty` is keyed by the PROCESS id (`ChannelPayload.id` is a process id), so it is purged
         // with the id this function was given, never with the leaf. Plan 028 §7.4's table.
@@ -1275,6 +1219,7 @@ impl<R: Runtime> AppState<R> {
         // inserting into `terminal_history`, and that check only closes the
         // TOCTOU window if this method removes `terminals` before
         // `terminal_history`.
+        if let Some(key) = self.session_key_for(id) { self.host_stream_offsets.remove(&key); }
         self.terminals.remove(id);
         // Alongside `terminals`, and for the same reason: the identity lookups are
         // an index OF that map, so an entry outliving its terminal would resolve a
@@ -1293,11 +1238,8 @@ impl<R: Runtime> AppState<R> {
         // The persist guard entry too (a late persist may re-create it via
         // or_default; that's harmless — it then no-ops on the missing terminal).
         self.history_persist_locks.remove(id);
-        // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
-        // in the routing set after its state is torn down. Idempotent when a
-        // caller (`teardown_host_terminal`, `host_close`) already removed it.
-        self.retire_host_process(id);
-        self.forget_host_terminal(id);
+        // Host ownership is released by the ending's effects, after its exact
+        // key has retired and any Close has entered the host FIFO.
     }
 }
 
@@ -1347,8 +1289,8 @@ mod automation_teardown_source_tests {
     fn cleanup_body() -> String {
         let source = include_str!("terminals.rs").replace("\r\n", "\n");
         let start = source
-            .find("pub fn cleanup_terminal_state(&self, id: &str) {")
-            .expect("cleanup_terminal_state must exist");
+            .find("pub(crate) fn cleanup_terminal_maps(&self, id: &str) {")
+            .expect("cleanup_terminal_maps must exist");
         let rest = &source[start..];
         let end = rest.find("\n    }\n").expect("its body must be closed at method indentation");
         let body = rest[..end].to_string();
@@ -1607,7 +1549,7 @@ mod host_close_announces_tests {
     /// Or every assertion below is about an empty string.
     #[test]
     fn found_the_method_it_is_reading() {
-        assert!(body_of("host_close").contains("route_close(self.host_table.keys(), channel, &session_key)"));
+        assert!(body_of("host_close").contains("self.close_process(id, super::CloseStorage::Preserve)"));
     }
 
     /// An over-long slice makes "host_close emits" a statement about the rest of the file —
@@ -1623,7 +1565,10 @@ mod host_close_announces_tests {
     /// THE regression. Without this line an API/MCP close is silent.
     #[test]
     fn host_close_emits_terminal_exit() {
-        let body = body_of("host_close");
+        let owner = include_str!("owner_lifecycle.rs").replace("\r\n", "\n");
+        assert!(body_of("host_close").contains("self.close_process("));
+        assert!(crate::state::source_scan::fn_body(&owner, "pub fn close_process(").contains("self.end_shell("));
+        let body = crate::state::source_scan::fn_body(&owner, "fn end_shell(");
         assert!(
             body.contains("\"terminal:exit\""),
             "host_close must announce the close — the sidecar's own Exit frame is dropped \
@@ -1637,8 +1582,9 @@ mod host_close_announces_tests {
     /// the live-client arm would leave the pipe-down case silent.
     #[test]
     fn the_emit_is_after_the_match_so_a_queued_close_announces_too() {
-        let body = body_of("host_close");
-        let queued = body.find("route_close(").expect("the close routing (which queues a close that cannot be delivered) is gone");
+        let owner = include_str!("owner_lifecycle.rs").replace("\r\n", "\n");
+        let body = crate::state::source_scan::fn_body(&owner, "fn end_shell(");
+        let queued = body.find("keys().end_process(").expect("the shared ending (which queues disconnected closes) is gone");
         let emit = body.find("\"terminal:exit\"").expect("emit gone");
         assert!(emit > queued, "the emit sits inside the live-client arm; a queued close would be silent");
     }

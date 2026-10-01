@@ -835,7 +835,8 @@ pub(crate) fn retarget_owning_tab(
     // Nothing inside takes another lock, so this cannot deadlock against the
     // read-only occupancy scan in `create_terminal`.
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.owning_tab_id.as_deref() != Some(owner) {
@@ -879,7 +880,8 @@ pub(crate) fn set_display_label(
         .map(str::to_string);
     // `iter_mut`, not scan-then-`get_mut`: the match and the write happen under the same shard guard.
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.display_label != next {
@@ -906,7 +908,8 @@ pub(crate) fn set_title_color(
         .filter(|color| !color.is_empty())
         .map(str::to_string);
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.title_color != next {
@@ -1224,19 +1227,14 @@ mod retarget_owning_tab_tests {
         assert_eq!(t.renderer_terminal_id.as_deref(), Some("tm-x"));
     }
 
-    /// The map is keyed by the PROCESS id; the renderer only ever knows the leaf.
     #[test]
-    fn it_matches_on_the_leaf_not_on_the_map_key() {
+    fn an_explicit_process_reference_updates_only_that_process() {
         let terminals = one_split_pane();
-        assert_eq!(
-            retarget_owning_tab(&terminals, "pc-1", "tb-b"),
-            Ok(false),
-            "the map key is not a renderer identity"
-        );
-        assert_eq!(
-            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
-            Some("tb-a"),
-        );
+        assert_eq!(retarget_owning_tab(&terminals, "pc-missing", "tb-b"), Ok(false));
+        assert_eq!(terminals.get("pc-1").unwrap().owning_tab_id.as_deref(), Some("tb-a"));
+        assert_eq!(retarget_owning_tab(&terminals, "pc-1", "tb-b"), Ok(true));
+        assert_eq!(terminals.get("pc-1").unwrap().owning_tab_id.as_deref(), Some("tb-b"));
+        assert_eq!(terminals.get("pc-1").unwrap().renderer_terminal_id.as_deref(), Some("tm-x"));
     }
 
     /// Panes move freely; a leaf with no live PTY (never spawned, already exited,

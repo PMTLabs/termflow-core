@@ -72,6 +72,11 @@ fn local_identity(ids: &crate::state::IdAllocator, leaf: Option<&str>) -> Result
     Ok((process, shell_identity))
 }
 
+struct UnpublishedChild(u32);
+impl Drop for UnpublishedChild {
+    fn drop(&mut self) { kill_process_tree(self.0); }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_terminal(
     app_state: AppState,
@@ -112,8 +117,24 @@ pub fn spawn_terminal(
     // next flush preserves it instead of overwriting the stored row with only this
     // session's content (the scrollback-persistence "ratchet" bug).
     history_seed: Option<String>,
+    admission: Option<u64>,
 ) -> Result<String, String> {
     let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
+    let leaf = renderer_terminal_id.as_deref().unwrap_or(&id);
+    let cg = match admission {
+        Some(cg) => cg,
+        None => match app_state.host_table.keys().admit_create(leaf, crate::state::CreateMode::Mount)? {
+            crate::state::CreateAdmission::Run(cg) => cg,
+            crate::state::CreateAdmission::Existing(pc) => return Ok(pc),
+            crate::state::CreateAdmission::Join(_) => return Err("host-ownership-pending: local create already in flight".into()),
+        },
+    };
+    let _placement = crate::state::CreateGuard::new(&app_state, leaf, cg);
+    let keys = app_state.host_table.keys();
+    let restage = matches!(keys.owner_state(leaf), Some((_, crate::state::OwnerState::Placing { stage: Some(_), .. })));
+    let (_, _, old) = if restage { keys.restage_shell(leaf, cg, &id, None) } else { keys.stage_shell(leaf, cg, &id, None) }?;
+    if let Some(old) = old { app_state.dispose_staged(&old); }
+    let owner_leaf = leaf.to_string();
     // Plan 049: sideload modern ConPTY once, before the first pseudoconsole opens.
     #[cfg(windows)]
     {
@@ -248,6 +269,7 @@ pub fn spawn_terminal(
     
     let child = pair.slave.spawn_command(cmd_builder).map_err(|e| e.to_string())?;
     let pid = child.process_id().unwrap_or(0);
+    let mut unpublished = UnpublishedChild(pid);
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     // Note: taking the writer might make the master unusable for writing if not cloned? 
@@ -303,6 +325,11 @@ pub fn spawn_terminal(
         title_color: None,
     });
 
+    unpublished.0 = 0;
+    app_state.complete_create(&owner_leaf, cg, &crate::state::StagedShell {
+        process: id.clone(), stage: crate::state::ShellStage::Local,
+    });
+
     // Spawn thread to read output
     let output_tx = app_state.output_tx.clone();
     let thread_id = id.clone();
@@ -343,11 +370,8 @@ pub fn spawn_terminal(
         // never reach the history store. Harmless for explicit closes: close_terminal
         // deletes the row afterwards (a sub-ms interleave could leave an orphan row,
         // which the startup prune sweeps).
-        app_state.persist_terminal_history(&thread_id, chrono::Utc::now().timestamp_millis());
-
-        // Cleanup on exit
+        if !app_state.exit_process(&thread_id) { return; }
         log::info!("Terminal {} process exited, cleaning up state", thread_id);
-        app_state.cleanup_terminal_state(&thread_id);
 
         // Notify UI
         if let Err(e) = app_state.app_handle.emit("terminal:exit", serde_json::json!({

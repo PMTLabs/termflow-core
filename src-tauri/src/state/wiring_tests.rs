@@ -142,8 +142,8 @@ fn restoring_intent_producers_and_consumers_are_classified() {
     census(".register_restoring_leaf(", &[("commands/terminal.rs", "register_restoring_leaves")]);
     census(".forget_restoring_leaf(", &[("commands/terminal.rs", "forget_restoring_leaf")]);
     census(".restoring_keys()", &[
-        ("state/host_routing.rs", "place_for_leaf"), // classification and TTL refresh
-        ("state/host_routing.rs", "place_for_leaf"),
+        ("state/host_routing.rs", "place_owned"), // classification and TTL refresh
+        ("state/host_routing.rs", "place_owned"),
         ("state/host_routing.rs", "settle"), // successful placement consumes intent
         ("state/host_adoption/panes.rs", "surface_orphans"), // every orphan path skips waiting keys
     ]);
@@ -162,7 +162,7 @@ fn host_entry_points_have_generation_traces() {
         ("pty_host_client/discovery.rs", "fn discover_hosts_in("),
         ("pty_host_client.rs", "fn close_transport("),
         ("state/host_adoption.rs", "async fn adopt<"),
-        ("state/host_routing.rs", "async fn place_for_leaf<"),
+        ("state/host_routing.rs", "async fn place_owned<"),
         ("state/host_adoption/sweep.rs", "async fn sweep<"),
         ("state/host_adoption/reconnect.rs", "async fn reconnect_primary<"),
         ("state/host_adoption/reconnect.rs", "async fn reconnect_frozen<"),

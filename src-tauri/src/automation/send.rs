@@ -181,6 +181,9 @@ pub async fn deliver(
 impl<R: tauri::Runtime> TerminalWriter for crate::state::AppState<R> {
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write as _;
+        if self.host_table.keys().resolve_process(pc, false).is_none() {
+            return Err(format!("terminal {} has no writer", pc));
+        }
         // Local writer first, matching the order `send_prompt_to_terminal` used. Clone the Arc out so
         // the shard guard is released before the inner Mutex is locked.
         let local = self.shell_writer_channels.get(pc).map(|r| r.clone());

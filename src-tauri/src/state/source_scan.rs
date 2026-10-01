@@ -107,7 +107,7 @@ pub(super) fn production(source: &str) -> String {
 /// The body (braces included) of the function whose text starts with `signature`.
 /// Fails loudly when the function is gone: a guard that cannot find what it
 /// guards must not pass.
-pub(super) fn fn_body(src: &str, signature: &str) -> String {
+pub(crate) fn fn_body(src: &str, signature: &str) -> String {
     let start = src
         .find(signature)
         .unwrap_or_else(|| panic!("`{signature}` not found — this guard must fail loudly, not pass vacuously"));
