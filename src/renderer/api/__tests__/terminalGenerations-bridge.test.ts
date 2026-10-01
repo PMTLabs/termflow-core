@@ -81,6 +81,14 @@ describe('the backend side of the same contract', () => {
     expect(enumBody.slice(0, enumBody.indexOf('}'))).toMatch(/Current,\s*Previous,/);
   });
 
+  it('carries the same key on the fleet list, which the MCP list tool proxies', () => {
+    expect(rust('api_server', 'fleet.rs')).toContain('"generation": generation.as_str(),');
+  });
+
+  it('publishes a host connection under the event name the renderer also re-reads on', () => {
+    expect(rust('state', 'host_port.rs')).toContain('emit("pty-host:connected", ())');
+  });
+
   it('registers the command the tauri bridge invokes', () => {
     expect(rust('lib.rs')).toContain('commands::get_terminal_generations,');
     expect(rust('commands', 'terminal.rs')).toContain('pub fn get_terminal_generations(');
@@ -91,12 +99,23 @@ describe('the backend side of the same contract', () => {
   });
 
   it('announces when a host terminal is registered and when one is forgotten', () => {
+    const notifyRegistered = 'state.notify_terminal_generations();';
     const register = rust('commands', 'terminal.rs');
     const registerBody = register.slice(register.indexOf('fn register_host_terminal('));
-    expect(registerBody.slice(0, registerBody.indexOf('\n}\n'))).toContain('state.notify_terminal_generations();');
+    const registerFn = registerBody.slice(0, registerBody.indexOf('\n}\n'));
+    // After the terminal is observable, or a reader asked in between sees nothing of it.
+    expect(registerFn).toContain(notifyRegistered);
+    expect(registerFn.indexOf('state.host_terminals.insert(')).toBeGreaterThan(-1);
+    expect(registerFn.indexOf('state.terminals.insert(')).toBeGreaterThan(registerFn.indexOf('state.host_terminals.insert('));
+    expect(registerFn.indexOf(notifyRegistered)).toBeGreaterThan(registerFn.indexOf('state.terminals.insert('));
 
+    const notifyForgotten = 'self.notify_terminal_generations();';
     const terminals = rust('state', 'terminals.rs');
     const forget = terminals.slice(terminals.indexOf('pub fn forget_host_terminal('));
-    expect(forget.slice(0, forget.indexOf('\n    }\n'))).toContain('self.notify_terminal_generations();');
+    const forgetFn = forget.slice(0, forget.indexOf('\n    }\n'));
+    // After the channel is gone, or the announcement is answered with the terminal still there.
+    expect(forgetFn).toContain(notifyForgotten);
+    expect(forgetFn.indexOf('self.host_terminals.remove(')).toBeGreaterThan(-1);
+    expect(forgetFn.indexOf(notifyForgotten)).toBeGreaterThan(forgetFn.indexOf('self.host_terminals.remove('));
   });
 });

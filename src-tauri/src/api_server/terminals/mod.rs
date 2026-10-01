@@ -58,6 +58,9 @@ pub(crate) fn health_body(instance_id: &str) -> serde_json::Value {
 ///                        a major-version change, explicitly not done here.
 ///   `owningTabId`      — NEW: the tab that owns the leaf. `null` for a
 ///                        headless (no-renderer-pane) terminal.
+///   `generation`       — `"current"` or `"previous"`: whether the host serving the
+///                        terminal belongs to the running build. Always present;
+///                        `"previous"` also means "cannot be shown to be current".
 /// Resolve any caller-supplied terminal reference to THIS RUN's process id.
 ///
 /// Prefix-dispatched deliberately. Before design 014 the id spaces overlapped —

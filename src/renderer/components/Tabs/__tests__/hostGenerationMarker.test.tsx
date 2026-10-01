@@ -17,16 +17,15 @@ import {
 import { readSource } from '../../../utils/readSource';
 import type { HostGeneration } from '../../../types/electron';
 
-/** The backend's announcement, captured so a test can fire it. */
-let announce: (() => void) | null = null;
-let listenedEvent: string | null = null;
+/** The backend's announcements, captured by event name so a test can fire each one. */
+const handlers = new Map<string, () => void>();
 jest.mock('@tauri-apps/api/event', () => ({
   listen: (name: string, cb: () => void) => {
-    listenedEvent = name;
-    announce = cb;
-    return Promise.resolve(() => { announce = null; });
+    handlers.set(name, cb);
+    return Promise.resolve(() => { handlers.delete(name); });
   },
 }));
+const fire = (name: string) => act(async () => { handlers.get(name)?.(); await new Promise((r) => setTimeout(r, 0)); });
 
 let container: HTMLDivElement;
 let root: Root;
@@ -54,8 +53,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   __resetHostGenerationsForTest();
-  announce = null;
-  listenedEvent = null;
+  handlers.clear();
   delete (window as unknown as { electronAPI?: unknown }).electronAPI;
 });
 
@@ -100,13 +98,41 @@ describe('the tab strip face', () => {
     generations = { 'tm-pane': 'previous' };
     render(['tm-pane']);
     await flush();
-    expect(listenedEvent).toBe(TERMINAL_GENERATIONS);
+    expect([...handlers.keys()].sort()).toEqual(['pty-host:connected', TERMINAL_GENERATIONS].sort());
     expect(marker()).not.toBeNull();
 
     // The pane's shell is restarted: the same leaf is now served by the current host.
     generations = { 'tm-pane': 'current' };
-    await act(async () => { announce?.(); await new Promise((r) => setTimeout(r, 0)); });
+    await fire(TERMINAL_GENERATIONS);
     expect(marker()).toBeNull();
+  });
+
+  it('reads again when a host connection is published, with no terminal having changed', async () => {
+    generations = {};
+    render(['tm-pane']);
+    await flush();
+    expect(marker()).toBeNull();
+
+    // The primary reconnected after a pipe drop: the same terminal is judged afresh.
+    generations = { 'tm-pane': 'previous' };
+    await fire('pty-host:connected');
+    expect(marker()).not.toBeNull();
+  });
+
+  it('keeps a burst of announcements to one read running and one behind it', async () => {
+    render(['tm-pane']);
+    await flush();
+    getTerminalGenerations.mockClear();
+
+    let release: (value: Record<string, HostGeneration>) => void = () => {};
+    getTerminalGenerations.mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+    act(() => { for (let i = 0; i < 6; i += 1) handlers.get(TERMINAL_GENERATIONS)?.(); });
+    expect(getTerminalGenerations).toHaveBeenCalledTimes(1);
+
+    generations = { 'tm-pane': 'previous' };
+    await act(async () => { release({}); await new Promise((r) => setTimeout(r, 0)); });
+    expect(getTerminalGenerations).toHaveBeenCalledTimes(2);
+    expect(marker()).not.toBeNull();
   });
 
   it('keeps what it knew when a read fails, and lets the last read win over an older one', async () => {
@@ -135,13 +161,17 @@ describe('wiring', () => {
   const TABS = path.resolve(__dirname, '..');
   const MANAGER = readSource(path.resolve(TABS, 'TabManager.tsx'));
 
-  it('draws the marker inside the tab item, from the tab\'s own terminals', () => {
+  it('draws the marker in the leading group beside the admin badge, from the tab\'s own terminals', () => {
     const item = MANAGER.indexOf('className={`tab-item ');
-    const close = MANAGER.indexOf('className="tab-close"');
+    const admin = MANAGER.indexOf('className="tab-admin-badge"');
     const mark = MANAGER.indexOf('<PreviousHostForTerminals terminalIds={tabTerminalIds} />');
+    const title = MANAGER.indexOf('className="tab-title"');
     expect(item).toBeGreaterThan(-1);
-    expect(mark).toBeGreaterThan(item);
-    expect(mark).toBeLessThan(close);
+    expect(admin).toBeGreaterThan(item);
+    // Before the title: the trailing badges sit under the absolutely positioned close button.
+    expect(mark).toBeGreaterThan(admin);
+    expect(mark).toBeLessThan(title);
+    expect(MANAGER.indexOf('<PreviousHostForTerminals', mark + 1)).toBe(-1);
   });
 
   it('is styled as an inline badge that overlays nothing', () => {

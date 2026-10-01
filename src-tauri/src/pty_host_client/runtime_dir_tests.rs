@@ -24,6 +24,22 @@ fn launch_generation_is_install_directory_identity_and_fallback_has_none() {
     }
 }
 
+/// Off Windows no ConPTY pair ships, so the install directory is named by the host file's
+/// digest alone and a host's advertised build id names its generation. If the install key
+/// ever starts to include anything else there, this stops being true and the marker would
+/// mis-judge every adopted host.
+#[cfg(not(windows))]
+#[test]
+fn off_windows_the_generation_is_the_first_sixteen_digits_of_the_build_id() {
+    let dir = super::test_dirs::tempdir().unwrap();
+    let source = dir.path().join("bundled");
+    std::fs::write(&source, b"host bytes").unwrap();
+    let installed = super::resolve_launch_from(source, Some(&dir.path().join("runtime")));
+    let build_id = installed.build_id.expect("a build id");
+    assert_eq!(installed.generation.as_deref(), build_id.get(..16));
+    assert_eq!(super::exe_origin::generation_of_build_id(&build_id), installed.generation);
+}
+
 #[test]
 fn qualified_endpoints_distinct_per_generation() {
     let profile = id("work", Integrity::Medium);

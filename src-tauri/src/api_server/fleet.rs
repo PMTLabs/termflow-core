@@ -214,10 +214,9 @@ pub(crate) async fn fleet_terminals(State(state): State<AppState>) -> impl IntoR
     let device_name = self_hostname();
     let os = std::env::consts::OS.to_string();
     let terminals: Vec<serde_json::Value> = state
-        .terminals
+        .terminals_with_markers()
         .iter()
-        .map(|entry| {
-            let t = entry.value();
+        .map(|(t, generation)| {
             json!({
                 "id": t.id,
                 "title": t.name,
@@ -229,6 +228,7 @@ pub(crate) async fn fleet_terminals(State(state): State<AppState>) -> impl IntoR
                 // §4). The MCP `list_terminals` tool proxies this body verbatim.
                 "terminalId": t.renderer_terminal_id,
                 "owningTabId": t.owning_tab_id,
+                "generation": generation.as_str(),
             })
         })
         .collect();

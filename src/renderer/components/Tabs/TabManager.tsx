@@ -416,6 +416,11 @@ const TabItem: React.FC<TabItemProps> = ({
         {tab.elevated && (
           <span className="tab-admin-badge" title="Running as Administrator">🛡️</span>
         )}
+        {/* A standing property of the tab, like the admin badge, and in the same leading group for
+            the same reason: the trailing badges sit under the absolutely positioned close button,
+            which would hide this one and take its clicks. Clears once the shell is replaced on the
+            current host. */}
+        <PreviousHostForTerminals terminalIds={tabTerminalIds} />
         <span
           key={tab.activityTick ?? 0}
           className="tab-title"
@@ -426,9 +431,6 @@ const TabItem: React.FC<TabItemProps> = ({
         {isCanvasHere && (
           <span className="tab-canvas-here" title="Canvas Mode is centred on this tab's group">◎</span>
         )}
-        {/* A standing property of the tab, like the armed-automation badge: it holds whether or not
-            anything has happened, and clears once the shell is replaced on the current host. */}
-        <PreviousHostForTerminals terminalIds={tabTerminalIds} />
         {tab.hasBackgroundActivity && !tab.isActive && (
           <span className="tab-activity-dot" title="Background activity from an external (MCP/API) call">●</span>
         )}

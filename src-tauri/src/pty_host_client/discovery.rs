@@ -158,7 +158,7 @@ pub fn generation_of_endpoint(endpoint: &str) -> Option<String> {
     generation_of_endpoint_in(endpoint, &super::endpoints::endpoint_for_generation(None))
 }
 
-pub(super) fn generation_of_endpoint_in(endpoint: &str, legacy: &str) -> Option<String> {
+pub fn generation_of_endpoint_in(endpoint: &str, legacy: &str) -> Option<String> {
     if physical_endpoint(endpoint) == physical_endpoint(legacy) {
         return None;
     }

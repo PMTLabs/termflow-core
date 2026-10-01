@@ -19,7 +19,7 @@ mod endpoints;
 mod discovery;
 mod exe_origin;
 pub use endpoints::{current_host_paths, running_generation, HostPaths};
-pub use discovery::{discover_hosts, generation_of_endpoint, HostCandidate, HostRole};
+pub use discovery::{discover_hosts, generation_of_endpoint, generation_of_endpoint_in, HostCandidate, HostRole};
 
 use crate::state::ChannelPayload;
 use conn::{cancelled, ConnState};
@@ -241,11 +241,16 @@ impl PtyHostClient {
         self.exe_origin.spawned_here()
     }
 
-    /// The generation of a host this app did not start, read from where its
-    /// image lives. `None` when that cannot be shown: no way to ask the OS
-    /// here, the lookup failed, or the image is not in the install directory.
-    pub fn image_generation(&self) -> Option<String> {
-        self.exe_origin.image_generation(runtime_host_dir().as_deref())
+    /// The generation of a host this app did not start, as far as it can be
+    /// shown (see `ExeOrigin::generation`). `None` when it cannot.
+    pub fn host_generation(&self) -> Option<String> {
+        self.exe_origin.generation(runtime_host_dir().as_deref())
+    }
+
+    /// Record the build id the host advertised, from the discovery record read
+    /// before connecting.
+    pub fn set_advertised_build_id(&self, build_id: Option<String>) {
+        self.exe_origin.set_advertised_build_id(build_id);
     }
 
     /// Say that this connection's host was started here, for a connection with

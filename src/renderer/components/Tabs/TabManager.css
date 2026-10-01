@@ -277,7 +277,8 @@
 
 /* Previous-host marker — a shell in this tab is served by a terminal host from an older
    build. An inline icon with its own `title`, like the other standing per-tab states: it takes
-   its own width in the row and overlays nothing, so it never shadows the tab or its close button. */
+   its own width in the row and overlays nothing. It is rendered before the title, with the
+   admin badge: the trailing badges sit under `.tab-close`, which would cover it. */
 .tab-previous-host {
   display: inline-flex;
   align-items: center;

@@ -71,6 +71,18 @@ pub(crate) struct ServingHosts {
 }
 
 impl ServingHosts {
+    /// The hosts as they are now. `primary_endpoint` is the current host's
+    /// endpoint, or `None` when no terminal is on it and there is nothing to
+    /// name; `generation_of` reads the generation an endpoint is named after.
+    pub(crate) fn assemble(
+        primary: Option<PtyHostClient>,
+        primary_endpoint: Option<&str>,
+        generation_of: impl Fn(&str) -> Option<String>,
+        frozen: Vec<FrozenHost>,
+    ) -> Self {
+        Self { primary, primary_generation: primary_endpoint.and_then(generation_of), frozen }
+    }
+
     pub(crate) fn serving(&self, channel: Option<HostChannel>) -> Serving {
         match channel {
             // Not a host terminal, or the elevated host, which only this app
@@ -84,11 +96,11 @@ impl ServingHosts {
                 client => Serving::Host(
                     self.primary_generation
                         .clone()
-                        .or_else(|| client.as_ref().and_then(PtyHostClient::image_generation)),
+                        .or_else(|| client.as_ref().and_then(PtyHostClient::host_generation)),
                 ),
             },
             Some(HostChannel::Frozen(id)) => match self.frozen.iter().find(|h| h.id == id) {
-                Some(host) => Serving::Host(host.generation.clone().or_else(|| host.client.image_generation())),
+                Some(host) => Serving::Host(host.generation.clone().or_else(|| host.client.host_generation())),
                 // Retired between looking up the terminal and the host.
                 None => Serving::Host(None),
             },
@@ -141,36 +153,37 @@ pub(crate) fn markers_by_leaf(terminals: &[Terminal], markers: &[Marker]) -> Has
 impl<R: Runtime> AppState<R> {
     fn serving_hosts(&self) -> ServingHosts {
         let primary_terminals = self.host_terminals.iter().any(|e| *e.value() == HostChannel::Primary);
-        ServingHosts {
-            primary: self.pty_host_clone(),
-            primary_generation: primary_terminals
-                .then(|| crate::pty_host_client::generation_of_endpoint(&crate::pty_host_client::current_host_paths().endpoint))
-                .flatten(),
-            frozen: host_registry::frozen_hosts_snapshot(&self.frozen_hosts),
-        }
+        let primary_endpoint = primary_terminals.then(|| crate::pty_host_client::current_host_paths().endpoint);
+        ServingHosts::assemble(
+            self.pty_host_clone(),
+            primary_endpoint.as_deref(),
+            crate::pty_host_client::generation_of_endpoint,
+            host_registry::frozen_hosts_snapshot(&self.frozen_hosts),
+        )
+    }
+
+    /// The markers of `terminals` against the hosts as they are now and the
+    /// running build's generation: the one place the two are put together.
+    fn markers_for(&self, terminals: &[Terminal]) -> Vec<Marker> {
+        markers_of(
+            terminals,
+            &self.host_terminals,
+            &self.serving_hosts(),
+            crate::pty_host_client::running_generation().as_deref(),
+        )
     }
 
     /// Every registered terminal with its marker, taken from one snapshot so the
     /// two cannot disagree about which terminals exist.
     pub fn terminals_with_markers(&self) -> Vec<(Terminal, Marker)> {
         let terminals: Vec<Terminal> = self.terminals.iter().map(|e| e.value().clone()).collect();
-        let markers = markers_of(
-            &terminals,
-            &self.host_terminals,
-            &self.serving_hosts(),
-            crate::pty_host_client::running_generation().as_deref(),
-        );
+        let markers = self.markers_for(&terminals);
         terminals.into_iter().zip(markers).collect()
     }
 
     /// The marker of one terminal.
     pub fn terminal_marker(&self, terminal: &Terminal) -> Marker {
-        markers_of(
-            std::slice::from_ref(terminal),
-            &self.host_terminals,
-            &self.serving_hosts(),
-            crate::pty_host_client::running_generation().as_deref(),
-        )[0]
+        self.markers_for(std::slice::from_ref(terminal))[0]
     }
 
     /// The marker of every terminal that has a renderer pane, by leaf id.

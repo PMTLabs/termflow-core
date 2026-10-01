@@ -208,6 +208,7 @@ impl<R: Runtime> AppState<R> {
         // under its own content hash by `resolve_host_launch`) announces too.
         client.set_shutdown_control(flags.shutdown_control || origin == HostConnectionOrigin::SpawnedHere);
         client.set_lifecycle(plan.retention_for(origin));
+        client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })
     }
 
@@ -227,6 +228,7 @@ impl<R: Runtime> AppState<R> {
         client.set_shutdown_control(flags.shutdown_control);
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
         let build_id = candidate.record.as_ref().and_then(|r| r.build_id.clone());
+        client.set_advertised_build_id(build_id.clone());
         Ok(Opened { client, epoch, build_id })
     }
 }

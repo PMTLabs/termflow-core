@@ -1,7 +1,7 @@
 //! Host image-path classification. The path-shape table runs on every OS (forward
 //! slashes parse as separators on both); the live-connection lookups are
 //! Windows-only.
-use super::exe_origin::{classify_exe, generation_of_image, path_within, spawned_from_bundled_fallback};
+use super::exe_origin::{classify_exe, generation_of_build_id, generation_of_image, path_within, spawned_from_bundled_fallback};
 use super::*;
 use std::path::Path;
 
@@ -242,18 +242,46 @@ fn only_an_image_one_generation_dir_below_the_install_base_names_a_generation() 
     }
 }
 
+/// Only the first 16 hex digits of a full digest name a generation, and only when they are
+/// hex: the install directory is named by the first 8 bytes of the host file's digest.
+#[test]
+fn a_build_id_names_a_generation_by_its_first_sixteen_hex_digits() {
+    let full = format!("{GENERATION}{}", "f".repeat(48));
+    assert_eq!(generation_of_build_id(&full).as_deref(), Some(GENERATION));
+    assert_eq!(generation_of_build_id(&full.to_uppercase()).as_deref(), Some(GENERATION));
+    for unusable in ["", "0123456789abcde", "0123456789abcdeg", "not a digest at all..."] {
+        assert_eq!(generation_of_build_id(unusable), None, "{unusable:?}");
+    }
+}
+
+#[cfg(windows)]
 #[tokio::test]
-async fn a_client_reports_a_generation_only_from_an_image_it_can_place() {
+async fn a_windows_client_reports_a_generation_only_from_an_image_it_can_place() {
     let base = crate::pty_host_client::runtime_host_dir().expect("a per-user runtime dir");
     let (client, _server, _c) = conn_tests::wired();
+    let digest = format!("{GENERATION}{}", "f".repeat(48));
+    client.set_advertised_build_id(Some(digest));
 
     client.inject_exe_image(Some(base.join(GENERATION).join("termflow-pty-host")));
-    assert_eq!(client.image_generation().as_deref(), Some(GENERATION));
+    assert_eq!(client.host_generation().as_deref(), Some(GENERATION));
 
     client.inject_exe_image(Some(std::path::PathBuf::from("/opt/termflow/termflow-pty-host")));
-    assert_eq!(client.image_generation(), None, "an image outside the install base");
+    assert_eq!(client.host_generation(), None, "an image outside the install base");
+    // The ConPTY pair is part of a Windows generation, so the digest is not a substitute
+    // for an image that could not be read.
     client.inject_exe_image(None);
-    assert_eq!(client.image_generation(), None, "a failed lookup");
+    assert_eq!(client.host_generation(), None, "a failed lookup");
+}
+
+#[cfg(not(windows))]
+#[tokio::test]
+async fn a_client_off_windows_reports_the_generation_its_host_advertised() {
+    let (client, _server, _c) = conn_tests::wired();
+    assert_eq!(client.host_generation(), None, "nothing advertised");
+    client.set_advertised_build_id(Some(format!("{GENERATION}{}", "f".repeat(48))));
+    assert_eq!(client.host_generation().as_deref(), Some(GENERATION));
+    client.set_advertised_build_id(Some("garbage".to_string()));
+    assert_eq!(client.host_generation(), None);
 }
 
 #[tokio::test]
