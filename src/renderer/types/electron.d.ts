@@ -197,9 +197,11 @@ export interface ElectronAPI {
   // the current main window and focus it. See services/openSettings.ts.
   openSettingsInMainWindow?: (category?: string, detail?: string) => Promise<void>;
   registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
-  forgetRestoringLeaf: (leafId: string) => Promise<void>;
+  forgetRestoringLeaf: (leafId: string, processId?: string) => Promise<boolean | void>;
   bindShell: (leafId: string, processId?: string) => Promise<ShellBinding>;
   releaseShellBinding: (leafId: string) => Promise<void>;
+  beginShellRestore: () => Promise<void>;
+  endShellRestore: () => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   /** Delete persisted terminal scrollback for every renderer id NOT in keepIds (startup orphan sweep). */
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;

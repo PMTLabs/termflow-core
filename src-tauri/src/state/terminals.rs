@@ -874,7 +874,7 @@ impl<R: Runtime> AppState<R> {
                     SweepTick::Run => {}
                 }
                 state.host_restore_released.store(false, Ordering::Release);
-                state.release_host_restore_sweep(true).await;
+                state.release_host_restore_sweep().await;
             }
         });
     }
@@ -882,29 +882,34 @@ impl<R: Runtime> AppState<R> {
     pub async fn report_host_restore_settled(&self, window_label: String) {
         self.host_restore_pending_windows.remove(&window_label);
         if !restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) { return; }
-        self.release_host_restore_sweep(false).await;
+        self.release_host_restore_sweep().await;
     }
 
     pub async fn host_restore_window_destroyed(&self, window_label: &str) {
         self.host_restore_pending_windows.remove(window_label);
         if restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) {
-            self.release_host_restore_sweep(false).await;
+            self.release_host_restore_sweep().await;
         }
     }
 
-    async fn release_host_restore_sweep(&self, forced: bool) {
+    async fn release_host_restore_sweep(&self) {
+        use tauri::Manager;
+        let live: std::collections::HashSet<_> = self.app_handle.webview_windows().keys().cloned().collect();
+        self.session_bindings.reconcile_windows(&live, std::time::Instant::now());
+        self.host_restore_pending_windows.retain(|label, _| live.contains(label));
+        if self.session_bindings.restore_in_progress() { return; }
         // Validate BEFORE claiming the flag. `swap` marks the sweep released
         // unconditionally, so claiming first and validating second lets a caller
         // that arrives while windows are still pending poison the flag: the real
         // release would return early until the periodic worker resets the flag
-        // and forces another pass. The guard belongs at this choke point, not
+        // and retries another settled pass. The guard belongs here, not
         // in each caller.
-        if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
+        if !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
         if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
         if !sweep_claim_survives(self.run_host_restore_sweep().await) {
             // Hand the one-shot back so the backstop — or a later report — can
-            // retry. The periodic worker also resets this flag before forcing
-            // another pass after a transient failure.
+            // retry. The periodic worker also resets this flag before trying
+            // another settled pass after a transient failure.
             self.host_restore_released.store(false, Ordering::Release);
             log::warn!("[HOTSWAP] restore sweep could not complete; leaving it retryable");
         }
@@ -913,8 +918,18 @@ impl<R: Runtime> AppState<R> {
     /// Runs the sweep over every host. `false` means it did NOT complete and must
     /// stay retryable.
     async fn run_host_restore_sweep(&self) -> bool {
-        for process_id in self.session_bindings.reap_unbound(std::time::Instant::now()) {
-            let _ = crate::commands::close_terminal_process(self, process_id);
+        use tauri::Manager;
+        use super::host_adoption::PanePort;
+        let now = std::time::Instant::now();
+        let live = self.app_handle.webview_windows().keys().cloned().collect();
+        self.session_bindings.reconcile_windows(&live, now);
+        let protected = self.terminals.iter().filter_map(|t| {
+            if self.is_restoring_key(&t.session_key) { t.renderer_terminal_id.clone() } else { None }
+        }).collect();
+        for process_id in self.session_bindings.reap_unbound_except(now, &protected) {
+            if let Some(key) = self.session_key_for(&process_id) {
+                self.announce_recovered(&key);
+            }
         }
         super::host_adoption::sweep(self).await
     }
@@ -1037,6 +1052,13 @@ impl<R: Runtime> AppState<R> {
         host_registry::close_leaf_for_window(
             &self.intent_maps(), &self.session_bindings, &self.identity,
             leaf_id, window, std::time::Instant::now(),
+        )
+    }
+
+    pub fn close_leaf_incarnation_for_window(&self, leaf_id: &str, window: &str, expected: Option<&str>) -> Option<String> {
+        host_registry::close_leaf_incarnation_for_window(
+            &self.intent_maps(), &self.session_bindings, &self.identity,
+            leaf_id, window, expected, std::time::Instant::now(),
         )
     }
 

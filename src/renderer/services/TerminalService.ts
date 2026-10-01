@@ -260,10 +260,19 @@ export class TerminalServiceClass {
 
   /** Absence releases ownership; only an explicit close records closed intent. */
   private async releaseAbsentCreate(terminalId: string): Promise<void> {
-    try {
-      await this.api().releaseShellBinding?.(terminalId);
-    } catch (error) {
-      console.warn(`TerminalService: could not release the binding of ${terminalId}:`, error);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      // A replacement may reinstall this leaf while an earlier release retries.
+      if (attempt > 0 && findTabIdByTerminalId(this.paneTrees(), terminalId)) return;
+      try {
+        await this.api()?.releaseShellBinding?.(terminalId);
+        return;
+      } catch (error) {
+        if (attempt === 3) {
+          console.error(`TerminalService: binding release exhausted for ${terminalId}:`, error);
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt));
+      }
     }
   }
 
@@ -424,8 +433,10 @@ export class TerminalServiceClass {
 
     console.log(`TerminalService: Found process ${process.id} for terminal ${terminalId}, calling electronAPI.closeTerminal`);
     try {
-      await this.api().forgetRestoringLeaf(terminalId);
-      await this.api().closeTerminal(process.id);
+      const handled = await this.api().forgetRestoringLeaf(terminalId, process.id);
+      // Desktop leaf-close already applied window authority and physical close.
+      // Browser/older bridges still require their process-addressed close.
+      if (!handled) await this.api().closeTerminal(process.id);
       this.processes.delete(terminalId);
       // Forget this terminal's per-pane zoom so closed terminals don't pile up in
       // the zoom slice. Moves use detachTerminal (which keeps the entry so zoom
@@ -456,10 +467,14 @@ export class TerminalServiceClass {
     try {
       if (this.api()?.bindShell) {
         const deadline = Date.now() + 15_000;
-        let firstAttempt = true;
         while (true) {
-          if (!firstAttempt && !findTabIdByTerminalId(this.paneTrees(), terminalId)) return '';
-          firstAttempt = false;
+          // Reconciliation runs before tree installation. Do not consume its
+          // restore intent or acquire/release a holder in that pre-install gap.
+          if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
+            if (Date.now() >= deadline) return '';
+            await new Promise(resolve => setTimeout(resolve, 250));
+            continue;
+          }
           const answer = await this.api().bindShell(terminalId, processId);
           if (answer.status === 'bound' && answer.processId === processId) {
             if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {

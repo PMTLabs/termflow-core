@@ -2,7 +2,7 @@ import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs, updateTabMeta } from '../store/slices/tabsSlice';
 import {
-  addTabTree, focusPane, focusPaneInTab, setActiveTabId, resetPanes, setMaximizedPane, PaneNode,
+  addTabTree, focusPane, focusPaneInTab, setActiveTabId, resetPanes, setMaximizedPane,
 } from '../store/slices/panesSlice';
 import { findTabIdByTerminalId, getAllTerminalIds, findLeaf } from '../store/slices/paneTreeOps';
 import { setDefaultProfile } from '../store/slices/settingsSlice';
@@ -10,6 +10,7 @@ import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
+import { beginPaneReplacement, endPaneReplacement } from './paneDepartures';
 import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
 import { groupLiveTerminalsByLeaf } from './reconcileTerminals';
 import { getAllCwdSnapshots } from './cwdSnapshot';
@@ -265,9 +266,31 @@ class StateManagerClass {
   private async asReplacement<T>(body: () => Promise<T>): Promise<T> {
     this.replacementDepth++;
     try {
-      return await body();
+      return await this.withShellRestore(body);
     } finally {
       this.replacementDepth--;
+    }
+  }
+
+  /** Keep backend recovery away from pre-install reconciliation and other awaits. */
+  private async withShellRestore<T>(body: () => Promise<T>): Promise<T> {
+    beginPaneReplacement();
+    let began = false;
+    try {
+      if (window.electronAPI?.beginShellRestore) await window.electronAPI.beginShellRestore();
+      began = true;
+      return await body();
+    } finally {
+      endPaneReplacement();
+      for (let attempt = 0; began && attempt < 4; attempt++) {
+        try {
+          await window.electronAPI?.endShellRestore?.();
+          break;
+        } catch (error) {
+          if (attempt === 3) console.error('StateManager: restore completion exhausted:', error);
+          else await new Promise(resolve => setTimeout(resolve, 250 * 2 ** attempt));
+        }
+      }
     }
   }
 
@@ -1332,6 +1355,9 @@ class StateManagerClass {
       // same reasoning as `restoreState`.
       seedRestoredCwds(snapshot.terminalCwds);
 
+      if (!await this.registerRestoringTrees(snapshot, () => generation === this.loadGeneration)) return false;
+      if (generation !== this.loadGeneration) return false;
+
       // Best-effort reattach to whatever survived a reload — a near no-op when
       // `TerminalService`'s map is already warm (nothing reloaded), and the
       // only way a persisted undo snapshot's ids point at anything live again
@@ -1382,6 +1408,10 @@ class StateManagerClass {
    * in `treesByTabId`) byte-identical.
    */
   async loadTabScopedLayout(layoutId: string, dispatch: Dispatch): Promise<boolean> {
+    return this.withShellRestore(() => this.loadTabScopedLayoutInner(layoutId, dispatch));
+  }
+
+  private async loadTabScopedLayoutInner(layoutId: string, dispatch: Dispatch): Promise<boolean> {
     try {
       const store = (window as any).__REDUX_STORE__;
       if (!store) throw new Error('Store not available');
@@ -1723,12 +1753,8 @@ class StateManagerClass {
    * Clear current state (used before loading a layout)
    */
   private clearCurrentState(dispatch: Dispatch): void {
-    // A replacement is not a close, but every old leaf releases this window's
-    // binding, including leaves whose create is still waiting on a host.
-    const trees = (window as any).__REDUX_STORE__?.getState().panes.treesByTabId ?? {};
-    for (const tree of Object.values(trees)) {
-      for (const leaf of getAllTerminalIds(tree as PaneNode | null)) terminalService.detachTerminal(leaf);
-    }
+    // The store's departure differ releases only leaves absent after the
+    // replacement, preserving retained leaves across pre-install awaits.
     // Clear the local tab panes mapping
     clearTabPanes();
     // Clear all tabs first

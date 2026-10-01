@@ -121,9 +121,11 @@ interface ElectronAPI {
   /// regardless of which window this was invoked from.
   openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
   registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
-  forgetRestoringLeaf: (leafId: string) => Promise<void>;
+  forgetRestoringLeaf: (leafId: string, processId?: string) => Promise<boolean | void>;
   bindShell: (leafId: string, processId?: string) => Promise<ShellBinding>;
   releaseShellBinding: (leafId: string) => Promise<void>;
+  beginShellRestore: () => Promise<void>;
+  endShellRestore: () => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
   writeToTerminal: (id: string, data: string) => Promise<void>;
@@ -477,9 +479,11 @@ const tauriBridge: ElectronAPI = {
   },
 
   registerRestoringLeaves: async (leaves) => invoke<void>('register_restoring_leaves', { leaves }),
-  forgetRestoringLeaf: async (leafId) => invoke<void>('forget_restoring_leaf', { leafId }),
+  forgetRestoringLeaf: async (leafId, processId) => invoke<boolean>('forget_restoring_leaf', processId ? { leafId, processId } : { leafId }),
   bindShell: async (leafId, processId) => invoke<ShellBinding>('bind_shell', { leafId, processId }),
   releaseShellBinding: async (leafId) => invoke<void>('release_shell_binding', { leafId }),
+  beginShellRestore: async () => invoke<void>('begin_shell_restore'),
+  endShellRestore: async () => invoke<void>('end_shell_restore'),
   closeTerminal: async (id) => {
     return invoke('close_terminal', { id });
   },

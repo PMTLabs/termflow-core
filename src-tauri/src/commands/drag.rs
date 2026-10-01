@@ -262,7 +262,7 @@ pub fn claim_global_pane_drag(
             let payload = state.detach_payloads.remove(&token).map(|(_, v)| v);
             state.detach_payload_sources.remove(&token);
             if let Some(tree) = payload.as_ref().and_then(|p| p.get("paneTree")) {
-                state.session_bindings.release_tree(tree, &source_label, std::time::Instant::now());
+                state.session_bindings.transfer_tree(tree, &source_label, window.label(), std::time::Instant::now());
             }
             if let Some(src) = app_handle.get_webview_window(&source_label) {
                 let _ = src.emit("pane-drag:claimed", token.clone());

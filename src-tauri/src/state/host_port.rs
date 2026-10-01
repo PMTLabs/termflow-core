@@ -394,12 +394,23 @@ impl<R: Runtime> PanePort for AppState<R> {
     }
 
     fn announce_recovered(&self, session_key: &str) {
-        let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
+        // Registered-but-unheld shells reuse their exact run; unknown host
+        // sessions still take the reserved-session attach path.
+        let process = self.identity.process_for_session(session_key);
+        let target_window = self.resolve_active_window_label();
+        if let Some(process) = &process {
+            if !self.session_bindings.prepare_recovery(process, &target_window, std::time::Instant::now()) { return; }
+        }
+        let leaf_id = process.as_deref().and_then(|p| self.terminals.get(p)
+            .and_then(|t| t.renderer_terminal_id.clone()))
+            .unwrap_or_else(|| format!("tm-{}", uuid::Uuid::new_v4().simple()));
+        let attach_key = if process.is_some() { None } else { Some(session_key) };
         if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
-            "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
-            "rendererTerminalId": leaf_id, "sessionKey": session_key,
-            "targetWindow": self.resolve_active_window_label(),
+            "name": "Recovered terminal", "profile": "default", "processId": process.clone().unwrap_or_else(|| leaf_id.clone()),
+            "rendererTerminalId": leaf_id, "sessionKey": attach_key,
+            "targetWindow": target_window,
         })) {
+            if let Some(process) = process { self.session_bindings.retry_recovery(&process); }
             log::warn!("[HOTSWAP] failed to surface recovered session {session_key}: {e}");
         }
     }

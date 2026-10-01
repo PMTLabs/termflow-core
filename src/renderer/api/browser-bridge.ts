@@ -190,13 +190,15 @@ class BrowserBridge implements ElectronAPI {
         throw new Error('Restoring terminal hosts requires the desktop bridge');
     }
 
-    async forgetRestoringLeaf(_leafId: string): Promise<void> { }
+    async forgetRestoringLeaf(_leafId: string, _processId?: string): Promise<void> { }
 
     // Browser terminals are single-window REST shells, not desktop bindings.
     async bindShell(_leafId: string, processId?: string): Promise<ShellBinding> {
         return processId ? { status: 'bound', processId } : { status: 'none' };
     }
     async releaseShellBinding(_leafId: string): Promise<void> { }
+    async beginShellRestore(): Promise<void> { }
+    async endShellRestore(): Promise<void> { }
 
     async closeTerminal(id: string): Promise<void> {
         try {

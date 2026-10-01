@@ -624,7 +624,7 @@ fn closing_one_window_keeps_the_other_copy_keyed_and_hidden_from_orphan_surfacin
 }
 
 #[test]
-fn another_windows_close_does_not_close_a_provisional_registration_before_spawn_returns() {
+fn moved_destinations_close_does_not_close_a_provisional_registration_before_spawn_returns() {
     let i = Intent::new(&[]);
     let bindings = crate::session_bindings::SessionBindings::default();
     let identity = crate::identity_index::IdentityIndex::new();
@@ -633,6 +633,7 @@ fn another_windows_close_does_not_close_a_provisional_registration_before_spawn_
     let creating = bindings.begin_create("tm-leaf", "source", now).unwrap();
     bindings.stage_process("tm-leaf", "pc-provisional");
     identity.index("pc-provisional", Some("tm-leaf"), "tm-leaf");
+    bindings.transfer_tree(&serde_json::json!({"terminalId": "tm-leaf"}), "source", "destination", now);
     assert_eq!(close_leaf_for_window(&i.maps(), &bindings, &identity, "tm-leaf", "destination", now), None);
     assert!(i.closed.contains_key("tm-leaf"));
     assert!(!creating.complete("pc-final-fallback", now), "close the final shell, not a provisional identity");

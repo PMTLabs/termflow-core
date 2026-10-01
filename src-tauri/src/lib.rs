@@ -874,6 +874,8 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
         commands::report_host_restore_settled,
+        commands::begin_shell_restore,
+        commands::end_shell_restore,
         commands::register_restoring_leaves,
         commands::forget_restoring_leaf,
         commands::bind_shell,

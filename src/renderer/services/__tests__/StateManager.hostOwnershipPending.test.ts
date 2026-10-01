@@ -11,6 +11,7 @@ import { restoreTabPanesInPlace } from '../tabPanesStore';
 import { pushUndo, __resetLayoutUndoForTests } from '../layoutUndo';
 import { captureWorkspaceSnapshot } from '../workspaceSnapshot';
 import { TerminalServiceClass } from '../TerminalService';
+import { attachPaneDepartureSync } from '../paneDepartures';
 import fs from 'fs';
 import path from 'path';
 import ts from 'typescript';
@@ -229,6 +230,7 @@ test('clearCurrentState releases all window leaves and cancels a wait without re
   };
   delete (window as any).electronAPI;
   const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any);
+  const stopDepartures = attachPaneDepartureSync(store, id => service.detachTerminal(id));
   const creating = service.createTerminal('tm-wait');
   await flush();
   (window as any).electronAPI = api;
@@ -238,6 +240,7 @@ test('clearCurrentState releases all window leaves and cancels a wait without re
   expect(api.createTerminal).toHaveBeenCalledTimes(1);
   expect(api.releaseShellBinding.mock.calls.map(([id]) => id).sort()).toEqual(['tm-background', 'tm-wait']);
   expect(api.forgetRestoringLeaf).not.toHaveBeenCalled();
+  stopDepartures();
 });
 
 /** Census the install operations, not a hand-written list of layout-loader names. */

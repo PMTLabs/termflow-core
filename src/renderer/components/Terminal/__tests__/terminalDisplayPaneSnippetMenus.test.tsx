@@ -84,6 +84,7 @@ jest.mock('../../../services/TerminalService', () => ({
     takeKeyboardProtocolHandoff: jest.fn(),
     stashPromptGate: jest.fn(), markReattachedSession: jest.fn(), stashKeyboardProtocol: jest.fn(),
     writeToTerminal: jest.fn(() => Promise.resolve()),
+    detachTerminal: jest.fn(),
   },
 }));
 jest.mock('../../../services/commandHistoryService', () => ({

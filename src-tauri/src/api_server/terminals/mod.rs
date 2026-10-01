@@ -363,7 +363,7 @@ pub(crate) async fn create_terminal(
     // No restored scrollback, as before: `resolve_api_spawn_identity` always mints
     // a FRESH `tm-*` leaf, so the `stage_scrollback` inside the routed spawn can
     // never find a stored row for it.
-    let spawned = crate::commands::spawn_routed(
+    let spawned = crate::commands::spawn_unowned_routed(
         &state,
         crate::commands::SpawnRequest {
             leaf_id: identity.renderer_terminal_id.clone(),
@@ -488,15 +488,12 @@ pub(crate) async fn delete_terminal(
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
     // Take the pid first (guard drops at end of statement, before cleanup).
-    let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
+    let Some(_) = state.terminals.get(&id).map(|t| t.pid) else {
         return Json(json!({ "error": "Terminal not found" }));
     };
     // Parity with the UI close path: host-owned → tell the sidecar to close the
     // session; otherwise kill the local shell tree. Then clean up every map.
-    if !state.host_close(&id) {
-        crate::pty_manager::kill_process_tree(pid);
-    }
-    state.cleanup_terminal_state(&id);
+    let _ = crate::commands::close_terminal_process_with_history(&state, id, false);
     Json(json!({ "status": "ok" }))
 }
 

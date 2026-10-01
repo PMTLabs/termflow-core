@@ -16,6 +16,7 @@ jest.mock('../../../services/TerminalService', () => ({
     closeTerminal,
     writeToTerminal: jest.fn(),
     resizeTerminal: jest.fn(),
+    detachTerminal: jest.fn(),
     stashPromptGate: jest.fn(),
   },
 }));

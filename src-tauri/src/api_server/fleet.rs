@@ -533,14 +533,12 @@ pub(crate) async fn fleet_close(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(pid) = state.terminals.get(&state.resolve_ref(&body.terminal_id)).map(|t| t.pid) else {
+            let id = state.resolve_ref(&body.terminal_id);
+            let Some(_) = state.terminals.get(&id).map(|t| t.pid) else {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
             };
-            // Host-owned → close via the sidecar; else kill the local tree.
-            if !state.host_close(&state.resolve_ref(&body.terminal_id)) {
-                crate::pty_manager::kill_process_tree(pid);
-            }
-            state.cleanup_terminal_state(&state.resolve_ref(&body.terminal_id));
+            // Keep the API's existing history semantics while sharing cancellation.
+            let _ = crate::commands::close_terminal_process_with_history(&state, id, false);
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,
@@ -696,7 +694,7 @@ pub(crate) async fn fleet_local_run(
             // Its identity is UNCHANGED — it keeps the `tb-*` it minted itself as
             // both owner and leaf, which design 011 §3 blesses precisely because it
             // minted it ("no create may take a root leaf it did not itself mint").
-            let new_id = match crate::commands::spawn_routed(
+            let new_id = match crate::commands::spawn_unowned_routed(
                 &state,
                 crate::commands::SpawnRequest {
                     leaf_id: fleet_leaf_id.clone(),

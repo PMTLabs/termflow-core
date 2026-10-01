@@ -19,6 +19,99 @@ const contended = (id: string) => new Error(`host-session-contended: ${id} regis
 beforeEach(() => { jest.useFakeTimers(); delete (window as any).electronAPI; });
 afterEach(() => { jest.useRealTimers(); });
 
+test('failed release retries while the source window remains alive and the leaf is absent', async () => {
+  const host = makeBindingHost();
+  const store = makeStore(); seed(store);
+  const api = host.apiFor('source');
+  host.seed('tm-wait', 'pc-p', 'source');
+  host.seed('other', 'pc-q', 'other-window');
+  const originalRelease = api.releaseShellBinding.getMockImplementation()!;
+  api.releaseShellBinding.mockRejectedValueOnce(new Error('temporary IPC failure'));
+  const { service } = makeService(store, api.createTerminal, api);
+  service.registerExistingTerminal('tm-wait', 'pc-p');
+  await flush();
+  store.dispatch(removeTabTree('tb-wait'));
+  service.detachTerminal('tm-wait');
+  await flush();
+  expect(host.holder('tm-wait')).toBe('source');
+  api.releaseShellBinding.mockImplementation(originalRelease);
+  await jest.advanceTimersByTimeAsync(250);
+  expect(api.releaseShellBinding).toHaveBeenCalledTimes(2);
+  expect(host.holder('tm-wait')).toBeUndefined();
+  expect(host.holder('other')).toBe('other-window');
+  expect(host.closed).toEqual([]);
+});
+
+test('release retry is bounded and does not send a late release after reinstall', async () => {
+  const store = makeStore(); seed(store);
+  const release = jest.fn().mockRejectedValue(new Error('IPC down'));
+  const { service } = makeService(store, jest.fn(), { releaseShellBinding: release });
+  store.dispatch(removeTabTree('tb-wait'));
+  service.detachTerminal('tm-wait');
+  await jest.advanceTimersByTimeAsync(1750);
+  expect(release).toHaveBeenCalledTimes(4);
+  service.detachTerminal('tm-wait');
+  await flush();
+  seed(store);
+  await jest.advanceTimersByTimeAsync(2000);
+  expect(release).toHaveBeenCalledTimes(5);
+});
+
+test('a refused duplicate pane closes without killing the process held by another window', async () => {
+  const host = makeBindingHost();
+  host.seed('tm-wait', 'pc-p', 'first');
+  const store = makeStore(); seed(store);
+  const api = host.apiFor('second');
+  const { service } = makeService(store, api.createTerminal, api);
+  await expect(service.createTerminal('tm-wait')).rejects.toThrow('host-session-contended');
+  await service.closeTerminal('tm-wait');
+  expect(host.closed).toEqual([]);
+  expect(host.holder('tm-wait')).toBe('first');
+});
+
+test('desktop close acknowledgement prevents an unauthorized second process-close after transfer', async () => {
+  const host = makeBindingHost();
+  const store = makeStore(); seed(store);
+  host.seed('tm-wait', 'pc-p', 'source');
+  const api = host.apiFor('source');
+  const { service } = makeService(store, api.createTerminal, api);
+  service.registerExistingTerminal('tm-wait', 'pc-p');
+  await flush();
+  host.transfer('tm-wait', 'source', 'destination');
+  const destinationApi = host.apiFor('destination');
+  expect(await destinationApi.bindShell('tm-wait', 'pc-p')).toEqual({ status: 'bound', processId: 'pc-p' });
+  await service.closeTerminal('tm-wait');
+  expect(api.forgetRestoringLeaf).toHaveBeenCalledWith('tm-wait', 'pc-p');
+  expect(api.closeTerminal).not.toHaveBeenCalled();
+  expect(host.closed).toEqual([]);
+  expect(host.holder('tm-wait')).toBe('destination');
+});
+
+test('backend transfer precedes source removal and its late reply never reacquires the holder', async () => {
+  const host = makeBindingHost();
+  const sourceStore = makeStore(); seed(sourceStore);
+  const destinationStore = makeStore(); seed(destinationStore);
+  const sourceApi = host.apiFor('source');
+  const destinationApi = host.apiFor('destination');
+  const source = makeService(sourceStore, sourceApi.createTerminal, sourceApi);
+  const destination = makeService(destinationStore, destinationApi.createTerminal, destinationApi);
+  const pendingSource = source.service.createTerminal('tm-wait');
+  await flush();
+  host.transfer('tm-wait', 'source', 'destination');
+  const pendingDestination = destination.service.createTerminal('tm-wait');
+  await flush();
+  host.complete('tm-wait');
+  await flush();
+  expect(await pendingSource).toBe('');
+  expect(source.service.getProcessId('tm-wait')).toBeUndefined();
+  sourceStore.dispatch(removeTabTree('tb-wait'));
+  source.service.detachTerminal('tm-wait');
+  await jest.advanceTimersByTimeAsync(1000);
+  expect(await pendingDestination).toBe('pc-old-host');
+  expect(host.holder('tm-wait')).toBe('destination');
+  expect(host.closed).toEqual([]);
+});
+
 test('split_a_waiting_solo_pane_does_not_spawn', async () => {
   const store = makeStore();
   seed(store);

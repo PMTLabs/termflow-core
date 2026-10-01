@@ -633,8 +633,8 @@ pub struct AppState<R: Runtime = Wry> {
     /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
     /// type so it is unit-testable without a Tauri AppHandle.
     pub identity: crate::identity_index::IdentityIndex,
-    /// Shells a window created for a pane that had already moved away, waiting for
-    /// the window that has the pane to take them (single use, short TTL).
+    /// Window-scoped holders, create reservations and restore intents. Unheld
+    /// shells are recovered without destroying their processes or history.
     pub session_bindings: crate::session_bindings::SessionBindings,
     // Sessions the sidecar still held when we connected (survived a hot-swap),
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;

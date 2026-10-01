@@ -529,8 +529,20 @@ pub(super) fn close_leaf_for_window(
     window: &str,
     now: Instant,
 ) -> Option<String> {
+    close_leaf_incarnation_for_window(maps, bindings, identity, leaf_id, window, None, now)
+}
+
+pub(super) fn close_leaf_incarnation_for_window(
+    maps: &IntentMaps,
+    bindings: &crate::session_bindings::SessionBindings,
+    identity: &crate::identity_index::IdentityIndex,
+    leaf_id: &str,
+    window: &str,
+    expected: Option<&str>,
+    now: Instant,
+) -> Option<String> {
     let registered = identity.process_for_leaf(leaf_id);
-    bindings.close_registered_with(leaf_id, window, registered.as_deref(), now, |other_intent| {
+    bindings.close_expected_registered_with(leaf_id, window, registered.as_deref(), expected, now, |other_intent| {
         if !other_intent { forget_restoring_leaf(maps, leaf_id, now); }
     })
 }

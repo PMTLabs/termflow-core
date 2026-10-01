@@ -872,6 +872,9 @@ mod sweep_tests;
 #[cfg(test)]
 mod routing_tests;
 #[cfg(test)]
+#[path = "host_adoption/binding_lifecycle_tests.rs"]
+mod binding_lifecycle_tests;
+#[cfg(test)]
 mod retire_tests;
 #[cfg(test)]
 mod retire_real_tests;

@@ -272,6 +272,9 @@ pub fn spawn_terminal(
     // Index alongside registration so a `tm-` lookup resolves for in-process
     // terminals too (design 014 §A3). This path never reaches the pty-host, so
     // its session key is its own id.
+    if let Some(leaf) = renderer_terminal_id.as_deref() {
+        app_state.session_bindings.stage_process(leaf, &id);
+    }
     app_state.identity.index(&id, renderer_terminal_id.as_deref(), &id);
     app_state.terminals.insert(id.clone(), Terminal {
         id: id.clone(),

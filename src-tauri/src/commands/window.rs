@@ -396,7 +396,7 @@ pub fn take_detach_payload(
         // Taking back one's own stash is cancellation, not a move.
         if source != window.label() {
             if let Some(tree) = payload.as_ref().and_then(|p| p.get("paneTree")) {
-                state.session_bindings.release_tree(tree, &source, std::time::Instant::now());
+                state.session_bindings.transfer_tree(tree, &source, window.label(), std::time::Instant::now());
             }
         }
     }

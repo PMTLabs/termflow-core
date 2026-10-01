@@ -47,6 +47,18 @@ describe('tauriBridge restore intent contract', () => {
     expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-migrated' });
   });
 
+  it('qualifies a live pane close by process and forwards the handled acknowledgement', async () => {
+    invokeMock.mockResolvedValueOnce(true);
+    await expect(tauriBridge.forgetRestoringLeaf('tm-leaf', 'pc-p')).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-leaf', processId: 'pc-p' });
+  });
+
+  it('brackets restore installation without caller-selected window labels', async () => {
+    await tauriBridge.beginShellRestore();
+    await tauriBridge.endShellRestore();
+    expect(invokeMock.mock.calls).toEqual([['begin_shell_restore'], ['end_shell_restore']]);
+  });
+
   it('releases a binding by leaf without an offer or a caller-supplied window label', async () => {
     await tauriBridge.releaseShellBinding('tm-moved');
     expect(invokeMock).toHaveBeenCalledWith('release_shell_binding', { leafId: 'tm-moved' });

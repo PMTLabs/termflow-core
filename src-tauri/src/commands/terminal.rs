@@ -234,6 +234,17 @@ pub struct RestoringLeaf {
     pub session_key: Option<String>,
 }
 
+/// Protect the pre-install awaits of a renderer restore transaction.
+#[tauri::command]
+pub fn begin_shell_restore(window: tauri::Window, state: State<'_, AppState>) {
+    state.session_bindings.begin_restore(window.label());
+}
+
+#[tauri::command]
+pub fn end_shell_restore(window: tauri::Window, state: State<'_, AppState>) {
+    state.session_bindings.end_restore(window.label());
+}
+
 /// Record that these persisted panes are about to mount, BEFORE any of them does.
 /// From then on a create for one of their session keys is a restore: it waits for
 /// the terminal hosts to answer instead of starting a second shell under a key a
@@ -256,23 +267,24 @@ pub fn register_restoring_leaves(
     Ok(())
 }
 
-/// Closing a leaf is authoritative even if another window is creating its
-/// shell. Only this window's restore intent is removed.
+/// Closing an unheld leaf cancels an outstanding create, including after a move.
+/// A refused duplicate cannot close another window's held shell.
 #[tauri::command]
 pub fn forget_restoring_leaf(
     window: tauri::Window,
     state: State<'_, AppState>,
     leaf_id: String,
-) -> Result<(), String> {
-    let process = state.close_leaf_for_window(&leaf_id, window.label());
+    process_id: Option<String>,
+) -> Result<bool, String> {
+    let process = state.close_leaf_incarnation_for_window(&leaf_id, window.label(), process_id.as_deref());
     if let Some(process) = process {
         close_terminal_process(state.inner(), process)?;
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Bind only when no other window holds this shell. The label is supplied by
-/// Tauri, never by the renderer. Publication waits for the final spawn result.
+/// Tauri, never by the renderer. Every routed producer reserves final publication.
 #[tauri::command]
 pub fn bind_shell(
     window: tauri::Window,
@@ -466,6 +478,19 @@ pub(crate) struct SpawnRequest {
 /// and leave every agent-created terminal in-process — blocking Offload & Close
 /// for as long as one was alive (plan 019). A new spawn site must call this, not
 /// `pty_manager::spawn_terminal`; `api_spawn_routing_tests` enforces that.
+/// Headless producers share final publication and cancellation, without a UI lease.
+pub(crate) async fn spawn_unowned_routed(state: &AppState, req: SpawnRequest) -> Result<String, String> {
+    let creating = state.session_bindings.begin_headless_create(&req.leaf_id, std::time::Instant::now())?;
+    let result = spawn_routed(state, req).await;
+    if let Ok(process) = &result {
+        if !creating.complete(process, std::time::Instant::now()) {
+            close_terminal_process_with_history(state, process.clone(), false)?;
+            return Err("shell closed while create was running".into());
+        }
+    }
+    result
+}
+
 pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<String, String> {
     let SpawnRequest {
         leaf_id: id,
@@ -724,6 +749,9 @@ fn register_host_terminal(
     // Index BEFORE the terminal becomes observable: the pty-host translates every
     // inbound frame through `process_for_session`, so a frame arriving between the
     // spawn and this call would be dropped as an unknown session.
+    if let Some(leaf) = ident.leaf.as_deref() {
+        state.session_bindings.stage_process(leaf, id);
+    }
     state.identity.index(id, leaf.as_deref(), &ident.session_key);
     state.terminals.insert(
         id.to_string(),
@@ -746,9 +774,6 @@ fn register_host_terminal(
             title_color: None,
         },
     );
-    if let Some(leaf) = ident.leaf.as_deref() {
-        state.session_bindings.stage_process(leaf, id);
-    }
     // After the terminal is observable: whoever asks which host serves it now
     // gets an answer.
     state.notify_terminal_generations();
@@ -1070,8 +1095,12 @@ pub async fn close_terminal(
     close_terminal_process(state.inner(), id)
 }
 
-/// Shared by explicit close, close-during-create, and unbound-shell cleanup.
+/// Shared by explicit close and close-during-create. API closes retain history.
 pub(crate) fn close_terminal_process<R: tauri::Runtime>(state: &AppState<R>, id: String) -> Result<(), String> {
+    close_terminal_process_with_history(state, id, true)
+}
+
+pub(crate) fn close_terminal_process_with_history<R: tauri::Runtime>(state: &AppState<R>, id: String, delete_history: bool) -> Result<(), String> {
     // Timed alongside `[SPAWN]` so a close/open pair can be read as one sequence:
     // whether the cost sits in this command or in the sidecar's answer to the
     // NEXT spawn tells you which side to look at.
@@ -1083,66 +1112,48 @@ pub(crate) fn close_terminal_process<R: tauri::Runtime>(state: &AppState<R>, id:
     } else {
         return Ok(()); // An exit or another close already removed this process.
     };
-    if let Some(leaf) = tab_id.as_deref() {
-        state.session_bindings.close(leaf, "");
-        if !state.session_bindings.has_intent(leaf, std::time::Instant::now()) {
-            state.mark_closed_unowned(&state.terminals.get(&id).map(|t| t.session_key.clone()).unwrap_or_else(|| leaf.to_string()));
-        }
-    }
-
-    if state.session_bindings.defer_process_close(&id) {
-        return Ok(());
-    }
-
-    // Host-owned: tell the sidecar to close the session (it kills the child);
-    // otherwise kill the local process tree.
-    if !state.host_close(&id) {
-        // Kill the process tree (parent and all children)
-        crate::pty_manager::kill_process_tree(pid);
-    }
-
-    // Clean up ALL state entries (incl. terminal_history/tmux_sessions, which
-    // the old inline cleanup leaked). Dropping the pty also EOFs the reader.
-    //
-    // Explicit user close: drop this terminal's persisted scrollback so a closed
-    // tab never reappears on the next restart (shell-exit keeps it — see
-    // cleanup_terminal_state). Both run under the per-terminal persist guard
-    // (review 062): the kill above EOFs the reader, whose exit-path persist could
-    // otherwise clone the screen, render for milliseconds, and re-upsert the row
-    // AFTER this delete. With the guard, either the persist finishes first (row
-    // recreated, then deleted here) or it starts after cleanup and no-ops on the
-    // missing terminal — delete semantics hold in both orders.
-    {
-        let guard_arc = state.history_persist_guard(&id);
-        let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
-        state.cleanup_terminal_state(&id);
-        if let Some(tab_id) = tab_id {
-            state.history_store.delete(&tab_id);
-            // ...and the canvas wires that named it. Nothing else ever deleted an edge on
-            // a terminal's death, so `canvas_edges` grew for the life of the profile and
-            // every `get_graph` deserialised the accumulated history.
-            //
-            // Keyed on the RENDERER id, which is the id space edges use — the same one
-            // `history_store` is keyed by, and deliberately not `id` (the backend handle).
-            // Targeted deletion rather than `prune_edges`: pruning takes a liveness set and
-            // would reap a restored-but-unspawned peer's edges, which is precisely the bug
-            // `get_graph` stopped filtering to avoid.
-            match state.canvas_store.delete_edges_for(&tab_id) {
-                Ok(0) => {}
-                Ok(n) => log::info!("Deleted {} canvas edge(s) for terminal {}", n, tab_id),
-                // Non-fatal: the terminal is closing either way, and a canvas store that
-                // cannot answer must not fail the close.
-                Err(e) => log::warn!("Failed to delete canvas edges for {}: {}", tab_id, e),
+    state.session_bindings.close_process_with(&id, delete_history, |delete_history| {
+        if let Some(leaf) = tab_id.as_deref() {
+            if !state.session_bindings.has_intent(leaf, std::time::Instant::now()) {
+                let key = state.terminals.get(&id).map(|t| t.session_key.clone())
+                    .unwrap_or_else(|| leaf.to_string());
+                state.mark_closed_unowned(&key);
             }
         }
-    }
 
-    log::info!(
-        "Closed terminal {} with PID {} in {}ms",
-        id,
-        pid,
-        close_started.elapsed().as_millis()
-    );
+        // Host-owned: tell its recorded sidecar to close the session; otherwise
+        // kill the local process tree. The lifecycle claim excludes duplicates.
+        if !state.host_close(&id) {
+            crate::pty_manager::kill_process_tree(pid);
+        }
+
+        // The kill EOFs the reader, whose final persist could otherwise re-upsert
+        // history AFTER this delete. Under the persist guard, it either finishes
+        // first or no-ops on the missing terminal after cleanup. API closes retain
+        // history, including when their provisional close completes via fallback.
+        {
+            let guard_arc = state.history_persist_guard(&id);
+            let _guard = guard_arc.lock().unwrap_or_else(|e| e.into_inner());
+            state.cleanup_terminal_state(&id);
+            if let Some(tab_id) = tab_id.filter(|_| delete_history) {
+                state.history_store.delete(&tab_id);
+                // Edges use the renderer leaf, not the backend run id. Targeted
+                // deletion never prunes a restored-but-not-yet-spawned peer.
+                match state.canvas_store.delete_edges_for(&tab_id) {
+                    Ok(0) => {}
+                    Ok(n) => log::info!("Deleted {} canvas edge(s) for terminal {}", n, tab_id),
+                    Err(e) => log::warn!("Failed to delete canvas edges for {}: {}", tab_id, e),
+                }
+            }
+        }
+
+        log::info!(
+            "Closed terminal {} with PID {} in {}ms",
+            id,
+            pid,
+            close_started.elapsed().as_millis()
+        );
+    });
     Ok(())
 }
 
