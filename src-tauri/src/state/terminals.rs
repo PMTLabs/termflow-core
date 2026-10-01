@@ -1100,8 +1100,8 @@ impl<R: Runtime> AppState<R> {
         let session_key = self.session_key_for(id).unwrap_or_else(|| id.to_string());
         // ...and the cwd for the same reason, one step further out: every caller runs
         // `cleanup_terminal_state` the moment this returns, and that drops `terminal_cwds`.
-        // It is the directory the shell died in, which is what a restart-in-place resumes in
-        // (spec 045 §3.3) — the pane survives an API close, so this is not dead weight.
+        // It is the directory the shell died in, which is what a restart-in-place resumes in:
+        // the pane survives an API close, so this is not dead weight.
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, id);
         // Pending closes are replayed against the HOST later, so they are recorded
         // in the host id space, and against the host that owns the session: the
@@ -1125,8 +1125,8 @@ impl<R: Runtime> AppState<R> {
         // so this makes the two paths indistinguishable to the renderer, which is the
         // point: it is the same event, and only the plumbing under it differs.
         //
-        // Regression from `3eb571d` (design 014). Before it the `Exit` frame was passed
-        // straight through with no lookup, so this close DID reach the UI.
+        // Regression from `3eb571d` (host sessions keyed apart from process ids). Before it
+        // the `Exit` frame was passed straight through with no lookup, so this close DID reach the UI.
         //
         // `exitCode: 0` and the payload shape are copied from that in-process emit rather
         // than invented, for the same reason: a deliberate close produces no status either

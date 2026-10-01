@@ -116,8 +116,13 @@ fn local_terminals_refusal(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
-/// Preflight query for the Settings "Offload & Close" affordance. Returns Ok
-/// when the offload would keep all terminals alive; Err with the reason if not.
+/// Preflight query for the Settings "Offload & Close" affordance: a snapshot of
+/// whether the offload looks possible right now, from what is already known
+/// (`offload_preflight`). The button asks again and also runs `begin_offload`
+/// (discovery, waiting for operations in flight, refusing hosts that are
+/// unresolved or never discovered), so it can still refuse after the panel
+/// showed the offload as available. Ok means this check passed, not that the
+/// offload will go ahead.
 #[tauri::command]
 pub fn hotswap_available(state: State<'_, AppState>) -> Result<(), String> {
     offload_preflight(&state)
@@ -264,7 +269,7 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
     flush_all_windows(&state.app_handle).await;
-    // Plan 045 AC9: admin tabs are never restored elevated, so the elevated
+    // Admin tabs are never restored elevated, so the elevated
     // sidecar (unlike the primary above) is torn down rather than kept alive
     // across the offload. No-op if no admin tab was ever opened this run.
     state.elevated_host.shutdown().await;
@@ -294,7 +299,8 @@ pub enum FlushPolicy {
 /// This is the way out of a hollow process, so it is stricter than nothing and
 /// laxer than an offload: it arms every host it is connected to and goes ahead
 /// without one it cannot reach (that host is left as a crash would leave it, for
-/// the successor to take back), and without waiting for a create that is stuck.
+/// the successor to take back). It waits for operations in flight like an
+/// offload, but a create that is still stuck after that wait does not stop it.
 /// A host that merely will not arm is not allowed to stop the restart either,
 /// except the current one.
 ///
@@ -356,8 +362,8 @@ pub async fn restart_keeping_terminals(
         }
     };
     log::info!("[RECOVERY] relaunch spawned (pid {pid}); exiting");
-    // Plan 045 AC9: same reason as restart_for_update — admin tabs are never
-    // restored elevated across a relaunch.
+    // Same reason as restart_for_update: admin tabs are never restored
+    // elevated across a relaunch.
     state.elevated_host.shutdown().await;
     in_flight.keep = true;
     hold.commit();
@@ -387,7 +393,7 @@ impl Drop for InFlight {
     }
 }
 
-/// The offload/update preflight split (design 014 §B4).
+/// The offload/update preflight split.
 ///
 /// `AppState` needs a Tauri `AppHandle`, and the `tauri::test` feature crashes
 /// the test binary on Windows, so these assert the WIRING from source. That is
@@ -473,7 +479,7 @@ mod preflight_wiring_tests {
             assert!(
                 !body.contains(api),
                 "Offload & Close must not consult siblings (`{api}` found) — it performs no \
-                 payload swap and cannot reach another instance (design 014 §B1.2). Body:\n{body}"
+                 payload swap and cannot reach another instance. Body:\n{body}"
             );
         }
         assert!(
@@ -562,9 +568,11 @@ mod preflight_wiring_tests {
 
     /// The asymmetry that produced the report: the panel showed offload as
     /// available while the button ran a stricter check, so the refusal arrived
-    /// as a toast after the click. One shared function, so they cannot diverge.
+    /// as a toast after the click. The panel is a snapshot and the button also
+    /// runs `begin_offload`, so the button can still refuse what the panel
+    /// showed; what is shared is the preflight, so that part cannot diverge.
     #[test]
-    fn the_settings_preflight_runs_the_same_check_the_button_enforces() {
+    fn the_settings_panel_and_the_button_both_run_the_shared_preflight() {
         let src = source();
         let shown = fn_body(&src, "pub fn hotswap_available");
         let enforced = fn_body(&src, "pub async fn restart_for_update");

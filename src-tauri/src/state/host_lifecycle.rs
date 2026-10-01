@@ -36,6 +36,12 @@ pub(super) const EXIT_QUIESCE_BOUND: Duration = Duration::from_secs(5);
 /// How long an offload or update waits for the same operations before it gives
 /// up and refuses. Longer than exit's: a spawn can legitimately take ~10 s.
 pub(super) const HOLD_QUIESCE_BOUND: Duration = Duration::from_secs(12);
+/// How long a sibling's arm request waits for the same operations. The instance
+/// that asked gives up after `SIBLING_CALL_TIMEOUT_SECS`, so the answer, a named
+/// refusal, has to come well inside that: an arm that finishes after its caller
+/// left would hold admission closed for a window nobody will release.
+pub(super) const SIBLING_QUIESCE_BOUND: Duration = Duration::from_secs(3);
+const _: () = assert!(SIBLING_QUIESCE_BOUND.as_secs() + 1 < crate::sibling_coord::SIBLING_CALL_TIMEOUT_SECS);
 /// One attempt, connect and announcement included, to reach a host exit holds no
 /// connection to. Closing the stream afterwards has its own bound
 /// (`PtyHostClient::close_transport`), so an attempt can take a little longer.
@@ -356,11 +362,13 @@ fn named_clients(hosts: &[OwnedHost]) -> Result<Vec<Named>, String> {
         .collect()
 }
 
-/// Admission to the hosts is closed and every owned host has been checked: an
-/// offload or update may now arm them. Dropping it reopens admission; `commit`
-/// keeps it closed for the rest of the process. A hold dropped while hosts are
-/// still armed by it disarms them first: admission is not reopened over a host
-/// nobody will release.
+/// Admission to the hosts is closed and the hosts it will arm have been checked:
+/// every owned host for an offload or update, only the current host and the
+/// connected ones for a relaunch (see [`begin_relaunch`]). Dropping it reopens
+/// admission; `commit` keeps it closed for the rest of the process. A hold
+/// dropped while hosts are armed, or while an arm is still in flight, disarms
+/// every host it asked first: admission is not reopened over a host nobody will
+/// release.
 pub struct Hold {
     /// Taken by `commit` (forgotten) and by `Drop` (kept until the disarm is done).
     guard: Option<QuiesceGuard>,
@@ -383,7 +391,9 @@ impl Hold {
     }
 
     /// Arm every owned host, or none: if one refuses, those already armed are
-    /// disarmed before the error is returned.
+    /// disarmed before the error is returned. A relaunch hold is the exception:
+    /// only the current host must arm, and any other host that will not is
+    /// released again and left out while the rest stay armed.
     ///
     /// Exit may take the table over from this hold at any moment, and a host that
     /// is armed when it is shut down holds its shells for the whole arm window
@@ -400,9 +410,17 @@ impl Hold {
         let guard = self.guard.as_ref().expect("a hold keeps its guard until it ends");
         let _in_flight = self.table.begin_as_quiescer(guard);
         refuse_if_exiting(&self.table)?;
+        // Every host is asked below, and an arm whose acknowledgement is still
+        // pending may land: a hold dropped now (its caller gave up) must disarm all
+        // of them. The failure paths below disarm for themselves and put back what
+        // an earlier arm left.
+        let previous = std::mem::replace(&mut self.armed, named.clone());
         let (optional, required): (Vec<Named>, Vec<Named>) =
             named.into_iter().partition(|(name, _)| self.tolerated.contains(name));
-        arm_hosts(&required, timeout_secs, token, purpose).await?;
+        if let Err(e) = arm_hosts(&required, timeout_secs, token, purpose).await {
+            self.armed = previous;
+            return Err(e);
+        }
         let mut armed = required;
         // Each of the others stands on its own: one that will not arm is released
         // again and left out, and the rest stay armed.
@@ -418,6 +436,7 @@ impl Hold {
         }
         if let Err(exiting) = refuse_if_exiting(&self.table) {
             disarm_hosts(&armed).await;
+            self.armed = previous;
             return Err(exiting);
         }
         self.armed = armed;
@@ -470,15 +489,16 @@ fn refuse_if_exiting(table: &HostTable) -> Result<(), String> {
     }
 }
 
-/// Close admission and wait for the operations in flight. With `strict` set, an
-/// operation still in flight at the bound refuses (admission reopens); otherwise
-/// the caller goes ahead anyway, as exit does.
+/// Close admission and wait up to `bound` for the operations in flight. With
+/// `strict` set, an operation still in flight at the bound refuses (admission
+/// reopens); otherwise the caller goes ahead anyway, as exit does.
 async fn close_admission<P: LifecyclePort>(
     port: &P,
     reason: QuiesceReason,
+    bound: Duration,
     strict: bool,
 ) -> Result<QuiesceGuard, String> {
-    let guard = port.table().quiesce(reason, HOLD_QUIESCE_BOUND).await.map_err(|busy| busy.to_string())?;
+    let guard = port.table().quiesce(reason, bound).await.map_err(|busy| busy.to_string())?;
     if !guard.drained() {
         log::warn!("[GEN] {reason:?}: operations still in flight on {:?}", guard.holders());
         if strict {
@@ -495,7 +515,7 @@ async fn close_admission<P: LifecyclePort>(
 /// change is in force, and refuses (naming the host) when any owned host is
 /// disconnected, has not reported its terminals, or cannot survive.
 async fn begin_hold<P: LifecyclePort>(port: &P, reason: QuiesceReason) -> Result<Hold, String> {
-    let guard = close_admission(port, reason, true).await?;
+    let guard = close_admission(port, reason, HOLD_QUIESCE_BOUND, true).await?;
     let hosts = owned_hosts(port).await;
     offload_refusal(&hosts)?;
     Ok(Hold { guard: Some(guard), table: port.table().clone(), hosts, tolerated: Vec::new(), armed: Vec::new() })
@@ -517,7 +537,7 @@ pub(super) async fn begin_update<P: LifecyclePort>(port: &P) -> Result<Hold, Str
 /// no connection to is left as it is, exactly as if the GUI had crashed. An
 /// operation still in flight at the bound does not stop it either.
 pub(super) async fn begin_relaunch<P: LifecyclePort>(port: &P) -> Result<Hold, String> {
-    let guard = close_admission(port, QuiesceReason::Offload, false).await?;
+    let guard = close_admission(port, QuiesceReason::Offload, HOLD_QUIESCE_BOUND, false).await?;
     let owned = owned_hosts_now(port);
     let Some(primary) = owned.iter().find(|h| h.channel == Some(HostChannel::Primary) && h.connected()) else {
         return Err(NOT_CONNECTED.to_string());
@@ -709,14 +729,16 @@ impl SiblingSlot {
 ///
 /// Admission stays closed until the sibling's disarm, or until the arm window
 /// ends: a re-list or a reconnect disarms the host it talks to, which would undo
-/// the arm made for the other instance's update.
+/// the arm made for the other instance's update. It waits for operations in
+/// flight only for `SIBLING_QUIESCE_BOUND` and refuses, naming why, so the
+/// answer reaches the instance that is waiting for it.
 pub(super) async fn sibling_arm<P: LifecyclePort>(port: &P, timeout_secs: u64) -> SiblingArm {
     let slot = port.sibling_slot();
     let mut hold = match slot.take() {
         // A repeated request arms the same window again.
         Some((_, hold)) => hold,
         None => {
-            let guard = match close_admission(port, QuiesceReason::Update, true).await {
+            let guard = match close_admission(port, QuiesceReason::Update, SIBLING_QUIESCE_BOUND, true).await {
                 Ok(guard) => guard,
                 Err(reason) => return SiblingArm::Refused(reason),
             };

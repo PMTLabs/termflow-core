@@ -122,6 +122,8 @@ pub const SIBLING_CALL_TIMEOUT_SECS: u64 = 5;
 ///
 /// If a call fails part-way through, the siblings already armed are disarmed
 /// before the error is returned — an aborted update must not mutate strangers.
+/// So is the sibling whose call failed: an arm whose acknowledgement was lost
+/// (a timeout, a dropped connection) may still have taken effect there.
 pub async fn arm_siblings<F, Fut>(
     siblings: &[InstanceRecord],
     call: F,
@@ -154,7 +156,8 @@ where
             Ok(()) => armed.push(s.profile.clone()),
             Err(e) => {
                 let msg = format!("{} could not be prepared for the update: {e}", s.profile);
-                log::warn!("[UPDATE] {msg}; releasing {} already-armed sibling(s)", armed.len());
+                log::warn!("[UPDATE] {msg}; releasing {} already-armed sibling(s) and it", armed.len());
+                armed.push(s.profile.clone());
                 let _ = disarm_siblings(siblings, &armed, &call).await;
                 return Err(msg);
             }
@@ -413,18 +416,27 @@ mod tests {
         assert_eq!(r.armed(), vec!["a".to_string(), "b".to_string()], "both were attempted");
         assert_eq!(
             r.disarmed(),
-            vec!["a".to_string()],
-            "the already-armed sibling must be released, not left holding a window"
+            vec!["a".to_string(), "b".to_string()],
+            "the already-armed sibling must be released, not left holding a window, \
+             and so must the one whose arm failed: its acknowledgement may have been lost"
         );
     }
 
-    /// The failing sibling itself is NOT disarmed — it never armed, and calling
-    /// disarm on it would report a spurious success for work never done.
+    /// An arm that errored (a timeout on the caller's side while the sibling went
+    /// on to arm) must be answered by a disarm to THAT sibling, at its own port and
+    /// with its own token, or nothing ever releases it.
     #[tokio::test]
-    async fn the_sibling_that_failed_to_arm_is_not_disarmed() {
+    async fn a_sibling_whose_arm_call_failed_is_disarmed_too() {
         let r = Recorder::failing_on(1);
-        let _ = arm_siblings(&[rec("a", 1, Some(1001), Some("t"))], r.call()).await;
-        assert!(r.disarmed().is_empty(), "nothing armed, so nothing to release");
+        arm_siblings(&[rec("only", 7, Some(1007), Some("tok-only"))], r.call())
+            .await
+            .expect_err("the only sibling's arm failed");
+        let call = |action| SiblingCall { profile: "only".into(), port: 1007, token: "tok-only".into(), action };
+        assert_eq!(
+            *r.calls.lock().unwrap(),
+            vec![call(Action::Arm), call(Action::Disarm)],
+            "the failed arm is followed by a disarm addressed to the same sibling"
+        );
     }
 
     /// The refusal a sibling sends back names its host; the error the updating

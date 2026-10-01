@@ -67,7 +67,7 @@ fn check_and_download() -> Result<Option<UpdateInfo>, String> {
 /// relaunch. Graceful exit (vs `process::exit`) lets Tauri flush state first.
 fn apply(info: UpdateInfo) -> Result<(), String> {
     let um = manager()?;
-    // Carry the instance identity through the restart (plan 018 Task 10). This
+    // Carry the instance identity through the restart. This
     // was `Vec::new()`, so `--profile work` came back as the DEFAULT profile —
     // a different config file, a different window registry and an empty storage
     // scope. The user reads that as the update having eaten their session.
@@ -130,7 +130,7 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // Deliberately AFTER the download: a failed or unavailable download must
     // never leave a stranger armed. `arm_siblings` is itself all-or-nothing and
     // rolls back what it armed, so reaching the next line means every sibling is
-    // prepared (design 014 §B3).
+    // prepared.
     // RE-ENUMERATE. The check above ran before a download that can take minutes,
     // and a profile launched during it would not be in that snapshot — so it
     // would never be armed, and the apply would kill its GUI with an unarmed
@@ -174,8 +174,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // Launch the updater (it waits for our exit), then quit — the relaunched app
     // reattaches sessions by `tab_id`. If the updater fails to launch AFTER we
     // armed, DISARM synchronously — otherwise the host stays armed and a later
-    // normal quit would orphan sessions instead of tearing down (design §10.5
-    // "updater-launch failure → synchronous Disarm").
+    // normal quit would orphan sessions instead of tearing down (an updater that
+    // fails to launch must disarm synchronously).
     if let Err(e) = tokio::task::spawn_blocking(move || apply(info))
         .await
         .map_err(|e| e.to_string())

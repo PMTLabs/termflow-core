@@ -7,7 +7,7 @@ use super::*;
 use crate::state::host_lifecycle::{
     begin_offload, begin_relaunch, begin_update, connected_retention, exit_hosts, owned_hosts, owned_hosts_now, sibling_arm,
     sibling_disarm, update_mode_of, update_refusal, LifecyclePort, SiblingArm, SiblingSlot, EXIT_QUIESCE_BOUND,
-    HOLD_QUIESCE_BOUND,
+    HOLD_QUIESCE_BOUND, SIBLING_QUIESCE_BOUND,
 };
 use crate::state::host_routing::{place, Placement};
 use crate::state::host_table::Busy;
@@ -54,8 +54,13 @@ fn holding(keys: &[(&str, u32)]) -> HostSpec {
 
 /// The current host and these older ones, all discovered.
 fn machine(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
+    machine_with_current(HostSpec::default(), old)
+}
+
+/// Like [`machine`], with the current host behaving as `current_spec` says.
+fn machine_with_current(current_spec: HostSpec, old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
     let world = World::new();
-    world.add_host(CURRENT, HostSpec::default());
+    world.add_host(CURRENT, current_spec);
     let mut candidates = Vec::new();
     for (name, spec) in old {
         world.add_host(name, spec.clone());
@@ -697,6 +702,36 @@ async fn an_arm_that_starts_after_exit_began_is_refused_and_sends_nothing() {
 // ---- a hold that is dropped ------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
+async fn a_hold_dropped_while_an_arm_is_still_pending_disarms_the_host_before_admission_reopens() {
+    let slow_to_ack = HostSpec { arm_delay: secs(2), ..HostSpec::default() };
+    let (world, port) = adopted(&[("h1", slow_to_ack)]).await;
+    let hosts = [CURRENT, "h1"];
+    let before = marks(&world, &hosts);
+    let mut hold = begin_offload(&port).await.unwrap();
+    let arming = tokio::spawn(async move { hold.arm_detach(600, "tok", Some(ArmDetachPurpose::Local)).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(world.count("h1", "Arm"), 1, "the arm is out and h1's acknowledgement is still 2 s away");
+
+    // The caller gives up: the arm future and the hold with it are dropped mid-arm.
+    arming.abort();
+    assert!(arming.await.unwrap_err().is_cancelled());
+    assert!(
+        matches!(port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_))),
+        "admission is not reopened over hosts that were asked to arm"
+    );
+    tokio::time::sleep(secs(5)).await;
+
+    // (h1 answers the disarm only after its slow arm, so the client's one retry of
+    // an unanswered disarm may reach it twice.)
+    for (host, from) in hosts.iter().zip(before) {
+        let frames = since(&world, host, from);
+        assert_eq!(frames[0], "Arm", "{host}: {frames:?}");
+        assert!(frames.len() > 1 && frames[1..].iter().all(|k| *k == "Disarm"), "{host}: the arm that may have landed is undone: {frames:?}");
+    }
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "and admission reopens once they are released");
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_hold_dropped_while_armed_disarms_its_hosts_before_admission_reopens() {
     let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
     let before = marks(&world, &[CURRENT, "h1"]);
@@ -751,10 +786,11 @@ async fn a_relaunch_arms_the_hosts_it_reaches_and_is_not_stopped_by_the_ones_it_
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_relaunch_needs_the_current_host_and_is_not_held_up_by_an_operation_in_flight() {
+async fn a_relaunch_needs_the_current_host_and_is_not_stopped_by_an_operation_in_flight() {
     let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
 
-    // A create that never finishes: an offload refuses, a restart does not wait for it.
+    // A create that never finishes: an offload refuses, a restart waits the same
+    // bound and then goes ahead.
     let _stuck = port.table().begin(HostChannel::Frozen(port.frozen_ids()[0])).unwrap();
     let started = Instant::now();
     let hold = begin_relaunch(&port).await.expect("a stuck create does not stop the restart");
@@ -769,6 +805,38 @@ async fn a_relaunch_needs_the_current_host_and_is_not_held_up_by_an_operation_in
     assert_eq!(world.count_everywhere("Arm"), 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_relaunch_whose_current_host_will_not_arm_fails_and_leaves_every_host_disarmed() {
+    // Only the current host is deaf; the older ones would arm.
+    let (world, port) = machine_with_current(
+        HostSpec { no_arm_ack: true, ..HostSpec::default() },
+        &[("h1", HostSpec::default()), ("h2", HostSpec::default())],
+    );
+    rediscover_hosts(&port).await.unwrap();
+    announce_capability(&port);
+    let hosts = [CURRENT, "h1", "h2"];
+    let before = marks(&world, &hosts);
+
+    let mut hold = begin_relaunch(&port).await.expect("the current host is connected");
+    let err = hold
+        .arm_detach(600, "tok", Some(ArmDetachPurpose::Local))
+        .await
+        .expect_err("a restart with the current host unarmed would lose its shells");
+
+    assert!(err.contains(CURRENT), "the refusing host is named: {err}");
+    assert_eq!(since(&world, CURRENT, before[0]), ["Arm", "Disarm"], "its arm may have landed, so it is released");
+    for (host, from) in hosts.iter().zip(before) {
+        let frames = since(&world, host, from);
+        let (armed, disarmed) = (
+            frames.iter().filter(|k| **k == "Arm").count(),
+            frames.iter().filter(|k| **k == "Disarm").count(),
+        );
+        assert_eq!(armed, disarmed, "{host} ends disarmed: {frames:?}");
+    }
+    drop(hold);
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "the failed restart reopens admission");
+}
+
 // ---- a sibling's arm holds admission ---------------------------------------------
 
 #[tokio::test(start_paused = true)]
@@ -780,6 +848,25 @@ async fn sibling_arm_refuses_a_connected_host_that_has_not_listed() {
     assert!(reason.contains("mute") && reason.contains("not reported"), "{reason}");
     assert_eq!(world.count_everywhere("Arm"), 0);
     assert!(port.table().begin(HostChannel::Primary).is_ok(), "a refused arm does not keep admission closed");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_siblings_arm_gives_up_on_an_operation_in_flight_before_its_caller_does() {
+    let (world, port) = adopted(&[("h1", HostSpec::default())]).await;
+    // A create that never finishes.
+    let _stuck = port.table().begin(HostChannel::Primary).unwrap();
+    let started = Instant::now();
+
+    let SiblingArm::Refused(reason) = sibling_arm(&port, 600).await else { panic!("the arm must be refused") };
+
+    // The instance that asked stops waiting after SIBLING_CALL_TIMEOUT_SECS, so the
+    // named reason has to be there before that, not after a hold-length wait.
+    let call_timeout = secs(crate::sibling_coord::SIBLING_CALL_TIMEOUT_SECS);
+    assert!(started.elapsed() < call_timeout, "answered after {:?}, past its caller's {call_timeout:?}", started.elapsed());
+    assert!(started.elapsed() >= SIBLING_QUIESCE_BOUND, "the operation was still given its bound first");
+    assert!(reason.starts_with(LIFECYCLE_BUSY) && reason.contains("in progress"), "{reason}");
+    assert_eq!(world.count_everywhere("Arm"), 0, "nothing was armed");
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "and the refusal left admission open");
 }
 
 #[tokio::test(start_paused = true)]
