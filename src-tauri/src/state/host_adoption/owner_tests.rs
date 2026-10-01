@@ -339,9 +339,9 @@ async fn delayed_process_ingress_never_retargets_a_restarted_leaf_with_the_same_
     assert_eq!(world.count_everywhere("Close"), 0);
     assert_eq!(port.table().keys().state(CHANNEL, &new_key), Some(KeyState::Bound(q.clone())));
     assert!(port.0.terminals.contains_key(&q));
-    let control = crate::state::host_registry::route_write(&port.0.host_terminals, &port.0.terminals, &q, b"control", &|c| port.client_for(c));
+    let control = crate::state::host_registry::route_write(port.table().keys(), &port.0.host_terminals, &port.0.terminals, &q, b"control", &|c| port.client_for(c));
     assert!(control);
-    assert!(crate::state::host_registry::route_resize(&port.0.host_terminals, &port.0.terminals, &q, 91, 37, &|c| port.client_for(c)));
+    assert!(crate::state::host_registry::route_resize(port.table().keys(), &port.0.host_terminals, &port.0.terminals, &q, 91, 37, &|c| port.client_for(c)));
     assert!(crate::state::retarget_owning_tab(&port.0.terminals, &q, "tb-new").unwrap());
     assert!(crate::state::set_display_label(&port.0.terminals, &q, Some("new")).unwrap());
     assert!(crate::state::set_title_color(&port.0.terminals, &q, Some("blue")).unwrap());
@@ -389,7 +389,7 @@ async fn registered_process_close_controls_preserve_each_callers_storage_policy(
 async fn elevated_channel_exit_ends_only_its_named_owner_once() {
     let (world, port) = machine(HostSpec::default());
     let channel = HostChannel::Elevated;
-    let epoch = port.table().reserve_epoch();
+    let epoch = port.table().reserve_epoch().unwrap();
     assert!(port.table().publish(channel, epoch));
     let stream = world.open(HOST).unwrap();
     let (rd, wr) = tokio::io::split(stream);

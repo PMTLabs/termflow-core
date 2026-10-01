@@ -244,8 +244,9 @@ async fn restoring_key_not_registered_for_an_already_live_session() {
     let now = StdInstant::now();
 
     assert!(!host_registry::register_restoring_leaf(&maps, "main", "tm-live", None, now));
-    assert!(!host_registry::register_restoring_leaf(&maps, "main", "tm-moved", Some("tm-live"), now), "by its override key too");
-    assert_eq!(port.table().keys().holder_count(), 0, "nothing would ever remove an entry for a live key");
+    assert_eq!(port.table().keys().holder_count(), 0, "same-leaf reload leaves no holder");
+    assert!(host_registry::register_restoring_leaf(&maps, "main", "tm-moved", Some("tm-live"), now), "another leaf's key is not proof this pane registered");
+    assert_eq!(port.table().keys().holder_count(), 1);
     assert!(host_registry::register_restoring_leaf(&maps, "main", "tm-waiting", None, now));
     assert!(port.table().keys().is_restoring_key("tm-waiting", now));
 }
@@ -462,15 +463,18 @@ async fn orphan_sweep_does_not_surface_a_restoring_key() {
 fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits() {
     let panes = source_of("host_adoption/panes.rs");
     let body = fn_body(&panes, "pub(in crate::state) fn surface_orphans<");
-    let verdict = body.find("host_registry::orphan_verdict(").expect("surfacing must consult the verdict");
-    let eligible = body.find(".keys().eligible(").expect("surfacing requires a listed key");
+    let decision = body.find(".keys().recover_listed(").expect("surfacing uses the atomic decision");
     let emit = body.find("port.announce_recovered(").expect("surfacing announces the recovered session");
-    assert!(eligible < emit && verdict < emit, "a listed key and a Surface verdict must precede emission");
-    for needle in ["OrphanVerdict::Restoring =>", "OrphanVerdict::CloseUnowned =>"] {
-        let arm = &body[body.find(needle).unwrap_or_else(|| panic!("no {needle} arm"))..];
-        let arm = &arm[..arm.find("continue;").expect("the arm leaves the loop iteration")];
-        assert!(!arm.contains("reserve_host_session") && !arm.contains("emit"), "{needle} must not surface");
-    }
+    assert!(decision < emit);
+    let authority = source_of("host_keys/effects.rs");
+    let recovery = fn_body(&authority, "pub(crate) fn recover_listed(");
+    let eligible = recovery.find("Some(&KeyState::Listed)").unwrap();
+    let protected = recovery.find("Self::protected(").unwrap();
+    let ending = recovery.find("Self::end(").unwrap();
+    let announce = recovery.find("announce()").unwrap();
+    assert!(eligible < announce && protected < announce && ending < announce);
+    assert!(recovery.contains("let mut inner = self.lock()"));
+    assert!(recovery.contains("else { announce(); }"), "ending and announcement are exclusive");
 
     // The three flows that surface orphans, the primary's pipe-drop recovery, an
     // older host's reconnect (both through `reattach_listed`) and the sweep, all go
@@ -656,7 +660,7 @@ fn spawn_routed_has_no_other_pty_host_clone() {
         "the router's refusals (LIFECYCLE_BUSY, host-ownership-pending) must propagate with `?`"
     );
     // The client acted on is the one the placement carries.
-    for call in ["attach_confirmed", "spawn_session"] {
+    for call in ["attach_owned", "spawn_owned"] {
         assert!(body.contains(&format!("client.{call}(")), "spawn_routed must act on the placement's client: {call}");
     }
     // It still falls back in-process when, and only when, the router says no host is usable.
@@ -672,6 +676,6 @@ fn the_router_takes_one_ticket_per_create() {
     assert_eq!(production.matches(".begin(").count(), 1);
     assert!(fn_body(&production, "pub(super) async fn place_owned<").contains("begin_ticket(port, channel)"));
     assert_eq!(fn_body(&production, "pub(super) async fn place_owned<").matches("begin_ticket(").count(), 1);
-    assert_eq!(fn_body(&production, "fn place_elevated_create(").matches("begin_ticket(").count(), 1);
+    assert_eq!(fn_body(&production, "fn place_elevated_process<").matches("begin_ticket(").count(), 1);
     assert!(fn_body(&production, "fn begin_ticket<").contains("port.table().begin(channel)"));
 }

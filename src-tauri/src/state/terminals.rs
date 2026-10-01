@@ -70,6 +70,7 @@ pub(super) fn plan_reconnect(
     plan
 }
 
+#[cfg(test)]
 pub(super) fn session_needs_surface(is_registered: bool) -> bool { !is_registered }
 
 pub const HOST_SESSION_CONTENDED: &str = "host-session-contended";
@@ -148,9 +149,13 @@ mod restore_sweep_gate_tests {
             .map(|start| &source[start..])
             .and_then(|rest| rest.split("/// Reconcile").next())
             .expect("surface_orphans body");
-        let eligible = body.find(".keys().eligible(channel, &orphan.tab_id)").expect("orphan must be a listed key on this channel");
+        let eligible = body.find(".keys().recover_listed(channel, &orphan.tab_id").expect("orphan must use the atomic listed-key recovery decision");
         let emit = body.find("port.announce_recovered(").expect("orphan must emit recovery event");
         assert!(eligible < emit, "listed-key qualification must precede recovery emission");
+        let authority = crate::state::source_scan::production(include_str!("host_keys/effects.rs"));
+        let decision = crate::state::source_scan::fn_body(&authority, "fn recover_listed(");
+        assert!(decision.find("Some(&KeyState::Listed)").unwrap() < decision.find("announce()").unwrap());
+        assert!(decision.contains("let mut inner = self.lock()"));
     }
 
     #[test]
@@ -215,6 +220,7 @@ impl<R: Runtime> AppState<R> {
             terminals: Arc::new(DashMap::new()),
             root_leaf_claims: Arc::new(RootLeafClaims::default()),
             shell_writer_channels: Arc::new(DashMap::new()),
+            local_processes: Arc::new(DashMap::new()),
             ptys: Arc::new(DashMap::new()),
             output_tx,
             terminal_history: Arc::new(DashMap::new()),
@@ -270,7 +276,7 @@ impl<R: Runtime> AppState<R> {
             pty_host: Arc::new(Mutex::new(None)),
             host_terminals: Arc::new(DashMap::new()),
             frozen_hosts: Arc::new(Mutex::new(Vec::new())),
-            frozen_host_seq: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            frozen_host_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             host_table: super::host_table::HostTable::new(),
             host_barrier: super::host_adoption::Barrier::new(),
             sibling_hold: Arc::default(),
@@ -701,8 +707,8 @@ impl<R: Runtime> AppState<R> {
         };
         log::info!("[ADMIN] elevated pty-host connected and verified (pid {})", launched.pid);
 
-        let my_gen = self.elevated_host.bump_gen();
-        let epoch = self.host_table.reserve_epoch();
+        let my_gen = self.elevated_host.bump_gen()?;
+        let epoch = self.host_table.reserve_epoch()?;
         if !self.host_table.publish(HostChannel::Elevated, epoch) {
             return Err("elevated terminal host is not admitting sessions".to_string());
         }
@@ -916,7 +922,7 @@ impl<R: Runtime> AppState<R> {
         host_registry::session_registered_on_any_channel(&self.host_terminals, &self.terminals, session_key)
     }
 
-    pub fn next_frozen_id(&self) -> FrozenId {
+    pub fn next_frozen_id(&self) -> Result<FrozenId, String> {
         host_registry::next_frozen_id(&self.frozen_host_seq)
     }
 
@@ -1009,12 +1015,12 @@ impl<R: Runtime> AppState<R> {
     /// return true. Returns false when disconnected so the caller surfaces the
     /// failure instead of reporting a false success for dropped input.
     pub fn host_write(&self, id: &str, bytes: &[u8]) -> bool {
-        host_registry::route_write(&self.host_terminals, &self.terminals, id, bytes, &|c| self.client_for_channel(c))
+        host_registry::route_write(self.host_table.keys(), &self.host_terminals, &self.terminals, id, bytes, &|c| self.client_for_channel(c))
     }
 
     /// If `id` is host-owned AND connected, forward the resize and return true.
     pub fn host_resize(&self, id: &str, cols: u16, rows: u16) -> bool {
-        host_registry::route_resize(&self.host_terminals, &self.terminals, id, cols, rows, &|c| self.client_for_channel(c))
+        host_registry::route_resize(self.host_table.keys(), &self.host_terminals, &self.terminals, id, cols, rows, &|c| self.client_for_channel(c))
     }
 
     /// If `id` is host-owned, forget it and (if connected) tell the sidecar to
@@ -1032,7 +1038,7 @@ impl<R: Runtime> AppState<R> {
     pub fn host_repaint(&self, id: &str) -> bool {
         // `id` is the PROCESS id (our map key); the host only knows this terminal
         // by its session key, so the nudge is addressed in the host's id space.
-        host_registry::route_repaint(&self.host_terminals, &self.terminals, id, &|c| self.client_for_channel(c))
+        host_registry::route_repaint(self.host_table.keys(), &self.host_terminals, &self.terminals, id, &|c| self.client_for_channel(c))
     }
 
     /// Force every live PTY to repaint by jiggling its size (rows+1, then back).
@@ -1157,7 +1163,13 @@ impl<R: Runtime> AppState<R> {
         // inserting into `terminal_history`, and that check only closes the
         // TOCTOU window if this method removes `terminals` before
         // `terminal_history`.
-        if let Some(key) = self.session_key_for(id) { self.host_stream_offsets.remove(&key); }
+        if let Some(key) = self.session_key_for(id) {
+            if let Some(channel) = self.host_channel_for(id) {
+                self.host_table.keys().cleanup_session_projection(channel, &key, id, || {
+                    self.host_stream_offsets.remove(&key);
+                });
+            }
+        }
         self.terminals.remove(id);
         // Alongside `terminals`, and for the same reason: the identity lookups are
         // an index OF that map, so an entry outliving its terminal would resolve a
@@ -1165,6 +1177,7 @@ impl<R: Runtime> AppState<R> {
         // choke point every other per-terminal map is torn down from.
         self.identity.unindex(id);
         self.shell_writer_channels.remove(id);
+        self.local_processes.remove(id);
         self.ptys.remove(id);
         self.terminal_screens.remove(id);
         self.terminal_focus_reporting.remove(id);

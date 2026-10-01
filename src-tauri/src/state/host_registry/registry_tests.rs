@@ -184,7 +184,7 @@ fn fake_host() -> (PtyHostClient, tokio::io::ReadHalf<tokio::io::DuplexStream>) 
 
 fn frozen(id: u32, client: PtyHostClient) -> FrozenHost {
     FrozenHost {
-        id: FrozenId(id),
+        id: FrozenId(id.into()),
         generation: Some(format!("gen{id}")),
         endpoint: format!("endpoint-{id}"),
         client,
@@ -221,10 +221,15 @@ async fn a_frozen_channel_resolves_to_its_own_hosts_client() {
 
 #[test]
 fn frozen_ids_are_never_reused() {
-    let seq = AtomicU32::new(0);
-    let a = next_frozen_id(&seq);
-    let b = next_frozen_id(&seq);
-    assert_ne!(a, b);
+    let seq = AtomicU64::new(0);
+    let a = next_frozen_id(&seq).unwrap();
+    let b = next_frozen_id(&seq).unwrap();
+    assert_eq!(a, FrozenId(0));
+    assert_eq!(b, FrozenId(1));
+    seq.store(u64::MAX - 1, Ordering::Release);
+    assert_eq!(next_frozen_id(&seq).unwrap(), FrozenId(u64::MAX - 1));
+    assert!(next_frozen_id(&seq).is_err());
+    assert_eq!(seq.load(Ordering::Acquire), u64::MAX);
 }
 
 // ---- restore intent and unowned closes --------------------------------------

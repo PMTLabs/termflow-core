@@ -60,15 +60,23 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
     let commands = production(include_str!("../commands/terminal.rs"));
     for name in ["write_terminal", "resize_terminal", "adopt_console_window"] {
         let body = fn_body(&commands, &format!("fn {name}("));
-        assert!(body.contains("keys().resolve_process("), "{name} lost process qualification");
+        assert!(body.contains("ingress::registered_target("), "{name} lost process qualification");
     }
     for name in ["set_terminal_owning_tab", "set_terminal_display_label", "set_terminal_title_color"] {
-        assert!(fn_body(&commands, &format!("fn {name}(")).contains("state.metadata_leaf("));
+        let body = fn_body(&commands, &format!("fn {name}("));
+        assert!(body.contains("state.metadata_leaf("));
+        assert!(body.contains("ingress::metadata(state.host_table.keys(), &state.terminals, &target,"));
+        assert!(!body.contains("renderer_terminal_id.clone()") && !body.contains("resolve_ref("));
     }
     assert!(fn_body(&commands, "fn close_terminal(").contains("state.close_process(&id, crate::state::CloseStorage::Delete)"));
     let owner = production(include_str!("owner_lifecycle.rs"));
-    assert!(fn_body(&owner, "fn metadata_leaf(").contains("keys().resolve_process(reference.trim(), true)"));
-    assert!(fn_body(&owner, "fn close_process(").contains("keys().close_process(reference, policy)"));
+    assert!(fn_body(&owner, "fn metadata_leaf(").contains("ingress::metadata_target(self.host_table.keys(), reference)"));
+    assert!(fn_body(&owner, "fn close_process(").contains("ingress::close(self.host_table.keys(), &process, policy"));
+    let ingress = production(include_str!("ingress.rs"));
+    assert!(fn_body(&ingress, "fn registered_target(").contains("keys.resolve_process(reference, false)"));
+    assert!(fn_body(&ingress, "fn metadata_target(").contains("keys.resolve_process(reference.trim(), true)"));
+    assert!(fn_body(&ingress, "fn close(").contains("keys.close_process(process, policy)"));
+    assert!(fn_body(&ingress, "fn metadata(").contains("keys.with_metadata(process,"));
     let end = fn_body(&owner, "fn end_shell(");
     assert!(end.contains("persist_history_snapshot(process, leaf"));
     assert!(end.contains("history_store.delete(leaf)"));
@@ -90,21 +98,21 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
 
     let api = production(include_str!("../api_server/terminals/mod.rs"));
     assert!(fn_body(&api, "fn delete_terminal(").contains("state.close_process(&id, crate::state::CloseStorage::Preserve)"));
-    assert!(fn_body(&api, "fn resize_terminal(").contains("keys().resolve_process(&id, false)"));
-    assert!(fn_body(&api, "fn write_data_to_terminal(").contains("keys().resolve_process(id, false)"));
+    assert!(fn_body(&api, "fn resize_terminal(").contains("ingress::registered_target(state.host_table.keys(), &id)"));
+    assert!(fn_body(&api, "fn write_data_to_terminal(").contains("ingress::registered_target(state.host_table.keys(), id)"));
     assert!(fn_body(&api, "fn write_terminal(").contains("write_data_to_terminal(&state, &id"));
     let reset = fn_body(&api, "fn reset_terminal(");
     assert_eq!(reset.matches("Json(").count(), 1);
     assert!(!reset.contains("state."));
     let exec = production(include_str!("../api_server/exec.rs"));
-    assert!(fn_body(&exec, "fn send_prompt_to_terminal<").contains("keys().resolve_process(id, false)"));
+    assert!(fn_body(&exec, "fn send_prompt_to_terminal<").contains("ingress::registered_target(state.host_table.keys(), id)"));
     for (name, operation) in [("execute_prompt", "send_prompt_to_terminal"), ("batch_execute_prompt", "send_prompt_to_terminal"), ("batch_write_terminal", "write_data_to_terminal")] {
         let body = fn_body(&exec, &format!("fn {name}("));
         assert!(body.contains("state.resolve_ref("));
         assert!(body.contains(operation));
     }
     let writer = production(include_str!("../automation/send.rs"));
-    assert!(fn_body(&writer, "fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {").contains("keys().resolve_process(pc, false)"));
+    assert!(fn_body(&writer, "fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {").contains("ingress::registered_target(self.host_table.keys(), pc)"));
     let fleet = production(include_str!("../api_server/fleet.rs"));
     assert!(fn_body(&fleet, "fn fleet_close(").contains("state.close_process(&body.terminal_id, crate::state::CloseStorage::Preserve)"));
     let run = fn_body(&fleet, "fn fleet_local_run(");
@@ -113,8 +121,14 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
     let ws = production(include_str!("../api_server/ws.rs"));
     let socket = fn_body(&ws, "fn handle_socket(");
     assert!(socket.contains("state.resolve_ref("));
-    assert!(socket.contains("keys().resolve_process(terminal_id, false)"));
+    assert!(socket.contains("ingress::registered_target(state.host_table.keys(), terminal_id)"));
     let router = production(include_str!("../api_server/mod.rs"));
     assert!(router.contains("\"/api/terminals/:id/prompt\", post(execute_prompt)"));
     assert!(router.contains("\"/api/terminals/:id/execute\", post(execute_prompt)"));
+    assert!(router.contains("\"/api/terminals/:id/resize-reflow\", post(resize_with_reflow)"));
+    let capture = production(include_str!("../api_server/capture.rs"));
+    let reflow = fn_body(&capture, "fn resize_with_reflow(");
+    assert!(reflow.contains("ingress::registered_target(state.host_table.keys(), &id)"));
+    assert!(!reflow.contains("state.resolve_ref("));
+    assert!(reflow.contains("state.host_resize(&id, payload.cols, payload.rows)"));
 }

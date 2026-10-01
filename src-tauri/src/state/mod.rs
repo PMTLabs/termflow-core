@@ -2,6 +2,8 @@ mod types;
 mod incarnation_ids;
 mod host_routes;
 mod host_keys;
+pub(crate) mod ingress;
+pub(crate) use host_keys::SessionIdentity;
 mod terminals;
 mod owner_lifecycle;
 pub(crate) use owner_lifecycle::CreateGuard;
@@ -13,6 +15,7 @@ mod host_connect;
 mod host_lifecycle;
 mod host_port;
 mod host_routing;
+pub(crate) use host_routing::prepare_elevated_process;
 mod host_generation;
 mod update_survival;
 mod update_full;
@@ -32,6 +35,8 @@ pub(crate) mod source_scan;
 mod wiring_tests;
 #[cfg(test)]
 mod owner_wiring_tests;
+#[cfg(test)]
+mod mutator_wiring_tests;
 #[cfg(test)]
 pub(crate) use host_adoption::wiring_tests::exercise_generations;
 

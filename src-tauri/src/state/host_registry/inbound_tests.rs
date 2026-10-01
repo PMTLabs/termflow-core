@@ -17,7 +17,7 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
     let (output_tx, mut output) = tokio::sync::broadcast::channel(16);
     let mut connections = Vec::new();
     for channel in channels {
-        let epoch = table.reserve_epoch();
+        let epoch = table.reserve_epoch().unwrap();
         assert!(table.publish(channel, epoch));
         let (stream, server) = tokio::io::duplex(4096);
         let (rd, wr) = tokio::io::split(stream);
@@ -72,7 +72,7 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
         let (client, server) = &mut connections[1];
         let key = if stale { "tm-old" } else { "tm-new" };
         if stale {
-            assert!(table.publish(channels[1], table.reserve_epoch()));
+            assert!(table.publish(channels[1], table.reserve_epoch().unwrap()));
         }
         for data in [
             Data::Stdout { tab_id: key.into(), offset: 9000, bytes: b"wrong-host".to_vec() },

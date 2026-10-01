@@ -42,20 +42,30 @@ fn frozen_id(channel: HostChannel) -> FrozenId {
     }
 }
 
+fn register_live(port: &FakePort, pc: &str, key: &str, channel: HostChannel) {
+    use crate::state::{CreateAdmission, CreateMode, StageMode, StagedShell, ShellStage, Completion};
+    let CreateAdmission::Run(cg) = port.table().keys().admit_create(pc, CreateMode::Mount).unwrap() else { panic!("admit") };
+    let mode = if port.table().keys().eligible(channel, key) { StageMode::Attach } else { StageMode::Spawn };
+    let (stage, _, _) = port.table().keys().stage_shell(pc, cg, pc, Some((channel, key, mode))).unwrap();
+    port.register_terminal(pc, key, channel);
+    let shell = StagedShell { process: pc.into(), stage: ShellStage::Hosted(stage.unwrap()) };
+    assert!(matches!(port.table().keys().complete_shell(pc, cg, &shell), Completion::Registered));
+}
+
 #[tokio::test(start_paused = true)]
 async fn frozen_channel_routes_to_its_clients_frame() {
     let (world, port) = adopted(&[("h1", holding(&[("k1", 11)])), ("h2", holding(&[("k2", 22)]))]).await;
     let (h1, h2) = (channel_of(&port, "h1"), channel_of(&port, "h2"));
-    port.register_terminal("pc-p", "tm-p", HostChannel::Primary);
-    port.register_terminal("pc-1", "k1", h1);
-    port.register_terminal("pc-2", "k2", h2);
+    register_live(&port, "pc-p", "tm-p", HostChannel::Primary);
+    register_live(&port, "pc-1", "k1", h1);
+    register_live(&port, "pc-2", "k2", h2);
     let t = &port.0;
     let client_for = |channel| port.client_for(channel);
 
     // The host knows a terminal by its session key, not by our process id.
-    assert!(host_registry::route_write(&t.host_terminals, &t.terminals, "pc-1", b"ls\r", &client_for));
-    assert!(host_registry::route_resize(&t.host_terminals, &t.terminals, "pc-2", 100, 30, &client_for));
-    assert!(host_registry::route_repaint(&t.host_terminals, &t.terminals, "pc-p", &client_for));
+    assert!(host_registry::route_write(t.table.keys(), &t.host_terminals, &t.terminals, "pc-1", b"ls\r", &client_for));
+    assert!(host_registry::route_resize(t.table.keys(), &t.host_terminals, &t.terminals, "pc-2", 100, 30, &client_for));
+    assert!(host_registry::route_repaint(t.table.keys(), &t.host_terminals, &t.terminals, "pc-p", &client_for));
     tokio::time::sleep(SEC).await;
 
     assert_eq!(world.sessions("h1", "Stdin"), vec!["k1".to_string()], "the keystrokes reached the owning older host");
@@ -77,8 +87,8 @@ async fn frozen_channel_routes_to_its_clients_frame() {
 async fn a_frozen_terminal_without_a_live_client_behaves_like_a_disconnected_primary() {
     let (world, port) = adopted(&[("h1", holding(&[("k1", 11)]))]).await;
     let h1 = channel_of(&port, "h1");
-    port.register_terminal("pc-p", "tm-p", HostChannel::Primary);
-    port.register_terminal("pc-1", "k1", h1);
+    register_live(&port, "pc-p", "tm-p", HostChannel::Primary);
+    register_live(&port, "pc-1", "k1", h1);
     let t = &port.0;
     world.kill_connections("h1");
     tokio::time::sleep(SEC).await;
@@ -88,11 +98,11 @@ async fn a_frozen_terminal_without_a_live_client_behaves_like_a_disconnected_pri
     // The registry still holds the host while it is reconnected, but there is no
     // client to act on: the failure is reported, never diverted to another host
     // and never reported as delivered.
-    assert!(!host_registry::route_write(&t.host_terminals, &t.terminals, "pc-1", b"ls\r", &client_for));
-    assert!(!host_registry::route_resize(&t.host_terminals, &t.terminals, "pc-1", 100, 30, &client_for));
-    assert!(host_registry::route_repaint(&t.host_terminals, &t.terminals, "pc-1", &client_for), "still host-owned");
+    assert!(!host_registry::route_write(t.table.keys(), &t.host_terminals, &t.terminals, "pc-1", b"ls\r", &client_for));
+    assert!(!host_registry::route_resize(t.table.keys(), &t.host_terminals, &t.terminals, "pc-1", 100, 30, &client_for));
+    assert!(host_registry::route_repaint(t.table.keys(), &t.host_terminals, &t.terminals, "pc-1", &client_for), "still host-owned");
     // A terminal no host owns is not routed at all.
-    assert!(!host_registry::route_write(&t.host_terminals, &t.terminals, "pc-nobody", b"x", &client_for));
+    assert!(!host_registry::route_write(t.table.keys(), &t.host_terminals, &t.terminals, "pc-nobody", b"x", &client_for));
     tokio::time::sleep(SEC).await;
     for kind in ["Stdin", "Resize"] {
         assert_eq!(world.count_everywhere(kind), 0, "no {kind} frame went to any host");

@@ -5,7 +5,7 @@
 //! the panes that host owned. A host's listing is never compared with another
 //! host's panes, so one host's recovery cannot tear down a neighbour's tabs.
 
-use super::panes::{reattach_listed, PanePort};
+use super::panes::{reattach_listed, reconnect_snapshot, PanePort};
 use super::{
     adopt, barrier_key, listing_is_current, reconnect_current, wait_for_reopen, Failure, FrozenHost, HostChannel, HostRole, PtyHostClient,
     ADOPTION_DEADLINE, LIFECYCLE_BUSY, LIST_ATTEMPTS, LIST_RETRY_PAUSE,
@@ -53,7 +53,7 @@ pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_m
     // the two directly matches NOTHING and sends every live terminal to
     // teardown — i.e. a transient pipe drop (sleep/wake) would destroy every
     // shell. Translate once, here.
-    let initial_by_session = port.panes_on(channel);
+    let initial_by_session = reconnect_snapshot(port, channel);
     // Do not return when the app currently owns no tabs: the host can still
     // hold live sessions which must be recovered into visible terminals.
     let tabs: Vec<String> = initial_by_session.keys().cloned().collect();
@@ -68,8 +68,8 @@ pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_m
         }
         log::error!("[HOTSWAP] could not reconnect to any pty-host; closing {} host pane(s)", tabs.len());
         // A pane the user closed while this was going on is already gone.
-        for process_id in initial_by_session.values().filter(|p| port.pane_is_host_owned(p)) {
-            port.teardown_pane(process_id);
+        for identity in initial_by_session.values().filter(|i| port.pane_is_host_owned(&i.process)) {
+            port.teardown_pane(&identity.process);
         }
         return;
     };
@@ -91,7 +91,7 @@ pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_m
         return;
     }
     port.apply_listing(channel, &client, Some(&sessions));
-    reattach_listed(port, channel, &client, &tabs, &sessions, &still_current).await;
+    reattach_listed(port, channel, &client, &initial_by_session, &sessions, &still_current).await;
 }
 
 /// How a reconnect of an older host ended.
@@ -193,7 +193,7 @@ async fn reconnect_frozen_pass<P: PanePort>(
 
     // The panes this host owned before the attempt: the only ones whose fate its
     // answer may decide.
-    let before = port.panes_on(channel);
+    let before = reconnect_snapshot(port, channel);
     let tabs: Vec<String> = before.keys().cloned().collect();
     let mut step = 0;
     let mut gone = false;
@@ -222,7 +222,7 @@ async fn reconnect_frozen_pass<P: PanePort>(
                 match list_with_retries(&client).await {
                     Some(sessions) if still_current() => {
                         port.apply_listing(channel, &client, Some(&sessions));
-                        reattach_listed(port, channel, &client, &tabs, &sessions, &still_current).await;
+                        reattach_listed(port, channel, &client, &before, &sessions, &still_current).await;
                     }
                     Some(_) => {
                         log::warn!("[GEN] reconnect of {} superseded; aborting pass", host.endpoint);
@@ -268,8 +268,8 @@ async fn reconnect_frozen_pass<P: PanePort>(
     }
     log::error!("[GEN] could not reconnect to terminal host {}; closing {} host pane(s)", host.endpoint, before.len());
     let still_owned = port.panes_on(channel);
-    for process_id in before.values().filter(|p| still_owned.values().any(|o| o == *p)) {
-        port.teardown_pane(process_id);
+    for identity in before.values().filter(|i| still_owned.values().any(|o| o == &i.process)) {
+        port.teardown_pane(&identity.process);
     }
     let dropped = gone && drop_dead_host(port, id, key, &host.endpoint);
     FrozenReconnect::GaveUp { dropped }

@@ -72,9 +72,13 @@ fn local_identity(ids: &crate::state::IdAllocator, leaf: Option<&str>) -> Result
     Ok((process, shell_identity))
 }
 
-struct UnpublishedChild(u32);
+use super::{LocalProcess, kill_process_tree};
+
+struct UnpublishedChild(Option<LocalProcess>);
 impl Drop for UnpublishedChild {
-    fn drop(&mut self) { kill_process_tree(self.0); }
+    fn drop(&mut self) {
+        if let Some(process) = self.0.take() { kill_process_tree(process); }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -269,7 +273,8 @@ pub fn spawn_terminal(
     
     let child = pair.slave.spawn_command(cmd_builder).map_err(|e| e.to_string())?;
     let pid = child.process_id().unwrap_or(0);
-    let mut unpublished = UnpublishedChild(pid);
+    let process = LocalProcess::new(child);
+    let mut unpublished = UnpublishedChild(Some(process.clone()));
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     // Note: taking the writer might make the master unusable for writing if not cloned? 
@@ -325,7 +330,8 @@ pub fn spawn_terminal(
         title_color: None,
     });
 
-    unpublished.0 = 0;
+    app_state.local_processes.insert(id.clone(), process);
+    unpublished.0 = None;
     app_state.complete_create(&owner_leaf, cg, &crate::state::StagedShell {
         process: id.clone(), stage: crate::state::ShellStage::Local,
     });
@@ -390,46 +396,6 @@ pub fn spawn_terminal(
     });
 
     Ok(id)
-}
-
-/// Kill a shell process tree (taskkill /T /F on Windows; kill -9 on the
-/// process group on Unix). No-op for pid 0 (unknown).
-///
-/// Backgrounded on its own thread: every caller (`commands::close_terminal`,
-/// `api_server::delete_terminal`, `api_server::fleet_close`) invokes this
-/// inline from an async Tauri command / Axum handler. `taskkill /T /F` can
-/// run 1-3s+ for a shell's whole process tree, and `.output()`/`.status()`
-/// blocks synchronously — which stalls that specific tokio task (and the
-/// worker thread running it) for the duration, same class of bug fixed for
-/// the pty-host sidecar's `Session::kill()` (PR #61). None of the three
-/// callers use the process's death as a signal before proceeding to
-/// `cleanup_terminal_state`, so firing this off and returning immediately is
-/// safe.
-pub fn kill_process_tree(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    std::thread::spawn(move || kill_process_tree_blocking(pid));
-}
-
-fn kill_process_tree_blocking(pid: u32) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: spawn taskkill without allocating a console, so a
-        // GUI app doesn't flash a command-line window on every tab close.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{}", pid)])
-            .output();
-    }
 }
 
 #[cfg(test)]

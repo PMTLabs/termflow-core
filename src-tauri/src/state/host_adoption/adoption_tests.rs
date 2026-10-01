@@ -186,7 +186,7 @@ async fn unpublished_answer_cannot_apply_when_admission_rejects_publication() {
         } });
         tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
         *gate.after_answer.lock().unwrap() = Some(Box::new({ let port = port.clone(); move || {
-            assert!(port.table().publish(channel, port.table().reserve_epoch()));
+            assert!(port.table().publish(channel, port.table().reserve_epoch().unwrap()));
             port.table().drain_host(channel).unwrap().retire();
         } }));
         gate.release.notify_one();
@@ -596,7 +596,7 @@ async fn stale_epoch_callback_inert() {
 
     // The host is reconnected: a newer epoch is published, then the OLD
     // connection finally reports its drop.
-    let newer = port.0.table.reserve_epoch();
+    let newer = port.0.table.reserve_epoch().unwrap();
     port.0.table.publish(host, newer);
     world.kill_connections("h1");
     tokio::time::sleep(SEC).await;
@@ -893,7 +893,9 @@ fn no_ticket_for_input_resize_close() {
         ("host_registry.rs", "pub(super) fn route_resize(", ".resize("),
         ("host_registry.rs", "pub(super) fn route_close(", ".close("),
         ("host_registry.rs", "pub(super) fn route_repaint(", "nudge_repaint"),
-        ("host_adoption/panes.rs", "pub(in crate::state) fn surface_orphans<", ".eligible("),
+        ("host_adoption/panes.rs", "pub(in crate::state) fn surface_orphans<", ".recover_listed("),
+        ("host_keys/effects.rs", "pub(crate) fn recover_listed(", "Self::protected("),
+        ("host_keys/effects.rs", "pub(crate) fn close_original(", "Self::end("),
         ("host_adoption/sweep.rs", "pub(in crate::state) async fn sweep<", "list_sessions"),
     ] {
         let body = fn_body(&source_of(file), signature);

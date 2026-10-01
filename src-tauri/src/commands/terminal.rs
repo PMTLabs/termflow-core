@@ -292,7 +292,7 @@ pub fn adopt_console_window(
 ) -> Result<(), String> {
     // Not registered (yet, or already gone) — nothing to adopt, and not an error:
     // the renderer fires this optimistically off its own binding lifecycle.
-    let Some(process) = state.host_table.keys().resolve_process(&terminal_id, false) else { return Ok(()) };
+    let Some(process) = crate::state::ingress::registered_target(state.host_table.keys(), &terminal_id) else { return Ok(()) };
     let Some(pid) = state.terminals.get(&process).map(|t| t.pid) else {
         return Ok(());
     };
@@ -333,7 +333,7 @@ pub fn set_terminal_owning_tab(
     owning_tab_id: String,
 ) -> Result<(), String> {
     let target = match state.metadata_leaf(&renderer_terminal_id)? { Some(leaf) => leaf, None => return Ok(()) };
-    if !crate::state::retarget_owning_tab(&state.terminals, &target, &owning_tab_id)? {
+    if !crate::state::ingress::metadata(state.host_table.keys(), &state.terminals, &target, crate::state::ingress::Metadata::OwningTab(&owning_tab_id))? {
         log::debug!(
             "set_terminal_owning_tab: no live terminal carries leaf {renderer_terminal_id}"
         );
@@ -359,7 +359,7 @@ pub fn set_terminal_display_label(
     label: Option<String>,
 ) -> Result<(), String> {
     let target = match state.metadata_leaf(&renderer_terminal_id)? { Some(leaf) => leaf, None => return Ok(()) };
-    if !crate::state::set_display_label(&state.terminals, &target, label.as_deref())? {
+    if !crate::state::ingress::metadata(state.host_table.keys(), &state.terminals, &target, crate::state::ingress::Metadata::Label(label.as_deref()))? {
         log::debug!(
             "set_terminal_display_label: no live terminal carries leaf {renderer_terminal_id}"
         );
@@ -377,7 +377,7 @@ pub fn set_terminal_title_color(
     title_color: Option<String>,
 ) -> Result<(), String> {
     let target = match state.metadata_leaf(&renderer_terminal_id)? { Some(leaf) => leaf, None => return Ok(()) };
-    if !crate::state::set_title_color(&state.terminals, &target, title_color.as_deref())? {
+    if !crate::state::ingress::metadata(state.host_table.keys(), &state.terminals, &target, crate::state::ingress::Metadata::Color(title_color.as_deref()))? {
         log::debug!(
             "set_terminal_title_color: no live terminal carries leaf {renderer_terminal_id}"
         );
@@ -463,7 +463,7 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
     // a client, and what happens if we can't, differs. The ticket keeps the host
     // admitting this create until it is done.
     let (process_id, channel, client, claimed_pid, ticket, session_key) = if elevated {
-        let process_id = state.ids.mint_process_id()?;
+        let prepared = crate::state::prepare_elevated_process(&state.ids)?;
         // Plan 045 R7: an elevated request never falls back in-process — that
         // would put an unprivileged shell behind an "Administrator" badge, a
         // lie the user cannot see. Every failure here returns `Err` directly.
@@ -474,7 +474,8 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
             Some(c) => c,
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
         };
-        match state.place_elevated_create(&id, session_key.as_deref(), client, cg, &process_id)? {
+        let (process_id, placement) = state.place_elevated_create(&id, session_key.as_deref(), client, cg, prepared)?;
+        match placement {
             crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
             crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
             crate::state::Placement::InProcess { .. } => unreachable!("elevated creates never run in-process"),
@@ -506,6 +507,8 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
     if !ticket.publish_key(&process_id) {
         return Err("host-ownership-pending: staged session changed before publication".into());
     }
+    let identity = state.host_table.keys().session_identity(channel, &session_key, &process_id)
+        .ok_or("host-ownership-pending: staged session changed before enqueue")?;
     // The session's claim is held from here on. A window that asked for the same
     // leaf and was refused asks this mark whether to keep waiting for the offer
     // this create may make when it returns; it must outlast the host round trip
@@ -538,12 +541,15 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
         // RP-3: transactional when the host supports it (AttachAck), silently
         // legacy otherwise. A confirmed-dead session still completes reattach —
         // the replayed ring + Exit tombstone render the final state honestly.
-        match client.attach_confirmed(&session_key, 0).await {
+        match client.attach_owned(&identity, 0).await? {
             Some(true) => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, host-confirmed alive)"),
             Some(false) => log::warn!("[HOTSWAP] reattached {session_key} but host reports it not alive"),
             None => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, legacy attach)"),
         }
-        client.nudge_repaint(&session_key, cols, rows);
+        state.host_table.keys().enqueue_session(&identity, || {
+            client.nudge_repaint(&session_key, cols, rows);
+            true
+        });
         state.complete_create(&id, cg, &staged);
         return Ok(process_id);
     }
@@ -578,7 +584,7 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
     // so any slow inline work in another frame's handler (notably a `Close`'s
     // process-tree kill) shows up here as latency and nowhere else.
     let spawn_started = std::time::Instant::now();
-    let spawned = client.spawn_session(&session_key, &spec).await;
+    let spawned = client.spawn_owned(&identity, &spec).await;
     let spawn_ms = spawn_started.elapsed().as_millis();
     if spawn_ms >= 250 {
         log::warn!("[SPAWN] host spawn for {session_key} took {spawn_ms}ms");
@@ -958,7 +964,7 @@ pub async fn write_terminal(
     id: String,
     data: String,
 ) -> Result<(), String> {
-    let id = state.host_table.keys().resolve_process(&id, false)
+    let id = crate::state::ingress::registered_target(state.host_table.keys(), &id)
         .ok_or_else(|| "Terminal not found".to_string())?;
     // Host-owned terminals: forward keystrokes to the sidecar (still tag the
     // user-input source below).
@@ -991,7 +997,7 @@ pub async fn resize_terminal(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let id = state.host_table.keys().resolve_process(&id, false)
+    let id = crate::state::ingress::registered_target(state.host_table.keys(), &id)
         .ok_or_else(|| "Terminal not found".to_string())?;
     // Host-owned terminals: forward the resize to the sidecar, update dims, and
     // keep the authoritative vt100 parser in sync (else /snapshot hydration
@@ -1722,8 +1728,8 @@ mod create_in_flight_mark_tests {
         assert!(after("place_process_create(") < at, "marked only once the host placement holds the claim");
         assert!(after("place_elevated_create(") < at, "the elevated claim comes before the mark too");
         assert!(at < after("register_host_terminal("), "marked before the terminal is registered");
-        assert!(at < after("attach_confirmed("), "marked before the slow attach round trip");
-        assert!(at < after("spawn_session("), "marked before the slow spawn round trip");
+        assert!(at < after("attach_owned("), "marked before the slow attach round trip");
+        assert!(at < after("spawn_owned("), "marked before the slow spawn round trip");
         let line = body[body[..at].rfind('\n').map_or(0, |n| n + 1)..].lines().next().unwrap();
         assert!(
             line.contains("let _create_in_flight ="),

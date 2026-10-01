@@ -423,7 +423,7 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
     fn current_client(&self) -> Option<PtyHostClient>;
     /// Snapshot of the registered frozen hosts.
     fn frozen_hosts(&self) -> Vec<FrozenHost>;
-    fn next_frozen_id(&self) -> FrozenId;
+    fn next_frozen_id(&self) -> Result<FrozenId, String>;
     /// Connect to `candidate`. The current role also starts its host when none is
     /// running; a frozen host is only ever connected to. `frozen` carries the id
     /// and epoch the connection's callbacks must capture.
@@ -564,10 +564,10 @@ async fn adopt<P: AdoptionPort>(
         return Ok(Adopted { resolution: resolution_of(&listing), channel, epoch });
     }
 
-    let frozen = (role == HostRole::Frozen).then(|| {
-        let id = registered.map_or_else(|| port.next_frozen_id(), |h| h.id);
-        (id, port.table().reserve_epoch())
-    });
+    let frozen = if role == HostRole::Frozen {
+        let id = match registered { Some(h) => h.id, None => port.next_frozen_id().map_err(Failure::Other)? };
+        Some((id, port.table().reserve_epoch().map_err(Failure::Other)?))
+    } else { None };
     let opened = tokio::time::timeout_at(deadline, port.connect(candidate, role, frozen))
         .await
         .map_err(|_| Failure::Other("timed out connecting to the terminal host".to_string()))?
@@ -923,6 +923,10 @@ mod incarnation_tests;
 mod key_lifecycle_tests;
 #[cfg(test)]
 mod owner_tests;
+#[cfg(test)]
+mod deferred_effect_tests;
+#[cfg(test)]
+mod elevated_adapter_tests;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(test)]

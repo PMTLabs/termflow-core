@@ -10,8 +10,8 @@ const BOUND: Duration = Duration::from_secs(5);
 
 fn table_with_hosts() -> HostTable {
     let table = HostTable::new();
-    table.publish(PRIMARY, table.reserve_epoch());
-    table.publish(OLD, table.reserve_epoch());
+    table.publish(PRIMARY, table.reserve_epoch().unwrap());
+    table.publish(OLD, table.reserve_epoch().unwrap());
     table
 }
 
@@ -182,11 +182,11 @@ async fn the_quiescer_can_still_connect_while_holding_the_quiesce() {
 #[tokio::test]
 async fn a_superseded_epoch_is_no_longer_current() {
     let table = HostTable::new();
-    let first = table.reserve_epoch();
+    let first = table.reserve_epoch().unwrap();
     assert!(!table.is_current(OLD, first), "nothing is published yet");
     table.publish(OLD, first);
     assert!(table.is_current(OLD, first));
-    let second = table.reserve_epoch();
+    let second = table.reserve_epoch().unwrap();
     table.publish(OLD, second);
     assert!(!table.is_current(OLD, first));
     assert!(table.is_current(OLD, second));
@@ -197,7 +197,7 @@ async fn a_superseded_epoch_is_no_longer_current() {
 async fn republishing_keeps_tickets_of_the_old_connection_counted() {
     let table = table_with_hosts();
     let held = table.begin(OLD).unwrap();
-    table.publish(OLD, table.reserve_epoch());
+    table.publish(OLD, table.reserve_epoch().unwrap());
     assert_eq!(table.drain_host(OLD).err(), Some(DrainRefusal::InFlight));
     drop(held);
     assert!(table.drain_host(OLD).is_ok());
@@ -206,11 +206,11 @@ async fn republishing_keeps_tickets_of_the_old_connection_counted() {
 #[tokio::test]
 async fn publishing_does_not_reopen_a_retired_host() {
     let table = table_with_hosts();
-    let epoch = table.reserve_epoch();
+    let epoch = table.reserve_epoch().unwrap();
     table.publish(OLD, epoch);
     table.drain_host(OLD).unwrap().retire();
 
-    let later = table.reserve_epoch();
+    let later = table.reserve_epoch().unwrap();
     assert!(!table.publish(OLD, later), "a retired host cannot be published again");
     assert_eq!(table.admission(OLD), Some(Admission::Retired));
     assert!(matches!(table.begin(OLD), Err(Busy::Host(OLD, Admission::Retired))));
@@ -221,16 +221,16 @@ async fn publishing_does_not_reopen_a_retired_host() {
 #[tokio::test]
 async fn publishing_during_a_drain_leaves_the_drain_in_charge() {
     let table = table_with_hosts();
-    let epoch = table.reserve_epoch();
+    let epoch = table.reserve_epoch().unwrap();
     table.publish(OLD, epoch);
     let drain = table.drain_host(OLD).unwrap();
 
-    assert!(!table.publish(OLD, table.reserve_epoch()));
+    assert!(!table.publish(OLD, table.reserve_epoch().unwrap()));
     assert_eq!(table.admission(OLD), Some(Admission::Draining), "still closed while the drain is decided");
 
     drop(drain);
     assert_eq!(table.admission(OLD), Some(Admission::Open), "the drain's guard still reopens its own host");
-    assert!(table.publish(OLD, table.reserve_epoch()), "an open host publishes as before");
+    assert!(table.publish(OLD, table.reserve_epoch().unwrap()), "an open host publishes as before");
 }
 
 // ---- claims ---------------------------------------------------------------
@@ -324,7 +324,7 @@ async fn a_host_has_one_ticker_and_its_handle_gives_the_place_back() {
     assert!(table.start_ticker(OLD).is_none(), "one per host");
     assert!(table.start_ticker(PRIMARY).is_some(), "another host has its own");
     // A reconnect replaces the connection, not the ticker.
-    table.publish(OLD, table.reserve_epoch());
+    table.publish(OLD, table.reserve_epoch().unwrap());
     assert!(table.start_ticker(OLD).is_none());
     drop(first);
     assert!(table.start_ticker(OLD).is_some(), "a ticker that ended can be started again");

@@ -200,7 +200,7 @@ async fn sweep_does_not_surface_a_superseded_or_retired_hosts_answer() {
         if retire {
             port.table().drain_host(channel).unwrap().retire();
         } else {
-            let epoch = port.table().reserve_epoch();
+            let epoch = port.table().reserve_epoch().unwrap();
             assert!(port.table().publish(channel, epoch));
         }
         assert!(!running.await.unwrap(), "a stale answer leaves the sweep retryable");

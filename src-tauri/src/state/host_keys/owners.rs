@@ -136,6 +136,7 @@ impl HostKeys {
         let row = inner.owners.get_mut(leaf).unwrap();
         let OwnerState::Placing { staged_exited, cancel, .. } = row.state else { unreachable!() };
         if staged_exited && cancel.is_none() {
+            self.end_staged_exit(&mut inner, shell);
             let row = inner.owners.remove(leaf).unwrap();
             row.outcome.send_replace(Some(Ok(shell.process.clone())));
             return Completion::Exited;
@@ -213,7 +214,13 @@ impl HostKeys {
         let Some(row) = inner.owners.values_mut().find(|r| shell_of(&r.state).is_some_and(|s| s.process == process)) else { return false };
         match &mut row.state {
             OwnerState::Registered(_) => true,
-            OwnerState::Placing { staged_exited, .. } => { *staged_exited = true; false }
+            OwnerState::Placing { stage: Some(shell), staged_exited, .. } => {
+                *staged_exited = true;
+                let shell = shell.clone();
+                self.end_staged_exit(&mut inner, &shell);
+                false
+            }
+            OwnerState::Placing { stage: None, .. } => false,
             OwnerState::Closing(_) => false,
         }
     }

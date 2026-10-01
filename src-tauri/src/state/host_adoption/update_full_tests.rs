@@ -237,7 +237,7 @@ async fn a_fast_scope_reply_is_revalidated_after_the_slow_host_answers() {
         assert!(!scope.is_finished(), "the slow host still holds the aggregate await");
         match change {
             "epoch" => {
-                assert!(port.table().publish(HostChannel::Primary, port.table().reserve_epoch()));
+                assert!(port.table().publish(HostChannel::Primary, port.table().reserve_epoch().unwrap()));
             }
             "admission" => port.table().drain_host(HostChannel::Primary).unwrap().retire(),
             "pipe" => {

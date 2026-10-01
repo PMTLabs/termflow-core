@@ -62,6 +62,7 @@ pub enum Busy {
     Host(HostChannel, Admission),
     /// Nothing is published for this channel.
     NoSuchHost(HostChannel),
+    Exhausted,
 }
 
 impl std::fmt::Display for Busy {
@@ -72,6 +73,7 @@ impl std::fmt::Display for Busy {
                 write!(f, "terminal host {channel:?} is not accepting new sessions ({admission:?})")
             }
             Busy::NoSuchHost(channel) => write!(f, "terminal host {channel:?} is not connected"),
+            Busy::Exhausted => write!(f, "{LIFECYCLE_BUSY}: lifecycle identity exhausted"),
         }
     }
 }
@@ -177,10 +179,11 @@ impl HostTable {
 
     /// An epoch for a connection about to be made. The callbacks wired into it
     /// capture the value; `publish` makes it the host's current one.
-    pub fn reserve_epoch(&self) -> u64 {
+    pub fn reserve_epoch(&self) -> Result<u64, String> {
         let mut inner = self.shared.lock();
-        inner.next_epoch += 1;
-        inner.next_epoch
+        let epoch = inner.next_epoch.checked_add(1).ok_or("terminal host connection identity exhausted")?;
+        inner.next_epoch = epoch;
+        Ok(epoch)
     }
 
     /// Make `epoch` the current connection of `channel` and open it for
@@ -304,8 +307,8 @@ impl HostTable {
                 (Lifecycle::Open, _) | (Lifecycle::Exiting | Lifecycle::Quiescing { .. }, QuiesceReason::Exit) => {}
                 _ => return Err(Self::check_lifecycle(&inner).expect_err("not open")),
             }
-            inner.next_holder += 1;
-            let holder = inner.next_holder;
+            let holder = inner.next_holder.checked_add(1).ok_or(Busy::Exhausted)?;
+            inner.next_holder = holder;
             inner.lifecycle = match reason {
                 QuiesceReason::Exit => Lifecycle::Exiting,
                 _ => Lifecycle::Quiescing { holder, reason },
@@ -556,3 +559,5 @@ impl Drop for DrainGuard {
 
 #[cfg(test)]
 mod table_tests;
+#[cfg(test)]
+mod counter_tests;

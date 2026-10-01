@@ -1,7 +1,7 @@
 //! Storage and process effects of owner transitions. No ownership guard is
 //! held while persisting, deleting canvas edges, or killing a local child.
 
-use super::{AppState, CloseAction, CloseStorage, Completion, CreateAdmission, CreateMode, EndKind, ShellStage, StagedShell, HostKeys};
+use super::{AppState, CloseStorage, Completion, CreateAdmission, CreateMode, EndKind, ShellStage, StagedShell, HostKeys};
 use tauri::Runtime;
 
 pub(crate) struct CreateGuard<R: Runtime> { state: AppState<R>, leaf: String, cg: u64 }
@@ -31,17 +31,16 @@ pub(super) fn finish_create(keys: &HostKeys, leaf: &str, cg: u64, shell: &Staged
 
 impl<R: Runtime> AppState<R> {
     pub(crate) fn metadata_leaf(&self, reference: &str) -> Result<Option<String>, String> {
-        if reference.trim().is_empty() { return Err("a renderer terminal (leaf) id is required".into()); }
-        let target = self.host_table.keys().resolve_process(reference.trim(), true);
-        if target.is_none() && reference.starts_with("pc-") { return Err("Terminal not found".into()); }
-        Ok(target)
+        super::ingress::metadata_target(self.host_table.keys(), reference)
     }
 
     pub(crate) fn dispose_staged(&self, shell: &StagedShell) {
-        let pid = self.terminals.get(&shell.process).map_or(0, |t| t.pid);
+        let process = self.local_processes.get(&shell.process).map(|p| p.clone());
         self.cleanup_terminal_maps(&shell.process);
         self.forget_host_terminal(&shell.process);
-        if matches!(shell.stage, ShellStage::Local) { crate::pty_manager::kill_process_tree(pid); }
+        if matches!(shell.stage, ShellStage::Local) {
+            if let Some(process) = process { crate::pty_manager::kill_process_tree(process); }
+        }
     }
 
     pub(crate) fn complete_create(&self, leaf: &str, cg: u64, shell: &StagedShell) {
@@ -59,11 +58,11 @@ impl<R: Runtime> AppState<R> {
 
     /// Resolves a leaf on arrival; an explicit process id is never redirected.
     pub fn close_process(&self, reference: &str, policy: CloseStorage) -> bool {
-        match self.host_table.keys().close_process(reference, policy) {
-            CloseAction::Cancelled => true,
-            CloseAction::End { process, .. } => { self.end_shell(&process, EndKind::Close(policy)); true }
-            CloseAction::Missing => false,
-        }
+        // Unstaged leaf placements can also be cancelled on arrival.
+        let process = super::ingress::close_target(self.host_table.keys(), reference).unwrap_or_else(|| reference.into());
+        super::ingress::close(self.host_table.keys(), &process, policy, |process| {
+            self.end_shell(process, EndKind::Close(policy));
+        })
     }
 
     pub fn exit_process(&self, process: &str) -> bool {
@@ -73,7 +72,7 @@ impl<R: Runtime> AppState<R> {
 
     /// Keep storage ahead of removal; a successor cannot admit during this work.
     pub(crate) fn end_shell(&self, process: &str, kind: EndKind) -> bool {
-        let pid = self.terminals.get(process).map_or(0, |t| t.pid);
+        let local_process = self.local_processes.get(process).map(|p| p.clone());
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, process);
         let ended = self.host_table.keys().end_process(process, kind, |leaf| {
             match kind {
@@ -97,7 +96,9 @@ impl<R: Runtime> AppState<R> {
         let Some(ended) = ended else { return false };
         self.forget_host_terminal(process);
         if matches!(kind, EndKind::Close(_)) {
-            if matches!(ended.shell.stage, ShellStage::Local) { crate::pty_manager::kill_process_tree(pid); }
+            if matches!(ended.shell.stage, ShellStage::Local) {
+                if let Some(process) = local_process { crate::pty_manager::kill_process_tree(process); }
+            }
             use tauri::Emitter;
             let _ = self.app_handle.emit("terminal:exit", super::terminals::host_exit_payload(process, exit_cwd));
         }

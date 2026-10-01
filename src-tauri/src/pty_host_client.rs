@@ -206,8 +206,8 @@ impl PtyHostClient {
     pub fn set_lifecycle(&mut self, lifecycle: HostRetention) {
         self.lifecycle = Arc::new(lifecycle);
     }
-    fn next_req(&self) -> u64 {
-        self.req_ctr.fetch_add(1, Ordering::Relaxed)
+    fn next_req(&self) -> Option<u64> {
+        self.req_ctr.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).ok()
     }
 
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
@@ -326,19 +326,19 @@ impl PtyHostClient {
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
 
-    pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) {
-        let _ = self.outbound.send(Frame::Data(Data::Stdin {
+    pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
             tab_id: tab_id.to_string(),
             bytes: bytes.to_vec(),
-        }));
+        })).is_ok()
     }
 
-    pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) {
-        let _ = self.outbound.send(Frame::Ctrl(Control::Resize {
+    pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Ctrl(Control::Resize {
             tab_id: tab_id.to_string(),
             cols,
             rows,
-        }));
+        })).is_ok()
     }
 
     /// Force a repaint of a host-owned program by nudging the size and
@@ -351,7 +351,7 @@ impl PtyHostClient {
     }
 
     pub fn attach(&self, tab_id: &str, from_offset: u64) {
-        let req = self.next_req();
+        let Some(req) = self.next_req() else { return };
         let _ = self.outbound.send(Frame::Ctrl(Control::Attach {
             req,
             tab_id: tab_id.to_string(),
@@ -365,30 +365,47 @@ impl PtyHostClient {
     /// the host confirmed the session as re-wired and alive (`None` = legacy
     /// host / no confirmation possible — treated as attached, as before).
     pub async fn attach_confirmed(&self, tab_id: &str, from_offset: u64) -> Option<bool> {
+        self.attach_confirmed_inner(tab_id, from_offset, None).await.ok().flatten()
+    }
+
+    pub(crate) async fn attach_owned(&self, identity: &crate::state::SessionIdentity, from_offset: u64) -> Result<Option<bool>, String> {
+        self.attach_confirmed_inner(&identity.key, from_offset, Some(identity)).await
+    }
+
+    async fn attach_confirmed_inner(&self, tab_id: &str, from_offset: u64, identity: Option<&crate::state::SessionIdentity>) -> Result<Option<bool>, String> {
+        let binding = self.sessions.lock().unwrap().clone();
         if !self.attach_acks.load(Ordering::Acquire) {
-            self.attach(tab_id, from_offset);
-            return None;
+            let req = self.next_req().ok_or("terminal host request identity exhausted")?;
+            let enqueue = || self.is_alive() && self.outbound.send(Frame::Ctrl(Control::Attach {
+                req, tab_id: tab_id.into(), from_offset,
+            })).is_ok();
+            if let Some(identity) = identity { binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue); }
+            else { enqueue(); }
+            return Ok(None);
         }
         let tab = tab_id.to_string();
         match self
-            .request(move |req| Control::AttachAcked {
+            .request_authorized(std::time::Duration::from_secs(10), move |req| Control::AttachAcked {
                 req,
                 tab_id: tab,
                 from_offset,
+            }, |enqueue| match identity {
+                Some(identity) => binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue),
+                None => enqueue(),
             })
-            .await
+            .await?
         {
             Some(Response::AttachAck { alive, tail_offset, .. }) => {
                 log::info!(
                     "[HOTSWAP] AttachAck for {tab_id}: alive={alive} tail_offset={tail_offset}"
                 );
-                Some(alive)
+                Ok(Some(alive))
             }
             _ => {
                 // Ack-capable host didn't answer in time — the attach itself may
                 // still have landed; log and treat like legacy.
                 log::warn!("[HOTSWAP] no AttachAck for {tab_id} (timeout); assuming attached");
-                None
+                Ok(None)
             }
         }
     }
@@ -408,35 +425,56 @@ impl PtyHostClient {
         timeout: std::time::Duration,
         make: impl FnOnce(u64) -> Control,
     ) -> Option<Response> {
-        let req = self.next_req();
+        self.request_authorized(timeout, make, |enqueue| enqueue()).await.ok().flatten()
+    }
+
+    async fn request_authorized(
+        &self, timeout: std::time::Duration, make: impl FnOnce(u64) -> Control,
+        authorize: impl FnOnce(&mut dyn FnMut() -> bool) -> bool,
+    ) -> Result<Option<Response>, String> {
+        let req = self.next_req().ok_or("terminal host request identity exhausted")?;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
+        let frame = Frame::Ctrl(make(req));
+        let mut frame = Some(frame);
         // `alive` is cleared before the pending map is drained, so a request that
         // slipped in after the drain sees it here instead of waiting out `timeout`.
-        if !self.is_alive() || self.outbound.send(Frame::Ctrl(make(req))).is_err() {
+        if !authorize(&mut || self.is_alive() && self.outbound.send(frame.take().unwrap()).is_ok()) {
             self.pending.lock().unwrap().remove(&req);
-            return None;
+            return Ok(None);
         }
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(resp)) => Some(resp),
+            Ok(Ok(resp)) => Ok(Some(resp)),
             _ => {
                 self.pending.lock().unwrap().remove(&req);
-                None
+                Ok(None)
             }
         }
     }
 
     /// Spawn a session; returns the child PID on success.
     pub async fn spawn_session(&self, tab_id: &str, spec: &SpawnSpec) -> Result<u32, String> {
+        self.spawn_session_inner(tab_id, spec, None).await
+    }
+
+    pub(crate) async fn spawn_owned(&self, identity: &crate::state::SessionIdentity, spec: &SpawnSpec) -> Result<u32, String> {
+        self.spawn_session_inner(&identity.key, spec, Some(identity)).await
+    }
+
+    async fn spawn_session_inner(&self, tab_id: &str, spec: &SpawnSpec, identity: Option<&crate::state::SessionIdentity>) -> Result<u32, String> {
         let tab = tab_id.to_string();
         let spec = spec.clone();
+        let binding = self.sessions.lock().unwrap().clone();
         match self
-            .request(move |req| Control::Spawn {
+            .request_authorized(std::time::Duration::from_secs(10), move |req| Control::Spawn {
                 req,
                 tab_id: tab,
                 spec,
+            }, |enqueue| match identity {
+                Some(identity) => binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue),
+                None => enqueue(),
             })
-            .await
+            .await?
         {
             Some(Response::Spawned { pid, .. }) => Ok(pid),
             Some(Response::SpawnFailed { error, .. }) => Err(error),
@@ -463,7 +501,7 @@ impl PtyHostClient {
     }
 
     pub async fn list_sessions_numbered_within(&self, timeout: std::time::Duration) -> Option<SessionListing> {
-        let req = self.next_req();
+        let req = self.next_req()?;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
         let binding = self.sessions.lock().unwrap().clone();
@@ -1359,6 +1397,8 @@ mod discovery_tests;
 
 #[cfg(test)]
 mod conn_tests;
+#[cfg(test)]
+mod counter_tests;
 
 #[cfg(test)]
 mod exe_origin_tests;

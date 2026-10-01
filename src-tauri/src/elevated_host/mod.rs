@@ -31,7 +31,7 @@ pub const ADMIN_UAC_CANCELLED: &str = "ADMIN_UAC_CANCELLED";
 /// never reused within a run, so a stale reference to a retired host cannot
 /// resolve to a later host that took its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FrozenId(pub u32);
+pub struct FrozenId(pub u64);
 
 /// Which pty-host sidecar owns a `host_terminals` entry. `Primary` is the
 /// existing, always-on sidecar; `Elevated` is the UAC-elevated one this
@@ -97,8 +97,8 @@ impl ElevatedHost {
         self.gen.load(Ordering::Acquire)
     }
 
-    pub fn bump_gen(&self) -> u64 {
-        self.gen.fetch_add(1, Ordering::AcqRel) + 1
+    pub fn bump_gen(&self) -> Result<u64, String> {
+        crate::checked_counter::advance(&self.gen)
     }
 
     /// Publish a freshly connected client and its launched process, becoming
@@ -179,6 +179,15 @@ fn wait_for_exit(proc: launch::LaunchedProcess, timeout_ms: u32) -> bool {
 /// already-superseded connection can't tear down a freshly opened one.
 #[cfg(test)]
 mod crash_tests {
+    #[test]
+    fn connection_generation_exhaustion_keeps_the_last_identity() {
+        let manager = super::ElevatedHost::new();
+        manager.gen.store(u64::MAX - 1, super::Ordering::Release);
+        assert_eq!(manager.bump_gen().unwrap(), u64::MAX);
+        assert!(manager.bump_gen().is_err());
+        assert_eq!(manager.current_gen(), u64::MAX);
+    }
+
     /// `on_disconnect`'s own closure body, extracted by brace-counting from
     /// its `Arc::new(move || {` opening — not a fixed line window, which
     /// would silently start matching the rest of the function once the

@@ -181,7 +181,7 @@ pub async fn deliver(
 impl<R: tauri::Runtime> TerminalWriter for crate::state::AppState<R> {
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
         use std::io::Write as _;
-        if self.host_table.keys().resolve_process(pc, false).is_none() {
+        if crate::state::ingress::registered_target(self.host_table.keys(), pc).is_none() {
             return Err(format!("terminal {} has no writer", pc));
         }
         // Local writer first, matching the order `send_prompt_to_terminal` used. Clone the Arc out so

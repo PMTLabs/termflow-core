@@ -129,7 +129,7 @@ async fn a_real_respawn_uses_a_new_key_and_rejects_held_output_from_the_closed_s
     let process_first = mint_process_id().unwrap();
     let process_second = mint_process_id().unwrap();
     let table = HostTable::new();
-    let epoch = table.reserve_epoch();
+    let epoch = table.reserve_epoch().unwrap();
     assert!(table.publish(HostChannel::Primary, epoch));
     table.routes().register(HostChannel::Primary, &first_session_key, &process_first, epoch);
     let armed = Arc::new(AtomicBool::new(false));

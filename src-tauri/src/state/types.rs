@@ -279,6 +279,7 @@ use std::collections::VecDeque;
 /// select a replacement child between checking and removing it.
 pub struct GenerationSlot<T> {
     next_generation: u64,
+    exhausted: bool,
     current: Option<(u64, T)>,
 }
 
@@ -287,10 +288,24 @@ mod generation_slot_tests {
     use super::GenerationSlot;
 
     #[test]
+    fn exhausted_generation_refuses_spawn_and_stop_invalidates_the_last_claim() {
+        let mut slot = GenerationSlot::new();
+        slot.next_generation = u64::MAX - 1;
+        let generation = slot.claim_generation().unwrap();
+        assert_eq!(generation, u64::MAX);
+        assert_eq!(slot.install_if_current(generation, "control"), Ok(None));
+        assert_eq!(slot.take(), Some("control"));
+        assert!(slot.claim_generation().is_err());
+        assert_eq!(slot.install_if_current(generation, "late"), Err("late"));
+        assert!(!slot.is_present());
+        assert_eq!(slot.next_generation, u64::MAX);
+    }
+
+    #[test]
     fn a_stale_spawn_cannot_replace_a_newer_slot_or_clear_it() {
         let mut slot = GenerationSlot::new();
-        let old = slot.claim_generation();
-        let new = slot.claim_generation();
+        let old = slot.claim_generation().unwrap();
+        let new = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(old, "old"), Err("old"));
         assert_eq!(slot.install_if_current(new, "new"), Ok(None));
         assert!(!slot.clear_if_current(old));
@@ -301,11 +316,11 @@ mod generation_slot_tests {
     #[test]
     fn replacement_returns_the_displaced_handle_and_stop_invalidates_a_spawn_claim() {
         let mut slot = GenerationSlot::new();
-        let first = slot.claim_generation();
+        let first = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(first, "first-child"), Ok(None));
-        let replacement = slot.claim_generation();
+        let replacement = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(replacement, "replacement-child"), Ok(Some("first-child")));
-        let in_flight = slot.claim_generation();
+        let in_flight = slot.claim_generation().unwrap();
         assert_eq!(slot.take(), Some("replacement-child"));
         assert_eq!(slot.install_if_current(in_flight, "late-child"), Err("late-child"));
     }
@@ -315,19 +330,23 @@ impl<T> GenerationSlot<T> {
     pub fn new() -> Self {
         Self {
             next_generation: 0,
+            exhausted: false,
             current: None,
         }
     }
 
-    pub fn claim_generation(&mut self) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1);
-        self.next_generation
+    pub fn claim_generation(&mut self) -> Result<u64, String> {
+        if self.exhausted { return Err("process generation exhausted".into()); }
+        match self.next_generation.checked_add(1) {
+            Some(generation) => { self.next_generation = generation; Ok(generation) }
+            None => { self.exhausted = true; Err("process generation exhausted".into()) }
+        }
     }
 
     /// Installs a spawned child only if no later spawn has claimed the slot.
     /// The caller must terminate the returned stale child itself.
     pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<Option<T>, T> {
-        if self.next_generation == generation {
+        if !self.exhausted && self.next_generation == generation {
             Ok(self.current.replace((generation, handle)).map(|(_, displaced)| displaced))
         } else {
             Err(handle)
@@ -360,7 +379,7 @@ impl<T> GenerationSlot<T> {
     pub fn take(&mut self) -> Option<T> {
         // Stop is a lifecycle boundary: a child which has claimed a generation
         // but has not installed yet must fail installation after this point.
-        self.claim_generation();
+        let _ = self.claim_generation();
         self.current.take().map(|(_, handle)| handle)
     }
 
@@ -407,6 +426,7 @@ pub struct AppState<R: Runtime = Wry> {
     // the same shard — i.e. creating or closing a colliding terminal stalled for
     // the full sleep. Mirrors the `terminal_history` Arc pattern below.
     pub shell_writer_channels: Arc<DashMap<String, Arc<Mutex<Box<dyn std::io::Write + Send>>>>>,
+    pub local_processes: Arc<DashMap<String, crate::pty_manager::LocalProcess>>,
     pub ptys: Arc<DashMap<String, Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     // Broadcast channel for PTY output
     pub output_tx: broadcast::Sender<ChannelPayload>,
@@ -579,7 +599,7 @@ pub struct AppState<R: Runtime = Wry> {
     /// in short synchronous sections; never held across an `.await`.
     pub frozen_hosts: Arc<std::sync::Mutex<Vec<FrozenHost>>>,
     /// Source of `FrozenId`s; ids are never reused within a run.
-    pub frozen_host_seq: Arc<std::sync::atomic::AtomicU32>,
+    pub frozen_host_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Admission to the hosts: who may start or adopt sessions, and when exit,
     /// offload, update or a retirement may proceed. Never held across an `.await`.
     pub host_table: super::host_table::HostTable,
@@ -664,6 +684,7 @@ impl<R: Runtime> Clone for AppState<R> {
             terminals: self.terminals.clone(),
             root_leaf_claims: self.root_leaf_claims.clone(),
             shell_writer_channels: self.shell_writer_channels.clone(),
+            local_processes: self.local_processes.clone(),
             ptys: self.ptys.clone(),
             output_tx: self.output_tx.clone(),
             terminal_history: self.terminal_history.clone(),

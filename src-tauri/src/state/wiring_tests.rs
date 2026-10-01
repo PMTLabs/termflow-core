@@ -98,8 +98,7 @@ fn every_channel_key_map_access_has_a_scope() {
     census(".host_sessions_by_key(", &[("state/host_port.rs", "panes_on")]); // routed adapter
     census(".panes_on(", &[
         ("state/host_adoption/panes.rs", "reattach_listed"), // routed, fresh ownership
-        ("state/host_adoption/reconnect.rs", "reconnect_primary"), // primary-only
-        ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"), // routed, before
+        ("state/host_adoption/panes.rs", "reconnect_snapshot"), // original routed identity before any wait
         ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"), // routed, after
         ("state/host_adoption/sweep.rs", "sweep"), // merged across hosts
         ("state/host_retire.rs", "facts"), // routed to frozen id
@@ -150,9 +149,12 @@ fn restoring_intent_producers_and_consumers_are_classified() {
     census(".is_restoring_key(", &[("state/host_routing.rs", "place_owned")]);
     census(".refresh_restoring_key(", &[
         ("state/host_routing.rs", "place_owned"),
-        ("state/host_routing.rs", "place_elevated_create"),
+        ("state/host_routing.rs", "place_elevated_process"),
     ]);
-    census("host_registry::orphan_verdict(", &[("state/host_adoption/panes.rs", "surface_orphans")]);
+    census(".recover_listed(", &[
+        ("state/host_adoption/panes.rs", "surface_orphans"),
+        ("state/host_routing.rs", "surface_ambiguity"),
+    ]);
     census("host_registry::apply_answered_listing(", &[("state/host_port.rs", "apply_listing")]);
 }
 

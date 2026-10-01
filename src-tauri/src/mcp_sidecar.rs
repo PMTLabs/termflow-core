@@ -207,7 +207,7 @@ async fn start_mcp_sidecar(
         .mcp_process
         .lock()
         .map_err(|_| "MCP process slot lock poisoned".to_string())?
-        .claim_generation();
+        .claim_generation()?;
     let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;
     log::info!("[MCP] MCP sidecar spawned");
     let (terminated_tx, terminated_rx) = std::sync::mpsc::channel();
@@ -316,7 +316,7 @@ async fn start_mcp_legacy(
         .mcp_process
         .lock()
         .map_err(|_| "MCP process slot lock poisoned".to_string())?
-        .claim_generation();
+        .claim_generation()?;
     let child = cmd.spawn().map_err(|e| e.to_string())?;
 
     let pid = child.id();

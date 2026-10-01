@@ -184,7 +184,7 @@ pub(crate) async fn send_prompt_to_terminal<R: tauri::Runtime>(
     payload: &ExecutePromptReq,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     use crate::automation::send::{deliver, SubmitPattern, TerminalWriter};
-    if state.host_table.keys().resolve_process(id, false).is_none() {
+    if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
         return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
     }
 

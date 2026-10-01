@@ -7,7 +7,7 @@ use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::PtyHostClient;
 use dashmap::DashMap;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -90,24 +90,26 @@ fn owner_of(
 /// failure rather than report input that went nowhere as delivered, and must
 /// never hand it to another host.
 pub(super) fn route_write(
+    keys: &HostKeys,
     host_terminals: &DashMap<String, HostChannel>,
     terminals: &DashMap<String, Terminal>,
     id: &str,
     bytes: &[u8],
     client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
 ) -> bool {
-    let Some((channel, session_key)) = owner_of(host_terminals, terminals, id) else { return false };
-    match client_for(channel) {
-        Some(client) => {
-            client.write_stdin(&session_key, bytes);
-            true
+    let _ = (host_terminals, terminals);
+    keys.with_registered(id, |shell| {
+        let super::ShellStage::Hosted(stage) = &shell.stage else { return false };
+        match client_for(stage.channel) {
+            Some(client) => { let session_key = &stage.key; client.write_stdin(session_key, bytes) }
+            None => false,
         }
-        None => false,
-    }
+    }).unwrap_or(false)
 }
 
 /// Forward a resize to the host that owns `id`; false as for [`route_write`].
 pub(super) fn route_resize(
+    keys: &HostKeys,
     host_terminals: &DashMap<String, HostChannel>,
     terminals: &DashMap<String, Terminal>,
     id: &str,
@@ -115,45 +117,46 @@ pub(super) fn route_resize(
     rows: u16,
     client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
 ) -> bool {
-    let Some((channel, session_key)) = owner_of(host_terminals, terminals, id) else { return false };
-    match client_for(channel) {
-        Some(client) => {
-            client.resize(&session_key, cols, rows);
-            true
+    let _ = (host_terminals, terminals);
+    keys.with_registered(id, |shell| {
+        let super::ShellStage::Hosted(stage) = &shell.stage else { return false };
+        match client_for(stage.channel) {
+            Some(client) => { let session_key = &stage.key; client.resize(session_key, cols, rows) }
+            None => false,
         }
-        None => false,
-    }
+    }).unwrap_or(false)
 }
 
 /// Nudge the owning host to repaint `id`. True when `id` is host-owned, whether
 /// or not the nudge could be sent: there is no local master to jiggle instead.
 pub(super) fn route_repaint(
+    keys: &HostKeys,
     host_terminals: &DashMap<String, HostChannel>,
     terminals: &DashMap<String, Terminal>,
     id: &str,
     client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
 ) -> bool {
-    let Some(channel) = host_terminals.get(id).map(|e| *e.value()) else { return false };
-    // The size and the name come from one record, so they stay consistent even
-    // for a migrated terminal, where the session key is not the leaf.
-    let info = terminals.get(id).map(|t| (t.cols, t.rows, t.session_key.clone()));
-    if let Some((cols, rows, session_key)) = info {
+    let Some((channel, session_key)) = owner_of(host_terminals, terminals, id) else { return false };
+    let Some(identity) = keys.session_identity(channel, &session_key, id) else { return true };
+    let info = terminals.get(id).map(|t| (t.cols, t.rows));
+    if let Some((cols, rows)) = info {
         if let Some(client) = client_for(channel) {
-            client.nudge_repaint(&session_key, cols, rows);
+            keys.enqueue_session(&identity, || { client.nudge_repaint(&session_key, cols, rows); true });
         }
     }
     true
 }
 
 /// Ending remains ineligible until a later answered listing proves the effect.
+#[cfg(test)]
 pub(super) fn route_close(keys: &HostKeys, channel: HostChannel, session_key: &str) {
     keys.close(channel, session_key);
 }
 
 // ---- frozen host registry -------------------------------------------------
 
-pub(super) fn next_frozen_id(frozen_host_seq: &AtomicU32) -> FrozenId {
-    FrozenId(frozen_host_seq.fetch_add(1, Ordering::Relaxed))
+pub(super) fn next_frozen_id(frozen_host_seq: &AtomicU64) -> Result<FrozenId, String> {
+    crate::checked_counter::advance(frozen_host_seq).map(|n| FrozenId(n - 1))
 }
 
 /// The connected client of a registered frozen host. A host whose connection
@@ -201,9 +204,8 @@ pub(super) fn register_restoring_leaf(
     session_key: Option<&str>,
     now: Instant,
 ) -> bool {
-    let key = effective_session_key(leaf_id, session_key);
     maps.keys.register_restoring_leaf(label, leaf_id, session_key, now, || {
-        maps.terminals.iter().any(|t| t.renderer_terminal_id.as_deref() == Some(leaf_id) || session_key_of(&t) == key)
+        maps.terminals.iter().any(|t| t.renderer_terminal_id.as_deref() == Some(leaf_id))
     })
 }
 
@@ -262,6 +264,7 @@ pub(super) fn apply_answered_listing(
 }
 
 /// What to do with a live session that no pane claims.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum OrphanVerdict {
     /// Offer it to the user as a recovered terminal.
@@ -274,6 +277,7 @@ pub(super) enum OrphanVerdict {
 }
 
 /// Decide for a live session with no registration on any channel.
+#[cfg(test)]
 pub(super) fn orphan_verdict(keys: &HostKeys, session_key: &str, now: Instant) -> OrphanVerdict {
     keys.orphan_verdict(session_key, now)
 }

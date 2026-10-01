@@ -109,9 +109,9 @@ async fn a_real_empty_host_exits_after_the_ticker_retires_it() {
     let port = FakePort::new(&world, "somewhere-else");
     // The application's own current host is up, as it is when an older host retires.
     ensure_hosts(&port).await.expect("the current host starts");
-    let id = port.next_frozen_id();
+    let id = port.next_frozen_id().unwrap();
     let channel = HostChannel::Frozen(id);
-    let epoch = port.0.table.reserve_epoch();
+    let epoch = port.0.table.reserve_epoch().unwrap();
     assert!(port.0.table.publish(channel, epoch));
     port.publish_frozen(FrozenHost {
         id,

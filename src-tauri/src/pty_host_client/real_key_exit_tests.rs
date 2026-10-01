@@ -56,7 +56,7 @@ async fn real_reader_and_attach_exits_each_prevent_their_older_listing_from_rele
         }
     });
     let table = HostTable::new();
-    let epoch = table.reserve_epoch();
+    let epoch = table.reserve_epoch().unwrap();
     assert!(table.publish(HostChannel::Primary, epoch));
     let observed = Arc::new(Mutex::new(Vec::new()));
     let (output_tx, _) = tokio::sync::broadcast::channel(128);

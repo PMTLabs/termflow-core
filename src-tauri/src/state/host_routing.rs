@@ -50,6 +50,7 @@ pub(super) trait RoutingPort: AdoptionPort {
     fn ids(&self) -> &IdAllocator;
     fn surface_ambiguous(&self, keys: &[String]);
 
+    #[cfg(test)]
     fn register_route(&self, channel: HostChannel, key: &str, process: &str) -> bool {
         self.table().epoch(channel).is_some_and(|epoch| self.table().keys().restore_route(channel, key, process, epoch))
     }
@@ -71,10 +72,12 @@ fn claim_fresh_owned<P: RoutingPort>(port: &P, leaf: &str, channel: HostChannel,
 
 fn surface_ambiguity<P: RoutingPort>(port: &P, leaf: &str) {
     let own: Vec<_> = port.table().keys().listed().into_iter()
-        .filter(|(_, key)| parse_session_key(key) == SessionKeyKind::V2 { owner_leaf: leaf })
-        .map(|(_, key)| key).collect();
+        .filter(|(_, key)| parse_session_key(key) == SessionKeyKind::V2 { owner_leaf: leaf }).collect();
     if own.len() > 1 {
-        port.surface_ambiguous(&own);
+        for (channel, key) in own {
+            port.table().keys().recover_listed(channel, &key, || true,
+                || port.surface_ambiguous(std::slice::from_ref(&key)));
+        }
     }
 }
 
@@ -262,21 +265,8 @@ impl<R: Runtime> RoutingPort for AppState<R> {
 }
 
 impl<R: Runtime> AppState<R> {
-    pub(crate) fn place_elevated_create(&self, leaf: &str, override_key: Option<&str>, client: PtyHostClient, cg: u64, process: &str) -> Result<Placement, String> {
-        let channel = HostChannel::Elevated;
-        let mut ticket = begin_ticket(self, channel).map_err(|e| e.to_string())?;
-        self.host_table.keys().refresh_restoring_key(override_key.unwrap_or(leaf), Instant::now());
-        if let Some((owner, key)) = self.host_table.keys().candidate(leaf, override_key) {
-            if owner != channel { return Err(pending("session belongs to a different terminal host")); }
-            let (stage, pid) = stage_key(self, leaf, Some((cg, process)), channel, &key, StageMode::Attach)?;
-            ticket.guard_key(stage);
-            return Ok(Placement::Attach { channel, client, pid, ticket, session_key: key });
-        }
-        let stage = claim_fresh_owned(self, leaf, channel, Some((cg, process)))?;
-        let key = stage.key.clone();
-        ticket.guard_key(stage);
-        surface_ambiguity(self, leaf);
-        Ok(Placement::Spawn { channel, client, ticket, session_key: key })
+    pub(crate) fn place_elevated_create(&self, leaf: &str, override_key: Option<&str>, client: PtyHostClient, cg: u64, prepared: PreparedElevatedProcess) -> Result<(String, Placement), String> {
+        place_elevated_process(self, leaf, override_key, client, cg, prepared)
     }
 
     /// Allocate before key staging, then place under the leaf's admission.
@@ -285,6 +275,30 @@ impl<R: Runtime> AppState<R> {
         let placement = place_owned(self, leaf, override_key, Some((cg, &process))).await?;
         Ok((process, placement))
     }
+}
+
+pub(crate) struct PreparedElevatedProcess(String);
+
+pub(crate) fn prepare_elevated_process(ids: &IdAllocator) -> Result<PreparedElevatedProcess, String> {
+    ids.mint_process_id().map(PreparedElevatedProcess)
+}
+
+pub(super) fn place_elevated_process<P: RoutingPort>(port: &P, leaf: &str, override_key: Option<&str>, client: PtyHostClient, cg: u64, prepared: PreparedElevatedProcess) -> Result<(String, Placement), String> {
+    let PreparedElevatedProcess(process) = prepared;
+    let channel = HostChannel::Elevated;
+    let mut ticket = begin_ticket(port, channel).map_err(|e| e.to_string())?;
+    port.table().keys().refresh_restoring_key(override_key.unwrap_or(leaf), Instant::now());
+    if let Some((owner, key)) = port.table().keys().candidate(leaf, override_key) {
+        if owner != channel { return Err(pending("session belongs to a different terminal host")); }
+        let (stage, pid) = stage_key(port, leaf, Some((cg, &process)), channel, &key, StageMode::Attach)?;
+        ticket.guard_key(stage);
+        return Ok((process, Placement::Attach { channel, client, pid, ticket, session_key: key }));
+    }
+    let stage = claim_fresh_owned(port, leaf, channel, Some((cg, &process)))?;
+    let key = stage.key.clone();
+    ticket.guard_key(stage);
+    surface_ambiguity(port, leaf);
+    Ok((process, Placement::Spawn { channel, client, ticket, session_key: key }))
 }
 
 #[cfg(test)]

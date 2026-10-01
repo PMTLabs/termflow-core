@@ -531,7 +531,7 @@ pub(crate) async fn resize_terminal(
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
-    if state.host_table.keys().resolve_process(&id, false).is_none() {
+    if crate::state::ingress::registered_target(state.host_table.keys(), &id).is_none() {
         return Json(json!({ "error": "Terminal not found" })).into_response();
     }
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
@@ -650,7 +650,7 @@ pub(crate) fn write_data_to_terminal(
     data: &str,
 ) -> Result<(), (StatusCode, String)> {
     use std::io::Write;
-    if state.host_table.keys().resolve_process(id, false).is_none() {
+    if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
         return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
     }
     // Host-owned terminals: forward to the sidecar.

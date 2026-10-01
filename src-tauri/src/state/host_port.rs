@@ -176,7 +176,7 @@ impl<R: Runtime> AppState<R> {
 
         // Generation for this connection: on_disconnect only nulls `pty_host` if
         // its generation is still current (a dead old client can't clobber a new).
-        let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let my_gen = crate::checked_counter::advance(&self.pty_host_gen)?;
         let deps = self.host_deps(token.clone(), HostChannel::Primary, my_gen, self.primary_disconnect(my_gen));
         // Advertised host pid (if any): connect_or_spawn refuses to spawn a
         // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
@@ -257,7 +257,7 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
         host_registry::frozen_hosts_snapshot(&self.frozen_hosts)
     }
 
-    fn next_frozen_id(&self) -> FrozenId {
+    fn next_frozen_id(&self) -> Result<FrozenId, String> {
         AppState::next_frozen_id(self)
     }
 

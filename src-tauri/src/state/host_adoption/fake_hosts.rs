@@ -518,7 +518,7 @@ pub(super) struct Inner {
     current_endpoint: String,
     current: Mutex<Option<PtyHostClient>>,
     frozen: Mutex<Vec<FrozenHost>>,
-    next_id: AtomicU32,
+    next_id: AtomicU64,
     pub host_terminals: DashMap<String, HostChannel>,
     pub terminals: DashMap<String, Terminal>,
     pub discovers: AtomicUsize,
@@ -637,7 +637,7 @@ impl FakePort {
             current_endpoint: current_endpoint.to_owned(),
             current: Mutex::new(None),
             frozen: Mutex::new(Vec::new()),
-            next_id: AtomicU32::new(1),
+            next_id: AtomicU64::new(1),
             host_terminals: DashMap::new(),
             terminals: DashMap::new(),
             discovers: AtomicUsize::new(0),
@@ -851,8 +851,8 @@ impl AdoptionPort for FakePort {
         self.0.frozen.lock().unwrap().clone()
     }
 
-    fn next_frozen_id(&self) -> FrozenId {
-        FrozenId(self.0.next_id.fetch_add(1, Ordering::SeqCst))
+    fn next_frozen_id(&self) -> Result<FrozenId, String> {
+        host_registry::next_frozen_id(&self.0.next_id)
     }
 
     /// Like the real pair: a frozen host is only connected to; the current
@@ -907,7 +907,7 @@ impl AdoptionPort for FakePort {
                 Arc::new(move || {
                     port.0.disconnects.fetch_add(1, Ordering::SeqCst);
                 }),
-                self.0.table.reserve_epoch(),
+                self.0.table.reserve_epoch()?,
             ),
         };
         let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));

@@ -218,7 +218,7 @@ async fn same_key_on_another_channel_and_on_a_superseded_epoch_is_dropped() {
         }
         gate.wait_reached(3).await;
         if stale {
-            let epoch = port.table().reserve_epoch();
+            let epoch = port.table().reserve_epoch().unwrap();
             assert!(port.table().publish(HostChannel::Primary, epoch));
             port.register_route(HostChannel::Primary, &key, "pc-current");
         }

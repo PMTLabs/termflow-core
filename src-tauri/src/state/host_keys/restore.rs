@@ -3,7 +3,9 @@
 
 use super::*;
 use std::time::Instant;
-use super::super::{parse_session_key, SessionKeyKind, host_registry::{RESTORE_INTENT_TTL, OrphanVerdict}};
+use super::super::{parse_session_key, SessionKeyKind, host_registry::RESTORE_INTENT_TTL};
+#[cfg(test)]
+use super::super::host_registry::OrphanVerdict;
 
 #[derive(Clone, Debug)]
 pub(super) struct Aliases { pub leaf: String, pub override_key: Option<String> }
@@ -55,7 +57,7 @@ impl HostKeys {
         for holder in self.lock().restore_holders.values_mut().filter(|h| h.aliases.contains(key)) { holder.stamp = now; }
     }
 
-    fn protected(inner: &Inner, key: &str, now: Instant) -> bool {
+    pub(super) fn protected(inner: &Inner, key: &str, now: Instant) -> bool {
         inner.restore_holders.values().any(|h| h.live(now) && h.aliases.contains(key))
     }
 
@@ -65,6 +67,7 @@ impl HostKeys {
             && !inner.keys.iter().any(|((_, k), r)| k == key && matches!(r.state, KeyState::Held(_) | KeyState::Bound(_)))
     }
 
+    #[cfg(test)]
     pub(in crate::state) fn orphan_verdict(&self, key: &str, now: Instant) -> OrphanVerdict {
         let inner = self.lock();
         if Self::protected(&inner, key, now) { OrphanVerdict::Restoring }

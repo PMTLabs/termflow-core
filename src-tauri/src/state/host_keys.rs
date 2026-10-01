@@ -11,6 +11,8 @@ use tokio::sync::mpsc::UnboundedSender;
 
 mod owners;
 mod restore;
+mod effects;
+pub(crate) use effects::SessionIdentity;
 pub use owners::{Admission as CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
 
 pub const ENDING_CAP: usize = 4096;
@@ -211,6 +213,7 @@ impl HostKeys {
         }
     }
 
+    #[cfg(test)]
     pub fn close(&self, channel: HostChannel, key: &str) {
         let mut inner = self.lock();
         if let Some(KeyState::Ending { .. }) = inner.keys.get(&(channel, key.to_string())).map(|r| &r.state) { return; }
@@ -236,12 +239,29 @@ impl HostKeys {
             matches!(&s.stage, ShellStage::Hosted(h) if h.channel == channel && h.key == key))) {
             match &mut row.state {
                 OwnerState::Registered(_) | OwnerState::Closing(_) => return,
-                OwnerState::Placing { staged_exited, .. } => *staged_exited = true,
+                OwnerState::Placing { stage: Some(shell), staged_exited, .. } => {
+                    *staged_exited = true;
+                    let shell = shell.clone();
+                    self.end_staged_exit(inner, &shell);
+                    return;
+                }
+                OwnerState::Placing { stage: None, .. } => return,
             }
         }
         if let Some(KeyState::Held(_) | KeyState::Bound(_) | KeyState::Ending { close: CloseState::None, .. }) = inner.keys.get(&address).map(|r| &r.state) {
             self.routes.remove_key(channel, key);
             Self::end(inner, channel, key, CloseState::None);
+        }
+    }
+
+    fn end_staged_exit(&self, inner: &mut Inner, shell: &StagedShell) {
+        let ShellStage::Hosted(stage) = &shell.stage else { return };
+        if matches!(inner.keys.get(&(stage.channel, stage.key.clone())).map(|r| &r.state),
+            Some(KeyState::Held(cg)) if *cg == stage.cg)
+            || matches!(inner.keys.get(&(stage.channel, stage.key.clone())).map(|r| &r.state),
+                Some(KeyState::Ending { close: CloseState::None, .. })) {
+            self.routes.remove_key(stage.channel, &stage.key);
+            Self::end(inner, stage.channel, &stage.key, CloseState::None);
         }
     }
 

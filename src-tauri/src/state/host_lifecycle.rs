@@ -23,7 +23,7 @@ use crate::elevated_host::HostChannel;
 use crate::pty_host_client::{HostCandidate, HostRetention, HostRole, PtyHostClient, PtyHostDeps};
 use futures::future::join_all;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::Runtime;
@@ -777,6 +777,11 @@ pub struct SiblingSlot {
 }
 
 impl SiblingSlot {
+    #[cfg(test)]
+    pub(super) fn seed_arm_counter(&self, value: u64) {
+        self.arms.store(value, std::sync::atomic::Ordering::Release);
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<(u64, Hold)>> {
         self.held.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -793,10 +798,8 @@ impl SiblingSlot {
         }
     }
 
-    fn keep(&self, hold: Hold) -> u64 {
-        let arm = self.arms.fetch_add(1, Ordering::AcqRel) + 1;
+    fn keep(&self, arm: u64, hold: Hold) {
         *self.lock() = Some((arm, hold));
-        arm
     }
 }
 
@@ -813,6 +816,10 @@ impl SiblingSlot {
 /// answer reaches the instance that is waiting for it.
 pub(super) async fn sibling_arm<P: LifecyclePort>(port: &P, timeout_secs: u64) -> SiblingArm {
     let slot = port.sibling_slot();
+    let arm = match crate::checked_counter::advance(&slot.arms) {
+        Ok(arm) => arm,
+        Err(reason) => return SiblingArm::Refused(reason),
+    };
     let mut hold = match slot.take() {
         // A repeated request arms the same window again.
         Some((_, hold)) => hold,
@@ -839,7 +846,7 @@ pub(super) async fn sibling_arm<P: LifecyclePort>(port: &P, timeout_secs: u64) -
         hold.release().await;
         return SiblingArm::Failed(e);
     }
-    let arm = slot.keep(hold);
+    slot.keep(arm, hold);
     let port = port.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
