@@ -343,12 +343,18 @@ export interface ElectronAPI {
   renameTerminalHistory?: (from: string, to: string) => Promise<void>;
   /** Preflight for a Velopack update: ours PLUS every sibling, because the
    *  apply kills every process under the install root. Separate from
-   *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4). */
-  updateAvailable?: () => Promise<void>;
+   *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4).
+   *  Resolves with the mode the update would run in (`full` closes every
+   *  terminal, with the reasons); rejects with the reason when it cannot run. */
+  updateAvailable?: () => Promise<import('../api/tauri-bridge').UpdateAvailability>;
   /** Check for a Velopack update. `unavailable` = no updater in this build. */
   checkForUpdates?: () => Promise<UpdateStatus>;
-  /** Download + arm + apply a Velopack update, keeping terminals alive. */
-  updateAndRestart?: () => Promise<void>;
+  /** Download + apply a Velopack update. An update that must close the terminals
+   *  resolves `needsConfirmation` until called again with the `confirm` made from
+   *  that answer; `started` means the app is exiting. */
+  updateAndRestart?: (
+    confirm?: import('../api/tauri-bridge').UpdateConfirmToken,
+  ) => Promise<import('../api/tauri-bridge').UpdateRestart>;
   /** The running app's version (from the Tauri config at build time). */
   getAppVersion?: () => Promise<string>;
 

@@ -112,6 +112,7 @@ describe('every ConfirmDialog declares its tone honestly', () => {
     ['pane', 'title="Close Pane"'],
     ['peers', 'title="Revoke peer?"'],
     ['settings', 'title="Rotate access token?"'],
+    ['settings', 'title={fullUpdateDialogTitle('],  // an update that closes every terminal
     ['tabs', 'title={titleByKind[pendingClose.kind]}'],
   ];
 
