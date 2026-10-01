@@ -18,6 +18,11 @@ mod update_survival;
 mod update_full;
 mod windows;
 mod history;
+pub(crate) mod leaf_storage;
+#[cfg(test)]
+mod leaf_storage_tests;
+#[cfg(test)]
+mod storage_wiring_tests;
 mod render;
 mod engine_host;
 mod reattach;

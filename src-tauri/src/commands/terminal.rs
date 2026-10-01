@@ -1097,6 +1097,12 @@ mod scrollback_restore_tests {
     }
 
     fn register_terminal(state: &AppState<tauri::test::MockRuntime>, id: &str) {
+        let keys = state.host_table.keys();
+        let crate::state::CreateAdmission::Run(cg) = keys.admit_create(id, crate::state::CreateMode::Mount).unwrap() else { panic!("new admission") };
+        keys.stage_shell(id, cg, id, None).unwrap();
+        assert!(matches!(keys.complete_shell(id, cg, &crate::state::StagedShell {
+            process: id.into(), stage: crate::state::ShellStage::Local,
+        }), crate::state::Completion::Registered));
         state.terminals.insert(
             id.to_string(),
             crate::state::Terminal {

@@ -264,7 +264,6 @@ impl<R: Runtime> AppState<R> {
             canvas_nodes: Arc::new(RwLock::new(std::collections::HashMap::new())),
             history_dirty: Arc::new(DashMap::new()),
             replay_prefix: Arc::new(DashMap::new()),
-            history_persist_locks: Arc::new(DashMap::new()),
             active_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             main_window: Arc::new(RwLock::new(DEFAULT_ACTIVE_WINDOW.to_string())),
             instance_id: uuid::Uuid::new_v4().to_string(),
@@ -1235,9 +1234,6 @@ impl<R: Runtime> AppState<R> {
         self.terminal_cwds.remove(id);
         self.replay_prefix.remove(id);
         self.history_dirty.remove(id);
-        // The persist guard entry too (a late persist may re-create it via
-        // or_default; that's harmless — it then no-ops on the missing terminal).
-        self.history_persist_locks.remove(id);
         // Host ownership is released by the ending's effects, after its exact
         // key has retired and any Close has entered the host FIFO.
     }

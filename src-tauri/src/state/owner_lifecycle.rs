@@ -77,10 +77,12 @@ impl<R: Runtime> AppState<R> {
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, process);
         let ended = self.host_table.keys().end_process(process, kind, |leaf| {
             match kind {
-                EndKind::Exit => self.persist_terminal_history(process, chrono::Utc::now().timestamp_millis()),
+                EndKind::Exit => {
+                    if super::history_key(Some(leaf)).is_some() {
+                        self.persist_history_snapshot(process, leaf, chrono::Utc::now().timestamp_millis());
+                    }
+                }
                 EndKind::Close(CloseStorage::Delete) => {
-                    let guard = self.history_persist_guard(process);
-                    let _persist = guard.lock().unwrap_or_else(|e| e.into_inner());
                     self.history_store.delete(leaf);
                     if let Err(e) = self.canvas_store.delete_edges_for(leaf) {
                         log::warn!("Failed to delete canvas edges for {leaf}: {e}");

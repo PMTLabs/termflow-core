@@ -28,7 +28,6 @@ pub(super) struct Row {
     pub(super) cg: u64,
     pub(super) state: OwnerState,
     outcome: watch::Sender<Option<Result<String, String>>>,
-    end_lock: Arc<Mutex<()>>,
 }
 pub enum Admission {
     Run(u64),
@@ -74,7 +73,7 @@ impl HostKeys {
         let (outcome, _) = watch::channel(None);
         inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Placing {
             stage: None, staged_exited: false, cancel: None,
-        }, outcome, end_lock: Arc::new(Mutex::new(())) });
+        }, outcome });
         Ok(Admission::Run(cg))
     }
 
@@ -215,32 +214,64 @@ impl HostKeys {
         }
     }
 
-    /// Storage effects finish before the row disappears and admits its successor.
-    /// The per-row lock serializes duplicate endings without holding ownership
-    /// during I/O. A leaf storage lock can wrap this entire operation.
+    /// A stale shell cannot write the durable leaf of its replacement. Storage
+    /// runs outside ownership, but removal must wait for this same stripe.
+    pub fn write<T>(&self, leaf: &str, process: &str, storage: impl FnOnce() -> T) -> Option<T> {
+        self.write_shells(&[(leaf, process)], storage)
+    }
+
+    /// An edge touches both endpoints; qualify both while holding their stripes.
+    pub(crate) fn write_shells<T>(&self, shells: &[(&str, &str)], storage: impl FnOnce() -> T) -> Option<T> {
+        if shells.is_empty() { return None; }
+        let leaves: Vec<_> = shells.iter().map(|(leaf, _)| *leaf).collect();
+        super::super::leaf_storage::with_leaves(&leaves, || {
+            let valid = {
+                let inner = self.lock();
+                shells.iter().all(|(leaf, process)| inner.owners.get(*leaf).is_some_and(|row|
+                    matches!(&row.state, OwnerState::Registered(shell) if shell.process == *process)))
+            };
+            if valid { Some(storage()) } else {
+                log::debug!("Skipping stale shell storage write");
+                None
+            }
+        })
+    }
+
+    /// Storage, recheck and row/key removal share one leaf critical section.
     pub fn end_process(&self, process: &str, kind: EndKind, storage: impl FnOnce(&str)) -> Option<Ended> {
-        let (leaf, end_lock) = {
+        // Resolve only; release ownership before acquiring any stripe.
+        let leaf = {
             let inner = self.lock();
-            let (leaf, row) = inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == process))?;
-            (leaf.clone(), row.end_lock.clone())
+            inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == process))?.0.clone()
         };
-        let _ending = end_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let valid = |r: &Row| match (&r.state, kind) {
-            (OwnerState::Registered(s), EndKind::Exit) | (OwnerState::Closing(s), EndKind::Close(_)) => s.process == process,
-            _ => false,
-        };
-        if !self.lock().owners.get(&leaf).is_some_and(&valid) { return None }
-        storage(&leaf);
-        let mut inner = self.lock();
-        if !inner.owners.get(&leaf).is_some_and(valid) { return None }
-        let row = inner.owners.remove(&leaf).unwrap();
-        let shell = shell_of(&row.state).unwrap().clone();
-        if let ShellStage::Hosted(stage) = &shell.stage {
-            self.routes.remove_key(stage.channel, &stage.key);
-            let close = if kind == EndKind::Exit { CloseState::None } else { CloseState::Pending };
-            Self::end(&mut inner, stage.channel, &stage.key, close);
+        let (ended, mut inner) = super::super::leaf_storage::with_leaves(&[&leaf], || {
+            let valid = |r: &Row| match (&r.state, kind) {
+                (OwnerState::Registered(s), EndKind::Exit) | (OwnerState::Closing(s), EndKind::Close(_)) => s.process == process,
+                _ => false,
+            };
+            if !self.lock().owners.get(&leaf).is_some_and(&valid) { return None }
+            storage(&leaf);
+            let mut inner = self.lock();
+            if !inner.owners.get(&leaf).is_some_and(valid) { return None }
+            let row = inner.owners.remove(&leaf).unwrap();
+            let shell = shell_of(&row.state).unwrap().clone();
+            if let ShellStage::Hosted(stage) = &shell.stage {
+                self.routes.remove_key(stage.channel, &stage.key);
+                let close = if kind == EndKind::Exit { CloseState::None } else { CloseState::Pending };
+                Self::mark_end(&mut inner, stage.channel, &stage.key, close);
+            }
+            row.outcome.send_replace(Some(Ok(process.into())));
+            Some((Ended { leaf: leaf.clone(), shell }, inner))
+        })?;
+        // Retain ownership until the stripe is released and Close is enqueued:
+        // reconnect must not send the newly Pending cell inside this section.
+        if let ShellStage::Hosted(stage) = &ended.shell.stage {
+            if matches!(inner.keys.get(&(stage.channel, stage.key.clone())).map(|r| &r.state),
+                Some(KeyState::Ending { close: CloseState::Pending, .. })) {
+                Self::send(&mut inner, stage.channel, &stage.key);
+            }
         }
-        row.outcome.send_replace(Some(Ok(process.into())));
-        Some(Ended { leaf, shell })
+        drop(inner);
+        Some(ended)
     }
 }

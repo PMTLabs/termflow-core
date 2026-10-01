@@ -7,7 +7,7 @@ use termflow_pty_protocol::{Data, Frame, SpawnSpec};
 
 const HOST: &str = "owner-host";
 const CHANNEL: HostChannel = HostChannel::Primary;
-fn machine(mut spec: HostSpec) -> (Arc<World>, FakePort) {
+pub(super) fn machine(mut spec: HostSpec) -> (Arc<World>, FakePort) {
     let world = World::new();
     spec.track_spawns = true;
     world.add_host(HOST, spec);
@@ -18,7 +18,7 @@ fn machine(mut spec: HostSpec) -> (Arc<World>, FakePort) {
 fn spec() -> SpawnSpec {
     SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 }
 }
-async fn until(mut predicate: impl FnMut() -> bool) {
+pub(super) async fn until(mut predicate: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(3), async {
         while !predicate() { tokio::task::yield_now().await; }
     }).await.expect("owner/host transition deadline");
@@ -50,7 +50,7 @@ fn finish(port: &FakePort, leaf: &str, cg: u64, shell: &StagedShell) -> Completi
     }
     result
 }
-fn close(port: &FakePort, reference: &str, policy: CloseStorage) -> bool {
+pub(super) fn close(port: &FakePort, reference: &str, policy: CloseStorage) -> bool {
     match port.table().keys().close_process(reference, policy) {
         CloseAction::Cancelled => true,
         CloseAction::End { process, .. } => port.end_owner(&process, EndKind::Close(policy)),
@@ -75,7 +75,7 @@ async fn run(port: &FakePort, leaf: &str, cg: u64) -> Result<String, String> {
     finish(port, leaf, cg, &shell);
     Ok(process)
 }
-async fn create(port: &FakePort, leaf: &str) -> Result<String, String> {
+pub(super) async fn create(port: &FakePort, leaf: &str) -> Result<String, String> {
     match port.table().keys().admit_create(leaf, CreateMode::Mount)? {
         CreateAdmission::Run(cg) => run(port, leaf, cg).await,
         CreateAdmission::Existing(pc) => Ok(pc),

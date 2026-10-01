@@ -545,12 +545,6 @@ pub struct AppState<R: Runtime = Wry> {
     // One-shot restore prefix (previous-session scrollback) per processId, staged by
     // create_terminal and consumed by the /snapshot endpoint on first hydration.
     pub replay_prefix: Arc<DashMap<String, String>>,
-    // Per-terminal serialization for history persistence (review 062): held across
-    // snapshot→render→upsert so write order always matches snapshot order (a slow
-    // periodic-flush render can't overwrite a newer exit snapshot), and taken by
-    // close_terminal around cleanup+row-delete so an in-flight persist can't
-    // resurrect an explicitly-deleted row.
-    pub history_persist_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     // The window label that API/MCP-created terminals route to. The create event is
     // BROADCAST with this label in its payload; each window ignores it unless it
     // matches its own label (the proven app:close-requested pattern — a bare emit_to
@@ -728,7 +722,6 @@ impl<R: Runtime> Clone for AppState<R> {
             canvas_nodes: self.canvas_nodes.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
-            history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
             main_window: self.main_window.clone(),
             instance_id: self.instance_id.clone(),

@@ -49,7 +49,7 @@ fn only_the_shared_ending_can_remove_a_registered_or_closing_owner() {
             assert!(end.contains("OwnerState::Registered(s), EndKind::Exit"));
             assert!(end.contains("OwnerState::Closing(s), EndKind::Close(_)"));
             assert!(end.find("storage(&leaf)").unwrap() < end.find(".owners.remove(").unwrap());
-            assert!(end.find(".owners.remove(").unwrap() < end.find("Self::end(").unwrap());
+            assert!(end.find(".owners.remove(").unwrap() < end.find("Self::mark_end(").unwrap());
         } else { assert!(hits.is_empty(), "parallel owner remover in {path}: {hits:?}"); }
     }
     assert_eq!(count, 3);
@@ -70,7 +70,7 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
     assert!(fn_body(&owner, "fn metadata_leaf(").contains("keys().resolve_process(reference.trim(), true)"));
     assert!(fn_body(&owner, "fn close_process(").contains("keys().close_process(reference, policy)"));
     let end = fn_body(&owner, "fn end_shell(");
-    assert!(end.contains("persist_terminal_history(process"));
+    assert!(end.contains("persist_history_snapshot(process, leaf"));
     assert!(end.contains("history_store.delete(leaf)"));
     assert!(end.contains("canvas_store.delete_edges_for(leaf)"));
     assert!(end.find("keys().end_process(").unwrap() < end.find("self.forget_host_terminal(process)").unwrap());

@@ -185,6 +185,11 @@ impl HostKeys {
     }
 
     fn end(inner: &mut Inner, channel: HostChannel, key: &str, close: CloseState) {
+        Self::mark_end(inner, channel, key, close.clone());
+        if close == CloseState::Pending { Self::send(inner, channel, key); }
+    }
+
+    fn mark_end(inner: &mut Inner, channel: HostChannel, key: &str, close: CloseState) {
         let stamp = (close == CloseState::None).then(|| inner.channels.get(&channel).map_or(0, |c| c.requests));
         let order = std::time::Instant::now();
         let r = inner.keys.entry((channel, key.to_string())).or_insert(Record { state: KeyState::Listed, pid: 0, order, alive: true });
@@ -192,7 +197,6 @@ impl HostKeys {
         r.order = order;
         // Existing sessions must always be allowed to owe a Close, even when
         // their population exceeds the admission cap.
-        if close == CloseState::Pending { Self::send(inner, channel, key); }
         Self::trim(inner, channel, false);
     }
 

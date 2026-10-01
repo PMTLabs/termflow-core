@@ -499,6 +499,7 @@ pub(super) fn record(endpoint: &str, proto_min: u16, proto_max: u16) -> HostReco
     }
 }
 
+type StorageEffect = Arc<dyn Fn(&str, &str, crate::state::EndKind) + Send + Sync>;
 pub(super) struct Inner {
     pub world: Arc<World>,
     pub table: HostTable,
@@ -506,6 +507,8 @@ pub(super) struct Inner {
     pub output: tokio::sync::broadcast::Sender<ChannelPayload>,
     pub exits: Mutex<Vec<String>>,
     pub persisted: Mutex<Vec<String>>,
+    pub ending_requested: AtomicUsize,
+    pub storage_effect: Mutex<Option<StorageEffect>>,
     pub killed: Mutex<Vec<String>>,
     pub deleted: Mutex<Vec<String>>,
     pub offsets: Arc<DashMap<String, u64>>,
@@ -626,6 +629,8 @@ impl FakePort {
             output: tokio::sync::broadcast::channel(128).0,
             exits: Mutex::new(Vec::new()),
             persisted: Mutex::new(Vec::new()),
+            ending_requested: AtomicUsize::new(0),
+            storage_effect: Mutex::new(None),
             killed: Mutex::new(Vec::new()),
             deleted: Mutex::new(Vec::new()),
             offsets: Arc::new(DashMap::new()),
@@ -762,7 +767,10 @@ impl FakePort {
     }
 
     pub fn end_owner(&self, process: &str, kind: crate::state::EndKind) -> bool {
+        self.0.ending_requested.fetch_add(1, Ordering::SeqCst);
+        let effect = self.0.storage_effect.lock().unwrap().clone();
         let ended = self.table().keys().end_process(process, kind, |leaf| {
+            if let Some(effect) = effect { effect(leaf, process, kind); }
             match kind {
                 crate::state::EndKind::Exit => self.0.persisted.lock().unwrap().push(process.into()),
                 crate::state::EndKind::Close(crate::state::CloseStorage::Delete) => self.0.deleted.lock().unwrap().push(leaf.into()),

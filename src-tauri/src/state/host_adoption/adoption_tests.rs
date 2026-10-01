@@ -887,7 +887,7 @@ fn no_ticket_for_input_resize_close() {
         ("terminals.rs", "pub fn host_resize(", "route_resize"),
         ("terminals.rs", "pub fn host_close(", "close_process"),
         ("owner_lifecycle.rs", "pub fn close_process(", "end_shell"),
-        ("host_keys/owners.rs", "pub fn end_process(", "Self::end"),
+        ("host_keys/owners.rs", "pub fn end_process(", "Self::mark_end"),
         ("terminals.rs", "pub fn host_repaint(", "route_repaint"),
         ("host_registry.rs", "pub(super) fn route_write(", "write_stdin"),
         ("host_registry.rs", "pub(super) fn route_resize(", ".resize("),

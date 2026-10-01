@@ -924,6 +924,8 @@ mod key_lifecycle_tests;
 #[cfg(test)]
 mod owner_tests;
 #[cfg(test)]
+mod storage_tests;
+#[cfg(test)]
 mod retire_tests;
 #[cfg(test)]
 mod retire_real_tests;

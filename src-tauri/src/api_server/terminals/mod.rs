@@ -301,6 +301,10 @@ pub(crate) async fn create_terminal(
     State(state): State<AppState>,
     Json(payload): Json<CreateTerminalReq>,
 ) -> impl IntoResponse {
+    // Bind the parent incarnation before spawning can await. Resolving its leaf
+    // again after the spawn could credit a replacement for the old shell's edge.
+    let parent_process = payload.parent_terminal_id.as_deref()
+        .and_then(|parent| state.host_table.keys().resolve_process(parent, false));
     // Resolve profile if provided (handle multiple field names for compatibility)
     let profile_to_use = payload.profile_id.clone()
         .or(payload.profile.clone())
@@ -415,8 +419,19 @@ pub(crate) async fn create_terminal(
                         );
                         // Never fail the spawn for a graph write. Task 16 returns `Result`
                         // precisely so this is a LOGGED failure rather than a silent one.
-                        if let Err(e) = state.canvas_store.insert_edge(&edge) {
-                            log::warn!("[CANVAS] auto-connect edge not stored: {}", e);
+                        if let Some(parent_process) = parent_process {
+                            let worker = state.clone();
+                            let process = id.clone();
+                            let stored = tokio::task::spawn_blocking(move || {
+                                worker.host_table.keys().write_shells(&[
+                                    (&edge.from_id, &parent_process), (&edge.to_id, &process),
+                                ], || worker.canvas_store.insert_edge(&edge))
+                            }).await;
+                            match stored {
+                                Ok(Some(Err(e))) => log::warn!("[CANVAS] auto-connect edge not stored: {e}"),
+                                Err(e) => log::warn!("[CANVAS] auto-connect worker failed: {e}"),
+                                _ => {}
+                            }
                         }
                     }
                     Some(_) => log::debug!(
