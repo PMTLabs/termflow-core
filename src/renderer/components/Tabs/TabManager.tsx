@@ -20,6 +20,7 @@ import type { CloseKind } from '../../services/closeTabs';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { AutomationArmedForTerminals } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminals } from '../Canvas/CanvasHiddenBadge';
+import { PreviousHostForTerminals } from './HostGenerationMarker';
 import { resolveTabProcessIds } from '../../services/tabProcessIds';
 import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
@@ -425,6 +426,9 @@ const TabItem: React.FC<TabItemProps> = ({
         {isCanvasHere && (
           <span className="tab-canvas-here" title="Canvas Mode is centred on this tab's group">◎</span>
         )}
+        {/* A standing property of the tab, like the armed-automation badge: it holds whether or not
+            anything has happened, and clears once the shell is replaced on the current host. */}
+        <PreviousHostForTerminals terminalIds={tabTerminalIds} />
         {tab.hasBackgroundActivity && !tab.isActive && (
           <span className="tab-activity-dot" title="Background activity from an external (MCP/API) call">●</span>
         )}

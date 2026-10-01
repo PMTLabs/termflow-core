@@ -722,6 +722,9 @@ fn register_host_terminal(
             title_color: None,
         },
     );
+    // After the terminal is observable: whoever asks which host serves it now
+    // gets an answer.
+    state.notify_terminal_generations();
 }
 
 /// Persisted scrollback for `history_key` rendered as a replay prefix (blob +
@@ -1021,6 +1024,15 @@ pub fn get_terminal_size(state: State<'_, AppState>, id: String) -> Result<Termi
     } else {
         Err("Terminal not found".to_string())
     }
+}
+
+/// Which terminals run on a host of an older generation than this build: leaf id
+/// to `"current"` / `"previous"`, for every terminal that has a renderer pane.
+/// Changes are announced by `terminal:generations`; this is the first reading and
+/// what each announcement is answered with.
+#[tauri::command]
+pub fn get_terminal_generations(state: State<'_, AppState>) -> HashMap<String, crate::state::Marker> {
+    state.terminal_markers_by_leaf()
 }
 
 #[tauri::command]

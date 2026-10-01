@@ -217,3 +217,29 @@ fn record_endpoint_must_match_directory_and_incompatible_is_listed() {
     assert_eq!(found[0].pid, Some(1));
     assert!(!found[0].compatible());
 }
+
+/// A legacy endpoint names no generation, even when the profile it is scoped to
+/// is called something that looks like one; a qualified endpoint names its own.
+#[test]
+fn an_endpoint_names_a_generation_only_when_it_is_qualified() {
+    use super::discovery::generation_of_endpoint_in;
+    let legacy = endpoint(None);
+    assert_eq!(generation_of_endpoint_in(&legacy, &legacy), None);
+    assert_eq!(generation_of_endpoint_in(&legacy.to_uppercase(), &legacy), None, "pipe names ignore case");
+    assert_eq!(generation_of_endpoint_in(&endpoint(Some(A)), &legacy).as_deref(), Some(A));
+
+    let lookalike = super::endpoints::qualified_pipe_for(
+        "u",
+        &crate::profile::ProfileIdentity {
+            channel: "dev",
+            name: A.into(),
+            integrity: crate::profile::Integrity::Medium,
+        },
+        None,
+    );
+    assert_eq!(
+        generation_of_endpoint_in(&lookalike, &lookalike),
+        None,
+        "a profile named like a generation does not give the legacy endpoint one"
+    );
+}

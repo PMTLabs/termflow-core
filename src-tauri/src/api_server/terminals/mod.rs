@@ -116,7 +116,11 @@ pub fn classify_terminal_ref(id: &str) -> Result<TerminalRef, (StatusCode, Strin
     Ok(if id.starts_with("tm-") { TerminalRef::Leaf } else { TerminalRef::Process })
 }
 
-pub(crate) fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> serde_json::Value {
+pub(crate) fn terminal_identity_json(
+    t: &crate::state::Terminal,
+    mode: &str,
+    generation: crate::state::Marker,
+) -> serde_json::Value {
     json!({
         "id": t.id,
         "processId": t.id,
@@ -139,11 +143,18 @@ pub(crate) fn terminal_identity_json(t: &crate::state::Terminal, mode: &str) -> 
         // gate DISARMED; the ARMED decision is sampled pre-mount via
         // probe_reattach_prompt_gate, NOT here (review 008 M-1).
         "promptHook": t.prompt_hook,
+        // `"previous"` when the host serving this terminal is not the running
+        // build's, or cannot be shown to be: the tab strip marks it.
+        "generation": generation.as_str(),
     })
 }
 
 pub(crate) async fn list_terminals(State(state): State<AppState>) -> impl IntoResponse {
-    let terminals: Vec<_> = state.terminals.iter().map(|e| terminal_identity_json(e.value(), "ui")).collect();
+    let terminals: Vec<_> = state
+        .terminals_with_markers()
+        .iter()
+        .map(|(t, generation)| terminal_identity_json(t, "ui", *generation))
+        .collect();
     // Owner discriminator. Terminals live in this process's own AppState, so
     // every entry above belongs to this instance by construction — the useful
     // guarantee is therefore at the RESPONSE level: a client that reaches the
@@ -455,7 +466,7 @@ pub(crate) async fn create_terminal(
             }
 
             if let Some(t) = state.terminals.get(&id) {
-                (StatusCode::OK, Json(terminal_identity_json(t.value(), "ui"))).into_response()
+                (StatusCode::OK, Json(terminal_identity_json(t.value(), "ui", state.terminal_marker(t.value())))).into_response()
             } else {
                 (StatusCode::OK, Json(json!({ "id": id, "status": "running" }))).into_response()
             }
@@ -940,7 +951,7 @@ pub(crate) async fn get_terminal(
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
     if let Some(terminal) = state.terminals.get(&id) {
-        let mut body = terminal_identity_json(terminal.value(), "default");
+        let mut body = terminal_identity_json(terminal.value(), "default", state.terminal_marker(terminal.value()));
         // Canvas identity, so an agent learns which node and group it is in one call
         // (`plan/013` Task 19). Merged HERE rather than inside `terminal_identity_json`,
         // which has three call sites: adding it there would put a canvas-registry lock and a

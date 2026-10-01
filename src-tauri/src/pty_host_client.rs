@@ -18,8 +18,8 @@ mod conn;
 mod endpoints;
 mod discovery;
 mod exe_origin;
-pub use endpoints::{current_host_paths, HostPaths};
-pub use discovery::{discover_hosts, HostCandidate, HostRole};
+pub use endpoints::{current_host_paths, running_generation, HostPaths};
+pub use discovery::{discover_hosts, generation_of_endpoint, HostCandidate, HostRole};
 
 use crate::state::ChannelPayload;
 use conn::{cancelled, ConnState};
@@ -219,10 +219,13 @@ impl PtyHostClient {
         self.conn.halves_released(BOUND).await
     }
 
-    /// Record that a host we spawned ourselves runs from the bundled source path
-    /// (the runtime-dir install failed): known at spawn time, no lookup needed.
+    /// Record how the host behind this connection came to be, known when the
+    /// connection is made and needing no lookup: whether we started it, and
+    /// whether a host we started runs from the bundled source path (the
+    /// runtime-dir install failed).
     #[cfg(any(windows, unix))]
     fn note_bundled_fallback(&self, origin: HostConnectionOrigin, sidecar: &std::path::Path) {
+        self.exe_origin.set_spawned_here(origin == HostConnectionOrigin::SpawnedHere);
         let runtime_dir = runtime_host_dir();
         self.exe_origin.set_bundled_fallback(exe_origin::spawned_from_bundled_fallback(
             origin == HostConnectionOrigin::SpawnedHere,
@@ -230,6 +233,26 @@ impl PtyHostClient {
             runtime_dir.as_deref(),
             cfg!(windows),
         ));
+    }
+
+    /// Whether this app started the host behind this connection from its own
+    /// resolved host binary, so it belongs to the running build by construction.
+    pub fn spawned_here(&self) -> bool {
+        self.exe_origin.spawned_here()
+    }
+
+    /// The generation of a host this app did not start, read from where its
+    /// image lives. `None` when that cannot be shown: no way to ask the OS
+    /// here, the lookup failed, or the image is not in the install directory.
+    pub fn image_generation(&self) -> Option<String> {
+        self.exe_origin.image_generation(runtime_host_dir().as_deref())
+    }
+
+    /// Say that this connection's host was started here, for a connection with
+    /// no real process behind it.
+    #[cfg(test)]
+    pub(crate) fn inject_spawned_here(&self, spawned: bool) {
+        self.exe_origin.set_spawned_here(spawned);
     }
 
     /// Say what the OS would report as this host's image path, for a connection
@@ -1494,6 +1517,7 @@ pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
     let launch = resolve_launch_from(src, runtime_host_dir().as_deref());
     endpoints::pin_current_paths(launch.generation.as_deref());
+    endpoints::pin_current_generation(launch.generation.as_deref());
     Some(launch)
 }
 

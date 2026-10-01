@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { TerminalSnapshot, SessionHandoffTake, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
+import type { HostGeneration, TerminalSnapshot, SessionHandoffTake, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -99,6 +99,7 @@ interface ElectronAPI {
   updateTerminalName: (id: string, name: string) => Promise<boolean>;
   getTerminalCwd: (processId: string) => Promise<string | null>;
   getTerminalCwds: (processIds: string[]) => Promise<Record<string, string | null>>;
+  getTerminalGenerations: () => Promise<Record<string, HostGeneration>>;
   /// Backlog 011: drain the reattach prompt-gate hook for a terminal id (Some only
   /// when it was reattached after a core-restart hot-swap; null otherwise). Used to
   /// re-seed the command-suggest prompt gate after createTerminal resolves.
@@ -472,6 +473,10 @@ const tauriBridge: ElectronAPI = {
 
   getTerminalCwds: async (processIds) => {
     return invoke('get_terminal_cwds', { ids: processIds });
+  },
+
+  getTerminalGenerations: async () => {
+    return invoke('get_terminal_generations');
   },
 
   takeReattachPromptHook: async (id) => {

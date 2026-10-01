@@ -19,6 +19,9 @@ pub(super) struct ExeOrigin {
     /// This app spawned the host itself from the bundled source path because the
     /// runtime-dir install failed. That copy runs from inside the payload.
     bundled_fallback: AtomicBool,
+    /// This app started the host behind the connection, from its own resolved
+    /// host binary, rather than finding one already running.
+    spawned_here: AtomicBool,
     /// What the OS lookup would have answered (tests, which have no real host
     /// behind a connection): the classification itself is not replaced.
     #[cfg(test)]
@@ -39,6 +42,14 @@ impl ExeOrigin {
 
     pub(super) fn set_bundled_fallback(&self, v: bool) {
         self.bundled_fallback.store(v, Ordering::Release);
+    }
+
+    pub(super) fn set_spawned_here(&self, v: bool) {
+        self.spawned_here.store(v, Ordering::Release);
+    }
+
+    pub(super) fn spawned_here(&self) -> bool {
+        self.spawned_here.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -74,13 +85,27 @@ impl ExeOrigin {
     }
 
     /// The host's image path: asked of the OS from the connection's server pid.
-    #[cfg(windows)]
+    /// Only Windows can ask; elsewhere there is no answer.
     fn image(&self) -> Option<PathBuf> {
         #[cfg(test)]
         if let Some(image) = self.image_lookup.lock().unwrap().clone() {
             return image;
         }
-        self.server_pid().and_then(image_path_of)
+        #[cfg(windows)]
+        {
+            self.server_pid().and_then(image_path_of)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// The install-directory generation the host's image sits in, when it can be
+    /// read from the image path. `None` is "cannot be shown", which callers must
+    /// not read as any particular generation.
+    pub(super) fn image_generation(&self, install_base: Option<&Path>) -> Option<String> {
+        generation_of_image(self.image()?.as_path(), install_base?, cfg!(windows))
     }
 
     #[cfg(windows)]
@@ -151,6 +176,23 @@ pub(super) fn classify_exe(
         return Some(false);
     }
     Some(velopack_root.is_some_and(|root| path_within(image, root, case_insensitive)))
+}
+
+/// The generation a host image belongs to: `<install_base>/<generation>/<exe>`,
+/// where the directory name is a generation (16 lowercase hex digits) and
+/// `install_base` is where the app installs hosts. An image anywhere else (the
+/// bundled copy, another profile's directory) names no generation.
+pub(super) fn generation_of_image(
+    image: &Path,
+    install_base: &Path,
+    case_insensitive: bool,
+) -> Option<String> {
+    let dir = image.parent()?;
+    let name = dir.file_name()?.to_str()?.to_ascii_lowercase();
+    let parent = dir.parent()?;
+    let same_base = path_within(parent, install_base, case_insensitive)
+        && path_within(install_base, parent, case_insensitive);
+    (same_base && super::discovery::valid_generation(&name)).then_some(name)
 }
 
 /// Component-aware containment (`TermFlowOther` is not inside `TermFlow`) over

@@ -8,6 +8,7 @@ mod host_connect;
 mod host_lifecycle;
 mod host_port;
 mod host_routing;
+mod host_generation;
 mod update_survival;
 mod windows;
 mod history;
@@ -26,3 +27,4 @@ pub use host_lifecycle::{offload_refusal, update_refusal, ExitReport, Hold, Host
 pub use update_survival::{describe_reasons, effective_mode, FullReason, HostOrigin, UpdateMode};
 pub use host_routing::{Placement, HOST_OWNERSHIP_PENDING};
 pub use host_registry::effective_session_key;
+pub use host_generation::{generation_marker, Marker, TERMINAL_GENERATIONS_EVENT};

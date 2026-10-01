@@ -152,6 +152,19 @@ pub(super) fn discover_hosts_in(
     candidates
 }
 
+/// The generation a host endpoint is named after; `None` for the legacy
+/// endpoint, which names none.
+pub fn generation_of_endpoint(endpoint: &str) -> Option<String> {
+    generation_of_endpoint_in(endpoint, &super::endpoints::endpoint_for_generation(None))
+}
+
+pub(super) fn generation_of_endpoint_in(endpoint: &str, legacy: &str) -> Option<String> {
+    if physical_endpoint(endpoint) == physical_endpoint(legacy) {
+        return None;
+    }
+    endpoint_generation(endpoint)
+}
+
 fn endpoint_generation(endpoint: &str) -> Option<String> {
     let stem = endpoint.strip_suffix(".sock").unwrap_or(endpoint);
     stem.rsplit('.')
@@ -160,7 +173,7 @@ fn endpoint_generation(endpoint: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn valid_generation(name: &str) -> bool {
+pub(super) fn valid_generation(name: &str) -> bool {
     name.len() == 16
         && name
             .bytes()

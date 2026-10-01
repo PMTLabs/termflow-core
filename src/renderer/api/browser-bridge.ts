@@ -1,4 +1,4 @@
-import { ElectronAPI, SessionHandoffTake, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { ElectronAPI, HostGeneration, SessionHandoffTake, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { getStoredApiToken } from '../services/profileScope';
@@ -250,6 +250,24 @@ class BrowserBridge implements ElectronAPI {
 
     async getTerminalCwds(_processIds: string[]): Promise<Record<string, string | null>> {
         return {};
+    }
+
+    async getTerminalGenerations(): Promise<Record<string, HostGeneration>> {
+        const response = await fetch(`${API_BASE_URL}/terminals`, {
+            headers: { ...this.buildAuthHeaders() },
+        });
+        if (!response.ok) throw new Error(`Failed to fetch terminals: ${response.status}`);
+        const data = await response.json();
+        const generations: Record<string, HostGeneration> = {};
+        for (const terminal of Array.isArray(data?.terminals) ? data.terminals : []) {
+            // Only a pane's terminal has a leaf to mark, and only the two known
+            // words count; anything else is not read as either.
+            const { terminalId, generation } = terminal ?? {};
+            if (typeof terminalId === 'string' && (generation === 'current' || generation === 'previous')) {
+                generations[terminalId] = generation;
+            }
+        }
+        return generations;
     }
 
     async resolveTerminalPath(_processId: string, _rel: string): Promise<string[]> {

@@ -575,6 +575,7 @@ impl<R: Runtime> AppState<R> {
         let Some((_, channel)) = self.host_terminals.remove(id) else {
             return;
         };
+        self.notify_terminal_generations();
         if matches!(channel, HostChannel::Frozen(_)) {
             // The last pane of an older host is gone: let its retirement ticker
             // look at the host now instead of at its next tick.
