@@ -42,7 +42,13 @@ describe('updateAvailable', () => {
     const answer = { mode: 'full', reasons: [...REASONS] };
     invokeMock.mockResolvedValueOnce(answer);
     await expect(tauriBridge.updateAvailable()).resolves.toStrictEqual(answer);
-    expect(invokeMock).toHaveBeenCalledWith('update_available');
+    expect(invokeMock).toHaveBeenCalledWith('update_available', { markerMode: null });
+  });
+
+  it('passes the mode the update check reported for the release', async () => {
+    invokeMock.mockResolvedValueOnce({ mode: 'full', reasons: [] });
+    await tauriBridge.updateAvailable('full');
+    expect(invokeMock).toHaveBeenCalledWith('update_available', { markerMode: 'full' });
   });
 
   it('keeps rejecting with the refusal text', async () => {

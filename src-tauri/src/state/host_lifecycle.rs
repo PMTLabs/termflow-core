@@ -623,9 +623,14 @@ async fn release_host(name: &str, client: &PtyHostClient, deadline: Option<Insta
         problem
     };
     let problem = match deadline {
-        Some(deadline) => tokio::time::timeout_at(deadline, announce)
-            .await
-            .unwrap_or_else(|_| Some("it did not acknowledge in time".to_string())),
+        Some(deadline) => tokio::time::timeout_at(deadline, announce).await.unwrap_or_else(|_| {
+            // The stream is closed below all the same, and a host that never heard
+            // the shutdown reads that as a crash.
+            log::warn!(
+                "quit: {name} did not acknowledge in time; it may treat the close as a crash and keep its terminals"
+            );
+            Some("it did not acknowledge in time".to_string())
+        }),
         None => announce.await,
     };
     if !client.close_transport().await {
@@ -667,6 +672,11 @@ async fn exit_one<P: LifecyclePort>(port: &P, host: &OwnedHost, per_host: Option
     }
 }
 
+fn not_in_time(bounds: Option<CloseBounds>) -> String {
+    let secs = bounds.map_or(0, |b| b.total.as_secs());
+    format!("it was not released within {secs} s")
+}
+
 /// How long closing every host may take when something is waiting for it: an
 /// update that has already started the updater cannot wait on a wedged host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,19 +713,34 @@ pub(super) async fn exit_hosts_within<P: LifecyclePort>(port: &P, bounds: Option
         log::warn!("quit: exiting although operations are still in flight on {holders:?}");
     }
     let per_host = bounds.map(|b| b.per_host);
-    let release = async {
-        let owned = owned_hosts(port).await;
-        join_all(owned.iter().map(|host| exit_one(port, host, per_host))).await
-    };
-    let hosts = match bounds {
-        None => release.await,
-        Some(bounds) => tokio::time::timeout(bounds.total, release).await.unwrap_or_else(|_| {
-            log::error!("quit: the terminal hosts were not all released within {} s; going ahead", bounds.total.as_secs());
-            vec![HostExit {
-                name: "the terminal hosts".to_string(),
-                problem: Some(format!("they were not all released within {} s", bounds.total.as_secs())),
-            }]
-        }),
+    let deadline = bounds.map(|b| Instant::now() + b.total);
+    // Within the bound, if there is one, for both the looking and the releasing.
+    async fn within<T>(deadline: Option<Instant>, work: impl Future<Output = T>) -> Option<T> {
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, work).await.ok(),
+            None => Some(work.await),
+        }
+    }
+    let owned = within(deadline, owned_hosts(port)).await;
+    let hosts = match owned {
+        None => {
+            log::error!("quit: the terminal hosts could not even be listed in time; going ahead");
+            vec![HostExit { name: "the terminal hosts".to_string(), problem: Some(not_in_time(bounds)) }]
+        }
+        Some(owned) => {
+            match within(deadline, join_all(owned.iter().map(|host| exit_one(port, host, per_host)))).await {
+                Some(hosts) => hosts,
+                None => {
+                    // A host that has not heard the shutdown reads the end of the
+                    // connection as a crash and keeps its terminals for a while.
+                    let names = owned.iter().map(OwnedHost::name).collect::<Vec<_>>().join(", ");
+                    log::error!(
+                        "quit: not every terminal host was released in time; any that did not hear the                          shutdown may keep its terminals as after a crash: {names}"
+                    );
+                    owned.iter().map(|h| HostExit { name: h.name(), problem: Some(not_in_time(bounds)) }).collect()
+                }
+            }
+        }
     };
     ExitReport { drained, hosts }
 }

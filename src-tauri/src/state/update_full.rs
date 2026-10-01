@@ -35,9 +35,10 @@ use crate::update_policy;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-use std::sync::atomic::Ordering;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 /// When the process is ended regardless, counted from the moment the updater was
 /// started. The updater waits 60 s for this process to exit; this stays well
@@ -52,6 +53,10 @@ const SCOPE_LIST_BOUND: Duration = Duration::from_secs(3);
 /// How long the updater is looked for after it was started, if it is not seen at
 /// once.
 const UPDATER_SEARCH: Duration = Duration::from_secs(2);
+/// How long it must have been running before it is believed to be: starting a
+/// process succeeds long before the updater has found out that it cannot apply
+/// anything (a locked file, a bad package).
+const UPDATER_SETTLE: Duration = Duration::from_millis(750);
 
 // ---- what the user agrees to -----------------------------------------------
 
@@ -79,6 +84,8 @@ pub struct Confirmation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfirmToken {
+    /// A confirmation echoed back as it came (`version`) is accepted too.
+    #[serde(alias = "version")]
     pub target_version: String,
     pub shell_count: u32,
     pub unknown: bool,
@@ -127,19 +134,6 @@ fn survival_mode(mode: update_policy::UpdateMode) -> UpdateMode {
     }
 }
 
-/// What the last update check found in the release's notes. Availability is
-/// judged on it before anything is downloaded; the download decides for good.
-static CHECKED_MODE: Mutex<update_policy::UpdateMode> = Mutex::new(update_policy::UpdateMode::Offload);
-
-#[cfg_attr(not(feature = "velopack-updates"), allow(dead_code))]
-pub fn note_checked_mode(mode: update_policy::UpdateMode) {
-    *CHECKED_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
-}
-
-pub fn checked_mode() -> update_policy::UpdateMode {
-    *CHECKED_MODE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 // ---- the port --------------------------------------------------------------
 
 /// What a full update needs from the application beyond the hosts.
@@ -148,16 +142,22 @@ pub(super) trait FullUpdatePort: LifecyclePort {
     fn local_shells(&self) -> u32;
     /// The other TermFlow instances running now.
     fn live_siblings(&self) -> Result<Vec<InstanceRecord>, String>;
-    /// Ask every window to persist its state and wait for them. True when this is
-    /// what marked the application as exiting, which [`Self::abort_flush`] undoes.
+    /// Ask every window to persist its state and wait for them. True when this very
+    /// call is what marked the application as exiting: only then does the mark
+    /// belong to the caller, and only then may [`Self::abort_flush`] take it back
+    /// (a quit that marked it first keeps its own).
     fn flush_windows(&self) -> impl Future<Output = bool> + Send;
-    /// The update did not go ahead after the windows were flushed.
+    /// The update did not go ahead after it marked the application as exiting.
     fn abort_flush(&self);
     /// Write every terminal's scrollback: the exit hooks are skipped when the
     /// watchdog ends the process.
     fn flush_history(&self) -> impl Future<Output = ()> + Send;
-    /// Is the updater that was just started running?
+    /// Is the updater that was just started running, and does it stay so?
     fn updater_alive(&self) -> impl Future<Output = bool> + Send;
+    /// The file the update crate starts, when this build can tell.
+    fn update_exe(&self) -> Option<PathBuf> {
+        None
+    }
     /// Close every host within `bounds`, then the elevated host.
     fn close_all_hosts(&self, bounds: CloseBounds) -> impl Future<Output = ()> + Send;
     /// Leave through the normal exit.
@@ -245,6 +245,13 @@ where
     let hold = begin_full_update(port).await?;
     let (_, reasons) = effective_mode(marker, &origins(hold.hosts()));
     let now = confirmation(target, scope_of(port, hold.hosts()).await, reasons);
+    if now.reasons.is_empty() {
+        // Nothing demands a full update any more (the host that did has gone, or is
+        // no longer inside the folder): the terminals can stay running, which asks
+        // less of the user than what they agreed to. Admission reopens.
+        log::info!("[UPDATE] no longer needs to close the terminals; applying it as an offload");
+        return Ok(FullRun::Offload(info));
+    }
     if !now.matches(&token) {
         log::info!("[UPDATE] what was agreed to changed while creation was being stopped; asking again");
         return Ok(FullRun::NeedsConfirmation(now));
@@ -257,43 +264,61 @@ where
     // Nothing is armed for it, so the only answer is not to go ahead.
     if let Err(reason) = live_siblings_refusal(port) {
         log::warn!("[UPDATE] refused: {reason}");
-        abort(port, flushed_by_us);
+        abort(port, flushed_by_us, None);
         return Err(reason);
     }
     if let Err(e) = launch(info).await {
         log::warn!("[UPDATE] the updater could not be started ({e}); nothing was closed");
-        abort(port, flushed_by_us);
+        abort(port, flushed_by_us, None);
         return Err(e);
     }
-    let launched = Instant::now();
+    // From here the process has a limited time to leave: the updater waits for it.
+    // The watchdog starts with the updater, before anything that could stall.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    start_watchdog(port, port.watchdog_after(), cancelled.clone());
     if !port.updater_alive().await {
         log::warn!("[UPDATE] the updater is not running; nothing was closed");
-        abort(port, flushed_by_us);
+        abort(port, flushed_by_us, Some(&cancelled));
         return Err("the updater did not start, so nothing was changed; try again".to_string());
     }
 
     // Irreversible. Admission stays closed until the process is gone.
+    //
+    // Declared residual risk: a host that does not take its shutdown in time is
+    // closed without one, and a host treats a connection that just ends as a crash:
+    // it keeps its shells for a while, and one that runs outside the folder the
+    // updater replaces can be adopted again by the new version. A full update then
+    // has not closed everything. Each such host is named in the log (see
+    // `exit_hosts_within`), and the bound is what keeps the app from outliving the
+    // updater's wait for it.
     hold.commit();
-    start_watchdog(port, port.watchdog_after().saturating_sub(launched.elapsed()));
     log::info!("[UPDATE] updater running; closing every terminal host and exiting");
     port.close_all_hosts(FULL_CLOSE).await;
     port.exit_app();
     Ok(FullRun::Exited)
 }
 
-/// Back out after the windows were flushed.
-fn abort<P: FullUpdatePort>(port: &P, flushed_by_us: bool) {
+/// Back out after the windows were flushed, and call off the watchdog if one was
+/// started.
+fn abort<P: FullUpdatePort>(port: &P, flushed_by_us: bool, watchdog: Option<&AtomicBool>) {
+    if let Some(cancelled) = watchdog {
+        cancelled.store(true, Ordering::SeqCst);
+    }
     if flushed_by_us {
         port.abort_flush();
     }
 }
 
-/// End the process `after` from now whatever the runtime is doing. On a thread of
-/// its own: a stalled Tokio runtime must not be able to stop it.
-fn start_watchdog<P: FullUpdatePort>(port: &P, after: Duration) {
+/// End the process `after` from now whatever the runtime is doing, unless it was
+/// called off by then. On a thread of its own: a stalled Tokio runtime must not be
+/// able to stop it.
+fn start_watchdog<P: FullUpdatePort>(port: &P, after: Duration, cancelled: Arc<AtomicBool>) {
     let port = port.clone();
     let started = std::thread::Builder::new().name("update-watchdog".to_string()).spawn(move || {
         std::thread::sleep(after);
+        if cancelled.load(Ordering::SeqCst) {
+            return;
+        }
         log::error!("[UPDATE] still running {} s after the updater started; ending the process", after.as_secs());
         port.hard_exit();
     });
@@ -326,26 +351,83 @@ pub(super) fn availability<P: FullUpdatePort>(
 
 // ---- AppState -----------------------------------------------------------------------
 
-/// Whether the updater process is running. The updater crate keeps no handle to the
-/// process it starts, so it is looked for: `Update.exe --waitPid <this pid>`. One
-/// whose command line cannot be read still counts, because refusing on that would
-/// make the update impossible, not safe.
-fn updater_running() -> bool {
-    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-    let me = std::process::id().to_string();
+/// Is this process the updater that was started for us? It is `Update` (the name
+/// differs by platform) called with `--waitPid <this pid>`. When its command line
+/// cannot be read it counts only if it is the very file the update crate starts:
+/// any other process named `update…` whose arguments are hidden (a service, an
+/// elevated process) says nothing about ours.
+pub(super) fn is_our_updater(
+    name: &str,
+    exe: Option<&Path>,
+    args: &[String],
+    my_pid: &str,
+    update_exe: Option<&Path>,
+) -> bool {
+    if !name.to_ascii_lowercase().starts_with("update") {
+        return false;
+    }
+    if args.is_empty() {
+        return match (exe, update_exe) {
+            (Some(exe), Some(update_exe)) => same_file(exe, update_exe),
+            _ => false,
+        };
+    }
+    args.windows(2).any(|pair| pair[0].eq_ignore_ascii_case("--waitPid") && pair[1] == my_pid)
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy())
+    } else {
+        a == b
+    }
+}
+
+/// One look at the process table for the updater. The update crate keeps no handle
+/// to the process it starts, so it is found. Names are read for every process, but
+/// command lines and image paths only for the few that could be it: reading them
+/// for all is the heavy part of a process scan.
+fn updater_running(update_exe: Option<&Path>) -> bool {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
     let mut sys = System::new();
+    sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing());
+    let candidates: Vec<Pid> = sys
+        .processes()
+        .iter()
+        .filter(|(_, process)| process.name().to_string_lossy().to_ascii_lowercase().starts_with("update"))
+        .map(|(pid, _)| *pid)
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
     sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
+        ProcessesToUpdate::Some(&candidates),
         true,
-        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
+        ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always).with_exe(UpdateKind::Always),
     );
-    sys.processes().values().any(|process| {
-        if !process.name().to_string_lossy().to_ascii_lowercase().starts_with("update") {
+    let me = std::process::id().to_string();
+    candidates.iter().filter_map(|pid| sys.process(*pid)).any(|process| {
+        let args: Vec<String> = process.cmd().iter().map(|a| a.to_string_lossy().to_string()).collect();
+        is_our_updater(&process.name().to_string_lossy(), process.exe(), &args, &me, update_exe)
+    })
+}
+
+/// Believe the updater is running only if it is seen (within `search`) and is
+/// still there after `settle`. `probe` is one look.
+pub(super) async fn confirm_running<F, Fut>(settle: Duration, search: Duration, probe: F) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let deadline = tokio::time::Instant::now() + search;
+    while !probe().await {
+        if tokio::time::Instant::now() >= deadline {
             return false;
         }
-        let args: Vec<String> = process.cmd().iter().map(|a| a.to_string_lossy().to_string()).collect();
-        args.is_empty() || args.windows(2).any(|pair| pair[0].eq_ignore_ascii_case("--waitPid") && pair[1] == me)
-    })
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    tokio::time::sleep(settle).await;
+    probe().await
 }
 
 impl FullUpdatePort for AppState {
@@ -361,9 +443,7 @@ impl FullUpdatePort for AppState {
     }
 
     async fn flush_windows(&self) -> bool {
-        let latch = !self.exiting.load(Ordering::SeqCst);
-        crate::commands::flush_all_windows(&self.app_handle).await;
-        latch
+        crate::commands::flush_all_windows(&self.app_handle).await
     }
 
     fn abort_flush(&self) {
@@ -378,15 +458,24 @@ impl FullUpdatePort for AppState {
     }
 
     async fn updater_alive(&self) -> bool {
-        let deadline = Instant::now() + UPDATER_SEARCH;
-        loop {
-            if tokio::task::spawn_blocking(updater_running).await.unwrap_or(false) {
-                return true;
+        let update_exe = self.update_exe();
+        confirm_running(UPDATER_SETTLE, UPDATER_SEARCH, || {
+            let update_exe = update_exe.clone();
+            async move {
+                tokio::task::spawn_blocking(move || updater_running(update_exe.as_deref())).await.unwrap_or(false)
             }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+        })
+        .await
+    }
+
+    fn update_exe(&self) -> Option<PathBuf> {
+        #[cfg(feature = "velopack-updates")]
+        {
+            crate::updater::update_exe_path()
+        }
+        #[cfg(not(feature = "velopack-updates"))]
+        {
+            None
         }
     }
 

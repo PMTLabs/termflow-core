@@ -437,6 +437,7 @@ pub(super) struct HardExit {
     pub thread: std::thread::ThreadId,
     /// It was a thread of a Tokio runtime.
     pub on_runtime: bool,
+    pub at: std::time::Instant,
 }
 
 /// The rest of the application, as a full update sees it: what it is told, what
@@ -448,8 +449,16 @@ pub(super) struct FullKnobs {
     /// Instances that start while the windows are being flushed.
     pub appear_during_flush: Mutex<Vec<crate::net_ports::InstanceRecord>>,
     pub flush_takes: Mutex<Duration>,
+    /// Whether the flush is what marks the application as exiting (it is not when a
+    /// quit marked it first).
+    pub flush_marks_exiting: AtomicBool,
     pub local_shells: AtomicU32,
     pub updater_dead: AtomicBool,
+    /// How long looking for the updater takes, and whether it never finishes.
+    pub alive_takes: Mutex<Duration>,
+    pub alive_stalls: AtomicBool,
+    /// When the updater was started.
+    pub launched_at: Mutex<Option<std::time::Instant>>,
     /// Blocks the thread the closing runs on for this long, as a stalled runtime would.
     pub close_stalls: Mutex<Duration>,
     pub watchdog_after: Mutex<Duration>,
@@ -465,8 +474,12 @@ impl Default for FullKnobs {
             siblings: Mutex::new(Vec::new()),
             appear_during_flush: Mutex::new(Vec::new()),
             flush_takes: Mutex::new(Duration::from_millis(1500)),
+            flush_marks_exiting: AtomicBool::new(true),
             local_shells: AtomicU32::new(0),
             updater_dead: AtomicBool::new(false),
+            alive_takes: Mutex::new(Duration::ZERO),
+            alive_stalls: AtomicBool::new(false),
+            launched_at: Mutex::new(None),
             close_stalls: Mutex::new(Duration::ZERO),
             watchdog_after: Mutex::new(Duration::from_secs(40)),
             aborted_flushes: AtomicUsize::new(0),

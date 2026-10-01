@@ -215,16 +215,20 @@ pub(crate) async fn close_all_hosts(app: &tauri::AppHandle, bounds: Option<Close
 /// outright, so a tab offloaded/updated between autosave ticks came back on
 /// relaunch with no persisted cwd and fell through to whatever directory
 /// `CreateProcess` picked with none given (reported: `C:\Windows`).
-pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
+///
+/// Returns whether THIS call is what marked the application as exiting. A caller
+/// that backs out afterwards (an update that is abandoned) may clear the mark only
+/// then: otherwise it would clear a quit's.
+pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) -> bool {
     use tauri::{Emitter, Manager as _};
 
-    let Some(state) = app.try_state::<AppState>() else { return };
+    let Some(state) = app.try_state::<AppState>() else { return false };
 
     // A second Quit while a flush is in flight means "I am done waiting" — the
     // caller's own exit still proceeds; there is just nothing further to await.
-    if state.exiting.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if !mark_exiting(&state.exiting) {
         log::info!("flush_all_windows: already flushing; not waiting again.");
-        return;
+        return false;
     }
 
     let expected: Vec<String> = app
@@ -234,14 +238,14 @@ pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
         .cloned()
         .collect();
     if expected.is_empty() {
-        return;
+        return true;
     }
 
     state.flush_acks.clear();
     if let Err(e) = app.emit("app:flush-session", ()) {
         // Nothing will ack, so do not make the caller wait out the timeout.
         log::warn!("flush_all_windows: could not ask windows to flush ({e}); continuing.");
-        return;
+        return true;
     }
 
     let acks = state.flush_acks.clone();
@@ -257,6 +261,13 @@ pub(crate) async fn flush_all_windows(app: &tauri::AppHandle) {
             FLUSH_TIMEOUT.as_millis()
         );
     }
+    true
+}
+
+/// Mark the application as exiting. True when this call set the mark, false when
+/// it was already set.
+fn mark_exiting(exiting: &std::sync::atomic::AtomicBool) -> bool {
+    !exiting.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
 pub fn flush_then_exit(app: &tauri::AppHandle) {
@@ -296,6 +307,16 @@ mod flush_tests {
     use dashmap::DashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// Whoever's swap set the mark is the only one that may take it back: an update
+    /// that backs out after a quit marked the application must leave the quit's mark.
+    #[test]
+    fn only_the_call_that_set_the_exit_mark_owns_it() {
+        let exiting = std::sync::atomic::AtomicBool::new(false);
+        assert!(mark_exiting(&exiting), "the first call sets it");
+        assert!(!mark_exiting(&exiting), "a second one finds it set and owns nothing");
+        assert!(exiting.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     #[tokio::test]
     async fn a_window_that_never_acks_does_not_wedge_the_quit() {

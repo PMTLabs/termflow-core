@@ -34,7 +34,7 @@ export interface EffectiveEndpoints {
 export type UpdateStatus =
   | { state: 'notInstalled' }
   | { state: 'upToDate' }
-  | { state: 'available'; version: string }
+  | { state: 'available'; version: string; markerMode: import('../api/tauri-bridge').UpdateMarkerMode }
   | { state: 'unavailable' };
 
 export interface NetworkInterfaceInfo {
@@ -346,7 +346,9 @@ export interface ElectronAPI {
    *  hotswapAvailable because the two verdicts genuinely differ (design 014 B4).
    *  Resolves with the mode the update would run in (`full` closes every
    *  terminal, with the reasons); rejects with the reason when it cannot run. */
-  updateAvailable?: () => Promise<import('../api/tauri-bridge').UpdateAvailability>;
+  updateAvailable?: (
+    markerMode?: import('../api/tauri-bridge').UpdateMarkerMode,
+  ) => Promise<import('../api/tauri-bridge').UpdateAvailability>;
   /** Check for a Velopack update. `unavailable` = no updater in this build. */
   checkForUpdates?: () => Promise<UpdateStatus>;
   /** Download + apply a Velopack update. An update that must close the terminals

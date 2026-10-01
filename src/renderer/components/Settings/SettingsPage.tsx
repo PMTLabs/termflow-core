@@ -30,7 +30,12 @@ import { SnippetsPanel } from './SnippetsPanel';
 import { AboutLegalPanel } from './AboutLegalPanel';
 import { AutomationsPanel } from './Automations/AutomationsPanel';
 import { offloadRetentionCopy } from './offloadRetentionCopy';
-import type { ConnectedHostRetention, UpdateAvailability, UpdateConfirmation } from '../../api/tauri-bridge';
+import type {
+    ConnectedHostRetention,
+    UpdateAvailability,
+    UpdateConfirmation,
+    UpdateMarkerMode,
+} from '../../api/tauri-bridge';
 import {
     confirmTokenFor,
     fullUpdateDialogLead,
@@ -251,10 +256,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // The mode follows the release notes of the last update check, so a sample taken
     // before that check finished can be superseded by one taken after it.
     const updateAvailabilityGenRef = useRef(0);
+    // What the last update check said the release asks for. It is handed to every
+    // availability sample, so a sample never depends on which call finished first;
+    // cleared whenever a check finds no release.
+    const checkedMarkerModeRef = useRef<UpdateMarkerMode | undefined>(undefined);
     const refreshUpdateAvailability = useCallback(async () => {
         const gen = ++updateAvailabilityGenRef.current;
         try {
-            const availability = await window.electronAPI?.updateAvailable?.();
+            const availability = await window.electronAPI?.updateAvailable?.(checkedMarkerModeRef.current);
             if (gen !== updateAvailabilityGenRef.current) return;
             setUpdateBlockedReason(null);
             setUpdateAvailability(availability ?? null);
@@ -285,10 +294,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         try {
             const status = await window.electronAPI.checkForUpdates();
             setUpdateStatus(status);
-            // The check is what tells the backend which way the release wants to be
-            // applied, so the mode sampled before it finished may be the old one.
-            if (status.state === 'available') void refreshUpdateAvailability();
+            // The check is what says which way the release wants to be applied, so a
+            // sample taken before it finished judged the wrong mode: take it again.
+            checkedMarkerModeRef.current = status.state === 'available' ? status.markerMode : undefined;
+            void refreshUpdateAvailability();
         } catch {
+            checkedMarkerModeRef.current = undefined;
             setUpdateStatus({ state: 'notInstalled' });
         } finally {
             setCheckingUpdate(false);

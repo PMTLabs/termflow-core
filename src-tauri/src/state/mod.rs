@@ -26,7 +26,7 @@ pub use host_table::{Admission, Busy, DrainGuard, DrainRefusal, HostTable, Quies
 pub use host_adoption::{Barrier, Resolution, UnresolvedHost};
 pub use host_lifecycle::{offload_refusal, update_refusal, CloseBounds, ExitReport, Hold, HostExit, OwnedHost, SiblingArm};
 pub use update_survival::{describe_reasons, effective_mode, FullReason, HostOrigin, UpdateMode};
-pub use update_full::{checked_mode, note_checked_mode, Availability, ConfirmToken, Confirmation, FullRun, Target};
+pub use update_full::{Availability, ConfirmToken, Confirmation, FullRun, Target};
 pub use host_routing::{Placement, HOST_OWNERSHIP_PENDING};
 pub use host_registry::effective_session_key;
 pub use host_generation::{generation_marker, Marker, TERMINAL_GENERATIONS_EVENT};

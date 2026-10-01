@@ -28,8 +28,11 @@ export interface EffectiveEndpoints {
 export type UpdateStatus =
   | { state: 'notInstalled' }
   | { state: 'upToDate' }
-  | { state: 'available'; version: string }
+  | { state: 'available'; version: string; markerMode: UpdateMarkerMode }
   | { state: 'unavailable' };
+
+/** What a release's own notes ask of an update, as the check that found it reports it. */
+export type UpdateMarkerMode = 'offload' | 'full';
 
 /** Why an update has to close every terminal (mirrors the Rust `FullReason`). */
 export type FullUpdateReason =
@@ -213,7 +216,9 @@ interface ElectronAPI {
   /// verdicts differ, and sharing one made the panel disagree with the button.
   /// Resolves with the mode the update would run in; `full` closes every terminal
   /// and lists why. Still rejects with the reason when the update cannot run.
-  updateAvailable: () => Promise<UpdateAvailability>;
+  /// `markerMode` is the one the update check reported for the release; leave it out
+  /// when no check has found one yet.
+  updateAvailable: (markerMode?: UpdateMarkerMode) => Promise<UpdateAvailability>;
   /// Check for a Velopack update. `unavailable` = no updater in this build.
   checkForUpdates: () => Promise<UpdateStatus>;
   /// The running app's version (from the Tauri config at build time).
@@ -805,7 +810,8 @@ const tauriBridge: ElectronAPI = {
   },
   restartForUpdate: async () => { await invoke('restart_for_update'); },
   connectedHostRetention: async () => invoke<ConnectedHostRetention>('connected_host_retention'),
-  updateAvailable: async () => invoke<UpdateAvailability>('update_available'),
+  updateAvailable: async (markerMode) =>
+    invoke<UpdateAvailability>('update_available', { markerMode: markerMode ?? null }),
 
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
   renameTerminalHistory: async (from: string, to: string) => {

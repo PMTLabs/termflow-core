@@ -67,7 +67,7 @@ describe('full update flow in the Updates panel', () => {
             updateAvailable: jest.fn(async () => ({ mode: 'full', reasons: REASONS })),
             updateAndRestart: jest.fn(async () => ({ outcome: 'started' })),
             connectedHostRetention: jest.fn(async () => ({ state: 'indefinite' })),
-            checkForUpdates: jest.fn(async () => ({ state: 'available', version: '9.9.9' })),
+            checkForUpdates: jest.fn(async () => ({ state: 'available', version: '9.9.9', markerMode: 'full' })),
             getAppVersion: jest.fn(async () => '0.0.0-test'),
         };
         (window as unknown as { electronAPI: unknown }).electronAPI = api;
@@ -262,5 +262,40 @@ describe('full update flow in the Updates panel', () => {
 
         expect(api.updateAvailable.mock.calls.length).toBeGreaterThanOrEqual(2);
         expect(notice()).not.toBeNull();
+    });
+
+    it('a marked release is reachable on first entry with an in-process shell, whichever call finishes first', async () => {
+        // The backend: an offload refuses an in-process shell; a full update is not asked.
+        const inProcess = 'cannot hot-swap: some terminals are in-process';
+        api.hotswapAvailable.mockRejectedValue(inProcess);
+        api.updateAvailable.mockImplementation(async (markerMode?: string) => {
+            if (markerMode === 'full') return { mode: 'full', reasons: REASONS };
+            throw inProcess;
+        });
+        let answerCheck!: (status: unknown) => void;
+        api.checkForUpdates.mockImplementation(() => new Promise((resolve) => { answerCheck = resolve; }));
+        await renderPanel();
+
+        // Sampled before the check answered: nothing is known about the release yet.
+        expect(api.updateAvailable.mock.calls[0]).toEqual([undefined]);
+        await act(async () => answerCheck({ state: 'available', version: '9.9.9', markerMode: 'full' }));
+
+        expect(api.updateAvailable).toHaveBeenLastCalledWith('full');
+        expect(container.querySelector('[data-testid="update-blocked"]')).toBeNull();
+        expect(notice()).not.toBeNull();
+        expect(updateButton()?.disabled).toBe(false);
+    });
+
+    it('forgets the mode of a release the next check does not find', async () => {
+        await renderPanel();
+        api.checkForUpdates.mockResolvedValue({ state: 'upToDate' });
+        api.updateAvailable.mockClear();
+
+        const recheck = Array.from(container.querySelectorAll('button')).find((b) => b.textContent === 'Re-check');
+        await click(recheck);
+
+        const modes = api.updateAvailable.mock.calls.map((call) => call[0]);
+        expect(modes.length).toBeGreaterThan(0);
+        expect(modes[modes.length - 1]).toBeUndefined();
     });
 });

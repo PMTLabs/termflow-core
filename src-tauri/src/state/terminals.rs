@@ -21,6 +21,29 @@ fn restore_sweep_may_release(pending_windows: usize, already_released: bool) -> 
     pending_windows == 0 && !already_released
 }
 
+/// What the 60 s sweep does at a tick. The sweep is the only retry there is for
+/// hosts and sessions that were not reachable at start-up, so it must outlive
+/// anything that is merely *trying* to exit: a quit's flush or an update that backs
+/// out sets `exiting` for a while and clears it again. Only the sticky exit
+/// quiesce means the process is going away for good.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SweepTick {
+    Run,
+    /// An exit may be under way: leave this tick alone, look again at the next.
+    Skip,
+    Stop,
+}
+
+pub(super) fn sweep_tick(exiting: bool, lifecycle: Option<super::host_table::QuiesceReason>) -> SweepTick {
+    if lifecycle == Some(super::host_table::QuiesceReason::Exit) {
+        SweepTick::Stop
+    } else if exiting {
+        SweepTick::Skip
+    } else {
+        SweepTick::Run
+    }
+}
+
 /// May a claimed sweep KEEP the one-shot flag? Only a sweep that actually ran
 /// to completion. Claiming the flag and then failing — no host, no client, an
 /// unanswered listing — used to consume the only sweep there will ever be: the
@@ -62,6 +85,21 @@ mod restore_sweep_gate_tests {
     fn waits_for_every_window_then_releases_when_last_is_destroyed() {
         assert!(!restore_sweep_may_release(1, false));
         assert!(restore_sweep_may_release(0, false));
+    }
+
+    #[test]
+    fn the_sweep_survives_an_exit_that_is_only_being_attempted() {
+        use super::{sweep_tick, SweepTick};
+        use crate::state::QuiesceReason;
+        assert_eq!(sweep_tick(false, None), SweepTick::Run);
+        // A flush that may yet be abandoned (an update that backs out) or a quit in
+        // progress: this tick is skipped, the next one looks again.
+        assert_eq!(sweep_tick(true, None), SweepTick::Skip);
+        assert_eq!(sweep_tick(true, Some(QuiesceReason::Update)), SweepTick::Skip);
+        assert_eq!(sweep_tick(false, Some(QuiesceReason::Update)), SweepTick::Run);
+        // Only the sticky exit quiesce ends it, whatever the flag says.
+        assert_eq!(sweep_tick(false, Some(QuiesceReason::Exit)), SweepTick::Stop);
+        assert_eq!(sweep_tick(true, Some(QuiesceReason::Exit)), SweepTick::Stop);
     }
 
     #[test]
@@ -828,7 +866,11 @@ impl<R: Runtime> AppState<R> {
         tauri::async_runtime::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                if state.exiting.load(Ordering::Acquire) { break; }
+                match sweep_tick(state.exiting.load(Ordering::Acquire), state.host_table.lifecycle_reason()) {
+                    SweepTick::Stop => break,
+                    SweepTick::Skip => continue,
+                    SweepTick::Run => {}
+                }
                 state.host_restore_released.store(false, Ordering::Release);
                 state.release_host_restore_sweep(true).await;
             }

@@ -16,8 +16,10 @@
 //! Pure over its two inputs. The marker is read by the OLD app, so it only takes
 //! effect for updates performed from a build that already contains this reader.
 
-/// How an update is applied, judged by the release notes alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How an update is applied, judged by the release notes alone. Crosses to the
+/// renderer as `"offload"` / `"full"` and comes back the same way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum UpdateMode {
     /// Keep terminals alive across the update (the default).
     Offload,

@@ -84,7 +84,7 @@ fn every_exit_offload_and_update_path_goes_through_a_quiesce() {
     }
     let update = fn_body(&read("updater.rs"), "pub async fn update_and_restart");
     assert!(
-        position(&update, "check_and_download") < position(&update, ".begin_update()")
+        position(&update, "download(&package)") < position(&update, ".begin_update()")
             && position(&update, ".begin_update()") < position(&update, "arm_siblings(")
             && position(&update, ".begin_update()") < position(&update, ".arm_detach("),
         "the update commit closes admission after the download and before anything is armed: {update}"
@@ -246,10 +246,14 @@ fn the_preflights_and_retention_read_the_owned_set_not_the_primary() {
 fn the_update_decides_its_mode_from_the_download_before_anything_is_armed() {
     let update = fn_body(&read("updater.rs"), "pub async fn update_and_restart");
     assert!(
-        position(&update, "check_and_download")
-            < position(&update, ".run_full_update(&target, confirm")
+        position(&update, "spawn_blocking(check)") < position(&update, "download(&package)")
+            && position(&update, "download(&package)") < position(&update, ".run_full_update(&target, confirm")
             && position(&update, ".run_full_update(") < position(&update, ".begin_update()"),
         "the downloaded release's notes decide first; only an offload goes on to arm: {update}"
+    );
+    assert!(
+        position(&update, "hotswap_preflight(") < position(&update, "download(&package)"),
+        "an offload refuses before it costs a download: {update}"
     );
     let command = fn_body(&read("commands/update.rs"), "pub async fn update_and_restart");
     assert!(command.contains("update_and_restart(&state, confirm)"), "the confirmation reaches the transaction: {command}");
@@ -264,7 +268,12 @@ fn the_update_decides_its_mode_from_the_download_before_anything_is_armed() {
 fn the_real_full_update_port_does_what_the_transaction_relies_on() {
     let full = read("state/update_full.rs");
     let port = full[full.find("impl FullUpdatePort for AppState").expect("the real port")..].to_string();
-    assert!(fn_body(&port, "async fn flush_windows").contains("flush_all_windows("), "{port}");
+    // The exit mark is the flush's own answer: a separate read before it could be
+    // overtaken by a quit's, and the update would then clear the quit's mark.
+    let flush = fn_body(&port, "async fn flush_windows");
+    assert!(flush.contains("flush_all_windows(&self.app_handle).await") && !flush.contains("exiting"), "{flush}");
+    let abort = fn_body(&port, "fn abort_flush");
+    assert!(abort.contains("exiting.store(false"), "{abort}");
     assert!(fn_body(&port, "async fn flush_history").contains("flush_all_history("), "{port}");
     assert!(fn_body(&port, "async fn close_all_hosts").contains("close_all_hosts(&self.app_handle, Some(bounds))"), "{port}");
     assert!(fn_body(&port, "fn exit_app").contains(".exit(0)"), "{port}");
@@ -280,9 +289,9 @@ fn the_real_full_update_port_does_what_the_transaction_relies_on() {
         "port.flush_history()",
         "live_siblings_refusal(port)",
         "launch(info)",
+        "start_watchdog(",
         "port.updater_alive()",
         "hold.commit()",
-        "start_watchdog(",
         "port.close_all_hosts(",
         "port.exit_app()",
     ];
@@ -293,4 +302,14 @@ fn the_real_full_update_port_does_what_the_transaction_relies_on() {
         .collect();
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{order:?} at {positions:?} in:
 {run}");
+}
+
+#[test]
+fn the_restore_sweep_stops_only_for_the_exit_that_is_final() {
+    let sweep = fn_body(&read("state/terminals.rs"), "pub fn begin_host_restore_sweep");
+    assert!(sweep.contains("sweep_tick(") && sweep.contains("lifecycle_reason()"), "{sweep}");
+    assert!(
+        !sweep.contains("break") || sweep.contains("SweepTick::Stop => break"),
+        "the only way out of the loop is the verdict that the exit is final: {sweep}"
+    );
 }

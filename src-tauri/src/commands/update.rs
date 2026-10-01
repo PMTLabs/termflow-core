@@ -89,15 +89,23 @@ pub fn update_preflight(state: &AppState) -> Result<(), String> {
 /// itself closes admission and looks again (`begin_update`), so it can still
 /// refuse what this approved: an operation that does not drain within the bound,
 /// or a host discovered or still unanswered by then. The panel can be green and
-/// the click refuse; the refusal is never the other way round.
+/// the click refuse; the refusal is never the other way round, provided the
+/// release's mode is passed in. Asked before any check has found the release, the
+/// verdict is the offload's, and the caller asks again once the check resolves.
 ///
 /// A full update is not subject to the offload's refusals (an in-process shell, a
 /// disconnected host); only a running sibling instance still stops it. The mode is
-/// the one the last update check found in the release notes: the download decides
-/// for good, and the confirmation is bound to what it found.
+/// the one the update check reported for the release (`marker_mode`); with no check
+/// yet, or none that found a release, it is an offload. The download decides for
+/// good, and the confirmation is bound to what it found.
 #[tauri::command]
-pub fn update_available(state: State<'_, AppState>) -> Result<Availability, String> {
-    state.update_availability(crate::state::checked_mode(), || update_preflight(&state))
+pub fn update_available(
+    state: State<'_, AppState>,
+    marker_mode: Option<crate::update_policy::UpdateMode>,
+) -> Result<Availability, String> {
+    state.update_availability(marker_mode.unwrap_or(crate::update_policy::UpdateMode::Offload), || {
+        update_preflight(&state)
+    })
 }
 
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
@@ -213,11 +221,14 @@ async fn sample_at_prompt(hook: bool, pid: u32) -> bool {
 /// Update availability, surfaced to the "Check for updates" UI. `Unavailable`
 /// means this build has no updater compiled in (store flavor / feature off).
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "camelCase")]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UpdateStatus {
     NotInstalled,
     UpToDate,
-    Available { version: String },
+    /// `marker_mode` is what the release's own notes ask for. It travels with the
+    /// check that found the release, so whoever asks `update_available` next hands
+    /// it back and the answer never depends on which command ran first.
+    Available { version: String, marker_mode: crate::update_policy::UpdateMode },
     Unavailable,
 }
 

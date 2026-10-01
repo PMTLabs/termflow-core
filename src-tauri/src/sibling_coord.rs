@@ -77,7 +77,9 @@ pub fn describe_unarmable(siblings: &[InstanceRecord]) -> Option<String> {
 ///
 /// Unlike [`describe_unarmable`], being reachable is no help: a full update does
 /// not arm anyone, and the updater kills every process under the install root,
-/// so a sibling that is still running would lose its window and its terminals.
+/// so a sibling that is still running would lose its window. Its terminals too
+/// if its pty-host runs from inside that folder; a host outside it keeps them
+/// (held, as after a crash), but the user would still find the window gone.
 pub fn describe_live_siblings(siblings: &[InstanceRecord]) -> Option<String> {
     if siblings.is_empty() {
         return None;
@@ -86,7 +88,7 @@ pub fn describe_live_siblings(siblings: &[InstanceRecord]) -> Option<String> {
     live.sort();
     Some(format!(
         "Cannot update while another TermFlow instance is running: {}. \
-         The update closes every terminal and would close that instance too. Close it and try again.",
+         The update would close that instance's window as well. Close it and try again.",
         live.join(", ")
     ))
 }

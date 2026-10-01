@@ -12,7 +12,8 @@ use crate::net_ports::InstanceRecord;
 use crate::state::host_lifecycle::{exit_hosts_within, CloseBounds};
 use crate::state::host_table::Busy;
 use crate::state::update_full::{
-    availability, run_full, ConfirmToken, Confirmation, FullRun, FullUpdatePort, Target,
+    availability, confirm_running, is_our_updater, run_full, ConfirmToken, Confirmation, FullRun, FullUpdatePort,
+    Target,
 };
 use crate::state::update_survival::{FullReason, UpdateMode};
 use crate::update_policy::UpdateMode as Marker;
@@ -37,7 +38,7 @@ impl FullUpdatePort for FakePort {
         let appearing = std::mem::take(&mut *self.0.full.appear_during_flush.lock().unwrap());
         self.0.full.siblings.lock().unwrap().extend(appearing);
         tokio::time::sleep(half).await;
-        true
+        self.0.full.flush_marks_exiting.load(Ordering::SeqCst)
     }
 
     fn abort_flush(&self) {
@@ -51,6 +52,11 @@ impl FullUpdatePort for FakePort {
 
     async fn updater_alive(&self) -> bool {
         note(self, "updater_alive");
+        if self.0.full.alive_stalls.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let takes = *self.0.full.alive_takes.lock().unwrap();
+        tokio::time::sleep(takes).await;
         !self.0.full.updater_dead.load(Ordering::SeqCst)
     }
 
@@ -76,6 +82,7 @@ impl FullUpdatePort for FakePort {
             thread_name: thread.name().map(str::to_owned),
             thread: thread.id(),
             on_runtime: tokio::runtime::Handle::try_current().is_ok(),
+            at: std::time::Instant::now(),
         });
         note(self, "hard_exit");
     }
@@ -130,6 +137,7 @@ async fn run(
     let recorder = port.clone();
     run_full(port, target, confirm, (), move |()| async move {
         note(&recorder, "launch");
+        *recorder.0.full.launched_at.lock().unwrap() = Some(std::time::Instant::now());
         launched
     })
     .await
@@ -649,6 +657,178 @@ async fn watchdog_runs_on_a_dedicated_os_thread_not_the_runtime() {
     assert_eq!(exits[0].thread_name.as_deref(), Some("update-watchdog"));
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn the_watchdog_is_timed_from_the_launch() {
+    let (_world, port, token) = agreed(&[("h1", holding(&[("k1", 11)]))]).await;
+    quick(&port, Duration::from_millis(400));
+    // Looking for the updater takes a while, and then the closing stalls the runtime.
+    *port.0.full.alive_takes.lock().unwrap() = Duration::from_millis(300);
+    *port.0.full.close_stalls.lock().unwrap() = Duration::from_millis(1500);
+
+    let out = run(&port, &marked(), Some(token), Ok(())).await.unwrap();
+
+    assert!(matches!(out, FullRun::Exited), "{out:?}");
+    let launched = port.0.full.launched_at.lock().unwrap().expect("the updater was started");
+    let exits = port.0.full.hard_exits.lock().unwrap();
+    assert_eq!(exits.len(), 1);
+    let after_launch = exits[0].at.duration_since(launched);
+    assert!(
+        after_launch < Duration::from_millis(600),
+        "due 400 ms after the launch, not after the updater was looked for as well: {after_launch:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_stalled_updater_check_is_still_bounded_by_the_watchdog() {
+    let (_world, port, token) = agreed(&[("h1", holding(&[("k1", 11)]))]).await;
+    quick(&port, Duration::from_millis(100));
+    port.0.full.alive_stalls.store(true, Ordering::SeqCst);
+    let runner = port.clone();
+    let update = tokio::spawn(async move { run(&runner, &marked(), Some(token), Ok(())).await });
+
+    for _ in 0..100 {
+        if !port.0.full.hard_exits.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert_eq!(port.0.full.hard_exits.lock().unwrap().len(), 1, "the process is ended although the check never returned");
+    let events = events(&port);
+    assert!(events.contains(&"updater_alive".to_string()) && !events.iter().any(|e| e.starts_with("close_hosts")), "{events:?}");
+    update.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_update_that_backs_out_leaves_the_exit_mark_it_did_not_set() {
+    let (_world, port, token) = agreed(&two_old_hosts()).await;
+    // A quit marked the application as exiting before this flush ran.
+    port.0.full.flush_marks_exiting.store(false, Ordering::SeqCst);
+    port.0.full.appear_during_flush.lock().unwrap().push(instance("rel.work", 77));
+
+    run(&port, &marked(), Some(token), Ok(())).await.expect_err("a sibling started");
+
+    assert_eq!(port.0.full.aborted_flushes.load(Ordering::SeqCst), 0, "the mark was not its to take back");
+    assert!(!events(&port).contains(&"abort_flush".to_string()), "{:?}", events(&port));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_commit_recollects_the_reasons_not_only_the_count() {
+    let (world, port, token) = agreed(&two_old_hosts()).await;
+    let before = marks(&world, &HOSTS);
+    let ticket = port.table().begin(HostChannel::Primary).unwrap();
+    let runner = port.clone();
+    let update = tokio::spawn(async move { run(&runner, &marked(), Some(token), Ok(())).await });
+    tokio::time::sleep(SEC).await;
+    // Where a host runs from stops being known while the update waits: neither the
+    // count nor the unknown flag moves.
+    port.set_exe_origin("h2", None);
+    drop(ticket);
+
+    let out = update.await.unwrap().unwrap();
+
+    match out {
+        FullRun::NeedsConfirmation(fresh) => {
+            assert_eq!((fresh.shell_count, fresh.unknown), (3, false), "only the reasons differ");
+            assert!(
+                matches!(&fresh.reasons[..], [FullReason::Marker, FullReason::HostOriginUnknown(host)] if host.contains("h2")),
+                "{:?}",
+                fresh.reasons
+            );
+        }
+        other => panic!("reasons from before the gate were reused: {other:?}"),
+    }
+    assert!(!events(&port).contains(&"flush_windows".to_string()), "{:?}", events(&port));
+    assert!(instances_closed(&world, &before).iter().all(|f| f == &["List", "List"]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_host_that_stops_forcing_a_full_update_during_the_gate_turns_it_into_an_offload() {
+    let (world, port) = adopted(&two_old_hosts()).await;
+    port.set_exe_origin("h1", Some(true));
+    let unmarked = target("2.0.0", Marker::Offload);
+    let asked = asked(&port, &unmarked).await;
+    assert!(matches!(&asked.reasons[..], [FullReason::HostInPayload(_)]), "{:?}", asked.reasons);
+    clear_events(&port);
+    let before = marks(&world, &HOSTS);
+    let ticket = port.table().begin(HostChannel::Primary).unwrap();
+    let runner = port.clone();
+    let token = token_of(&asked);
+    let update = tokio::spawn(async move { run(&runner, &target("2.0.0", Marker::Offload), Some(token), Ok(())).await });
+    tokio::time::sleep(SEC).await;
+    port.set_exe_origin("h1", Some(false));
+    drop(ticket);
+
+    let out = update.await.unwrap().unwrap();
+
+    assert!(
+        matches!(out, FullRun::Offload(())),
+        "with nothing left that demands it the terminals stay running, instead of asking about an empty list of reasons: {out:?}"
+    );
+    assert!(!events(&port).contains(&"flush_windows".to_string()), "{:?}", events(&port));
+    assert!(instances_closed(&world, &before).iter().all(|f| f == &["List", "List"]), "nothing was closed");
+    assert!(port.table().begin(HostChannel::Primary).is_ok(), "admission reopened for the offload to take");
+}
+
+// ---- recognising the updater -------------------------------------------------------------
+
+fn args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|a| a.to_string()).collect()
+}
+
+#[test]
+fn only_the_updater_started_for_this_process_is_recognised() {
+    use std::path::Path;
+    let update = Path::new("C:/apps/TermFlow/Update.exe");
+    let other = Path::new("C:/vendor/UpdateService.exe");
+    let ours = args(&["C:/apps/TermFlow/Update.exe", "apply", "--waitPid", "4242", "--root", "C:/apps/TermFlow"]);
+    let check = |name: &str, exe: Option<&Path>, argv: &[String], pid: &str, known: Option<&Path>| {
+        is_our_updater(name, exe, argv, pid, known)
+    };
+
+    assert!(check("Update.exe", Some(update), &ours, "4242", Some(update)));
+    assert!(!check("Update.exe", Some(update), &ours, "4243", Some(update)), "another process's updater");
+    assert!(check("Update.exe", Some(update), &args(&["apply", "--waitpid", "4242"]), "4242", Some(update)), "the flag's case");
+    assert!(!check("Update.exe", Some(update), &args(&["apply", "--waitPid"]), "4242", Some(update)), "a flag with no value");
+    assert!(check("UpdateNix", None, &args(&["apply", "--waitPid", "4242"]), "4242", None), "other platforms' name");
+    assert!(check("UpdateMac", None, &args(&["apply", "--waitPid", "4242"]), "4242", None));
+    // Names that merely start alike, with arguments that say they are not ours.
+    assert!(!check("Updater.exe", None, &args(&["--check"]), "4242", None));
+    assert!(!check("UpdateService.exe", Some(other), &args(&["/svc"]), "4242", Some(update)));
+    // Not an updater at all, whatever it is called with.
+    assert!(!check("notepad.exe", None, &args(&["--waitPid", "4242"]), "4242", None));
+    // Arguments that cannot be read: ours only if it is the file the crate starts.
+    assert!(check("Update.exe", Some(update), &[], "4242", Some(update)));
+    assert!(!check("UpdateService.exe", Some(other), &[], "4242", Some(update)), "a service whose arguments are hidden");
+    assert!(!check("Update.exe", None, &[], "4242", Some(update)), "no image path to compare");
+    assert!(!check("Update.exe", Some(update), &[], "4242", None), "nothing to compare it with");
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_updater_must_be_seen_and_still_be_there_after_the_settle() {
+    use std::sync::atomic::AtomicUsize;
+    let looks = |script: &'static [bool]| {
+        let seen = Arc::new(AtomicUsize::new(0));
+        move || {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            let answer = script[n.min(script.len() - 1)];
+            async move { answer }
+        }
+    };
+    let (settle, search) = (Duration::from_millis(750), secs(2));
+
+    let started = Instant::now();
+    assert!(confirm_running(settle, search, looks(&[true, true])).await);
+    assert!(started.elapsed() >= settle, "it is believed only after the settle: {:?}", started.elapsed());
+
+    assert!(!confirm_running(settle, search, looks(&[true, false])).await, "gone again within the settle");
+    assert!(confirm_running(settle, search, looks(&[false, false, true, true])).await, "seen late, within the search");
+
+    let started = Instant::now();
+    assert!(!confirm_running(settle, search, looks(&[false])).await, "never seen");
+    assert!(started.elapsed() >= search, "it was looked for the whole search: {:?}", started.elapsed());
+}
+
 // ---- availability ---------------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
@@ -720,6 +900,27 @@ fn the_confirmation_and_its_answer_cross_the_wire_in_the_shape_the_renderer_read
         serde_json::to_value(availability).unwrap(),
         json!({ "mode": "full", "reasons": reasons })
     );
+}
+
+#[test]
+fn a_confirmation_echoed_back_whole_is_accepted_as_a_token() {
+    let echoed: ConfirmToken = serde_json::from_value(
+        json!({ "version": "2.0.0", "shellCount": 3, "unknown": false, "reasons": [{ "kind": "marker" }] }),
+    )
+    .unwrap();
+    assert_eq!(echoed.target_version, "2.0.0");
+}
+
+#[test]
+fn the_check_carries_the_mode_of_the_release_it_found() {
+    use crate::commands::UpdateStatus;
+    let found = UpdateStatus::Available { version: "2.0.0".into(), marker_mode: Marker::Full };
+    assert_eq!(
+        serde_json::to_value(found).unwrap(),
+        json!({ "state": "available", "version": "2.0.0", "markerMode": "full" })
+    );
+    assert_eq!(serde_json::from_value::<Marker>(json!("offload")).unwrap(), Marker::Offload);
+    assert_eq!(serde_json::to_value(UpdateStatus::UpToDate).unwrap(), json!({ "state": "upToDate" }));
 }
 
 #[test]
