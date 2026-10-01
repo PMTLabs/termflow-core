@@ -58,6 +58,13 @@
 
 .EXAMPLE
     .\publish-windows.ps1 1.2.0 -Unsigned      # local, unsigned
+
+.EXAMPLE
+    .\publish-windows.ps1 1.2.0 -ReleaseNotes .
+otes-1.2.0.md
+    # The notes file ends up in the Velopack feed, which is where the updater
+    # reads it from (including a first-line `<!-- termflow: offload-from=X.Y.Z -->`
+    # marker). Write the notes BEFORE packing: the GitHub release body is not read.
 #>
 param(
     [string]$Version            = "1.0.0",
@@ -68,10 +75,17 @@ param(
     [string]$Arch = "x64",
     [switch]$Msi,
     [switch]$Unsigned,
-    [switch]$SkipSmoke
+    [switch]$SkipSmoke,
+    # Markdown release notes, passed to `vpk pack --releaseNotes`.
+    [string]$ReleaseNotes = $env:RELEASE_NOTES_FILE
 )
 
 $ErrorActionPreference = "Stop"
+
+if ($ReleaseNotes -and -not (Test-Path -LiteralPath $ReleaseNotes -PathType Leaf)) {
+    Write-Error "Release notes file not found: $ReleaseNotes"
+    exit 1
+}
 
 # vpk is a .NET tool; roll forward so a matching major runtime is enough.
 $env:DOTNET_ROLL_FORWARD = "LatestMajor"
@@ -262,6 +276,7 @@ New-Item -ItemType Directory -Force -Path $ReleasesDir | Out-Null
 
 $MsiArgs     = if ($Msi) { @("--msi") } else { @() }
 $ChannelArgs = if ($A.Channel) { @("--channel", $A.Channel) } else { @() }
+$NotesArgs   = if ($ReleaseNotes) { @("--releaseNotes", (Resolve-Path -LiteralPath $ReleaseNotes).Path) } else { @() }
 $VpkArgs = @(
     "vpk", "pack",
     "--packId",      $PackId,
@@ -271,7 +286,7 @@ $VpkArgs = @(
     "--mainExe",     $MainExe,
     "--icon",        $Icon,
     "--outputDir",   $ReleasesDir
-) + $ChannelArgs + $MsiArgs + $SignArgs
+) + $ChannelArgs + $NotesArgs + $MsiArgs + $SignArgs
 
 & dotnet @VpkArgs
 if ($LASTEXITCODE -ne 0) { Write-Error "vpk pack failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
