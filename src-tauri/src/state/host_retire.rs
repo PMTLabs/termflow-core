@@ -154,6 +154,7 @@ impl Emptiness {
 /// the moment the host is adopted or its connection replaced.
 pub(super) fn start_ticker<P: PanePort>(port: &P, id: FrozenId) {
     let Some(handle) = port.table().start_ticker(HostChannel::Frozen(id)) else { return };
+    log::info!("[GEN] starting retirement ticker for frozen host {id:?}");
     tokio::spawn(run_ticker(port.clone(), id, handle));
 }
 

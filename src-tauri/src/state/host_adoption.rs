@@ -508,7 +508,11 @@ async fn adopt<P: AdoptionPort>(
 ) -> Result<Adopted, Failure> {
     // Held for the whole adoption so a quiesce waits for it; refused outright
     // once exit, offload or update has closed admission.
-    let _ticket = port.table().begin_adoption().map_err(|busy| Failure::Other(busy.to_string()))?;
+    log::info!("[GEN] adopting {:?} terminal host {}", role, candidate.endpoint);
+    let _ticket = port.table().begin_adoption().map_err(|busy| {
+        log::info!("[GEN] adoption of {} refused: {busy}", candidate.endpoint);
+        Failure::Other(busy.to_string())
+    })?;
     let key = barrier_key(&candidate.endpoint);
 
     let registered = match role {
@@ -861,6 +865,8 @@ pub(super) use sweep::sweep;
 
 #[cfg(test)]
 mod fake_hosts;
+#[cfg(test)]
+pub(crate) mod wiring_tests;
 #[cfg(test)]
 mod adoption_tests;
 #[cfg(test)]

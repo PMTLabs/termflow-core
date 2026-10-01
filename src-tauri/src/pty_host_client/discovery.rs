@@ -149,6 +149,10 @@ pub(super) fn discover_hosts_in(
             .then_with(|| a.generation.cmp(&b.generation))
             .then_with(|| a.endpoint.cmp(&b.endpoint))
     });
+    for candidate in &candidates {
+        log::info!("[GEN] discovered {:?} host {} (generation {:?}, compatible={})",
+            candidate.role, candidate.endpoint, candidate.generation, candidate.compatible());
+    }
     candidates
 }
 

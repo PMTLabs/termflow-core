@@ -45,6 +45,7 @@ async fn list_with_retries(client: &PtyHostClient) -> Option<Vec<SessionMeta>> {
 /// Only the primary's panes are considered: an older host's session never
 /// appears in the primary's listing, so it would read as lost.
 pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_ms: &[u64]) {
+    log::info!("[GEN] reconnecting current terminal host {}", port.current_endpoint());
     let channel = HostChannel::Primary;
     // This whole pass runs in the HOST's id space: `plan_reattach` matches
     // against `SessionMeta.tab_id` and `host_stream_offsets` is keyed the
@@ -147,6 +148,7 @@ pub(in crate::state) async fn reconnect_frozen<P: PanePort>(
     lost_epoch: u64,
     backoff_ms: &[u64],
 ) -> FrozenReconnect {
+    log::info!("[GEN] reconnecting frozen terminal host {id:?} from epoch {lost_epoch}");
     let Some(host) = registered(port, id) else { return FrozenReconnect::Inert };
     if !port.table().is_current(HostChannel::Frozen(id), lost_epoch) || host.client.is_alive() {
         return FrozenReconnect::Inert;

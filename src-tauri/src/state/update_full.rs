@@ -226,6 +226,8 @@ where
     L: FnOnce(I) -> Fut + Send,
     Fut: Future<Output = Result<(), String>> + Send,
 {
+    log::info!("[GEN] preparing update {} (marker mode {:?}, confirmed={})",
+        target.version, target.marker_mode, confirm.is_some());
     // Prepare: nothing is stopped, nothing is changed.
     let hosts = owned_hosts(port).await;
     let marker = survival_mode(target.marker_mode);
@@ -347,6 +349,7 @@ pub(super) fn availability<P: FullUpdatePort>(
 ) -> Result<Availability, String> {
     let hosts = owned_hosts_now(port);
     let (mode, reasons) = effective_mode(survival_mode(marker_mode), &origins(&hosts));
+    log::debug!("[GEN] update availability: {mode:?}, reasons={reasons:?}");
     match mode {
         UpdateMode::Offload => offload_preflight()?,
         UpdateMode::Full => live_siblings_refusal(port)?,

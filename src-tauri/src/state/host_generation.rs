@@ -195,6 +195,7 @@ impl<R: Runtime> AppState<R> {
     /// Tell every window that the set of terminals on an older host may have
     /// changed: one was registered on a host or forgotten.
     pub fn notify_terminal_generations(&self) {
+        log::debug!("[GEN] terminal generation markers changed");
         let _ = self.app_handle.emit(TERMINAL_GENERATIONS_EVENT, ());
     }
 }

@@ -183,6 +183,31 @@ async fn orphan_sweep_does_not_surface_a_restoring_key_on_a_frozen_host() {
     assert_eq!(world.count_everywhere("Spawn"), 0, "no Spawn frame for the key, on any host");
 }
 
+#[tokio::test(start_paused = true)]
+async fn sweep_does_not_surface_a_superseded_or_retired_hosts_answer() {
+    for retire in [false, true] {
+        let delayed = HostSpec {
+            list: ListBehavior::SlowAfter { answered: 1, delay: secs(2) },
+            ..holding(&[("tm-stray", 61)])
+        };
+        let (world, port) = machine(HostSpec::default(), &[("h1", delayed)]);
+        rediscover_hosts(&port).await.unwrap();
+        let channel = frozen_channel(&port, "h1");
+        port.0.claims.clear();
+        let running = tokio::spawn({ let port = port.clone(); async move { sweep(&port).await } });
+        while world.count("h1", "List") < 2 { tokio::task::yield_now().await; }
+        if retire {
+            port.table().drain_host(channel).unwrap().retire();
+        } else {
+            let epoch = port.table().reserve_epoch();
+            assert!(port.table().publish(channel, epoch));
+        }
+        assert!(!running.await.unwrap(), "a stale answer leaves the sweep retryable");
+        assert!(recovered(&port).is_empty(), "the old answer must not emit a recovery tab");
+        assert!(!port.0.claims.contains_key("tm-stray"), "nor reserve a session on a stale host");
+    }
+}
+
 // ---- a host that cannot be connected ----------------------------------------------------
 
 #[tokio::test(start_paused = true)]
