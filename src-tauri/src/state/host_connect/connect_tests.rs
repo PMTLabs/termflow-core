@@ -28,7 +28,9 @@ fn missing_endpoint() -> String {
     if cfg!(windows) {
         format!(r"\\.\pipe\tf-connect-missing-{id}")
     } else {
-        std::env::temp_dir().join(format!("tf-connect-missing-{id}.sock")).to_string_lossy().into_owned()
+        // Short on purpose: a socket path longer than sun_path is rejected before it
+        // is ever looked up (macOS temp dirs are long), which says nothing about the host.
+        format!("/tmp/tfm-{}.sock", &id[..12])
     }
 }
 
