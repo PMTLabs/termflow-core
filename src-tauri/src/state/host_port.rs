@@ -360,6 +360,10 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
         self.add_frozen_host(host);
         let _ = self.app_handle.emit("pty-host:connected", ());
     }
+
+    fn frozen_adopted(&self, id: FrozenId) {
+        super::host_retire::start_ticker(self, id);
+    }
 }
 
 impl<R: Runtime> PanePort for AppState<R> {

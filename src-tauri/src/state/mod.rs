@@ -1,6 +1,7 @@
 mod types;
 mod terminals;
 mod host_registry;
+mod host_retire;
 mod host_table;
 mod host_adoption;
 mod host_connect;

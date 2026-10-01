@@ -29,6 +29,12 @@ pub(super) enum ListBehavior {
     /// Answers the first `n` listing requests of each connection, then goes
     /// silent: a host that stops answering after it was adopted.
     AnswerFirst(usize),
+    /// Drops listing requests received from `.0` to `.1` after the world began,
+    /// answers the rest: a host that goes quiet for a while and comes back.
+    SilentBetween(Duration, Duration),
+    /// Answers the first `answered` listing requests of each connection at once
+    /// and every later one only after `delay`: a host that has become slow.
+    SlowAfter { answered: usize, delay: Duration },
 }
 
 #[derive(Clone)]
@@ -110,10 +116,19 @@ impl Recorded {
 
 /// The machine: which hosts are running, what each received, which host
 /// processes were started.
+/// A session that ended on its host by itself (not because it was closed).
+struct Ended {
+    host: String,
+    session: String,
+    /// Still listed, with `alive: false`, instead of gone from the listing.
+    listed_dead: bool,
+}
+
 pub(super) struct World {
     started: Instant,
     hosts: Mutex<HashMap<String, (HostSpec, Vec<AbortHandle>)>>,
     log: Arc<Mutex<Vec<Recorded>>>,
+    ended: Arc<Mutex<Vec<Ended>>>,
     /// Endpoints a host process was started for, in order.
     pub started_processes: Mutex<Vec<String>>,
     pub spawn_fails: AtomicBool,
@@ -127,6 +142,7 @@ impl World {
             started: Instant::now(),
             hosts: Mutex::new(HashMap::new()),
             log: Arc::new(Mutex::new(Vec::new())),
+            ended: Arc::new(Mutex::new(Vec::new())),
             started_processes: Mutex::new(Vec::new()),
             spawn_fails: AtomicBool::new(false),
             connect_panics: AtomicBool::new(false),
@@ -142,6 +158,17 @@ impl World {
         if let Some((spec, _)) = self.hosts.lock().unwrap().get_mut(endpoint) {
             spec.unreachable = unreachable;
         }
+    }
+
+    /// A session of `host` ends on its own, as a shell does when its program
+    /// exits: the host stops listing it, with no `Close` ever received.
+    pub fn end_session(&self, host: &str, session: &str) {
+        self.ended.lock().unwrap().push(Ended { host: host.to_owned(), session: session.to_owned(), listed_dead: false });
+    }
+
+    /// Like [`Self::end_session`], but the host still lists the session, dead.
+    pub fn end_session_listed_dead(&self, host: &str, session: &str) {
+        self.ended.lock().unwrap().push(Ended { host: host.to_owned(), session: session.to_owned(), listed_dead: true });
     }
 
     /// The host dies: every connection to it drops.
@@ -160,7 +187,14 @@ impl World {
             return None;
         }
         let (client, server) = duplex(64 * 1024);
-        let task = tokio::spawn(serve(endpoint.to_owned(), spec.clone(), self.started, self.log.clone(), server));
+        let task = tokio::spawn(serve(
+            endpoint.to_owned(),
+            spec.clone(),
+            self.started,
+            self.log.clone(),
+            self.ended.clone(),
+            server,
+        ));
         tasks.push(task.abort_handle());
         Some(client)
     }
@@ -218,6 +252,7 @@ async fn serve(
     spec: HostSpec,
     world_start: Instant,
     log: Arc<Mutex<Vec<Recorded>>>,
+    ended: Arc<Mutex<Vec<Ended>>>,
     server: DuplexStream,
 ) {
     let (mut rd, mut wr) = tokio::io::split(server);
@@ -228,15 +263,25 @@ async fn serve(
             Frame::Ctrl(Control::Disarm { req }) => Some(Response::DisarmAck { req }),
             Frame::Ctrl(Control::ListSessions { req, .. }) => {
                 listings += 1;
+                if let ListBehavior::SlowAfter { answered, delay } = &spec.list {
+                    if listings > *answered {
+                        tokio::time::sleep(*delay).await;
+                    }
+                }
                 let answers = match &spec.list {
                     ListBehavior::Answer => true,
                     ListBehavior::Never => false,
                     ListBehavior::SilentFor(d) => Instant::now() >= world_start + *d,
                     ListBehavior::AnswerFirst(n) => listings <= *n,
+                    ListBehavior::SilentBetween(from, to) => {
+                        let now = Instant::now();
+                        !(world_start + *from <= now && now < world_start + *to)
+                    }
+                    ListBehavior::SlowAfter { .. } => true,
                 };
                 // A session the host was told to close is no longer listed once its
                 // close has taken effect.
-                answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &host) })
+                answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &ended, &host) })
             }
             Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => Some(Response::Spawned { req, tab_id, pid: 4242 }),
             Frame::Ctrl(Control::AttachAcked { req, tab_id, .. }) => {
@@ -266,9 +311,11 @@ async fn serve(
 
 /// The sessions of `spec` that `host` has not closed yet: one is gone `close_lag`
 /// after the `Close` for it was received.
-fn still_open(spec: &HostSpec, log: &Mutex<Vec<Recorded>>, host: &str) -> Vec<SessionMeta> {
+fn still_open(spec: &HostSpec, log: &Mutex<Vec<Recorded>>, ended: &Mutex<Vec<Ended>>, host: &str) -> Vec<SessionMeta> {
     let log = log.lock().unwrap();
+    let ended = ended.lock().unwrap();
     let now = Instant::now();
+    let ended_here = |key: &str| ended.iter().find(|e| e.host == host && e.session == key);
     spec.sessions
         .iter()
         .filter(|s| {
@@ -277,9 +324,9 @@ fn still_open(spec: &HostSpec, log: &Mutex<Vec<Recorded>>, host: &str) -> Vec<Se
                     && r.kind() == "Close"
                     && r.session() == Some(s.tab_id.as_str())
                     && now.duration_since(r.at) >= spec.close_lag
-            })
+            }) && !ended_here(&s.tab_id).is_some_and(|e| !e.listed_dead)
         })
-        .cloned()
+        .map(|s| SessionMeta { alive: s.alive && ended_here(&s.tab_id).is_none(), ..s.clone() })
         .collect()
 }
 
@@ -351,6 +398,10 @@ pub(super) struct Inner {
     pub exe_origins: Mutex<HashMap<String, Option<bool>>>,
     /// The hold a sibling's arm keeps.
     pub sibling_slot: SiblingSlot,
+    /// Whether adopting an older host starts its retirement ticker, as it does in
+    /// the application. Off unless a test is about retirement, so the tests of
+    /// everything else see no sampling.
+    pub retirement: AtomicBool,
 }
 
 /// `AppState`'s stand-in: the same port, over a fake machine.
@@ -387,7 +438,13 @@ impl FakePort {
             frozen_admission_when_published: Mutex::new(Vec::new()),
             exe_origins: Mutex::new(HashMap::new()),
             sibling_slot: SiblingSlot::default(),
+            retirement: AtomicBool::new(false),
         }))
+    }
+
+    /// Adopted older hosts are watched for emptiness from now on.
+    pub fn enable_retirement(&self) {
+        self.0.retirement.store(true, Ordering::SeqCst);
     }
 
     pub fn candidates(&self) -> Vec<HostCandidate> {
@@ -633,6 +690,12 @@ impl AdoptionPort for FakePort {
             return Err("pty-host connection lost during setup".into());
         }
         Ok(())
+    }
+
+    fn frozen_adopted(&self, id: FrozenId) {
+        if self.0.retirement.load(Ordering::SeqCst) {
+            crate::state::host_retire::start_ticker(self, id);
+        }
     }
 
     fn publish_frozen(&self, host: FrozenHost) {
