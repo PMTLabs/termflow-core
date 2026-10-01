@@ -113,6 +113,18 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         info.TargetFullRelease.Version
     );
 
+    // Close admission to the hosts and look again at every one this instance owns,
+    // now that the download is done: a host that dropped, or a create still in
+    // flight, while it ran must not be armed over. Nothing is armed yet, so
+    // returning on any refusal below just drops the hold, which reopens admission.
+    let mut hold = state.begin_update().await?;
+    // An update that would have to close terminals is not an offload: refuse
+    // rather than lose them.
+    if let Err(reason) = hold.update_refusal() {
+        log::warn!("[UPDATE] refused: {reason}");
+        return Err(reason);
+    }
+
     // Arm the SIBLINGS first, then ourselves.
     //
     // Deliberately AFTER the download: a failed or unavailable download must
@@ -137,23 +149,10 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         );
     }
 
-    // Arm our own host so shells survive, and wait for the ack BEFORE applying.
-    let client = match state.pty_host_clone() {
-        Some(c) => c,
-        None => {
-            // We armed strangers for an update that cannot now proceed. Put them
-            // back before returning, or each holds a 600s window it never asked for.
-            let _ = crate::sibling_coord::disarm_siblings(
-                &siblings,
-                &armed_siblings,
-                &crate::sibling_coord::http_call,
-            )
-            .await;
-            return Err("pty-host not connected — nothing to keep alive".to_string());
-        }
-    };
+    // Arm every host this instance owns so shells survive, and wait for the acks
+    // BEFORE applying. All or none: a host that refuses has the others put back.
     let token = crate::pty_host_client::resolve_token();
-    if let Err(e) = client
+    if let Err(e) = hold
         .arm_detach(
             termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
             &token,
@@ -161,6 +160,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         )
         .await
     {
+        // We armed strangers for an update that cannot now proceed. Put them
+        // back before returning, or each holds a 600s window it never asked for.
         let _ = crate::sibling_coord::disarm_siblings(
             &siblings,
             &armed_siblings,
@@ -181,12 +182,10 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         .and_then(|r| r)
     {
         log::warn!("[UPDATE] updater failed to launch after arming ({e}); disarming");
-        if !client.disarm().await {
-            log::error!(
-                "[UPDATE] rollback disarm was not acknowledged; this host may still \
-                 hold its detach window until a later quit releases it"
-            );
-        }
+        // Every host that was armed is disarmed again; one that does not
+        // acknowledge is logged by name and may still hold its detach window until
+        // a later quit releases it.
+        hold.release().await;
         // Same obligation for the siblings we armed. Disarming ourselves and
         // leaving them armed would be the asymmetry this rollback exists to
         // avoid — they armed for OUR update, and it is not happening.
@@ -218,6 +217,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // Plan 045 AC9: admin tabs are never restored elevated across an update.
     state.elevated_host.shutdown().await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
+    // Admission stays closed until the process is gone.
+    hold.commit();
     state.app_handle.exit(0);
     Ok(())
 }

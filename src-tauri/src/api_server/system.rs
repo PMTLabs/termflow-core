@@ -5,7 +5,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
-use crate::state::AppState;
+use crate::state::{AppState, SiblingArm};
 
 /// How long a sibling holds its detach window after being armed for our update.
 ///
@@ -14,29 +14,34 @@ use crate::state::AppState;
 /// exists to save.
 pub(crate) const SIBLING_ARM_SECS: u64 = 600;
 
-/// Arm this instance's pty-host so its shells survive a sibling's update.
+/// Arm every pty-host this instance owns so its shells survive a sibling's update.
 ///
 /// Called BY another instance, not by this one's UI. Velopack's apply kills our
 /// GUI along with the updating instance; arming is what lets our shells outlive
 /// it and reattach on the next launch (design 014 §B1).
 ///
+/// All the instance's hosts are armed, or none: one that is unreachable, or that
+/// runs from inside the install root and would be killed by the update, makes the
+/// request fail with the reason, which names the host.
+///
 /// Idempotent: a duplicate arm re-arms the same window, which is harmless and
 /// keeps the caller's retry logic simple.
 pub(crate) async fn hotswap_arm(State(state): State<AppState>) -> impl IntoResponse {
-    let Some(client) = state.pty_host_clone() else {
-        // No host means no shells to save; say so rather than claiming success,
-        // so the caller can tell "prepared" from "nothing to prepare".
-        return (StatusCode::SERVICE_UNAVAILABLE, "pty-host not connected").into_response();
-    };
-    let token = crate::pty_host_client::resolve_token();
-    match client.arm_detach(SIBLING_ARM_SECS, &token, None).await {
-        Ok(_) => {
-            log::info!("[HOTSWAP] armed at a sibling's request ({SIBLING_ARM_SECS}s)");
+    match state.sibling_arm(SIBLING_ARM_SECS).await {
+        SiblingArm::Armed(hosts) => {
+            log::info!("[HOTSWAP] armed {hosts} host(s) at a sibling's request ({SIBLING_ARM_SECS}s)");
             (StatusCode::OK, "armed").into_response()
         }
-        Err(e) => {
-            log::warn!("[HOTSWAP] refused a sibling's arm request: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+        // No host means no shells to save; say so rather than claiming success,
+        // so the caller can tell "prepared" from "nothing to prepare".
+        SiblingArm::NothingToArm => (StatusCode::SERVICE_UNAVAILABLE, "pty-host not connected").into_response(),
+        SiblingArm::Refused(reason) => {
+            log::warn!("[HOTSWAP] refused a sibling's arm request: {reason}");
+            (StatusCode::CONFLICT, reason).into_response()
+        }
+        SiblingArm::Failed(reason) => {
+            log::warn!("[HOTSWAP] could not arm for a sibling: {reason}");
+            (StatusCode::INTERNAL_SERVER_ERROR, reason).into_response()
         }
     }
 }
@@ -47,20 +52,18 @@ pub(crate) async fn hotswap_arm(State(state): State<AppState>) -> impl IntoRespo
 /// must put them back, or every sibling holds a 600s window it never asked for.
 /// Idempotent — disarming an unarmed host is a no-op.
 pub(crate) async fn hotswap_disarm(State(state): State<AppState>) -> impl IntoResponse {
-    let Some(client) = state.pty_host_clone() else {
-        return (StatusCode::OK, "nothing to disarm").into_response();
-    };
-    // Report the sidecar's actual answer. `disarm_siblings` logs a non-2xx as
+    // Report the sidecars' actual answer. `disarm_siblings` logs a non-2xx as
     // "its window will expire" — answering 200 unconditionally made that
     // diagnostic unreachable, so a sibling still holding an armed 600s window
-    // looked exactly like one that had released it.
-    if client.disarm().await {
+    // looked exactly like one that had released it. With no host there is nothing
+    // to release, and that is a success.
+    if state.sibling_disarm().await {
         (StatusCode::OK, "disarmed").into_response()
     } else {
         log::warn!("[HOTSWAP] sibling disarm request got no DisarmAck; still armed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            "pty-host did not acknowledge the disarm",
+            "a pty-host did not acknowledge the disarm",
         )
             .into_response()
     }

@@ -2,7 +2,10 @@
 //! connected, what a listing reserves, and where a connected host is published.
 //! The ordering and timing rules live in `host_adoption`.
 
-use super::host_adoption::{frozen_connection_lost, AdoptionPort, Barrier, ConnectFailure, Opened};
+use super::host_adoption::{
+    frozen_connection_lost, reconnect_frozen, AdoptionPort, Barrier, ConnectFailure, Opened, PanePort,
+    RECONNECT_BACKOFF_MS,
+};
 use super::host_connect::{connect_existing, endpoint_is_gone, GRACE_ENDPOINT_ONLY, GRACE_LIVE_HOST};
 use super::host_registry;
 use super::host_table::HostTable;
@@ -143,13 +146,18 @@ impl<R: Runtime> AppState<R> {
     }
 
     /// Drop handler of a frozen host's connection `epoch`. A superseded
-    /// connection does nothing; the current one marks the host unknown again.
+    /// connection does nothing; the current one marks the host unknown again and
+    /// reconnects that one host, leaving every other host's panes alone.
     fn frozen_disconnect(&self, id: FrozenId, epoch: u64, endpoint: String) -> Arc<dyn Fn() + Send + Sync> {
         let st = self.clone();
         Arc::new(move || {
             if frozen_connection_lost(&st.host_table, &st.host_barrier, id, epoch, &endpoint) {
-                log::warn!("[GEN] connection to terminal host {endpoint} dropped");
+                log::warn!("[GEN] connection to terminal host {endpoint} dropped; trying to reconnect it");
                 let _ = st.app_handle.emit("pty-host:disconnected", ());
+                let st = st.clone();
+                tauri::async_runtime::spawn(async move {
+                    reconnect_frozen(&st, id, epoch, RECONNECT_BACKOFF_MS).await;
+                });
             }
         })
     }
@@ -351,6 +359,52 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
     fn publish_frozen(&self, host: FrozenHost) {
         self.add_frozen_host(host);
         let _ = self.app_handle.emit("pty-host:connected", ());
+    }
+}
+
+impl<R: Runtime> PanePort for AppState<R> {
+    fn panes_on(&self, channel: HostChannel) -> std::collections::HashMap<String, String> {
+        self.host_sessions_by_key(channel)
+    }
+
+    fn registered_on_any_channel(&self, session_key: &str) -> bool {
+        self.session_registered_on_any_channel(session_key)
+    }
+
+    fn pane_is_host_owned(&self, process_id: &str) -> bool {
+        self.host_terminals.contains_key(process_id)
+    }
+
+    fn saved_offsets(&self) -> std::collections::HashMap<String, u64> {
+        self.host_stream_offsets.iter().map(|e| (e.key().clone(), *e.value())).collect()
+    }
+
+    fn pane_size(&self, process_id: &str) -> (u16, u16) {
+        self.terminals.get(process_id).map(|t| (t.cols, t.rows)).unwrap_or((80, 24))
+    }
+
+    fn teardown_pane(&self, process_id: &str) {
+        self.teardown_host_terminal(process_id);
+    }
+
+    fn announce_recovered(&self, session_key: &str) {
+        let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
+        if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
+            "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
+            "rendererTerminalId": leaf_id, "sessionKey": session_key,
+            "targetWindow": self.resolve_active_window_label(),
+        })) {
+            log::warn!("[HOTSWAP] failed to surface recovered session {session_key}: {e}");
+        }
+    }
+
+    fn forget_host(&self, id: FrozenId) {
+        let channel = HostChannel::Frozen(id);
+        self.remove_frozen_host(id);
+        // What was owed to a host that no longer exists can never be delivered,
+        // and a session reserved on it is gone with it.
+        self.prune_pending_closes(channel);
+        host_registry::forget_reserved_claims_on(&self.host_session_claims, channel);
     }
 }
 

@@ -212,7 +212,20 @@ pub async fn http_call(req: SiblingCall) -> Result<(), String> {
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(format!("HTTP {}", resp.status()))
+        let status = resp.status();
+        // The sibling says WHY it refused (which of its hosts cannot be armed), and
+        // the update that is refused because of it has to be able to say so.
+        let body = resp.text().await.unwrap_or_default();
+        Err(failure_text(status, &body))
+    }
+}
+
+/// How a non-success answer reads in an error: the status, then the sibling's own
+/// explanation when it gave one.
+fn failure_text(status: reqwest::StatusCode, body: &str) -> String {
+    match body.trim() {
+        "" => format!("HTTP {status}"),
+        reason => format!("HTTP {status}: {reason}"),
     }
 }
 
@@ -412,6 +425,15 @@ mod tests {
         let r = Recorder::failing_on(1);
         let _ = arm_siblings(&[rec("a", 1, Some(1001), Some("t"))], r.call()).await;
         assert!(r.disarmed().is_empty(), "nothing armed, so nothing to release");
+    }
+
+    /// The refusal a sibling sends back names its host; the error the updating
+    /// instance shows must carry it, not just a status code.
+    #[test]
+    fn a_refusal_carries_the_siblings_reason() {
+        let status = reqwest::StatusCode::CONFLICT;
+        assert_eq!(failure_text(status, "  host h1 is inside the app folder\n"), "HTTP 409 Conflict: host h1 is inside the app folder");
+        assert_eq!(failure_text(status, ""), "HTTP 409 Conflict");
     }
 
     #[test]

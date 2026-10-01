@@ -455,11 +455,11 @@ async fn orphan_sweep_does_not_surface_a_restoring_key() {
 
 #[test]
 fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits() {
-    let terminals = source_of("terminals.rs");
-    let body = fn_body(&terminals, "pub(crate) fn surface_host_orphans(");
+    let panes = source_of("host_adoption/panes.rs");
+    let body = fn_body(&panes, "pub(in crate::state) fn surface_orphans<");
     let verdict = body.find("host_registry::orphan_verdict(").expect("surfacing must consult the verdict");
-    let reserve = body.find("self.reserve_host_session(").expect("surfacing reserves the session");
-    let emit = body.find("self.app_handle.emit").expect("surfacing emits the recovery event");
+    let reserve = body.find("host_registry::reserve_session(").expect("surfacing reserves the session");
+    let emit = body.find("port.announce_recovered(").expect("surfacing announces the recovered session");
     assert!(verdict < reserve && verdict < emit, "the verdict must come first");
     for needle in ["OrphanVerdict::Restoring =>", "OrphanVerdict::CloseUnowned =>"] {
         let arm = &body[body.find(needle).unwrap_or_else(|| panic!("no {needle} arm"))..];
@@ -467,16 +467,21 @@ fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits
         assert!(!arm.contains("reserve_host_session") && !arm.contains("emit"), "{needle} must not surface");
     }
 
-    // The two callers that surface orphans, `reconnect_after_pipe_drop` and
-    // `run_host_restore_sweep`, both go through that one function, and the source
-    // of the recovery-tab request appears once in terminals.rs: inside it. Other
-    // files are not read here.
-    assert_eq!(terminals.matches("\"api:createTerminalTab\"").count(), 1);
-    for caller in ["pub async fn reconnect_after_pipe_drop(", "async fn run_host_restore_sweep("] {
-        assert!(
-            fn_body(&terminals, caller).contains("self.surface_host_orphans("),
-            "{caller} must surface through surface_host_orphans"
-        );
+    // The three flows that surface orphans, the primary's pipe-drop recovery, an
+    // older host's reconnect (both through `reattach_listed`) and the sweep, all go
+    // through that one function, and the recovery-tab request is made in one place
+    // in the state module: the port's `announce_recovered`, which only it calls.
+    // Other files are not read here.
+    assert_eq!(source_of("host_port.rs").matches("\"api:createTerminalTab\"").count(), 1);
+    assert_eq!(source_of("terminals.rs").matches("\"api:createTerminalTab\"").count(), 0);
+    assert!(fn_body(&panes, "pub(super) async fn reattach_listed<").contains("surface_orphans(port,"));
+    assert!(fn_body(&source_of("host_adoption/sweep.rs"), "pub(in crate::state) async fn sweep<").contains("surface_orphans(port,"));
+    let reconnect = source_of("host_adoption/reconnect.rs");
+    for flow in ["pub(in crate::state) async fn reconnect_primary<", "pub(in crate::state) async fn reconnect_frozen<"] {
+        assert!(fn_body(&reconnect, flow).contains("reattach_listed("), "{flow} must reconcile through reattach_listed");
+    }
+    for file in ["host_adoption.rs", "host_adoption/panes.rs", "host_adoption/reconnect.rs", "host_adoption/sweep.rs"] {
+        assert_eq!(source_of(file).matches(".announce_recovered(").count(), usize::from(file == "host_adoption/panes.rs"));
     }
 }
 

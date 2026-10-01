@@ -159,7 +159,8 @@ const FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500
 /// `FLUSH_TIMEOUT` elapses.
 /// The ONLY route from a user-initiated quit to `exit(0)`.
 ///
-/// Releases the pty-host's detach arm, then ANNOUNCES the exit, before exiting.
+/// Releases every pty-host's detach arm, then ANNOUNCES the exit to each, before
+/// exiting. Admission to the hosts is closed first and stays closed.
 /// A host that loses its GUI *holds* its sessions instead of tearing them down
 /// when it is armed — and, since the 2026-09-21 crash, also when the pipe just
 /// drops with live children (a crashed GUI is indistinguishable from a quitting
@@ -176,27 +177,19 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        // Resolve the client and drop the `State` borrow before awaiting.
-        let client = app.try_state::<AppState>().and_then(|s| s.pty_host_clone());
-        if let Some(client) = client {
-            if !client.disarm().await {
-                log::error!(
-                    "quit: pty-host never acknowledged the disarm; it may keep \
-                     holding sessions after we exit"
-                );
-            }
-            if !client.shutdown().await {
-                log::error!(
-                    "quit: pty-host never acknowledged the shutdown; it will hold \
-                     live sessions as a crash until its retention window expires"
-                );
-            }
+        // Every pty-host this instance owns — the current one and any older one
+        // that survived an update, connected or not — is released, not just the
+        // primary; see `AppState::exit_hosts`. Clone out of the `State` borrow
+        // before awaiting.
+        let state = app.try_state::<AppState>().map(|s| s.inner().clone());
+        if let Some(state) = &state {
+            state.exit_hosts().await;
         }
         // Plan 045 AC9: the elevated sidecar is never armed for detach and never
         // restored elevated, so unlike the primary above it always tears down
         // here rather than being disarmed. A no-op if no admin tab was ever
         // opened this run.
-        if let Some(elevated) = app.try_state::<AppState>().map(|s| s.elevated_host.clone()) {
+        if let Some(elevated) = state.map(|s| s.elevated_host.clone()) {
             elevated.shutdown().await;
         }
         app.exit(0);
@@ -807,34 +800,46 @@ mod quit_teardown_wiring_tests {
         );
     }
 
-    /// Since the 2026-09-21 crash the primary host HOLDS live sessions on a
-    /// bare disconnect (a crash and a quit look the same on the wire) and only
-    /// tears down on an explicit `Shutdown`. Disarming alone is no longer a
-    /// quit: a `disarm_then_exit` that forgets to announce the exit leaves the
-    /// user's shells and agent CLIs running, unreachable, for the host's whole
+    /// Since the 2026-09-21 crash a host HOLDS live sessions on a bare
+    /// disconnect (a crash and a quit look the same on the wire) and only tears
+    /// down on an explicit `Shutdown`. Disarming alone is no longer a quit: a
+    /// `disarm_then_exit` that forgets to announce the exit leaves the user's
+    /// shells and agent CLIs running, unreachable, for the host's whole
     /// retention window — the exact orphan "Exit" must never produce.
     ///
-    /// Requires the ack to be CHECKED (`if !client.shutdown().await` with a
-    /// logged failure), placed before `exit(0)`, and after the disarm — the
-    /// host clears its latch when a GUI adopts, and a stale arm released after
-    /// the announcement would be the wrong order to reason about.
+    /// The quit hands every owned host to `exit_hosts` before `exit(0)`; what is
+    /// done to each host lives in `release_host`, which requires the acks to be
+    /// CHECKED (`if !client.shutdown().await` with a logged failure), placed after
+    /// the disarm — the host clears its latch when a GUI adopts, and a stale arm
+    /// released after the announcement would be the wrong order to reason about —
+    /// and before the stream is closed.
     #[test]
-    fn disarm_then_exit_announces_the_exit_to_the_primary_host() {
+    fn disarm_then_exit_announces_the_exit_to_every_host() {
         let body = fn_body(&source("commands/window.rs"), "pub fn disarm_then_exit");
         let stripped = strip_line_comments(&body);
-        let if_at = stripped.find("if !client.shutdown().await").unwrap_or_else(|| {
-            panic!("the shutdown ack must be checked via `if !client.shutdown().await`. Body:\n{body}")
+        let hosts_at = stripped.find(".exit_hosts()").unwrap_or_else(|| {
+            panic!("the quit must release every owned host via `exit_hosts()`. Body:\n{body}")
         });
-        let arm = block_at(&stripped, if_at);
+        let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
+        assert!(hosts_at < exit_at, "the hosts are released BEFORE exit(0). Body:\n{body}");
+
+        let release = strip_line_comments(&fn_body(
+            &source("state/host_lifecycle.rs"),
+            "async fn release_host",
+        ));
+        let if_at = release.find("if !client.shutdown().await").unwrap_or_else(|| {
+            panic!("the shutdown ack must be checked via `if !client.shutdown().await`. Body:\n{release}")
+        });
+        let arm = block_at(&release, if_at);
         assert!(
             arm.contains("log::error!"),
             "an unacknowledged shutdown on the quit path must be logged. Block:\n{arm}"
         );
-        let disarm_at = stripped.find("client.disarm(").expect("the disarm is still required");
-        let exit_at = stripped.find(".exit(").expect("disarm_then_exit must still exit");
+        let disarm_at = release.find("client.disarm(").expect("the disarm is still required");
+        let close_at = release.find("client.close_transport(").expect("the stream is closed");
         assert!(
-            disarm_at < if_at && if_at < exit_at,
-            "expected disarm, then shutdown, then exit(0). Body:\n{body}"
+            disarm_at < if_at && if_at < close_at,
+            "expected disarm, then shutdown, then close. Body:\n{release}"
         );
     }
 
@@ -988,12 +993,13 @@ mod quit_teardown_wiring_tests {
         );
     }
 
-    /// The spawn-failure path must disarm (releasing the hold) and must be the
-    /// ONLY place this function disarms — the success path exits deliberately
-    /// armed, same as `restart_for_update`, so the pty-host keeps holding.
+    /// The spawn-failure path must release the hold (disarming every host it
+    /// armed) and must be the ONLY place this function does — the success path
+    /// exits deliberately armed, same as `restart_for_update`, so the pty-hosts
+    /// keep holding.
     ///
-    /// Checks BLOCK containment (the disarm call must live inside the `Err(`
-    /// arm's own block), not textual order — a disarm sitting between
+    /// Checks BLOCK containment (the release call must live inside the `Err(`
+    /// arm's own block), not textual order — a release sitting between
     /// `spawn_relaunch` and `.exit(` purely by offset could still actually be
     /// inside the `Ok(` arm.
     #[test]
@@ -1004,13 +1010,16 @@ mod quit_teardown_wiring_tests {
         );
         let stripped = strip_line_comments(&body);
 
-        // Count CALLS (`.disarm(`), not the word: the spawn-failure branch also
-        // logs a sentence about the disarm going unacknowledged.
-        let disarm_positions: Vec<_> = stripped.match_indices(".disarm(").collect();
+        // Count CALLS (`.release(`), not the word: the branch also comments on it.
+        let release_positions: Vec<_> = stripped.match_indices(".release(").collect();
         assert_eq!(
-            disarm_positions.len(),
+            release_positions.len(),
             1,
-            "expected exactly one `.disarm(` call — only on the spawn-failure path. Body:\n{body}"
+            "expected exactly one `.release(` call — only on the spawn-failure path. Body:\n{body}"
+        );
+        assert!(
+            !stripped.contains(".disarm("),
+            "a disarm that bypasses the hold would leave admission closed. Body:\n{body}"
         );
 
         let match_at = stripped
@@ -1022,32 +1031,34 @@ mod quit_teardown_wiring_tests {
             .expect("spawn match must have an Err( arm");
         let err_arm = block_at(match_block, err_at);
         assert!(
-            err_arm.contains(".disarm("),
-            "`.disarm(` must be inside the Err( arm's own block of the spawn_relaunch \
+            err_arm.contains(".release("),
+            "`.release(` must be inside the Err( arm's own block of the spawn_relaunch \
              match — not merely textually between spawn_relaunch and exit. Err arm:\n{err_arm}"
         );
     }
 
     /// `PtyHostClient::disarm` returns whether the host ACKED. A spawn failure
     /// that then loses the disarm leaves the host holding a 15-minute window
-    /// under a fully connected GUI; the least this path can do is say so.
+    /// under a fully connected GUI; the least this path can do is say so, and
+    /// name the host. The release goes through `disarm_hosts`.
     ///
-    /// Requires the ack to actually be CHECKED — an `if !client.disarm().await`
-    /// condition whose block logs the failure — not merely evaluated and
-    /// discarded (`let _ = !client.disarm().await;`).
+    /// Requires the ack to actually be CHECKED — an `if !acknowledged` condition
+    /// whose block logs the failure — not merely evaluated and discarded
+    /// (`let _ = client.disarm().await;`).
     #[test]
     fn restart_keeping_terminals_checks_the_disarm_ack() {
         let body = strip_line_comments(&fn_body(
-            &source("commands/update.rs"),
-            "pub async fn restart_keeping_terminals",
+            &source("state/host_lifecycle.rs"),
+            "async fn disarm_hosts",
         ));
-        let if_at = body.find("if !client.disarm().await").unwrap_or_else(|| {
-            panic!("the disarm ack must be checked via `if !client.disarm().await`. Body:\n{body}")
+        assert!(body.contains("client.disarm().await"), "the disarm is sent. Body:\n{body}");
+        let if_at = body.find("if !acknowledged").unwrap_or_else(|| {
+            panic!("the disarm ack must be checked via `if !acknowledged`. Body:\n{body}")
         });
         let arm = block_at(&body, if_at);
         assert!(
-            arm.contains("log::error!"),
-            "a spawn-failure disarm that goes unacknowledged must be logged. Block:\n{arm}"
+            arm.contains("log::error!") && arm.contains("{name}"),
+            "a disarm that goes unacknowledged must be logged by host name. Block:\n{arm}"
         );
     }
 

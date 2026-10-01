@@ -5,9 +5,10 @@ use super::window::flush_all_windows;
 use crate::state::AppState;
 use tauri::State;
 
-/// Lifecycle retention reported by the host this app is currently connected to.
-/// This deliberately reads the connected client, never discovery: a discovery
-/// record can be stale or replaced after the pipe connection is established.
+/// Lifecycle retention reported by the hosts this app is currently connected to:
+/// the least any of them promises. This deliberately reads the connected clients,
+/// never discovery: a discovery record can be stale or replaced after the pipe
+/// connection is established.
 #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
 // `rename_all` renames the VARIANTS; the fields INSIDE a struct variant need
 // `rename_all_fields`. Without it this sent `active_secs` while the renderer
@@ -32,14 +33,12 @@ impl From<crate::pty_host_client::HostRetention> for ConnectedHostRetention {
     }
 }
 
-/// Return the retention contract of the connected host. No connected client is
-/// also unknown: absence does not establish an indefinite retention promise.
+/// Return the retention contract of the connected hosts, worst of all. No
+/// connected client, or an owned host that is not connected, is also unknown:
+/// absence does not establish an indefinite retention promise.
 #[tauri::command]
 pub fn connected_host_retention(state: State<'_, AppState>) -> ConnectedHostRetention {
-    state
-        .pty_host_clone()
-        .map(|client| client.host_retention().into())
-        .unwrap_or(ConnectedHostRetention::Unknown)
+    state.connected_retention().into()
 }
 
 /// Arm the sidecar hot-swap hold and quit the app so its `.exe` unlocks for a
@@ -69,6 +68,9 @@ pub fn offload_preflight(state: &AppState) -> Result<(), String> {
 /// shells with its GUI. Unlike offload, that reach is real, so the check is real.
 pub fn update_preflight(state: &AppState) -> Result<(), String> {
     hotswap_preflight(state)?;
+    // A host that would be killed by the swap cannot be offloaded: say which, and
+    // why, rather than offer an update that would close its terminals.
+    crate::state::update_refusal(&state.owned_hosts_now())?;
     let own = crate::profile::current().key();
     // Fail closed: a sibling this cannot SEE is a sibling the apply would kill
     // unarmed, so an unreadable record store refuses the update outright.
@@ -90,15 +92,9 @@ pub fn update_available(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
-    let client = state
-        .pty_host_clone()
-        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
-    if !client.survives_hotswap() {
-        return Err(
-            "hot-swap unavailable: the sidecar could not break away from a kill-on-close job"
-                .to_string(),
-        );
-    }
+    // Every host this instance owns must be able to keep its shells alive; the
+    // refusal names the ones that cannot.
+    crate::state::offload_refusal(&state.owned_hosts_now())?;
     // Refuse if ANY live terminal is in-process (not host-owned) — a hot-swap
     // would kill those shells. Only proceed when every terminal will survive.
     let has_local = state
@@ -246,19 +242,18 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // swaps the binary", which is a rebuild this command does not perform, and
     // it is what made a live `rel.alt` refuse `rel`'s offload (design 014 §B1.2).
     offload_preflight(&state)?;
-    let client = state
-        .pty_host_clone()
-        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    // Close admission first, then look again at what every owned host can do: a
+    // create in flight would otherwise land on a host after it was armed.
+    let mut hold = state.begin_offload().await?;
     let token = crate::pty_host_client::resolve_token();
-    // Arm and WAIT for the ack so we know the sidecar durably armed BEFORE we
-    // exit and drop the pipe (10-minute safety window).
-    client
-        .arm_detach(
-            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
-            &token,
-            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
-        )
-        .await?;
+    // Arm every host and WAIT for the acks so we know each sidecar durably armed
+    // BEFORE we exit and drop the pipes (10-minute safety window). All or none.
+    hold.arm_detach(
+        termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+        &token,
+        Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+    )
+    .await?;
     // Let every window persist its state (cwd snapshot included) before we drop
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
@@ -268,6 +263,7 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // across the offload. No-op if no admin tab was ever opened this run.
     state.elevated_host.shutdown().await;
     log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
+    hold.commit();
     state.app_handle.exit(0);
     Ok(())
 }
@@ -322,18 +318,15 @@ pub async fn restart_keeping_terminals(
     };
 
     offload_preflight(&state)?;
-    let client = state
-        .pty_host_clone()
-        .ok_or_else(|| "pty-host not connected — nothing to keep alive".to_string())?;
+    let mut hold = state.begin_offload().await?;
     let token = crate::pty_host_client::resolve_token();
-    let deadline_ms = client
-        .arm_detach(
-            termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
-            &token,
-            Some(termflow_pty_protocol::ArmDetachPurpose::Local),
-        )
-        .await?;
-    log::info!("[RECOVERY] armed hot-swap hold (deadline_ms={deadline_ms})");
+    hold.arm_detach(
+        termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
+        &token,
+        Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+    )
+    .await?;
+    log::info!("[RECOVERY] armed the hot-swap hold on every host");
 
     if flush == FlushPolicy::Renderer {
         flush_all_windows(&app).await;
@@ -343,12 +336,10 @@ pub async fn restart_keeping_terminals(
         Ok(pid) => pid,
         Err(e) => {
             log::error!("[RECOVERY] relaunch spawn failed: {e}; releasing the hold");
-            if !client.disarm().await {
-                log::error!(
-                    "[RECOVERY] pty-host never acknowledged the disarm; it may keep \
-                     holding its detach window while this GUI is still connected"
-                );
-            }
+            // Disarms every host that was armed (an unacknowledged one is logged by
+            // name: it may keep holding its detach window while this GUI is still
+            // connected) and lets creates through again.
+            hold.release().await;
             return Err(e);
         }
     };
@@ -357,6 +348,7 @@ pub async fn restart_keeping_terminals(
     // restored elevated across a relaunch.
     state.elevated_host.shutdown().await;
     in_flight.keep = true;
+    hold.commit();
     app.exit(0);
     Ok(())
 }
@@ -530,22 +522,25 @@ mod preflight_wiring_tests {
         }
 
         // The sibling site must stay UNLABELLED — a different profile's update
-        // must never install a deadline on terminals its user never touched.
-        let sibling_calls = read_all("api_server/system.rs");
-        assert_eq!(
-            sibling_calls.len(),
-            1,
-            "api_server/system.rs: expected exactly one arm_detach call"
-        );
-        let sibling = &sibling_calls[0];
+        // must never install a deadline on terminals its user never touched. The
+        // handler no longer arms anything itself: it asks `sibling_arm`, which arms
+        // every owned host through the one shared `arm_hosts`, passing no purpose.
         assert!(
-            !sibling.contains("ArmDetachPurpose"),
-            "a sibling-armed hold must carry no purpose, got: {sibling}"
+            read_all("api_server/system.rs").is_empty(),
+            "api_server/system.rs must arm through `sibling_arm`, not call arm_detach itself"
         );
+        let lifecycle = std::fs::read_to_string(root.join("state/host_lifecycle.rs")).unwrap();
+        let sibling_arm = fn_body(&lifecycle.replace("\r\n", "\n"), "async fn sibling_arm");
+        let call_at = sibling_arm.find("arm_hosts(").expect("sibling_arm arms through arm_hosts");
+        let call = &sibling_arm[call_at..sibling_arm[call_at..].find(".await").map_or(sibling_arm.len(), |i| call_at + i)];
         assert!(
-            sibling.contains("None"),
-            "sibling arm must pass an explicit None, got: {sibling}"
+            !call.contains("ArmDetachPurpose") && call.trim_end().ends_with("None)"),
+            "a sibling-armed hold must carry no purpose (an explicit None), got: {call}"
         );
+        // The shared arm passes the caller's purpose through untouched.
+        let shared = arm_detach_args(&lifecycle);
+        assert_eq!(shared.len(), 1, "host_lifecycle.rs: expected exactly one arm_detach call");
+        assert!(shared[0].contains("purpose"), "the shared arm must forward its purpose: {}", shared[0]);
     }
 
     /// The asymmetry that produced the report: the panel showed offload as

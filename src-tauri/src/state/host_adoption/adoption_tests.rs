@@ -496,7 +496,7 @@ async fn stale_epoch_callback_inert() {
     let unresolved = port.barrier().unresolved();
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].reason, "connection lost");
-    // No reconnect of a single older host exists yet: it stays unresolved, and a rediscovery must not start an attempt on it.
+    // The host's own reconnect owns getting it back: it stays unresolved meanwhile, and a rediscovery must not start an attempt on it.
     assert!(!port.barrier().needs_attempt());
 }
 
@@ -628,8 +628,12 @@ async fn reconnect_gives_up_only_after_every_backoff_step() {
 fn the_pipe_drop_recovery_reconnects_through_reconnect_current() {
     let terminals = source_of("terminals.rs");
     let body = fn_body(&terminals, "pub async fn reconnect_after_pipe_drop(");
-    assert!(body.contains("host_adoption::reconnect_current(self,"));
-    assert!(!body.contains("ensure_pty_host"), "ensure_pty_host also succeeds on an older host alone");
+    assert!(body.contains("host_adoption::reconnect_primary(self,"));
+    let recovery = fn_body(&source_of("host_adoption/reconnect.rs"), "pub(in crate::state) async fn reconnect_primary<");
+    assert!(recovery.contains("reconnect_current(port,"));
+    for body in [body, recovery] {
+        assert!(!body.contains("ensure_pty_host"), "ensure_pty_host also succeeds on an older host alone");
+    }
 }
 
 // ---- publication --------------------------------------------------------------
@@ -763,16 +767,19 @@ fn source_of(file: &str) -> String {
 /// check cannot go vacuous if a function is emptied or renamed.)
 #[test]
 fn no_ticket_for_input_resize_close() {
-    let terminals = source_of("terminals.rs");
-    for (signature, still_does) in [
-        ("pub fn host_write(", "write_stdin"),
-        ("pub fn host_resize(", ".resize("),
-        ("pub fn host_close(", ".close("),
-        ("pub fn host_repaint(", "nudge_repaint"),
-        ("pub(crate) fn surface_host_orphans(", "reserve_host_session"),
-        ("async fn run_host_restore_sweep(", "list_sessions"),
+    for (file, signature, still_does) in [
+        ("terminals.rs", "pub fn host_write(", "route_write"),
+        ("terminals.rs", "pub fn host_resize(", "route_resize"),
+        ("terminals.rs", "pub fn host_close(", "route_close"),
+        ("terminals.rs", "pub fn host_repaint(", "route_repaint"),
+        ("host_registry.rs", "pub(super) fn route_write(", "write_stdin"),
+        ("host_registry.rs", "pub(super) fn route_resize(", ".resize("),
+        ("host_registry.rs", "pub(super) fn route_close(", ".close("),
+        ("host_registry.rs", "pub(super) fn route_repaint(", "nudge_repaint"),
+        ("host_adoption/panes.rs", "pub(in crate::state) fn surface_orphans<", "reserve_session"),
+        ("host_adoption/sweep.rs", "pub(in crate::state) async fn sweep<", "list_sessions"),
     ] {
-        let body = fn_body(&terminals, signature);
+        let body = fn_body(&source_of(file), signature);
         assert!(body.contains(still_does), "{signature} no longer does `{still_does}` — update this census");
         for forbidden in ["host_table", ".begin(", "begin_adoption", "begin_as_quiescer", "Ticket"] {
             assert!(!body.contains(forbidden), "{signature} must not take a ticket (found `{forbidden}`)");
@@ -791,6 +798,9 @@ fn only_adoption_takes_a_ticket_in_the_state_module() {
         "host_connect.rs",
         "host_registry.rs",
         "host_adoption.rs",
+        "host_adoption/panes.rs",
+        "host_adoption/reconnect.rs",
+        "host_adoption/sweep.rs",
         "host_routing.rs",
         "types.rs",
     ] {

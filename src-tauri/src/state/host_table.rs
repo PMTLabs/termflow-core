@@ -204,6 +204,22 @@ impl HostTable {
         self.shared.lock().hosts.iter().find(|h| h.channel == channel).map(|h| h.admission)
     }
 
+    /// The epoch of the connection currently published for `channel`.
+    pub fn epoch(&self, channel: HostChannel) -> Option<u64> {
+        self.shared.lock().hosts.iter().find(|h| h.channel == channel).map(|h| h.epoch)
+    }
+
+    /// Why admission is closed right now: `None` while the table is open.
+    /// `Some(QuiesceReason::Exit)` is permanent for the life of the process; the
+    /// other reasons end when their guard is dropped.
+    pub fn lifecycle_reason(&self) -> Option<QuiesceReason> {
+        match self.shared.lock().lifecycle {
+            Lifecycle::Open => None,
+            Lifecycle::Quiescing { reason, .. } => Some(reason),
+            Lifecycle::Exiting => Some(QuiesceReason::Exit),
+        }
+    }
+
     /// Start an operation that creates or attaches a session on `channel`. Never
     /// waits: it is refused the moment the table is closing or the host is not
     /// `Open`.

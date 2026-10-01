@@ -181,12 +181,120 @@ pub(super) fn prune_pending_closes(
     host_close_pending.retain(|_, owed_to| *owed_to != channel);
 }
 
+/// Drop the claims a host listed but no pane has taken over. For a host that is
+/// gone for good: its sessions went with it, and a restoring pane must not wait
+/// for a session on a host nobody can reach.
+pub(super) fn forget_reserved_claims_on(
+    host_session_claims: &DashMap<String, HostSessionClaim>,
+    channel: HostChannel,
+) {
+    host_session_claims
+        .retain(|_, claim| !(claim.state == HostSessionClaimState::Reserved && claim.channel == channel));
+}
+
+// ---- live operations on a terminal ------------------------------------------
+
+/// Where `id` lives: the host that owns it and the name that host knows it by.
+fn owner_of(
+    host_terminals: &DashMap<String, HostChannel>,
+    terminals: &DashMap<String, Terminal>,
+    id: &str,
+) -> Option<(HostChannel, String)> {
+    let channel = *host_terminals.get(id)?.value();
+    let session_key = terminals.get(id).map(|t| session_key_of(&t))?;
+    Some((channel, session_key))
+}
+
+/// Forward keystrokes to the host that owns `id`. False when `id` is not
+/// host-owned or that host has no connection: the caller must surface the
+/// failure rather than report input that went nowhere as delivered, and must
+/// never hand it to another host.
+pub(super) fn route_write(
+    host_terminals: &DashMap<String, HostChannel>,
+    terminals: &DashMap<String, Terminal>,
+    id: &str,
+    bytes: &[u8],
+    client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
+) -> bool {
+    let Some((channel, session_key)) = owner_of(host_terminals, terminals, id) else { return false };
+    match client_for(channel) {
+        Some(client) => {
+            client.write_stdin(&session_key, bytes);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Forward a resize to the host that owns `id`; false as for [`route_write`].
+pub(super) fn route_resize(
+    host_terminals: &DashMap<String, HostChannel>,
+    terminals: &DashMap<String, Terminal>,
+    id: &str,
+    cols: u16,
+    rows: u16,
+    client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
+) -> bool {
+    let Some((channel, session_key)) = owner_of(host_terminals, terminals, id) else { return false };
+    match client_for(channel) {
+        Some(client) => {
+            client.resize(&session_key, cols, rows);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Nudge the owning host to repaint `id`. True when `id` is host-owned, whether
+/// or not the nudge could be sent: there is no local master to jiggle instead.
+pub(super) fn route_repaint(
+    host_terminals: &DashMap<String, HostChannel>,
+    terminals: &DashMap<String, Terminal>,
+    id: &str,
+    client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
+) -> bool {
+    let Some(channel) = host_terminals.get(id).map(|e| *e.value()) else { return false };
+    // The size and the name come from one record, so they stay consistent even
+    // for a migrated terminal, where the session key is not the leaf.
+    let info = terminals.get(id).map(|t| (t.cols, t.rows, t.session_key.clone()));
+    if let Some((cols, rows, session_key)) = info {
+        if let Some(client) = client_for(channel) {
+            client.nudge_repaint(&session_key, cols, rows);
+        }
+    }
+    true
+}
+
+/// Tell the host that owns a closed session to close it, or owe it that close.
+/// A host with no live connection (a pipe that dropped, a reconnect in flight)
+/// is told on its next answered listing, and only by that host: the tombstone
+/// carries its channel. The elevated host is never reconnected, so a close that
+/// cannot reach it is simply dropped.
+pub(super) fn route_close(
+    host_close_pending: &DashMap<String, HostChannel>,
+    channel: HostChannel,
+    session_key: &str,
+    client: Option<PtyHostClient>,
+) {
+    match client {
+        Some(client) if client.is_alive() => client.close(session_key),
+        _ if channel != HostChannel::Elevated => {
+            host_close_pending.insert(session_key.to_string(), channel);
+        }
+        _ => {}
+    }
+}
+
 // ---- frozen host registry -------------------------------------------------
 
 pub(super) fn next_frozen_id(frozen_host_seq: &AtomicU32) -> FrozenId {
     FrozenId(frozen_host_seq.fetch_add(1, Ordering::Relaxed))
 }
 
+/// The connected client of a registered frozen host. A host whose connection
+/// dropped stays registered while it is reconnected, but has no client to act
+/// on in the meantime: it answers like a disconnected primary, never with a dead
+/// client that would swallow a keystroke and report success.
 pub(super) fn frozen_client(
     frozen_hosts: &Mutex<Vec<FrozenHost>>,
     id: FrozenId,
@@ -197,6 +305,7 @@ pub(super) fn frozen_client(
         .iter()
         .find(|h| h.id == id)
         .map(|h| h.client.clone())
+        .filter(PtyHostClient::is_alive)
 }
 
 /// Snapshot of the registered frozen hosts.
@@ -207,17 +316,16 @@ pub(super) fn frozen_hosts_snapshot(frozen_hosts: &Mutex<Vec<FrozenHost>>) -> Ve
 // ---- restore intent -------------------------------------------------------
 
 /// Record that the pane owning `session_key` is being restored and must wait
-/// for its host. A key that already has a live registration on some channel is
-/// skipped: a renderer reload binds those without a create, so nothing would
-/// ever remove the entry. Returns whether the key was recorded.
+/// for its host. A key that already has a live terminal is skipped, whichever
+/// host or this process runs it: a renderer reload binds those without a create,
+/// so nothing would ever remove the entry. Returns whether the key was recorded.
 pub(super) fn register_restoring_key(
     restoring_keys: &DashMap<String, Instant>,
-    host_terminals: &DashMap<String, HostChannel>,
     terminals: &DashMap<String, Terminal>,
     session_key: &str,
     now: Instant,
 ) -> bool {
-    if session_registered_on_any_channel(host_terminals, terminals, session_key) {
+    if terminals.iter().any(|t| session_key_of(&t) == session_key) {
         return false;
     }
     restoring_keys.insert(session_key.to_string(), now);
@@ -345,7 +453,6 @@ pub(super) struct IntentMaps<'a> {
     pub restoring_keys: &'a DashMap<String, Instant>,
     pub restoring_leaf_keys: &'a DashMap<String, String>,
     pub closed_unowned: &'a DashMap<String, Instant>,
-    pub host_terminals: &'a DashMap<String, HostChannel>,
     pub terminals: &'a DashMap<String, Terminal>,
 }
 
@@ -359,7 +466,7 @@ pub(super) fn register_restoring_leaf(
     now: Instant,
 ) -> bool {
     let key = effective_session_key(leaf_id, session_key);
-    if !register_restoring_key(maps.restoring_keys, maps.host_terminals, maps.terminals, &key, now) {
+    if !register_restoring_key(maps.restoring_keys, maps.terminals, &key, now) {
         return false;
     }
     // The pane is being restored again, so an earlier close of it no longer

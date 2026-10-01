@@ -120,6 +120,12 @@ pub(super) async fn place<P: RoutingPort>(
     session_key: &str,
     override_key: bool,
 ) -> Result<Placement, String> {
+    // Exit, offload and update commit close admission to every host. Say so up
+    // front: once exit has begun closing the hosts none of them is a usable target
+    // any more, and the create would be run in this process instead of refused.
+    if let Some(reason) = port.table().lifecycle_reason() {
+        return Err(Busy::Lifecycle(reason).to_string());
+    }
     let keyed = override_key
         || host_registry::is_restoring_key(port.restoring_keys(), session_key, Instant::now())
         || host_registry::reserved_channel(port.claims(), session_key).is_some();
