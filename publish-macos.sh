@@ -20,11 +20,24 @@ set -e
 #     password) before running — e.g. the orchestrator pipes it in from Infisical
 #     (env dev, /machine). MAC_PWD is used only to unlock; never echoed.
 #
-# Usage:  ./publish-macos.sh [VERSION]
-#         MAC_PWD=... ./publish-macos.sh 1.2.0
+# Usage:  ./publish-macos.sh [VERSION [NOTES_FILE]]
+#         MAC_PWD=... ./publish-macos.sh 1.2.0 notes-1.2.0.md
+#
+# NOTES_FILE (or RELEASE_NOTES_FILE) is markdown passed to `vpk pack
+# --releaseNotes`. The updater reads release notes from the Velopack feed, not
+# from the GitHub release body, so write the notes BEFORE packing.
 # ─────────────────────────────────────────────────────────────────────────────
 
 VERSION="${1:-1.0.0}"
+NOTES_FILE="${2:-${RELEASE_NOTES_FILE:-}}"
+NOTES_ARGS=()
+if [ -n "$NOTES_FILE" ]; then
+  if [ ! -f "$NOTES_FILE" ]; then
+    echo "Release notes file not found: $NOTES_FILE" >&2
+    exit 1
+  fi
+  NOTES_ARGS=(--releaseNotes "$(cd "$(dirname "$NOTES_FILE")" && pwd)/$(basename "$NOTES_FILE")")
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Tools are not on a non-interactive shell's PATH (bun in ~/.bun, dotnet in
@@ -88,6 +101,7 @@ dotnet vpk pack \
   --mainExe     "$MAIN_EXE" \
   --icon        "$ICON" \
   --outputDir   "$RELEASES_DIR" \
+  "${NOTES_ARGS[@]}" \
   --signAppIdentity     "$SIGN_APP_IDENTITY" \
   --signInstallIdentity "$SIGN_INSTALLER_IDENTITY" \
   --notaryProfile       "$NOTARY_PROFILE"
