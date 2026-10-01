@@ -55,6 +55,9 @@ pub(super) struct HostSpec {
     /// How long a session that was told to close is still listed. A real host
     /// reaps the session after it hears the close, not before.
     pub close_lag: Duration,
+    /// Never acknowledges a disarm or a shutdown: the frames are received and
+    /// ignored, as by a host that is wedged when the app quits.
+    pub no_release_ack: bool,
 }
 
 impl Default for HostSpec {
@@ -68,6 +71,7 @@ impl Default for HostSpec {
             no_arm_ack: false,
             arm_delay: Duration::ZERO,
             close_lag: Duration::ZERO,
+            no_release_ack: false,
         }
     }
 }
@@ -271,6 +275,7 @@ async fn serve(
     while let Ok(Some(frame)) = read_frame(&mut rd).await {
         log.lock().unwrap().push(Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() });
         let reply = match frame {
+            Frame::Ctrl(Control::Disarm { .. } | Control::Shutdown { .. }) if spec.no_release_ack => None,
             Frame::Ctrl(Control::Disarm { req }) => Some(Response::DisarmAck { req }),
             Frame::Ctrl(Control::ListSessions { req, .. }) => {
                 listings += 1;
@@ -418,10 +423,57 @@ pub(super) struct Inner {
     pub exe_origins: Mutex<HashMap<String, Option<bool>>>,
     /// The hold a sibling's arm keeps.
     pub sibling_slot: SiblingSlot,
+    /// What the application around the hosts does during a full update.
+    pub full: FullKnobs,
     /// Whether adopting an older host starts its retirement ticker, as it does in
     /// the application. Off unless a test is about retirement, so the tests of
     /// everything else see no sampling.
     pub retirement: AtomicBool,
+}
+
+/// A thread that ended the process.
+pub(super) struct HardExit {
+    pub thread_name: Option<String>,
+    pub thread: std::thread::ThreadId,
+    /// It was a thread of a Tokio runtime.
+    pub on_runtime: bool,
+}
+
+/// The rest of the application, as a full update sees it: what it is told, what
+/// it asks to be done, and in which order (`events`, shared by everything).
+pub(super) struct FullKnobs {
+    pub events: Mutex<Vec<String>>,
+    /// Other instances running.
+    pub siblings: Mutex<Vec<crate::net_ports::InstanceRecord>>,
+    /// Instances that start while the windows are being flushed.
+    pub appear_during_flush: Mutex<Vec<crate::net_ports::InstanceRecord>>,
+    pub flush_takes: Mutex<Duration>,
+    pub local_shells: AtomicU32,
+    pub updater_dead: AtomicBool,
+    /// Blocks the thread the closing runs on for this long, as a stalled runtime would.
+    pub close_stalls: Mutex<Duration>,
+    pub watchdog_after: Mutex<Duration>,
+    pub aborted_flushes: AtomicUsize,
+    pub app_exits: AtomicUsize,
+    pub hard_exits: Mutex<Vec<HardExit>>,
+}
+
+impl Default for FullKnobs {
+    fn default() -> Self {
+        Self {
+            events: Mutex::new(Vec::new()),
+            siblings: Mutex::new(Vec::new()),
+            appear_during_flush: Mutex::new(Vec::new()),
+            flush_takes: Mutex::new(Duration::from_millis(1500)),
+            local_shells: AtomicU32::new(0),
+            updater_dead: AtomicBool::new(false),
+            close_stalls: Mutex::new(Duration::ZERO),
+            watchdog_after: Mutex::new(Duration::from_secs(40)),
+            aborted_flushes: AtomicUsize::new(0),
+            app_exits: AtomicUsize::new(0),
+            hard_exits: Mutex::new(Vec::new()),
+        }
+    }
 }
 
 /// `AppState`'s stand-in: the same port, over a fake machine.
@@ -458,6 +510,7 @@ impl FakePort {
             frozen_admission_when_published: Mutex::new(Vec::new()),
             exe_origins: Mutex::new(HashMap::new()),
             sibling_slot: SiblingSlot::default(),
+            full: FullKnobs::default(),
             retirement: AtomicBool::new(false),
         }))
     }

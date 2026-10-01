@@ -641,8 +641,9 @@ fn adopting_an_older_host_starts_its_ticker_and_nothing_else_does() {
         ("host_retire::start_ticker(", &["state/host_port.rs"][..]),
         (".start_ticker(", &["state/host_retire.rs"][..]),
         (".retire_when_open(", &["state/host_retire.rs"][..]),
-        // Bounded listings: the ticker's and adoption's own.
-        ("list_sessions_within(", &["state/host_retire.rs", "state/host_adoption.rs"][..]),
+        // Bounded listings: the ticker's, adoption's own, and the count of what a
+        // full update would close.
+        ("list_sessions_within(", &["state/host_retire.rs", "state/host_adoption.rs", "state/update_full.rs"][..]),
     ] {
         for (file, text) in &sources {
             if text.contains(needle) {

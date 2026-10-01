@@ -15,10 +15,10 @@ use crate::state::update_survival::{FullReason, UpdateMode};
 use crate::pty_host_client::HostRetention;
 use termflow_pty_protocol::{ArmDetachPurpose, Control, Frame, CAP_ATTACH_ACK};
 
-const CURRENT: &str = "cur";
-const SEC: Duration = Duration::from_secs(1);
+pub(super) const CURRENT: &str = "cur";
+pub(super) const SEC: Duration = Duration::from_secs(1);
 
-fn secs(n: u64) -> Duration {
+pub(super) fn secs(n: u64) -> Duration {
     Duration::from_secs(n)
 }
 
@@ -40,7 +40,7 @@ impl LifecyclePort for FakePort {
     }
 }
 
-fn frozen(name: &str) -> HostCandidate {
+pub(super) fn frozen(name: &str) -> HostCandidate {
     candidate(name, HostRole::Frozen)
 }
 
@@ -48,12 +48,12 @@ fn current() -> HostCandidate {
     candidate(CURRENT, HostRole::Current)
 }
 
-fn holding(keys: &[(&str, u32)]) -> HostSpec {
+pub(super) fn holding(keys: &[(&str, u32)]) -> HostSpec {
     HostSpec { sessions: keys.iter().map(|(k, pid)| meta(k, *pid)).collect(), ..HostSpec::default() }
 }
 
 /// The current host and these older ones, all discovered.
-fn machine(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
+pub(super) fn machine(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
     machine_with_current(HostSpec::default(), old)
 }
 
@@ -74,7 +74,7 @@ fn machine_with_current(current_spec: HostSpec, old: &[(&str, HostSpec)]) -> (Ar
 
 /// Every host adopted, as after start-up; their clients announce an exit, as the
 /// real connection's capabilities make them.
-async fn adopted(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
+pub(super) async fn adopted(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
     let (world, port) = machine(old);
     rediscover_hosts(&port).await.unwrap();
     announce_capability(&port);
@@ -89,7 +89,7 @@ fn announce_capability(port: &FakePort) {
 }
 
 /// A host that is running and advertised but this instance never adopted.
-fn undiscovered_until_now(world: &Arc<World>, port: &FakePort, name: &str, spec: HostSpec) -> HostCandidate {
+pub(super) fn undiscovered_until_now(world: &Arc<World>, port: &FakePort, name: &str, spec: HostSpec) -> HostCandidate {
     world.add_host(name, spec);
     let c = frozen(name);
     let mut all = port.candidates();
@@ -99,12 +99,12 @@ fn undiscovered_until_now(world: &Arc<World>, port: &FakePort, name: &str, spec:
 }
 
 /// How many frames each host has received so far.
-fn marks(world: &World, hosts: &[&str]) -> Vec<usize> {
+pub(super) fn marks(world: &World, hosts: &[&str]) -> Vec<usize> {
     hosts.iter().map(|h| world.kinds(h).len()).collect()
 }
 
 /// What `host` received after its `from`th frame.
-fn since(world: &World, host: &str, from: usize) -> Vec<&'static str> {
+pub(super) fn since(world: &World, host: &str, from: usize) -> Vec<&'static str> {
     world.kinds(host)[from..].to_vec()
 }
 

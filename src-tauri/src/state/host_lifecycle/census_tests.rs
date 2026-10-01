@@ -68,8 +68,11 @@ fn position(body: &str, needle: &str) -> usize {
 #[test]
 fn every_exit_offload_and_update_path_goes_through_a_quiesce() {
     // Each entry point takes its admission closure from the lifecycle module...
-    let exit = fn_body(&read("commands/window.rs"), "pub fn disarm_then_exit");
-    assert!(exit.contains(".exit_hosts().await"), "the quit path must release every host: {exit}");
+    let window = read("commands/window.rs");
+    let exit = fn_body(&window, "pub fn disarm_then_exit");
+    assert!(exit.contains("close_all_hosts("), "the quit path must close every host: {exit}");
+    let close = fn_body(&window, "pub(crate) async fn close_all_hosts");
+    assert!(close.contains(".exit_hosts_within("), "closing the hosts releases every owned one: {close}");
     let update_rs = read("commands/update.rs");
     for (name, signature, begin) in [
         ("restart_for_update", "pub async fn restart_for_update", ".begin_offload()"),
@@ -89,13 +92,16 @@ fn every_exit_offload_and_update_path_goes_through_a_quiesce() {
 
     // ...and that module is where the quiesce is taken, with the right reason.
     let lifecycle = read("state/host_lifecycle.rs");
-    assert!(fn_body(&lifecycle, "async fn exit_hosts").contains("QuiesceReason::Exit"));
+    assert!(fn_body(&lifecycle, "async fn exit_hosts_within").contains("QuiesceReason::Exit"));
     assert!(fn_body(&lifecycle, "async fn close_admission").contains(".quiesce(reason"));
     assert!(fn_body(&lifecycle, "async fn begin_hold").contains("close_admission("));
     assert!(fn_body(&lifecycle, "async fn begin_relaunch").contains("close_admission("));
     assert!(fn_body(&lifecycle, "async fn sibling_arm").contains("close_admission("));
     assert!(fn_body(&lifecycle, "async fn begin_offload").contains("QuiesceReason::Offload"));
     assert!(fn_body(&lifecycle, "async fn begin_update").contains("QuiesceReason::Update"));
+    // A full update closes admission too, and takes nothing else from the hosts.
+    let full = fn_body(&lifecycle, "async fn begin_full_update");
+    assert!(full.contains("close_admission(") && full.contains("QuiesceReason::Update"), "{full}");
 }
 
 /// Where each `.quiesce(` call is, as `(file, function)`.
@@ -118,7 +124,7 @@ fn only_the_lifecycle_module_closes_admission() {
         quiesce_callers(&production_sources()),
         [
             ("state/host_lifecycle.rs".to_string(), Some("close_admission".to_string())),
-            ("state/host_lifecycle.rs".to_string(), Some("exit_hosts".to_string())),
+            ("state/host_lifecycle.rs".to_string(), Some("exit_hosts_within".to_string())),
         ],
         "a new `.quiesce(` call is a new lifecycle path: route it through host_lifecycle"
     );
@@ -234,4 +240,57 @@ fn the_preflights_and_retention_read_the_owned_set_not_the_primary() {
     assert!(update_preflight.contains("update_refusal"), "{update_preflight}");
     let retention = fn_body(&update, "pub fn connected_host_retention");
     assert!(retention.contains("connected_retention") && !retention.contains("pty_host_clone"), "{retention}");
+}
+
+#[test]
+fn the_update_decides_its_mode_from_the_download_before_anything_is_armed() {
+    let update = fn_body(&read("updater.rs"), "pub async fn update_and_restart");
+    assert!(
+        position(&update, "check_and_download")
+            < position(&update, ".run_full_update(&target, confirm")
+            && position(&update, ".run_full_update(") < position(&update, ".begin_update()"),
+        "the downloaded release's notes decide first; only an offload goes on to arm: {update}"
+    );
+    let command = fn_body(&read("commands/update.rs"), "pub async fn update_and_restart");
+    assert!(command.contains("update_and_restart(&state, confirm)"), "the confirmation reaches the transaction: {command}");
+    let available = fn_body(&read("commands/update.rs"), "pub fn update_available");
+    assert!(
+        available.contains(".update_availability(") && available.contains("update_preflight"),
+        "availability is mode-aware and an offload still passes the shared preflight: {available}"
+    );
+}
+
+#[test]
+fn the_real_full_update_port_does_what_the_transaction_relies_on() {
+    let full = read("state/update_full.rs");
+    let port = full[full.find("impl FullUpdatePort for AppState").expect("the real port")..].to_string();
+    assert!(fn_body(&port, "async fn flush_windows").contains("flush_all_windows("), "{port}");
+    assert!(fn_body(&port, "async fn flush_history").contains("flush_all_history("), "{port}");
+    assert!(fn_body(&port, "async fn close_all_hosts").contains("close_all_hosts(&self.app_handle, Some(bounds))"), "{port}");
+    assert!(fn_body(&port, "fn exit_app").contains(".exit(0)"), "{port}");
+    assert!(fn_body(&port, "fn hard_exit").contains("std::process::exit(0)"), "{port}");
+    // The watchdog is a thread of its own, not a task.
+    let watchdog = fn_body(&full, "fn start_watchdog");
+    assert!(watchdog.contains("std::thread::Builder") && !watchdog.contains("spawn(async"), "{watchdog}");
+    // The pieces of the commit, in the order that makes each of them safe.
+    let run = fn_body(&full, "async fn run_full");
+    let order = [
+        "begin_full_update(",
+        "port.flush_windows()",
+        "port.flush_history()",
+        "live_siblings_refusal(port)",
+        "launch(info)",
+        "port.updater_alive()",
+        "hold.commit()",
+        "start_watchdog(",
+        "port.close_all_hosts(",
+        "port.exit_app()",
+    ];
+    let positions: Vec<usize> = order
+        .iter()
+        .map(|step| run.rfind(step).unwrap_or_else(|| panic!("`{step}` not found in:
+{run}")))
+        .collect();
+    assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{order:?} at {positions:?} in:
+{run}");
 }

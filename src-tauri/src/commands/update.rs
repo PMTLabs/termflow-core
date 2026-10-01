@@ -2,7 +2,7 @@
 //! seed. Split out of the former `commands.rs`.
 
 use super::window::flush_all_windows;
-use crate::state::AppState;
+use crate::state::{Availability, AppState, ConfirmToken, Confirmation};
 use tauri::State;
 
 /// Lifecycle retention reported by the hosts this app is currently connected to:
@@ -79,18 +79,25 @@ pub fn update_preflight(state: &AppState) -> Result<(), String> {
     crate::sibling_coord::describe_unarmable(&siblings).map_or(Ok(()), Err)
 }
 
-/// The Settings preflight for the update affordance.
+/// The Settings preflight for the update affordance, and the mode the update
+/// would run in: `offload` keeps the terminals running, `full` closes them all
+/// and lists why.
 ///
-/// It shares `update_preflight` with the update's own check, so the two judge
-/// the same things, but they are not the same question. This is a snapshot of
-/// what is known (`owned_hosts_now`): no discovery, no waiting. The action itself
-/// closes admission and looks again (`begin_update`), so it can still refuse what
-/// this approved: an operation that does not drain within the bound, or a host
-/// discovered or still unanswered by then. The panel can be green and the click
-/// refuse; the refusal is never the other way round.
+/// An offload shares `update_preflight` with the update's own check, so the two
+/// judge the same things, but they are not the same question. This is a snapshot
+/// of what is known (`owned_hosts_now`): no discovery, no waiting. The action
+/// itself closes admission and looks again (`begin_update`), so it can still
+/// refuse what this approved: an operation that does not drain within the bound,
+/// or a host discovered or still unanswered by then. The panel can be green and
+/// the click refuse; the refusal is never the other way round.
+///
+/// A full update is not subject to the offload's refusals (an in-process shell, a
+/// disconnected host); only a running sibling instance still stops it. The mode is
+/// the one the last update check found in the release notes: the download decides
+/// for good, and the confirmation is bound to what it found.
 #[tauri::command]
-pub fn update_available(state: State<'_, AppState>) -> Result<(), String> {
-    update_preflight(&state)
+pub fn update_available(state: State<'_, AppState>) -> Result<Availability, String> {
+    state.update_availability(crate::state::checked_mode(), || update_preflight(&state))
 }
 
 pub fn hotswap_preflight(state: &AppState) -> Result<(), String> {
@@ -230,17 +237,36 @@ pub async fn check_for_updates() -> UpdateStatus {
     }
 }
 
-/// Download + arm + apply a Velopack update, keeping terminals alive. Always
-/// registered; a store/no-updater build returns a stable "not available" error.
+/// What `update_and_restart` came to when it returned without an error.
+#[derive(serde::Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "outcome", rename_all = "camelCase")]
+pub enum UpdateRestart {
+    /// The updater is running and the app is exiting.
+    Started,
+    /// The update closes every terminal and the user has not agreed to this yet, or
+    /// what was agreed to has changed. Nothing was done. Send the same call again
+    /// with `confirm` made from this: `targetVersion` is the `version` here, the
+    /// other fields keep their names.
+    NeedsConfirmation(Confirmation),
+}
+
+/// Download + apply a Velopack update. An offload arms the hosts and keeps
+/// terminals alive; an update that has to close them (see `update_available`)
+/// answers `needsConfirmation` until `confirm` matches what is then true.
+/// Always registered; a store/no-updater build returns a stable "not available"
+/// error.
 #[tauri::command]
-pub async fn update_and_restart(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn update_and_restart(
+    state: State<'_, AppState>,
+    confirm: Option<ConfirmToken>,
+) -> Result<UpdateRestart, String> {
     #[cfg(feature = "velopack-updates")]
     {
-        crate::updater::update_and_restart(&state).await
+        crate::updater::update_and_restart(&state, confirm).await
     }
     #[cfg(not(feature = "velopack-updates"))]
     {
-        let _ = state;
+        let _ = (state, confirm);
         Err("in-app updates aren't available in this build (managed by the store)".to_string())
     }
 }
