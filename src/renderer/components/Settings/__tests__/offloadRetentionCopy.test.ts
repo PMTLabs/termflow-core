@@ -5,6 +5,7 @@ import { readSource } from '../../../utils/readSource';
 const SETTINGS = readSource(path.resolve(__dirname, '..', 'SettingsPage.tsx'));
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..', '..');
 const UPDATE_COMMANDS = readSource(path.resolve(ROOT, 'src-tauri', 'src', 'commands', 'update.rs'));
+const HOST_LIFECYCLE = readSource(path.resolve(ROOT, 'src-tauri', 'src', 'state', 'host_lifecycle.rs'));
 const TAURI_BRIDGE = readSource(path.resolve(ROOT, 'src', 'renderer', 'api', 'tauri-bridge.ts'));
 const PANEL_START = SETTINGS.indexOf('<label className="setting-label">Offload &amp; rebuild');
 const DIALOG_START = SETTINGS.indexOf('<ConfirmDialog', PANEL_START);
@@ -19,9 +20,12 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
       UPDATE_COMMANDS.indexOf('\n}', UPDATE_COMMANDS.indexOf('pub fn connected_host_retention')) + 2,
     );
 
-    expect(command).toContain('pty_host_clone()');
-    expect(command).toContain('client.host_retention()');
+    expect(command).toContain('state.connected_retention()');
     expect(command).not.toContain('read_host_record');
+    const start = HOST_LIFECYCLE.indexOf('pub(super) fn connected_retention');
+    const policy = HOST_LIFECYCLE.slice(start, HOST_LIFECYCLE.indexOf('\n}', start) + 2);
+    expect(policy).toContain('PtyHostClient::host_retention');
+    expect(policy).not.toContain('read_host_record');
     expect(TAURI_BRIDGE).toContain("invoke<ConnectedHostRetention>('connected_host_retention')");
   });
 

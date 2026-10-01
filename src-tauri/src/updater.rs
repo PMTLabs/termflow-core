@@ -67,7 +67,7 @@ fn check_and_download() -> Result<Option<UpdateInfo>, String> {
 /// relaunch. Graceful exit (vs `process::exit`) lets Tauri flush state first.
 fn apply(info: UpdateInfo) -> Result<(), String> {
     let um = manager()?;
-    // Carry the instance identity through the restart (plan 018 Task 10). This
+    // Carry the instance identity through the restart. This
     // was `Vec::new()`, so `--profile work` came back as the DEFAULT profile —
     // a different config file, a different window registry and an empty storage
     // scope. The user reads that as the update having eaten their session.
@@ -113,12 +113,24 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         info.TargetFullRelease.Version
     );
 
+    // Close admission to the hosts and look again at every one this instance owns,
+    // now that the download is done: a host that dropped, or a create still in
+    // flight, while it ran must not be armed over. Nothing is armed yet, so
+    // returning on any refusal below just drops the hold, which reopens admission.
+    let mut hold = state.begin_update().await?;
+    // An update that would have to close terminals is not an offload: refuse
+    // rather than lose them.
+    if let Err(reason) = hold.update_refusal() {
+        log::warn!("[UPDATE] refused: {reason}");
+        return Err(reason);
+    }
+
     // Arm the SIBLINGS first, then ourselves.
     //
     // Deliberately AFTER the download: a failed or unavailable download must
     // never leave a stranger armed. `arm_siblings` is itself all-or-nothing and
     // rolls back what it armed, so reaching the next line means every sibling is
-    // prepared (design 014 §B3).
+    // prepared.
     // RE-ENUMERATE. The check above ran before a download that can take minutes,
     // and a profile launched during it would not be in that snapshot — so it
     // would never be armed, and the apply would kill its GUI with an unarmed
@@ -137,23 +149,10 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         );
     }
 
-    // Arm our own host so shells survive, and wait for the ack BEFORE applying.
-    let client = match state.pty_host_clone() {
-        Some(c) => c,
-        None => {
-            // We armed strangers for an update that cannot now proceed. Put them
-            // back before returning, or each holds a 600s window it never asked for.
-            let _ = crate::sibling_coord::disarm_siblings(
-                &siblings,
-                &armed_siblings,
-                &crate::sibling_coord::http_call,
-            )
-            .await;
-            return Err("pty-host not connected — nothing to keep alive".to_string());
-        }
-    };
+    // Arm every host this instance owns so shells survive, and wait for the acks
+    // BEFORE applying. All or none: a host that refuses has the others put back.
     let token = crate::pty_host_client::resolve_token();
-    if let Err(e) = client
+    if let Err(e) = hold
         .arm_detach(
             termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS,
             &token,
@@ -161,6 +160,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
         )
         .await
     {
+        // We armed strangers for an update that cannot now proceed. Put them
+        // back before returning, or each holds a 600s window it never asked for.
         let _ = crate::sibling_coord::disarm_siblings(
             &siblings,
             &armed_siblings,
@@ -173,20 +174,18 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // Launch the updater (it waits for our exit), then quit — the relaunched app
     // reattaches sessions by `tab_id`. If the updater fails to launch AFTER we
     // armed, DISARM synchronously — otherwise the host stays armed and a later
-    // normal quit would orphan sessions instead of tearing down (design §10.5
-    // "updater-launch failure → synchronous Disarm").
+    // normal quit would orphan sessions instead of tearing down (an updater that
+    // fails to launch must disarm synchronously).
     if let Err(e) = tokio::task::spawn_blocking(move || apply(info))
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r)
     {
         log::warn!("[UPDATE] updater failed to launch after arming ({e}); disarming");
-        if !client.disarm().await {
-            log::error!(
-                "[UPDATE] rollback disarm was not acknowledged; this host may still \
-                 hold its detach window until a later quit releases it"
-            );
-        }
+        // Every host that was armed is disarmed again; one that does not
+        // acknowledge is logged by name and may still hold its detach window until
+        // a later quit releases it.
+        hold.release().await;
         // Same obligation for the siblings we armed. Disarming ourselves and
         // leaving them armed would be the asymmetry this rollback exists to
         // avoid — they armed for OUR update, and it is not happening.
@@ -218,6 +217,8 @@ pub async fn update_and_restart(state: &crate::state::AppState) -> Result<(), St
     // Plan 045 AC9: admin tabs are never restored elevated across an update.
     state.elevated_host.shutdown().await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
+    // Admission stays closed until the process is gone.
+    hold.commit();
     state.app_handle.exit(0);
     Ok(())
 }

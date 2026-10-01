@@ -58,12 +58,17 @@ fn pending(reason: impl std::fmt::Display) -> String {
     format!("{HOST_OWNERSHIP_PENDING}: {reason}")
 }
 
+/// The live connection of `channel`. A host whose connection dropped stays
+/// registered while it is reconnected, but there is nothing to attach through in
+/// the meantime: attaching on the dead client would "succeed", and the reconnect
+/// that follows would never attach a session registered after it began.
 fn client_of<P: AdoptionPort>(port: &P, channel: HostChannel) -> Option<PtyHostClient> {
     match channel {
         HostChannel::Primary => port.current_client(),
         HostChannel::Frozen(id) => port.frozen_hosts().into_iter().find(|h| h.id == id).map(|h| h.client),
         HostChannel::Elevated => None,
     }
+    .filter(PtyHostClient::is_alive)
 }
 
 /// The host a fresh session is created on: the current host while it is
@@ -120,6 +125,12 @@ pub(super) async fn place<P: RoutingPort>(
     session_key: &str,
     override_key: bool,
 ) -> Result<Placement, String> {
+    // Exit, offload and update commit close admission to every host. Say so up
+    // front: once exit has begun closing the hosts none of them is a usable target
+    // any more, and the create would be run in this process instead of refused.
+    if let Some(reason) = port.table().lifecycle_reason() {
+        return Err(Busy::Lifecycle(reason).to_string());
+    }
     let keyed = override_key
         || host_registry::is_restoring_key(port.restoring_keys(), session_key, Instant::now())
         || host_registry::reserved_channel(port.claims(), session_key).is_some();

@@ -19,6 +19,16 @@ pub(super) struct ExeOrigin {
     /// This app spawned the host itself from the bundled source path because the
     /// runtime-dir install failed. That copy runs from inside the payload.
     bundled_fallback: AtomicBool,
+    /// What the OS lookup would have answered (tests, which have no real host
+    /// behind a connection): the classification itself is not replaced.
+    #[cfg(test)]
+    #[cfg_attr(not(windows), allow(dead_code))]
+    image_lookup: std::sync::Mutex<Option<Option<PathBuf>>>,
+    /// A verdict decided by the test, for the rows that are about what an update
+    /// does with a host in the payload or of unknown origin rather than about how
+    /// that is told.
+    #[cfg(test)]
+    verdict: std::sync::Mutex<Option<Option<bool>>>,
 }
 
 impl ExeOrigin {
@@ -29,6 +39,16 @@ impl ExeOrigin {
 
     pub(super) fn set_bundled_fallback(&self, v: bool) {
         self.bundled_fallback.store(v, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_image_lookup(&self, image: Option<PathBuf>) {
+        *self.image_lookup.lock().unwrap() = Some(image);
+    }
+
+    #[cfg(test)]
+    pub(super) fn inject_verdict(&self, verdict: Option<bool>) {
+        *self.verdict.lock().unwrap() = Some(verdict);
     }
 
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -43,10 +63,24 @@ impl ExeOrigin {
         velopack_root: Option<&Path>,
         runtime_dir: Option<&Path>,
     ) -> Option<bool> {
+        #[cfg(test)]
+        if let Some(verdict) = *self.verdict.lock().unwrap() {
+            return verdict;
+        }
         if self.bundled_fallback.load(Ordering::Acquire) {
             return Some(true);
         }
         self.lookup_in_payload(velopack_root, runtime_dir)
+    }
+
+    /// The host's image path: asked of the OS from the connection's server pid.
+    #[cfg(windows)]
+    fn image(&self) -> Option<PathBuf> {
+        #[cfg(test)]
+        if let Some(image) = self.image_lookup.lock().unwrap().clone() {
+            return image;
+        }
+        self.server_pid().and_then(image_path_of)
     }
 
     #[cfg(windows)]
@@ -55,7 +89,7 @@ impl ExeOrigin {
         velopack_root: Option<&Path>,
         runtime_dir: Option<&Path>,
     ) -> Option<bool> {
-        let image = self.server_pid().and_then(image_path_of);
+        let image = self.image();
         classify_exe(image.as_deref(), velopack_root, runtime_dir, false, true)
     }
 

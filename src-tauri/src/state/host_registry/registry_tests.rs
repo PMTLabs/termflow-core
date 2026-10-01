@@ -71,19 +71,19 @@ fn surface_time_recheck_sees_frozen_channel_registration() {
     assert!(!t.registered_anywhere("tm-someone-else"));
 }
 
-/// The wiring half: the function above is useless if `surface_host_orphans`
+/// The wiring half: the function above is useless if orphan surfacing
 /// re-checks through the primary-only map.
 #[test]
-fn surface_host_orphans_rechecks_through_the_all_channel_check() {
-    let source = include_str!("../terminals.rs").replace("\r\n", "\n");
+fn surface_orphans_rechecks_through_the_all_channel_check() {
+    let source = include_str!("../host_adoption/panes.rs").replace("\r\n", "\n");
     let start = source
-        .find("\n    pub(crate) fn surface_host_orphans(")
-        .expect("surface_host_orphans moved or was renamed");
+        .find("\npub(in crate::state) fn surface_orphans<")
+        .expect("surface_orphans moved or was renamed");
     let body = &source[start..];
-    let body = &body[..body.find("\n    }\n").expect("body end")];
-    assert!(body.contains("session_registered_on_any_channel("));
+    let body = &body[..body.find("\n}\n").expect("body end")];
+    assert!(body.contains("registered_on_any_channel("));
     assert!(
-        !body.contains("host_sessions_by_key("),
+        !body.contains("panes_on("),
         "the surface-time re-check must not read one channel's map"
     );
 }
@@ -257,10 +257,44 @@ fn restore_intent_skips_a_key_that_is_already_registered() {
     let restoring: DashMap<String, Instant> = DashMap::new();
     let now = Instant::now();
 
-    assert!(!register_restoring_key(&restoring, &t.host_terminals, &t.terminals, "tm-live", now));
-    assert!(register_restoring_key(&restoring, &t.host_terminals, &t.terminals, "tm-waiting", now));
+    assert!(!register_restoring_key(&restoring, &t.terminals, "tm-live", now));
+    assert!(register_restoring_key(&restoring, &t.terminals, "tm-waiting", now));
     assert!(is_restoring_key(&restoring, "tm-waiting", now));
     assert!(!is_restoring_key(&restoring, "tm-live", now), "a live key would never be removed again");
+}
+
+/// A shell running in this process (the fallback when no host is usable) is a live
+/// terminal too: a renderer reload binds it without a create, so nothing would
+/// ever remove a restore intent recorded for its key.
+#[test]
+fn restore_intent_skips_a_key_held_by_an_in_process_terminal() {
+    let t = tables(&[("pc-host", "tm-hosted", FROZEN_1)]);
+    t.terminals.insert("pc-local".into(), terminal("pc-local", "tm-local"));
+    let restoring: DashMap<String, Instant> = DashMap::new();
+    let now = Instant::now();
+
+    assert!(!t.registered_anywhere("tm-local"), "no host owns it");
+    assert!(!register_restoring_key(&restoring, &t.terminals, "tm-local", now));
+    assert!(!register_restoring_key(&restoring, &t.terminals, "tm-hosted", now));
+    assert!(restoring.is_empty(), "nothing would ever remove these");
+    assert!(register_restoring_key(&restoring, &t.terminals, "tm-waiting", now));
+}
+
+#[test]
+fn the_leaf_entry_point_skips_an_in_process_terminal_too() {
+    let i = Intent::new(&[]);
+    i.tables.terminals.insert("pc-local".into(), terminal("pc-local", "tm-local"));
+    assert!(!register_restoring_leaf(&i.maps(), "tm-local", None, Instant::now()));
+    assert!(i.restoring.is_empty());
+}
+
+#[test]
+fn a_close_that_cannot_reach_the_elevated_host_is_dropped_not_owed() {
+    let pending: DashMap<String, HostChannel> = DashMap::new();
+    route_close(&pending, HostChannel::Elevated, "tm-e", None);
+    assert!(pending.is_empty(), "the elevated host is never reconnected, so there is nothing to deliver to");
+    route_close(&pending, FROZEN_1, "tm-f", None);
+    assert_eq!(pending.get("tm-f").map(|c| *c.value()), Some(FROZEN_1), "an older host is owed it, by name");
 }
 
 #[test]
@@ -348,90 +382,7 @@ fn closed_unowned_never_closes_a_registered_session() {
 /// removal is covered without anyone remembering to list it.
 #[test]
 fn registry_maps_are_only_shrunk_by_their_chokepoints() {
-    /// `#[cfg(test)] mod name { ... }` blocks cut out, so what remains is
-    /// production text.
-    fn without_test_modules(source: &str) -> String {
-        let bytes = source.as_bytes();
-        let mut out = String::new();
-        let mut at = 0;
-        while let Some(rel) = source[at..].find("#[cfg(") {
-            let attr = at + rel;
-            let attr_end = source[attr..].find(']').map_or(source.len(), |e| attr + e + 1);
-            let attribute = &source[attr..attr_end];
-            let after = source[attr_end..].trim_start();
-            let is_test_mod =
-                attribute.contains("test") && !attribute.contains("not(") && after.starts_with("mod ");
-            if !is_test_mod {
-                out.push_str(&source[at..attr_end]);
-                at = attr_end;
-                continue;
-            }
-            out.push_str(&source[at..attr]);
-            let item = source.len() - after.len();
-            let brace = source[item..].find(['{', ';']).map(|i| item + i);
-            at = match brace {
-                Some(i) if bytes[i] == b';' => i + 1,
-                Some(i) => matching_brace(source, i) + 1,
-                None => source.len(),
-            };
-        }
-        out.push_str(&source[at..]);
-        out
-    }
-
-    /// Index of the `}` closing the `{` at `open`, skipping comments, strings and
-    /// char literals.
-    fn matching_brace(source: &str, open: usize) -> usize {
-        let b = source.as_bytes();
-        let mut depth = 0usize;
-        let mut i = open;
-        while i < b.len() {
-            match b[i] {
-                b'/' if b.get(i + 1) == Some(&b'/') => {
-                    i += source[i..].find('\n').unwrap_or(b.len() - i);
-                    continue;
-                }
-                b'/' if b.get(i + 1) == Some(&b'*') => {
-                    i += source[i..].find("*/").map_or(b.len() - i, |e| e + 2);
-                    continue;
-                }
-                b'"' => {
-                    let before = &source[..i];
-                    let hashes = before.bytes().rev().take_while(|c| *c == b'#').count();
-                    let raw = before[..before.len() - hashes].ends_with('r');
-                    if raw {
-                        let close = format!("\"{}", "#".repeat(hashes));
-                        i += 1 + source[i + 1..].find(&close).map_or(b.len(), |e| e + close.len());
-                    } else {
-                        i += 1;
-                        while i < b.len() && b[i] != b'"' {
-                            i += if b[i] == b'\\' { 2 } else { 1 };
-                        }
-                        i += 1;
-                    }
-                    continue;
-                }
-                b'\'' if b.get(i + 2) == Some(&b'\'') => {
-                    i += 3;
-                    continue;
-                }
-                b'\'' if b.get(i + 1) == Some(&b'\\') && b.get(i + 3) == Some(&b'\'') => {
-                    i += 4;
-                    continue;
-                }
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return i;
-                    }
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-        panic!("unbalanced braces in a scanned source file");
-    }
+    use crate::state::source_scan::without_test_modules;
 
     /// Production text only, with a method chain split over lines rejoined so
     /// `map\n    .remove(` is seen as `map.remove(`.
@@ -521,6 +472,12 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
             &["host_close_pending.remove(", "host_close_pending.remove_if(", "host_close_pending.retain(", "host_close_pending.clear("],
             &["pub(super) fn take_pending_close(", "pub(super) fn prune_pending_closes("],
         ),
+        (
+            // Claims listed by a host that is gone for good are dropped as a set; every
+            // other claim leaves through its owner-guarded or transaction-guarded path.
+            &["host_session_claims.retain(", "host_session_claims.clear("],
+            &["pub(super) fn forget_reserved_claims_on("],
+        ),
     ];
 
     for (needles, allowed) in rules {
@@ -576,7 +533,6 @@ impl Intent {
             restoring_keys: &self.restoring,
             restoring_leaf_keys: &self.leaf_keys,
             closed_unowned: &self.closed,
-            host_terminals: &self.tables.host_terminals,
             terminals: &self.tables.terminals,
         }
     }

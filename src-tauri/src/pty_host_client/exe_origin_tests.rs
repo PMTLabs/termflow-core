@@ -70,6 +70,31 @@ fn the_runtime_dir_stays_safe_when_the_root_would_contain_it() {
     assert_eq!(cls(image, Some(wide_root), Some(RUNTIME)), Some(false));
 }
 
+/// The classifier is handed the PARENT of the profile's runtime dir (so any
+/// profile's host is safe). Built from the real layout function, the install
+/// location of a host in it is outside a root that sits next to it, and so is one
+/// of another profile.
+#[test]
+fn a_host_installed_where_the_app_installs_it_is_outside_the_payload() {
+    let Some(profile_dir) = runtime_host_dir() else { return };
+    let hosts_dir = profile_dir.parent().expect("the runtime dir has a parent").to_path_buf();
+    let app_dir = hosts_dir.parent().expect("the host dir sits in the app's data dir");
+    assert_eq!(hosts_dir.file_name().and_then(|n| n.to_str()), Some("host"), "{}", hosts_dir.display());
+    assert_eq!(app_dir.file_name().and_then(|n| n.to_str()), Some("app.termflow.desktop"), "{}", app_dir.display());
+    let root = app_dir.parent().expect("a layout deep enough to have a root");
+    for image in [
+        profile_dir.join("0123456789abcdef").join("termflow-pty-host.exe"),
+        hosts_dir.join("another.profile").join("fedcba9876543210").join("termflow-pty-host.exe"),
+    ] {
+        assert_eq!(
+            classify_exe(Some(&image), Some(root), Some(&hosts_dir), false, true),
+            Some(false),
+            "{}",
+            image.display()
+        );
+    }
+}
+
 /// The pre-runtime-dir location lived inside the root and died with every update.
 #[test]
 fn the_old_in_root_host_location_is_in_the_payload() {

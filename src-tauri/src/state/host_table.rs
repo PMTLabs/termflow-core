@@ -204,6 +204,22 @@ impl HostTable {
         self.shared.lock().hosts.iter().find(|h| h.channel == channel).map(|h| h.admission)
     }
 
+    /// The epoch of the connection currently published for `channel`.
+    pub fn epoch(&self, channel: HostChannel) -> Option<u64> {
+        self.shared.lock().hosts.iter().find(|h| h.channel == channel).map(|h| h.epoch)
+    }
+
+    /// Why admission is closed right now: `None` while the table is open.
+    /// `Some(QuiesceReason::Exit)` is permanent for the life of the process; the
+    /// other reasons end when their guard is dropped.
+    pub fn lifecycle_reason(&self) -> Option<QuiesceReason> {
+        match self.shared.lock().lifecycle {
+            Lifecycle::Open => None,
+            Lifecycle::Quiescing { reason, .. } => Some(reason),
+            Lifecycle::Exiting => Some(QuiesceReason::Exit),
+        }
+    }
+
     /// Start an operation that creates or attaches a session on `channel`. Never
     /// waits: it is refused the moment the table is closing or the host is not
     /// `Open`.
@@ -230,9 +246,10 @@ impl HostTable {
         Ok(Ticket::new(&self.shared, TicketTarget::Adoption))
     }
 
-    /// The lifecycle owner's own operations (exit's bounded connect-and-shutdown
-    /// of a host that was never adopted) must not be refused by the quiesce they
-    /// hold. Requires the guard, so only the holder can call it.
+    /// An operation of the lifecycle owner that a quiesce must wait for, and that
+    /// the quiesce it holds must not refuse: an offload's arm, which an exit taking
+    /// the table over waits out before it releases the hosts. Requires the guard,
+    /// so only the holder can call it.
     pub fn begin_as_quiescer(&self, _guard: &QuiesceGuard) -> Ticket {
         let mut inner = self.shared.lock();
         inner.adopting += 1;

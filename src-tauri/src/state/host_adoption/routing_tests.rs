@@ -6,6 +6,7 @@ use super::*;
 use crate::state::host_registry::{self, OrphanVerdict};
 use crate::state::host_routing::{place, spawn_target, Placement, HOST_OWNERSHIP_PENDING};
 use crate::state::host_table::QuiesceReason;
+use crate::state::types::HostSessionClaimState;
 use std::time::{Instant as StdInstant, SystemTime};
 use termflow_pty_protocol::SpawnSpec;
 
@@ -455,11 +456,11 @@ async fn orphan_sweep_does_not_surface_a_restoring_key() {
 
 #[test]
 fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits() {
-    let terminals = source_of("terminals.rs");
-    let body = fn_body(&terminals, "pub(crate) fn surface_host_orphans(");
+    let panes = source_of("host_adoption/panes.rs");
+    let body = fn_body(&panes, "pub(in crate::state) fn surface_orphans<");
     let verdict = body.find("host_registry::orphan_verdict(").expect("surfacing must consult the verdict");
-    let reserve = body.find("self.reserve_host_session(").expect("surfacing reserves the session");
-    let emit = body.find("self.app_handle.emit").expect("surfacing emits the recovery event");
+    let reserve = body.find("host_registry::reserve_session(").expect("surfacing reserves the session");
+    let emit = body.find("port.announce_recovered(").expect("surfacing announces the recovered session");
     assert!(verdict < reserve && verdict < emit, "the verdict must come first");
     for needle in ["OrphanVerdict::Restoring =>", "OrphanVerdict::CloseUnowned =>"] {
         let arm = &body[body.find(needle).unwrap_or_else(|| panic!("no {needle} arm"))..];
@@ -467,16 +468,23 @@ fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits
         assert!(!arm.contains("reserve_host_session") && !arm.contains("emit"), "{needle} must not surface");
     }
 
-    // The two callers that surface orphans, `reconnect_after_pipe_drop` and
-    // `run_host_restore_sweep`, both go through that one function, and the source
-    // of the recovery-tab request appears once in terminals.rs: inside it. Other
-    // files are not read here.
-    assert_eq!(terminals.matches("\"api:createTerminalTab\"").count(), 1);
-    for caller in ["pub async fn reconnect_after_pipe_drop(", "async fn run_host_restore_sweep("] {
-        assert!(
-            fn_body(&terminals, caller).contains("self.surface_host_orphans("),
-            "{caller} must surface through surface_host_orphans"
-        );
+    // The three flows that surface orphans, the primary's pipe-drop recovery, an
+    // older host's reconnect (both through `reattach_listed`) and the sweep, all go
+    // through that one function, and the recovery-tab request is made in one place
+    // in the state module: the port's `announce_recovered`, which only it calls.
+    // Other files are not read here.
+    assert_eq!(source_of("host_port.rs").matches("\"api:createTerminalTab\"").count(), 1);
+    assert_eq!(source_of("terminals.rs").matches("\"api:createTerminalTab\"").count(), 0);
+    assert!(fn_body(&panes, "pub(super) async fn reattach_listed<").contains("surface_orphans(port,"));
+    assert!(fn_body(&source_of("host_adoption/sweep.rs"), "pub(in crate::state) async fn sweep<").contains("surface_orphans(port,"));
+    let reconnect = source_of("host_adoption/reconnect.rs");
+    // An older host's reconnect is `reconnect_frozen_pass`, run under `reconnect_frozen`'s claim.
+    for flow in ["pub(in crate::state) async fn reconnect_primary<", "async fn reconnect_frozen_pass<"] {
+        assert!(fn_body(&reconnect, flow).contains("reattach_listed("), "{flow} must reconcile through reattach_listed");
+    }
+    assert!(fn_body(&reconnect, "pub(in crate::state) async fn reconnect_frozen<").contains("reconnect_frozen_pass("));
+    for file in ["host_adoption.rs", "host_adoption/panes.rs", "host_adoption/reconnect.rs", "host_adoption/sweep.rs"] {
+        assert_eq!(source_of(file).matches(".announce_recovered(").count(), usize::from(file == "host_adoption/panes.rs"));
     }
 }
 
@@ -546,6 +554,50 @@ async fn duplicate_session_key_across_channels_is_reported() {
     assert_eq!(world.count_everywhere("Spawn"), 0);
     assert!(port.0.claims.get("tm-dup").is_none(), "no second owner is reserved for it");
     assert!(port.0.claims.get("tm-ok").is_some(), "other sessions are adopted as usual");
+}
+
+// ---- a host whose connection dropped -----------------------------------------
+
+/// A session reserved on an older host is attached through that host's live
+/// connection or not at all. While the host's reconnect is backing off its client
+/// is dead: an attach on it "succeeds", and the reconnect that follows lists only
+/// the panes it knew when it began, so the pane would look alive and never get its
+/// output.
+#[tokio::test(start_paused = true)]
+async fn a_keyed_create_for_a_session_on_a_host_that_is_reconnecting_waits_and_then_attaches() {
+    let (world, port) = machine(&[("h1", holding(&[("k1", 11)]))]);
+    ensure_hosts(&port).await.unwrap();
+    tokio::time::sleep(SEC).await;
+    let id = port.frozen_ids()[0];
+    let h1 = HostChannel::Frozen(id);
+    let lost = port.0.table.epoch(h1).expect("published");
+    world.kill_connections("h1");
+    tokio::time::sleep(SEC).await;
+    assert!(!port.frozen_hosts()[0].client.is_alive(), "the host's connection really dropped");
+    world.set_unreachable("h1", true);
+    let reconnect = tokio::spawn({
+        let port = port.clone();
+        async move { reconnect_frozen(&port, id, lost, &[5000, 20000, 20000]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!reconnect.is_finished(), "the reconnect is backing off");
+
+    // The create gives up waiting for the host (8 s) and must still not attach.
+    let err = refusal(&port, "k1", false).await;
+    assert!(is_pending(&err), "{err}");
+    assert_eq!(world.count("h1", "Attach"), 0, "nothing was attached on the dead connection");
+    assert_eq!(
+        port.0.claims.get("k1").map(|c| (c.state.clone(), c.channel)),
+        Some((HostSessionClaimState::Reserved, h1)),
+        "and the session is still reserved for the pane that will retry"
+    );
+
+    // The host comes back; the same create now attaches through the new connection.
+    world.set_unreachable("h1", false);
+    assert_eq!(reconnect.await.unwrap(), super::reconnect::FrozenReconnect::Reconnected);
+    assert_eq!(create(&port, "k1", false).await, Did::Attached(h1, 11));
+    assert_eq!(world.sessions("h1", "Attach"), vec!["k1".to_string()], "attached once, on the host that holds it");
+    assert_eq!(world.count(CURRENT, "Attach"), 0);
 }
 
 // ---- the router's caller ----------------------------------------------------

@@ -2,6 +2,7 @@ use super::fake_hosts::*;
 use super::*;
 use crate::state::host_registry;
 use crate::state::host_table::{Admission, QuiesceReason};
+use crate::state::source_scan::production;
 use crate::state::types::HostSessionClaimState;
 use std::sync::atomic::Ordering;
 use termflow_pty_protocol::SpawnSpec;
@@ -496,7 +497,7 @@ async fn stale_epoch_callback_inert() {
     let unresolved = port.barrier().unresolved();
     assert_eq!(unresolved.len(), 1);
     assert_eq!(unresolved[0].reason, "connection lost");
-    // No reconnect of a single older host exists yet: it stays unresolved, and a rediscovery must not start an attempt on it.
+    // The host's own reconnect owns getting it back: it stays unresolved meanwhile, and a rediscovery must not start an attempt on it.
     assert!(!port.barrier().needs_attempt());
 }
 
@@ -628,8 +629,12 @@ async fn reconnect_gives_up_only_after_every_backoff_step() {
 fn the_pipe_drop_recovery_reconnects_through_reconnect_current() {
     let terminals = source_of("terminals.rs");
     let body = fn_body(&terminals, "pub async fn reconnect_after_pipe_drop(");
-    assert!(body.contains("host_adoption::reconnect_current(self,"));
-    assert!(!body.contains("ensure_pty_host"), "ensure_pty_host also succeeds on an older host alone");
+    assert!(body.contains("host_adoption::reconnect_primary(self,"));
+    let recovery = fn_body(&source_of("host_adoption/reconnect.rs"), "pub(in crate::state) async fn reconnect_primary<");
+    assert!(recovery.contains("reconnect_current(port,"));
+    for body in [body, recovery] {
+        assert!(!body.contains("ensure_pty_host"), "ensure_pty_host also succeeds on an older host alone");
+    }
 }
 
 // ---- publication --------------------------------------------------------------
@@ -763,16 +768,19 @@ fn source_of(file: &str) -> String {
 /// check cannot go vacuous if a function is emptied or renamed.)
 #[test]
 fn no_ticket_for_input_resize_close() {
-    let terminals = source_of("terminals.rs");
-    for (signature, still_does) in [
-        ("pub fn host_write(", "write_stdin"),
-        ("pub fn host_resize(", ".resize("),
-        ("pub fn host_close(", ".close("),
-        ("pub fn host_repaint(", "nudge_repaint"),
-        ("pub(crate) fn surface_host_orphans(", "reserve_host_session"),
-        ("async fn run_host_restore_sweep(", "list_sessions"),
+    for (file, signature, still_does) in [
+        ("terminals.rs", "pub fn host_write(", "route_write"),
+        ("terminals.rs", "pub fn host_resize(", "route_resize"),
+        ("terminals.rs", "pub fn host_close(", "route_close"),
+        ("terminals.rs", "pub fn host_repaint(", "route_repaint"),
+        ("host_registry.rs", "pub(super) fn route_write(", "write_stdin"),
+        ("host_registry.rs", "pub(super) fn route_resize(", ".resize("),
+        ("host_registry.rs", "pub(super) fn route_close(", ".close("),
+        ("host_registry.rs", "pub(super) fn route_repaint(", "nudge_repaint"),
+        ("host_adoption/panes.rs", "pub(in crate::state) fn surface_orphans<", "reserve_session"),
+        ("host_adoption/sweep.rs", "pub(in crate::state) async fn sweep<", "list_sessions"),
     ] {
-        let body = fn_body(&terminals, signature);
+        let body = fn_body(&source_of(file), signature);
         assert!(body.contains(still_does), "{signature} no longer does `{still_does}` — update this census");
         for forbidden in ["host_table", ".begin(", "begin_adoption", "begin_as_quiescer", "Ticket"] {
             assert!(!body.contains(forbidden), "{signature} must not take a ticket (found `{forbidden}`)");
@@ -780,31 +788,69 @@ fn no_ticket_for_input_resize_close() {
     }
 }
 
-/// The only code in the state module that takes a ticket is adoption and the
-/// router, which takes one per create.
-#[test]
-fn only_adoption_takes_a_ticket_in_the_state_module() {
+/// Every file under `dir` (relative to `src`) that is production code, as
+/// `(path relative to src, production text)`.
+fn production_files_under(dir: &str, out: &mut Vec<(String, String)>) {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut entries: Vec<_> = std::fs::read_dir(root.join(dir))
+        .unwrap_or_else(|e| panic!("cannot read {dir} ({e})"))
+        .map(|e| e.unwrap().path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        let relative = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        if path.is_dir() {
+            production_files_under(&relative, out);
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let is_test_file = name.ends_with("_tests.rs") || matches!(name.as_str(), "tests.rs" | "fake_hosts.rs" | "source_scan.rs");
+        if name.ends_with(".rs") && !is_test_file {
+            out.push((relative, production(&std::fs::read_to_string(&path).unwrap())));
+        }
+    }
+}
+
+/// Which files take an admission ticket, and by which call.
+fn ticket_takers(sources: &[(String, String)]) -> Vec<String> {
     let mut takers = Vec::new();
-    for file in [
-        "terminals.rs",
-        "host_port.rs",
-        "host_connect.rs",
-        "host_registry.rs",
-        "host_adoption.rs",
-        "host_routing.rs",
-        "types.rs",
-    ] {
-        let src = source_of(file);
+    for (file, text) in sources {
         for needle in [".begin(", ".begin_adoption(", ".begin_as_quiescer("] {
-            if src.contains(needle) {
+            if text.contains(needle) {
                 takers.push(format!("{file}: {needle}"));
             }
         }
     }
+    takers
+}
+
+/// The only code under `state` and `commands` that takes a ticket is adoption, the
+/// router (one per create) and the lifecycle's hold, which registers an arm as an
+/// operation in flight so that an exit waits for it. The files are found by
+/// walking the directories, so a new one that takes a ticket is seen.
+#[test]
+fn only_adoption_takes_a_ticket_in_the_state_module() {
+    let mut sources = Vec::new();
+    for dir in ["state", "commands"] {
+        production_files_under(dir, &mut sources);
+    }
+    for expected in ["state/host_adoption.rs", "state/host_lifecycle.rs", "state/terminals.rs", "commands/terminal.rs"] {
+        assert!(sources.iter().any(|(file, _)| file == expected), "{expected} was not scanned: the census would be vacuous");
+    }
     assert_eq!(
-        takers,
-        vec!["host_adoption.rs: .begin_adoption(".to_string(), "host_routing.rs: .begin(".to_string()]
+        ticket_takers(&sources),
+        vec![
+            "state/host_adoption.rs: .begin_adoption(".to_string(),
+            "state/host_lifecycle.rs: .begin_as_quiescer(".to_string(),
+            "state/host_routing.rs: .begin(".to_string(),
+        ]
     );
+}
+
+#[test]
+fn a_planted_ticket_taker_is_seen() {
+    let planted = [("commands/terminal.rs".to_string(), production("fn sneaky(s: &S) { let _t = s.host_table.begin(c); }"))];
+    assert_eq!(ticket_takers(&planted), vec!["commands/terminal.rs: .begin(".to_string()]);
 }
 
 // ---- registry ---------------------------------------------------------------

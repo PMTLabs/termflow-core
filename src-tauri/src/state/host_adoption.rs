@@ -15,7 +15,7 @@
 //! Everything here runs against [`AdoptionPort`], which `AppState` implements,
 //! so the ordering and timing rules are testable without a Tauri `AppHandle`.
 
-use super::host_table::{HostTable, LIFECYCLE_BUSY};
+use super::host_table::{Admission, HostTable, QuiesceReason, LIFECYCLE_BUSY};
 use super::types::FrozenHost;
 use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::{HostCandidate, HostRole, PtyHostClient};
@@ -76,10 +76,14 @@ struct Entry {
     resolution: Resolution,
     /// An attempt is in flight for this host, or its connection dropped after it
     /// was adopted. Either way no discovery round starts another attempt on it,
-    /// so nothing else may assume a retry is coming. A dropped connection is not
-    /// retried at all yet: the host stays unresolved until a reconnect of that one
-    /// host exists to settle it.
+    /// so nothing else may assume a retry is coming. A dropped connection is
+    /// settled by that one host's reconnect, never by a discovery round.
     retry_pending: bool,
+    /// A reconnect of this host is running. At most one is, whoever asks.
+    reconnecting: bool,
+    /// Someone asked for a reconnect while one was running: the connection it was
+    /// about to replace is not the one that dropped last.
+    reconnect_again: bool,
 }
 
 struct BarrierShared {
@@ -131,6 +135,8 @@ impl Barrier {
                         role: candidate.role,
                         resolution: Resolution::Unresolved("not connected yet".into()),
                         retry_pending: false,
+                        reconnecting: false,
+                        reconnect_again: false,
                     });
                 }
             }
@@ -196,6 +202,8 @@ impl Barrier {
                     role,
                     resolution,
                     retry_pending: false,
+                    reconnecting: false,
+                    reconnect_again: false,
                 }),
             }
         }
@@ -220,15 +228,30 @@ impl Barrier {
     }
 
     /// The connection to a resolved host dropped: what it holds is unknown again.
-    /// A rediscovery does not retry it (`retry_pending` stays set), and there is no
-    /// reconnect of a single older host yet, so until one exists it keeps holding
-    /// every pane that waits for the hosts to answer.
+    /// A rediscovery does not retry it (`retry_pending` stays set): the host's own
+    /// reconnect does, and until that settles it the host keeps holding every pane
+    /// that waits for the hosts to answer.
     pub fn mark_lost(&self, key: &str, reason: &str) {
         if let Some(entry) = self.lock().iter_mut().find(|e| e.key == key) {
             entry.resolution = Resolution::Unresolved(reason.to_owned());
             entry.retry_pending = true;
         }
         self.notify();
+    }
+
+    /// Claim the right to reconnect `key`. `None` when a reconnect of it is
+    /// already running; that one is told (see [`ReconnectGuard::rerun`]) that
+    /// another was asked for. The claim is released when the guard is dropped.
+    pub fn begin_reconnect(&self, key: &str) -> Option<ReconnectGuard<'_>> {
+        if let Some(entry) = self.lock().iter_mut().find(|e| e.key == key) {
+            if entry.reconnecting {
+                entry.reconnect_again = true;
+                return None;
+            }
+            entry.reconnecting = true;
+            entry.reconnect_again = false;
+        }
+        Some(ReconnectGuard { barrier: self, key: key.to_owned(), released: false })
     }
 
     pub fn unresolved(&self) -> Vec<UnresolvedHost> {
@@ -266,9 +289,44 @@ impl Barrier {
     }
 }
 
+/// Releases a host's reconnect claim, however the reconnect ends.
+pub struct ReconnectGuard<'a> {
+    barrier: &'a Barrier,
+    key: String,
+    released: bool,
+}
+
+impl ReconnectGuard<'_> {
+    /// Was a reconnect asked for while this one ran? If so the claim is kept and
+    /// the caller must run again; if not the claim is released here, in the same
+    /// step, so a request cannot slip in between the answer and the release.
+    pub fn rerun(&mut self) -> bool {
+        let mut entries = self.barrier.lock();
+        let Some(entry) = entries.iter_mut().find(|e| e.key == self.key) else { return false };
+        if std::mem::take(&mut entry.reconnect_again) {
+            return true;
+        }
+        entry.reconnecting = false;
+        self.released = true;
+        false
+    }
+}
+
+impl Drop for ReconnectGuard<'_> {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Some(entry) = self.barrier.lock().iter_mut().find(|e| e.key == self.key) {
+            entry.reconnecting = false;
+            entry.reconnect_again = false;
+        }
+    }
+}
+
 /// A frozen host's connection dropped. Only the connection currently published
-/// for the host may act on it: a callback from a superseded connection is inert.
-/// Returns whether it acted.
+/// for the host may act on it: a callback from a superseded connection is inert,
+/// and so is one from a host that has been retired. Returns whether it acted.
 pub(super) fn frozen_connection_lost(
     table: &HostTable,
     barrier: &Barrier,
@@ -276,7 +334,8 @@ pub(super) fn frozen_connection_lost(
     epoch: u64,
     endpoint: &str,
 ) -> bool {
-    if !table.is_current(HostChannel::Frozen(id), epoch) {
+    let channel = HostChannel::Frozen(id);
+    if !table.is_current(channel, epoch) || table.admission(channel) == Some(Admission::Retired) {
         return false;
     }
     barrier.mark_lost(&barrier_key(endpoint), "connection lost");
@@ -386,31 +445,52 @@ fn resolution_of(listing: &Option<Vec<SessionMeta>>) -> Resolution {
     }
 }
 
+/// What an adoption found out, and which connection it found it through.
+struct Adopted {
+    resolution: Resolution,
+    channel: HostChannel,
+    /// The connection the listing was asked of. If another one has been
+    /// published for the host since, the answer is out of date.
+    epoch: u64,
+}
+
 /// Connect (or re-list) one host and publish it. The single implementation of
-/// adopting a host, for both roles.
+/// adopting a host, for both roles. A frozen host that is already registered is
+/// reconnected under its own id, so the panes that name it keep resolving.
 async fn adopt<P: AdoptionPort>(
     port: &P,
     candidate: &HostCandidate,
     role: HostRole,
     deadline: Instant,
-) -> Result<Resolution, Failure> {
+) -> Result<Adopted, Failure> {
     // Held for the whole adoption so a quiesce waits for it; refused outright
     // once exit, offload or update has closed admission.
     let _ticket = port.table().begin_adoption().map_err(|busy| Failure::Other(busy.to_string()))?;
     let key = barrier_key(&candidate.endpoint);
 
+    let registered = match role {
+        HostRole::Current => None,
+        HostRole::Frozen => frozen_for(port, &key),
+    };
     let existing = match role {
         HostRole::Current => port.current_client().map(|c| (HostChannel::Primary, c)),
-        HostRole::Frozen => frozen_for(port, &key).map(|h| (HostChannel::Frozen(h.id), h.client)),
+        HostRole::Frozen => registered
+            .clone()
+            .filter(|h| h.client.is_alive())
+            .map(|h| (HostChannel::Frozen(h.id), h.client)),
     };
     if let Some((channel, client)) = existing {
         // Already connected; only its listing is missing.
+        let epoch = port.table().epoch(channel).unwrap_or(0);
         let listing = settle(&client, deadline).await;
         port.apply_listing(channel, &client, listing.as_deref());
-        return Ok(resolution_of(&listing));
+        return Ok(Adopted { resolution: resolution_of(&listing), channel, epoch });
     }
 
-    let frozen = (role == HostRole::Frozen).then(|| (port.next_frozen_id(), port.table().reserve_epoch()));
+    let frozen = (role == HostRole::Frozen).then(|| {
+        let id = registered.map_or_else(|| port.next_frozen_id(), |h| h.id);
+        (id, port.table().reserve_epoch())
+    });
     let opened = tokio::time::timeout_at(deadline, port.connect(candidate, role, frozen))
         .await
         .map_err(|_| Failure::Other("timed out connecting to the terminal host".to_string()))?
@@ -420,13 +500,17 @@ async fn adopt<P: AdoptionPort>(
         })?;
     let client = opened.client;
     let listing = settle(&client, deadline).await;
-    match (role, frozen) {
+    let (channel, epoch) = match (role, frozen) {
         (HostRole::Frozen, Some((id, epoch))) => {
             let channel = HostChannel::Frozen(id);
             port.apply_listing(channel, &client, listing.as_deref());
             // Admission first, as for the current host below: a create that sees the
-            // client must find a slot to take a ticket on.
-            publish_admission(port, channel, epoch);
+            // client must find a slot to take a ticket on. A host retired while it
+            // was being reconnected must not be brought back by the connection.
+            if !publish_admission(port, channel, epoch) {
+                client.close_transport().await;
+                return Err(Failure::Superseded);
+            }
             port.publish_frozen(FrozenHost {
                 id,
                 generation: candidate.generation.clone(),
@@ -443,6 +527,7 @@ async fn adopt<P: AdoptionPort>(
                 frozen_connection_lost(port.table(), port.barrier(), id, epoch, &candidate.endpoint);
                 return Err(Failure::ConnectionLost);
             }
+            (channel, epoch)
         }
         _ => {
             port.apply_listing(HostChannel::Primary, &client, listing.as_deref());
@@ -450,17 +535,21 @@ async fn adopt<P: AdoptionPort>(
             // take a ticket on, or it would pass the host over.
             publish_admission(port, HostChannel::Primary, opened.epoch);
             port.publish_current(&client).map_err(Failure::Other)?;
+            (HostChannel::Primary, opened.epoch)
         }
-    }
-    Ok(resolution_of(&listing))
+    };
+    Ok(Adopted { resolution: resolution_of(&listing), channel, epoch })
 }
 
 /// Open `channel` for admission on `epoch`. The table leaves a host that is
-/// draining or retired as it is; an adoption must not do that silently.
-fn publish_admission<P: AdoptionPort>(port: &P, channel: HostChannel, epoch: u64) {
-    if !port.table().publish(channel, epoch) {
+/// draining or retired as it is, and says so; an adoption must not do that
+/// silently.
+fn publish_admission<P: AdoptionPort>(port: &P, channel: HostChannel, epoch: u64) -> bool {
+    let admitted = port.table().publish(channel, epoch);
+    if !admitted {
         log::warn!("[GEN] {channel:?} is draining or retired; its connection was not opened for admission");
     }
+    admitted
 }
 
 /// How an adoption ended without a listing.
@@ -468,6 +557,8 @@ enum Failure {
     /// The connection dropped after the host was adopted; the barrier already
     /// says so (`frozen_connection_lost`), and recording a failure would undo it.
     ConnectionLost,
+    /// The host was retired while it was being reconnected.
+    Superseded,
     /// Nothing listens on the host's endpoint.
     EndpointGone(String),
     Other(String),
@@ -477,6 +568,7 @@ impl Failure {
     fn into_message(self) -> String {
         match self {
             Failure::ConnectionLost => CONNECTION_LOST.to_string(),
+            Failure::Superseded => "the terminal host was retired".to_string(),
             Failure::EndpointGone(reason) | Failure::Other(reason) => reason,
         }
     }
@@ -513,7 +605,12 @@ async fn attempt<P: AdoptionPort>(
     let mut guard = AttemptGuard { barrier: port.barrier(), key: &key, recorded: false };
     let outcome = adopt(&port, &candidate, role, deadline).await;
     match &outcome {
-        Ok(resolution) => port.barrier().finish(&key, &candidate.endpoint, role, resolution.clone()),
+        // The host was reconnected while this listing was in flight: the newer
+        // connection recorded its own answer, which this older one must not undo.
+        Ok(done) if !port.table().is_current(done.channel, done.epoch) => {
+            log::info!("[GEN] discarding a listing of {} from a superseded connection", candidate.endpoint);
+        }
+        Ok(done) => port.barrier().finish(&key, &candidate.endpoint, role, done.resolution.clone()),
         // A dropped connection is left as the drop callback recorded it.
         Err(Failure::ConnectionLost) => {}
         // Discovery found this endpoint without any process behind it (an old
@@ -564,25 +661,57 @@ pub(super) async fn rediscover_hosts<P: AdoptionPort>(port: &P) -> Result<(), St
     round(port, Wait::All).await
 }
 
+/// Wait until admission is open again. `false` when it will never reopen because
+/// the app is exiting.
+///
+/// For the backend operations that take a ticket (a reconnect among them): being
+/// refused because of an exit, offload or update is no verdict on the host, so it
+/// is neither retried against a backoff nor taken as the host being gone.
+pub(super) async fn wait_for_reopen(table: &HostTable) -> bool {
+    const POLL: Duration = Duration::from_millis(500);
+    loop {
+        match table.lifecycle_reason() {
+            None => return true,
+            Some(QuiesceReason::Exit) => return false,
+            Some(_) => tokio::time::sleep(POLL).await,
+        }
+    }
+}
+
 /// Get the current host connected again after its connection dropped, waiting
 /// `backoff_ms[i]` milliseconds after attempt `i` fails. Whether the current host
 /// is back is asked of the published client, not of `ensure_hosts`: that also
 /// succeeds when only an older host is usable, which is no help to the panes
 /// that were on the current one.
+///
+/// An attempt refused because admission is closed (`LIFECYCLE_BUSY`) waits for it
+/// to reopen and does not use up a backoff step; `false` then means the app is
+/// exiting, not that the host could not be had.
 pub(super) async fn reconnect_current<P: AdoptionPort>(port: &P, backoff_ms: &[u64]) -> bool {
-    for (i, ms) in backoff_ms.iter().enumerate() {
+    let mut step = 0;
+    while step < backoff_ms.len() {
+        let ms = backoff_ms[step];
         // A concurrent create may already have reconnected; otherwise try here.
-        if port.current_client().is_some()
-            || (ensure_hosts(port).await.is_ok() && port.current_client().is_some())
-        {
+        if port.current_client().is_some() {
             return true;
+        }
+        match ensure_hosts(port).await {
+            Ok(()) if port.current_client().is_some() => return true,
+            Err(e) if e.starts_with(LIFECYCLE_BUSY) => {
+                if !wait_for_reopen(port.table()).await {
+                    return false;
+                }
+                continue;
+            }
+            _ => {}
         }
         log::warn!(
             "[HOTSWAP] reconnect attempt {}/{} failed; retrying in {ms}ms",
-            i + 1,
+            step + 1,
             backoff_ms.len()
         );
-        tokio::time::sleep(Duration::from_millis(*ms)).await;
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+        step += 1;
     }
     false
 }
@@ -625,6 +754,8 @@ async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
         for (candidate, role) in frozen {
             let key = barrier_key(&candidate.endpoint);
             let connected = frozen_for(port, &key);
+            // A registered host whose connection is down is not retried here: its own
+            // reconnect (`reconnect_frozen`) does that, one host at a time.
             let wanted = match &connected {
                 None => true,
                 Some(host) => host.client.is_alive() && port.barrier().needs_attempt_for(&key),
@@ -672,9 +803,28 @@ async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
     }
 }
 
+mod panes;
+mod reconnect;
+mod sweep;
+
+#[cfg(all(test, feature = "integration-tests"))]
+pub(super) use panes::surface_orphans;
+pub(super) use panes::PanePort;
+pub(super) use reconnect::{reconnect_frozen, reconnect_primary, RECONNECT_BACKOFF_MS};
+pub(super) use sweep::sweep;
+
 #[cfg(test)]
 mod fake_hosts;
 #[cfg(test)]
 mod adoption_tests;
 #[cfg(test)]
+mod live_tests;
+#[cfg(test)]
+mod reconnect_tests;
+#[cfg(test)]
+mod sweep_tests;
+#[cfg(test)]
 mod routing_tests;
+// The lifecycle tests drive the same fake hosts through `host_lifecycle`.
+#[cfg(test)]
+mod lifecycle_tests;
