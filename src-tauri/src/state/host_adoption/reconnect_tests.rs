@@ -462,6 +462,77 @@ async fn a_connection_that_drops_during_its_own_reconnect_is_reconnected_again()
     assert!(torn_down(&port).is_empty());
 }
 
+#[tokio::test]
+async fn an_answered_second_listing_that_loses_its_pipe_keeps_the_queued_reconnect() {
+    let gate = Arc::new(ListGate::default());
+    let recovered = Arc::new(ListGate::default());
+    let world = World::new();
+    world.add_host(CURRENT, HostSpec::default());
+    world.add_host("h1", holding(&[("k1", 731)]));
+    let port = FakePort::new(&world, CURRENT);
+    port.set_candidates(vec![candidate(CURRENT, HostRole::Current), candidate("h1", HostRole::Frozen)]);
+    rediscover_hosts(&port).await.unwrap();
+    let id = frozen_id(&port, "h1");
+    let channel = HostChannel::Frozen(id);
+    port.register_terminal("pc-1", "k1", channel);
+    let lost = epoch_of(&port, id);
+    let old_client = port.frozen_hosts().into_iter().find(|h| h.id == id).unwrap().client;
+    world.kill_connections("h1");
+    tokio::time::timeout(secs(2), async {
+        while old_client.is_alive() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    world.add_host("h1", HostSpec {
+        list: ListBehavior::GatedAfter { answered: 0, gate: gate.clone() },
+        ..holding(&[("k1", 731)])
+    });
+    let reconnect = tokio::spawn({ let port = port.clone(); async move {
+        reconnect_frozen(&port, id, lost, &[0]).await
+    } });
+    tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
+    // Only the second listing includes this newly appeared, unclaimed shell.
+    *gate.after_answer.lock().unwrap() = Some(Box::new({ let world = world.clone(); move || {
+        world.begin_session("h1", meta("stale-orphan", 732));
+    } }));
+    gate.release.notify_one();
+    tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
+    let second = epoch_of(&port, id);
+    assert_ne!(second, lost);
+    *gate.after_answer.lock().unwrap() = Some(Box::new({
+        let world = world.clone();
+        let port = port.clone();
+        let recovered = recovered.clone();
+        move || {
+            world.kill_connections("h1");
+            world.end_session("h1", "stale-orphan");
+            // Model the drop callback's reconnect notification synchronously so
+            // it is queued before the answered listing is consumed.
+            assert!(port.barrier().begin_reconnect(&barrier_key("h1")).is_none());
+            world.add_host("h1", HostSpec {
+                list: ListBehavior::GatedAfter { answered: 0, gate: recovered },
+                ..holding(&[("k1", 731)])
+            });
+        }
+    }));
+    gate.release.notify_one();
+    tokio::time::timeout(secs(2), recovered.reached.notified()).await.unwrap();
+    assert_eq!(port.connect_count("h1"), 3, "initial adoption and both reconnects");
+    assert_eq!(world.count_everywhere("Attach"), 0, "the stale listing must not reattach");
+    assert_eq!(world.count_everywhere("Close"), 0);
+    assert_eq!(port.0.listings.lock().unwrap().len(), 3, "current, initial frozen, and first reconnect adoption only");
+    assert_eq!(port.0.claims.len(), 1, "no stale orphan claims were added");
+    recovered.release.notify_one();
+    // The second listing on the final connection uses the same gate.
+    tokio::time::timeout(secs(2), recovered.reached.notified()).await.unwrap();
+    recovered.release.notify_one();
+    assert_eq!(tokio::time::timeout(secs(2), reconnect).await.unwrap().unwrap(), FrozenReconnect::Reconnected);
+    let host = port.frozen_hosts().into_iter().find(|h| h.id == id).unwrap();
+    assert!(host.client.is_alive());
+    assert!(port.table().is_current(channel, host.epoch));
+    assert_ne!(host.epoch, second);
+    assert_eq!(world.sessions("h1", "Attach"), ["k1"]);
+    assert!(torn_down(&port).is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_reconnect_asked_for_while_one_runs_is_not_run_a_second_time_when_the_host_is_back() {
     let (world, port) = adopted(HostSpec::default(), &[("h1", holding(&[("k1", 11)]))]).await;

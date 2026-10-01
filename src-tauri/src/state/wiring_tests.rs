@@ -37,6 +37,8 @@ fn census(needle: &str, classified: &[(&str, &str)]) {
     assert_eq!(actual, expected, "every `{needle}` expression needs a routing classification");
 }
 
+/// Lexical inventory of listing call sites; fence efficacy is proven by the
+/// behavioural regressions, not by this census.
 #[test]
 fn listing_side_effect_callers_share_post_await_validation() {
     census(".apply_listing(", &[("state/host_adoption.rs", "apply_validated_listing")]);

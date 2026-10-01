@@ -162,14 +162,18 @@ pub(in crate::state) async fn reconnect_frozen<P: PanePort>(
             (FrozenReconnect::Inert, Some(earlier)) => earlier,
             (outcome, _) => outcome,
         };
-        if outcome != FrozenReconnect::Reconnected || !claim.rerun() {
+        // Even a superseded answer can have a newer drop queued behind it.
+        // Release/check the claim on every exit, not just successful reconciliation.
+        if !claim.rerun() {
             return outcome;
         }
         log::info!(
             "[GEN] terminal host {} dropped again while it was being reconnected; reconnecting again",
             host.endpoint
         );
-        reconnected = Some(outcome);
+        if outcome == FrozenReconnect::Reconnected {
+            reconnected = Some(outcome);
+        }
     }
 }
 

@@ -214,6 +214,47 @@ async fn the_count_sums_answered_hosts_and_local_shells_and_flags_an_unanswered_
     assert_eq!(silent.shell_count, 2 + 3, "and what it might hold is not counted as if it were known");
 }
 
+#[tokio::test]
+async fn a_fast_scope_reply_is_revalidated_after_the_slow_host_answers() {
+    for change in ["epoch", "admission", "pipe"] {
+        let gate = Arc::new(ListGate::default());
+        let world = World::new();
+        world.add_host(CURRENT, holding(&[("fast-shell", 731)]));
+        world.add_host("slow", HostSpec {
+            list: ListBehavior::GatedAfter { answered: 1, gate: gate.clone() },
+            ..holding(&[("slow-shell", 732)])
+        });
+        let port = FakePort::new(&world, CURRENT);
+        port.set_candidates(vec![candidate(CURRENT, HostRole::Current), candidate("slow", HostRole::Frozen)]);
+        rediscover_hosts(&port).await.unwrap();
+        let fast = port.current_client().unwrap();
+        let scope = tokio::spawn({ let port = port.clone(); async move { asked(&port, &marked()).await } });
+        tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
+        // The reader processes this response after the fast scope response. Give
+        // the aggregate future its turn while the slow response is still gated.
+        assert_eq!(fast.list_sessions().await.unwrap(), [meta("fast-shell", 731)]);
+        tokio::task::yield_now().await;
+        assert!(!scope.is_finished(), "the slow host still holds the aggregate await");
+        match change {
+            "epoch" => {
+                assert!(port.table().publish(HostChannel::Primary, port.table().reserve_epoch()));
+            }
+            "admission" => port.table().drain_host(HostChannel::Primary).unwrap().retire(),
+            "pipe" => {
+                world.kill_connections(CURRENT);
+                tokio::time::timeout(secs(2), async {
+                    while fast.is_alive() { tokio::task::yield_now().await; }
+                }).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        gate.release.notify_one();
+        let asked = tokio::time::timeout(secs(2), scope).await.unwrap().unwrap();
+        assert_eq!((asked.shell_count, asked.unknown), (1, true), "{change}: only the slow host is authoritative");
+        assert_eq!(events(&port), ["siblings"], "no updater or closure effects");
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_token_that_differs_in_any_field_asks_again() {
     let (world, port, token) = agreed(&two_old_hosts()).await;

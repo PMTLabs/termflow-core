@@ -184,19 +184,21 @@ async fn scope_of<P: FullUpdatePort>(port: &P, hosts: &[OwnedHost]) -> Scope {
         let epoch = port.table().epoch(channel)?;
         let client = host.client.as_ref()?;
         let sessions = client.list_sessions_within(SCOPE_LIST_BOUND).await?;
-        listing_is_current(port.table(), channel, epoch, client, Admission::Open).then_some(sessions)
+        Some((channel, epoch, client, sessions))
     }))
     .await;
     let mut shell_count = port.local_shells();
     let mut unknown = false;
     for answer in answers {
         match answer {
-            Some(sessions) => {
+            // A fast reply may have become stale while another host was listing.
+            Some((channel, epoch, client, sessions))
+                if listing_is_current(port.table(), channel, epoch, client, Admission::Open) => {
                 let live = sessions.iter().filter(|s| s.alive).count();
                 shell_count = shell_count.saturating_add(u32::try_from(live).unwrap_or(u32::MAX));
             }
             // A host that did not answer holds an unknown number: never none.
-            None => unknown = true,
+            _ => unknown = true,
         }
     }
     Scope { shell_count, unknown }
