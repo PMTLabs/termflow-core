@@ -8,10 +8,10 @@ use super::reconnect::FrozenReconnect;
 use super::*;
 use crate::state::host_lifecycle::exit_hosts;
 use crate::state::host_registry;
-use crate::state::host_retire::{EMPTY_FOR, TICK};
+use crate::state::host_retire::{start_ticker, EMPTY_FOR, TICK};
 use crate::state::host_routing::{place, Placement, HOST_OWNERSHIP_PENDING};
 use crate::state::host_table::{Admission, QuiesceReason};
-use crate::state::source_scan::{fn_body, production, without_test_modules};
+use crate::state::source_scan::{fn_body, production};
 use crate::state::types::HostSessionClaimState;
 use std::sync::atomic::Ordering;
 
@@ -44,15 +44,17 @@ fn machine(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
     (world, port)
 }
 
-/// Every host adopted, as after start-up, with the older ones watched for
-/// emptiness. Their clients announce an exit, as a real host's capabilities make
-/// them.
+/// Every host adopted, as after start-up, and then the older ones watched for
+/// emptiness, with the current host already up (the older ones are adopted beside
+/// it, so a look made while that is still going on would not see it). Their
+/// clients announce an exit, as a real host's capabilities make them.
 async fn retiring(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
     let (world, port) = machine(old);
-    port.enable_retirement();
     rediscover_hosts(&port).await.unwrap();
+    port.enable_retirement();
     for host in port.frozen_hosts() {
         host.client.set_shutdown_control(true);
+        start_ticker(&port, host.id);
     }
     (world, port)
 }
@@ -105,9 +107,9 @@ async fn unregistered_orphan_exit_retires_within_15s_via_ticker() {
     assert!(at <= secs(15), "retired {at:?} after its last session ended; the limit is 15 s");
     let kinds = world.kinds("h1");
     assert_eq!(
-        &kinds[kinds.len() - 3..],
-        ["List", "Shutdown", "Eof"],
-        "one more look under the closure, then the shutdown, then the stream closed"
+        &kinds[kinds.len() - 4..],
+        ["List", "List", "Shutdown", "Eof"],
+        "the look that found it empty, the one more look under the closure, then the shutdown, then the stream closed"
     );
     assert_eq!(port.0.table.admission(h1), Some(Admission::Retired));
     assert_eq!(registered_endpoints(&port), ["h2"], "only h1 left the registry");
@@ -131,10 +133,29 @@ async fn host_adopted_empty_is_retired_ten_seconds_after_adoption() {
     assert_eq!(world.count("h1", "Shutdown"), 0);
     tokio::time::sleep(secs(5)).await;
 
+    // Looks at 0, 5 and 10 s: the first is at once, so ten seconds of emptiness have
+    // been seen by the third, not the fourth.
     let at = first_after(&world, "h1", "Shutdown", adopted).expect("retired");
-    assert!((EMPTY_FOR..=EMPTY_FOR + TICK).contains(&at), "{at:?}");
+    assert!(at >= EMPTY_FOR && at <= EMPTY_FOR + secs(1), "retired {at:?} after adoption");
     assert_eq!(world.count("h2", "Shutdown"), 0, "a host with a live session stays");
     assert_eq!(registered_endpoints(&port), ["h2"]);
+}
+
+/// Adopting an older host is what starts its ticker: nothing else is told about it.
+#[tokio::test(start_paused = true)]
+async fn adoption_alone_starts_the_ticker_that_retires_an_empty_host() {
+    let (world, port) = machine(&[("h1", HostSpec::default()), ("h2", holding(&[("k2", 22)]))]);
+    port.enable_retirement();
+    rediscover_hosts(&port).await.unwrap();
+    for host in port.frozen_hosts() {
+        host.client.set_shutdown_control(true);
+    }
+    let adopted = Instant::now();
+
+    tokio::time::sleep(secs(30)).await;
+    let at = first_after(&world, "h1", "Shutdown", adopted).expect("retired, though nobody started a ticker but adoption");
+    assert!(at >= EMPTY_FOR && at <= EMPTY_FOR + TICK + secs(1), "{at:?}");
+    assert_eq!(world.count("h2", "Shutdown"), 0);
 }
 
 /// The session is gone, or listed dead, by the time anyone asks: nothing is
@@ -303,6 +324,98 @@ async fn a_retired_host_is_not_adopted_again_while_its_process_lingers() {
     assert!(!port.barrier().is_retired(&key));
 }
 
+// ---- the final check under the closure -----------------------------------------
+
+/// The final look is made with admission closed, and the host is retired only if
+/// it still finds the host empty. Ten seconds of emptiness have been seen at the
+/// third look; the last one then comes back unanswered, or with a session.
+#[tokio::test(start_paused = true)]
+async fn a_final_check_that_is_unanswered_keeps_the_host_and_reopens_it() {
+    // Answers the adoption's listing and the looks at 0, 5 and 10 s, then nothing.
+    let goes_quiet = HostSpec { list: ListBehavior::AnswerFirst(4), ..HostSpec::default() };
+    let (world, port) = retiring(&[("h1", goes_quiet), ("h2", holding(&[("k2", 22)]))]).await;
+    let h1 = channel_of(&port, "h1");
+
+    tokio::time::sleep(secs(10) + millis(200)).await;
+    assert_eq!(port.0.table.admission(h1), Some(Admission::Draining), "the final check is under way");
+    tokio::time::sleep(secs(60)).await;
+
+    for kind in ["Shutdown", "Eof", "Close"] {
+        assert_eq!(world.count("h1", kind), 0, "{kind}: an unanswered final check is not an empty host");
+    }
+    assert_eq!(port.0.table.admission(h1), Some(Admission::Open), "the host was reopened");
+    assert!(registered_endpoints(&port).contains(&"h1".to_string()));
+    assert!(port.0.table.begin(h1).is_ok(), "and takes new sessions again");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_final_check_that_finds_a_session_keeps_the_host_and_reopens_it() {
+    // Looks at 0, 5 and 10 s answer at once; the final check is slow, and a session
+    // appears on the host while it is being waited for.
+    let slow_check = HostSpec { list: ListBehavior::SlowAfter { answered: 4, delay: secs(1) }, ..HostSpec::default() };
+    let (world, port) = retiring(&[("h1", slow_check), ("h2", holding(&[("k2", 22)]))]).await;
+    let h1 = channel_of(&port, "h1");
+
+    tokio::time::sleep(secs(10) + millis(200)).await;
+    assert_eq!(port.0.table.admission(h1), Some(Admission::Draining), "the final check is under way");
+    world.begin_session("h1", meta("k9", 99));
+    tokio::time::sleep(secs(40)).await;
+
+    for kind in ["Shutdown", "Eof", "Close"] {
+        assert_eq!(world.count("h1", kind), 0, "{kind}: the host holds a running session");
+    }
+    assert_eq!(port.0.table.admission(h1), Some(Admission::Open));
+    assert!(registered_endpoints(&port).contains(&"h1".to_string()));
+}
+
+// ---- the current host is down ------------------------------------------------
+
+/// While the current host is down an older host is where new terminals go, so an
+/// empty one is kept; once the current host is back the host is retired like any
+/// other, after ten fresh seconds of emptiness.
+#[tokio::test(start_paused = true)]
+async fn an_older_host_is_kept_while_the_current_host_is_down_and_retired_after_it_returns() {
+    let (world, port) = retiring(&[("h1", HostSpec::default())]).await;
+    let h1 = channel_of(&port, "h1");
+    port.drop_current();
+    world.set_unreachable(CURRENT, true);
+
+    tokio::time::sleep(secs(60)).await;
+    for kind in ["Shutdown", "Eof"] {
+        assert_eq!(world.count("h1", kind), 0, "{kind}: h1 is the only host a new terminal can go to");
+    }
+    match place(&port, "tm-fresh", false).await.unwrap() {
+        Placement::Spawn { channel, .. } => assert_eq!(channel, h1, "the new terminal lands on the older host"),
+        _ => panic!("the older host is usable, so the terminal must not run in this process"),
+    }
+
+    world.set_unreachable(CURRENT, false);
+    rediscover_hosts(&port).await.unwrap();
+    assert!(port.current_client().is_some(), "the current host is back");
+    let back = Instant::now();
+    tokio::time::sleep(secs(9)).await;
+    assert_eq!(world.count("h1", "Shutdown"), 0, "the clock starts when the current host returns");
+    tokio::time::sleep(secs(7)).await;
+    let at = first_after(&world, "h1", "Shutdown", back).expect("retired once the current host is back");
+    assert!(at >= EMPTY_FOR, "{at:?}");
+}
+
+// ---- the barrier --------------------------------------------------------------
+
+#[test]
+fn forgetting_a_host_does_not_erase_its_retirement() {
+    let barrier = Barrier::new();
+    let key = barrier_key("h1");
+    barrier.mark_retired(&key, "h1");
+    barrier.forget(&key);
+    assert!(barrier.is_retired(&key), "the mark outlives a forget: the process may still be discoverable");
+
+    // A host that was not retired is forgotten as before.
+    barrier.finish(&barrier_key("h2"), "h2", HostRole::Frozen, Resolution::Resolved);
+    barrier.forget(&barrier_key("h2"));
+    assert!(!barrier.is_tracked(&barrier_key("h2")));
+}
+
 // ---- what is never retired ----------------------------------------------------
 
 /// A host that stops answering is unknown, not empty, and what had been seen
@@ -353,11 +466,12 @@ async fn a_host_with_no_connection_is_left_to_its_reconnect() {
     tokio::time::sleep(secs(1)).await;
     world.kill_connections("h1");
     tokio::time::sleep(secs(1)).await;
-    assert!(!port.frozen_hosts()[0].client.is_alive());
-    let frames = world.kinds("h1").len();
+    let client = port.frozen_hosts()[0].client.clone();
+    assert!(!client.is_alive());
 
     tokio::time::sleep(secs(60)).await;
-    assert_eq!(world.kinds("h1").len(), frames, "nothing is asked of a host nobody is connected to");
+    assert_eq!(client.pending_requests(), 0, "nothing is asked of a host nobody is connected to");
+    assert_eq!(world.count("h1", "Shutdown"), 0);
     assert_eq!(registered_endpoints(&port), ["h1"], "and it is not retired behind its reconnect's back");
 }
 
@@ -376,9 +490,9 @@ async fn a_single_current_host_has_no_ticker_and_sees_no_new_frames() {
 
 // ---- exit, offload and update -------------------------------------------------
 
-/// An offload or update holds the hosts armed, and asking an armed host for its
-/// sessions disarms it: while one is in force the hosts are not sampled, and what
-/// was seen before it does not count after.
+/// An offload or update holds the table, and a retirement cannot commit while it
+/// does: while one is in force the hosts are not sampled, and what was seen before
+/// it does not count after.
 #[tokio::test(start_paused = true)]
 async fn nothing_is_sampled_while_a_hold_is_in_force_and_the_clock_starts_over_after() {
     let (world, port) = retiring(&[("h1", HostSpec::default())]).await;
@@ -515,16 +629,37 @@ fn adopting_an_older_host_starts_its_ticker_and_nothing_else_does() {
     assert!(fn_body(&port, "fn frozen_adopted(").contains("host_retire::start_ticker(self, id)"));
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut startersite = Vec::new();
+    let mut sources = Vec::new();
     for dir in ["state", "commands"] {
-        scan(&root.join(dir), &root, &mut startersite);
+        scan(&root.join(dir), &root, &mut sources);
     }
-    assert!(startersite.iter().any(|(file, _)| file == "state/host_retire.rs"), "the census scanned nothing");
-    for (file, text) in &startersite {
-        for needle in ["list_sessions_within(", ".retire_when_open("] {
+    // (needle, the only files that may contain it). Each must be found in every
+    // file listed, or the census has gone vacuous.
+    for (needle, allowed) in [
+        // Only adoption (through the port's hook) starts a ticker, and only the
+        // ticker commits a retirement or places itself on a host's slot.
+        ("host_retire::start_ticker(", &["state/host_port.rs"][..]),
+        (".start_ticker(", &["state/host_retire.rs"][..]),
+        (".retire_when_open(", &["state/host_retire.rs"][..]),
+        // Bounded listings: the ticker's and adoption's own.
+        ("list_sessions_within(", &["state/host_retire.rs", "state/host_adoption.rs"][..]),
+    ] {
+        for (file, text) in &sources {
             if text.contains(needle) {
-                assert!(file == "state/host_retire.rs", "`{needle}` found in {file}: only the retirement ticker may do this");
+                assert!(allowed.contains(&file.as_str()), "`{needle}` found in {file}: not a place that may do this");
             }
+        }
+        for file in allowed {
+            let text = &sources.iter().find(|(f, _)| f == file).unwrap_or_else(|| panic!("{file} was not scanned")).1;
+            assert!(text.contains(needle), "{file} no longer contains `{needle}`: update this census");
+        }
+    }
+    // A timeout wrapped around a listing from outside would drop the request without
+    // removing it from the client's pending map; the bound belongs inside it.
+    assert!(sources.iter().any(|(_, text)| text.contains(".list_sessions(")), "no listing was found: vacuous");
+    for (file, text) in &sources {
+        for line in text.lines().filter(|l| l.contains("list_sessions")) {
+            assert!(!line.contains("timeout("), "{file}: a listing is bounded with `list_sessions_within`, not an outer timeout: {line}");
         }
     }
 }
@@ -540,7 +675,7 @@ fn scan(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<(String, St
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         if name.ends_with(".rs") && !name.ends_with("_tests.rs") && name != "fake_hosts.rs" {
             let relative = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
-            out.push((relative, without_test_modules(&std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n"))));
+            out.push((relative, production(&std::fs::read_to_string(&path).unwrap())));
         }
     }
 }

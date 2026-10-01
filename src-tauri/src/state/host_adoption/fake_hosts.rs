@@ -129,6 +129,8 @@ pub(super) struct World {
     hosts: Mutex<HashMap<String, (HostSpec, Vec<AbortHandle>)>>,
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
+    /// Sessions that began on their host after the world did: `(host, session)`.
+    begun: Arc<Mutex<Vec<(String, SessionMeta)>>>,
     /// Endpoints a host process was started for, in order.
     pub started_processes: Mutex<Vec<String>>,
     pub spawn_fails: AtomicBool,
@@ -143,6 +145,7 @@ impl World {
             hosts: Mutex::new(HashMap::new()),
             log: Arc::new(Mutex::new(Vec::new())),
             ended: Arc::new(Mutex::new(Vec::new())),
+            begun: Arc::new(Mutex::new(Vec::new())),
             started_processes: Mutex::new(Vec::new()),
             spawn_fails: AtomicBool::new(false),
             connect_panics: AtomicBool::new(false),
@@ -158,6 +161,12 @@ impl World {
         if let Some((spec, _)) = self.hosts.lock().unwrap().get_mut(endpoint) {
             spec.unreachable = unreachable;
         }
+    }
+
+    /// A new session starts on `host` by itself, as one does when something other
+    /// than this app spawns it: the host lists it from now on.
+    pub fn begin_session(&self, host: &str, session: SessionMeta) {
+        self.begun.lock().unwrap().push((host.to_owned(), session));
     }
 
     /// A session of `host` ends on its own, as a shell does when its program
@@ -193,6 +202,7 @@ impl World {
             self.started,
             self.log.clone(),
             self.ended.clone(),
+            self.begun.clone(),
             server,
         ));
         tasks.push(task.abort_handle());
@@ -253,6 +263,7 @@ async fn serve(
     world_start: Instant,
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
+    begun: Arc<Mutex<Vec<(String, SessionMeta)>>>,
     server: DuplexStream,
 ) {
     let (mut rd, mut wr) = tokio::io::split(server);
@@ -281,7 +292,7 @@ async fn serve(
                 };
                 // A session the host was told to close is no longer listed once its
                 // close has taken effect.
-                answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &ended, &host) })
+                answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &ended, &begun, &host) })
             }
             Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => Some(Response::Spawned { req, tab_id, pid: 4242 }),
             Frame::Ctrl(Control::AttachAcked { req, tab_id, .. }) => {
@@ -311,8 +322,16 @@ async fn serve(
 
 /// The sessions of `spec` that `host` has not closed yet: one is gone `close_lag`
 /// after the `Close` for it was received.
-fn still_open(spec: &HostSpec, log: &Mutex<Vec<Recorded>>, ended: &Mutex<Vec<Ended>>, host: &str) -> Vec<SessionMeta> {
+fn still_open(
+    spec: &HostSpec,
+    log: &Mutex<Vec<Recorded>>,
+    ended: &Mutex<Vec<Ended>>,
+    begun: &Mutex<Vec<(String, SessionMeta)>>,
+    host: &str,
+) -> Vec<SessionMeta> {
     let log = log.lock().unwrap();
+    let begun: Vec<SessionMeta> =
+        begun.lock().unwrap().iter().filter(|(h, _)| h == host).map(|(_, s)| s.clone()).collect();
     let ended = ended.lock().unwrap();
     let now = Instant::now();
     let ended_here = |key: &str| ended.iter().find(|e| e.host == host && e.session == key);
@@ -327,6 +346,7 @@ fn still_open(spec: &HostSpec, log: &Mutex<Vec<Recorded>>, ended: &Mutex<Vec<End
             }) && !ended_here(&s.tab_id).is_some_and(|e| !e.listed_dead)
         })
         .map(|s| SessionMeta { alive: s.alive && ended_here(&s.tab_id).is_none(), ..s.clone() })
+        .chain(begun)
         .collect()
 }
 

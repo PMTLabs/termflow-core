@@ -85,7 +85,9 @@ struct Entry {
     /// about to replace is not the one that dropped last.
     reconnect_again: bool,
     /// The host was retired: it is being shut down on purpose and must not be
-    /// adopted again while its process is still discoverable.
+    /// adopted again while its process is still discoverable. Whatever else is
+    /// recorded about it (an outcome, a `forget`), the mark stays until `sync`
+    /// finds the host gone.
     retired: bool,
 }
 
@@ -221,7 +223,7 @@ impl Barrier {
     /// holds the panes that wait for the hosts to answer. A later discovery that
     /// still finds its endpoint tracks it again and finds it gone again.
     pub fn forget(&self, key: &str) {
-        self.lock().retain(|e| e.key != key);
+        self.lock().retain(|e| e.key != key || e.retired);
         self.notify();
     }
 
@@ -462,7 +464,7 @@ async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<Vec<Session
             log::warn!("[GEN] host did not acknowledge the disarm");
         }
         for attempt in 0..LIST_ATTEMPTS {
-            if let Ok(Some(sessions)) = tokio::time::timeout(LIST_ATTEMPT_TIMEOUT, client.list_sessions()).await {
+            if let Some(sessions) = client.list_sessions_within(LIST_ATTEMPT_TIMEOUT).await {
                 return Some(sessions);
             }
             if !client.is_alive() {

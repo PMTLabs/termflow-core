@@ -1,12 +1,13 @@
 //! The pure part of retirement: what is enough to retire a host, and how emptiness
-//! is counted. Every case differs from the retirable baseline in exactly one
-//! fact, so a verdict that ignores that fact fails its own case.
+//! is counted. Every case differs from the retirable baseline in the one fact it
+//! is about, so a verdict that ignores that fact fails its own case.
 
 use super::*;
 
 fn retirable() -> RetireFacts {
     RetireFacts {
         frozen: true,
+        current_usable: true,
         sample: Sample::Answered { alive: 0 },
         panes: 0,
         unfinished_claims: 0,
@@ -22,20 +23,16 @@ fn the_baseline_is_retired() {
 
 #[test]
 fn never_with_live_session() {
-    // Emptiness for any length of time does not outweigh a running shell.
-    let facts = RetireFacts {
-        sample: Sample::Answered { alive: 1 },
-        empty_for: Duration::from_secs(3600),
-        ..retirable()
-    };
+    let facts = RetireFacts { sample: Sample::Answered { alive: 1 }, ..retirable() };
     assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::LiveSession));
 }
 
 #[test]
-fn a_listed_dead_session_does_not_keep_the_host() {
-    // The host lists a session that has ended: nothing runs, so nothing is lost.
-    assert!(observation_is_empty(Sample::Answered { alive: 0 }, 0, 0));
-    assert_eq!(retire_decision(&retirable()), Verdict::Retire);
+fn current_unavailable() {
+    // Older hosts are where new terminals go while the current one is down.
+    let facts = RetireFacts { current_usable: false, ..retirable() };
+    assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::CurrentUnavailable));
+    assert!(!observation_is_empty(Sample::Answered { alive: 0 }, 0, 0, false), "and the clock does not run");
 }
 
 #[test]
@@ -67,7 +64,7 @@ fn role_not_frozen() {
 fn an_unanswered_sample_is_never_empty() {
     let facts = RetireFacts { sample: Sample::Unanswered, ..retirable() };
     assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::Unanswered));
-    assert!(!observation_is_empty(Sample::Unanswered, 0, 0));
+    assert!(!observation_is_empty(Sample::Unanswered, 0, 0, true));
 }
 
 #[test]
@@ -81,10 +78,10 @@ fn emptiness_must_last_the_whole_period() {
 #[test]
 fn only_a_quiet_answered_listing_counts_as_empty() {
     let answered = Sample::Answered { alive: 0 };
-    assert!(observation_is_empty(answered, 0, 0));
-    assert!(!observation_is_empty(Sample::Answered { alive: 1 }, 0, 0));
-    assert!(!observation_is_empty(answered, 1, 0));
-    assert!(!observation_is_empty(answered, 0, 1));
+    assert!(observation_is_empty(answered, 0, 0, true));
+    assert!(!observation_is_empty(Sample::Answered { alive: 1 }, 0, 0, true));
+    assert!(!observation_is_empty(answered, 1, 0, true));
+    assert!(!observation_is_empty(answered, 0, 1, true));
 }
 
 #[test]
@@ -97,7 +94,7 @@ fn unanswered_sample_resets_emptiness() {
     assert_eq!(emptiness.observe(at(5), true), Duration::from_secs(5));
     // The host stops answering. The five seconds already seen do not carry over,
     // and neither does the time it was silent.
-    assert_eq!(emptiness.observe(at(10), observation_is_empty(Sample::Unanswered, 0, 0)), Duration::ZERO);
+    assert_eq!(emptiness.observe(at(10), observation_is_empty(Sample::Unanswered, 0, 0, true)), Duration::ZERO);
     assert_eq!(emptiness.observe(at(15), true), Duration::ZERO, "the clock starts again at the first answer");
     assert_eq!(emptiness.observe(at(20), true), Duration::from_secs(5));
     assert_eq!(emptiness.observe(at(25), true), Duration::from_secs(10));
@@ -109,7 +106,7 @@ fn a_session_appearing_restarts_the_clock() {
     let at = |secs: u64| start + Duration::from_secs(secs);
     let mut emptiness = Emptiness::default();
     emptiness.observe(at(0), true);
-    emptiness.observe(at(5), observation_is_empty(Sample::Answered { alive: 1 }, 0, 0));
+    emptiness.observe(at(5), observation_is_empty(Sample::Answered { alive: 1 }, 0, 0, true));
     assert_eq!(emptiness.observe(at(10), true), Duration::ZERO);
 }
 

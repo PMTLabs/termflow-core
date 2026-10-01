@@ -27,8 +27,8 @@ use tokio::time::{Instant, MissedTickBehavior};
 
 /// How often a host is looked at.
 pub(super) const TICK: Duration = Duration::from_secs(5);
-/// How long one listing is waited for. Shorter than the tick, so a host that
-/// never answers has one request waiting at a time, never a growing queue.
+/// How long one listing is waited for. Shorter than the tick, so at most one
+/// request to a host is awaited at a time; a late reply is discarded.
 pub(super) const SAMPLE_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a host must have been seen empty, without a break, before it is
 /// retired. With the tick this puts the exit about 15 s after its last shell.
@@ -50,6 +50,10 @@ pub(super) enum Sample {
 pub(super) struct RetireFacts {
     /// The host is not the current one, by endpoint and by role.
     pub frozen: bool,
+    /// The current host is connected and admitting. While it is not, an older host
+    /// is where new terminals go, and retiring it would leave them nowhere but
+    /// this process.
+    pub current_usable: bool,
     pub sample: Sample,
     /// Panes that own a session on the host.
     pub panes: usize,
@@ -64,6 +68,7 @@ pub(super) struct RetireFacts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Keep {
     NotFrozen,
+    CurrentUnavailable,
     Unanswered,
     LiveSession,
     PaneRegistered,
@@ -79,9 +84,16 @@ pub(super) enum Verdict {
 }
 
 /// Whether one observation counts towards emptiness. Only an answered listing
-/// with nothing running, no pane on the host and no claim in progress does.
-pub(super) fn observation_is_empty(sample: Sample, panes: usize, unfinished_claims: usize) -> bool {
-    matches!(sample, Sample::Answered { alive: 0 }) && panes == 0 && unfinished_claims == 0
+/// with nothing running, no pane on the host and no claim in progress does, and
+/// not while the current host is unusable: the clock then starts over when it is
+/// back.
+pub(super) fn observation_is_empty(
+    sample: Sample,
+    panes: usize,
+    unfinished_claims: usize,
+    current_usable: bool,
+) -> bool {
+    current_usable && matches!(sample, Sample::Answered { alive: 0 }) && panes == 0 && unfinished_claims == 0
 }
 
 /// May the host be retired now? Each reason to keep it is checked on its own, so
@@ -89,6 +101,9 @@ pub(super) fn observation_is_empty(sample: Sample, panes: usize, unfinished_clai
 pub(super) fn retire_decision(facts: &RetireFacts) -> Verdict {
     if !facts.frozen {
         return Verdict::Keep(Keep::NotFrozen);
+    }
+    if !facts.current_usable {
+        return Verdict::Keep(Keep::CurrentUnavailable);
     }
     match facts.sample {
         Sample::Unanswered => return Verdict::Keep(Keep::Unanswered),
@@ -200,9 +215,17 @@ async fn sample<P: PanePort>(port: &P, seen: &Seen) -> Sample {
     Sample::Answered { alive: sessions.iter().filter(|s| s.alive).count() }
 }
 
+/// Is the current host connected and admitting? The same question the router asks
+/// before it falls back to an older host.
+fn current_usable<P: PanePort>(port: &P) -> bool {
+    port.current_client().is_some_and(|client| client.is_alive())
+        && port.table().admission(HostChannel::Primary) == Some(Admission::Open)
+}
+
 fn facts<P: PanePort>(port: &P, seen: &Seen, sample: Sample, empty_for: Duration) -> RetireFacts {
     RetireFacts {
         frozen: is_frozen(port, &seen.host),
+        current_usable: current_usable(port),
         sample,
         panes: port.panes_on(seen.channel).len(),
         unfinished_claims: host_registry::unfinished_claims_on(port.claims(), seen.channel),
@@ -228,8 +251,9 @@ async fn look<P: PanePort>(port: &P, id: FrozenId, emptiness: &mut Emptiness) ->
         None => {}
         // The process is ending; the exit releases every host itself.
         Some(QuiesceReason::Exit) => return Next::Stop,
-        // An offload or update holds the hosts armed, and asking an armed host for
-        // its sessions disarms it. Nothing is observed, so nothing is remembered.
+        // An offload or update holds the table: a retirement cannot commit while it
+        // does, and the hosts are about to be armed or released by it. So nothing is
+        // asked of them, and nothing seen before the hold counts after it.
         Some(_) => {
             emptiness.reset();
             return Next::Go;
@@ -245,7 +269,8 @@ async fn look<P: PanePort>(port: &P, id: FrozenId, emptiness: &mut Emptiness) ->
     let answer = sample(port, &seen).await;
     let panes = port.panes_on(seen.channel).len();
     let claims = host_registry::unfinished_claims_on(port.claims(), seen.channel);
-    let empty_for = emptiness.observe(Instant::now(), observation_is_empty(answer, panes, claims));
+    let empty_for =
+        emptiness.observe(Instant::now(), observation_is_empty(answer, panes, claims, current_usable(port)));
     match retire_decision(&facts(port, &seen, answer, empty_for)) {
         Verdict::Keep(why) => {
             log::debug!("[GEN] terminal host {} stays: {why:?}", seen.host.endpoint);
@@ -257,7 +282,14 @@ async fn look<P: PanePort>(port: &P, id: FrozenId, emptiness: &mut Emptiness) ->
 
 /// Retire a host that has been empty long enough. Admission is closed first, so
 /// nothing new can start on it, and it is looked at once more under that closure
-/// before anything irreversible is done.
+/// before anything irreversible is done; the host is retired only if that look
+/// still finds it empty.
+///
+/// The last step is closing the connection (`close_transport`, bounded): the host
+/// sees EOF and, being empty, exits by itself. This does not wait for the host's
+/// process to be gone, because the connection holds no handle on it; a host that
+/// does not exit is not noticed here, and is kept from being adopted again by the
+/// retired mark in the barrier.
 async fn retire<P: PanePort>(port: &P, seen: &Seen, emptiness: &mut Emptiness) -> Next {
     let endpoint = &seen.host.endpoint;
     let drain = match port.table().drain_host(seen.channel) {

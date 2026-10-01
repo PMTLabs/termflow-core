@@ -392,8 +392,8 @@ impl PtyHostClient {
     }
 
     /// `list_sessions` with an explicit deadline. A request that times out is
-    /// removed from the pending map, so a caller that asks again and again of a
-    /// host that never answers never has more than one request waiting.
+    /// removed from the pending map, so asking again and again of a host that never
+    /// answers does not accumulate entries there; a late reply is discarded.
     pub async fn list_sessions_within(&self, timeout: std::time::Duration) -> Option<Vec<SessionMeta>> {
         let token = self.lifecycle_token.to_string();
         match self
