@@ -2,7 +2,7 @@ import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs, updateTabMeta } from '../store/slices/tabsSlice';
 import {
-  addTabTree, focusPane, focusPaneInTab, setActiveTabId, resetPanes, setMaximizedPane,
+  addTabTree, focusPane, focusPaneInTab, setActiveTabId, resetPanes, setMaximizedPane, PaneNode,
 } from '../store/slices/panesSlice';
 import { findTabIdByTerminalId, getAllTerminalIds, findLeaf } from '../store/slices/paneTreeOps';
 import { setDefaultProfile } from '../store/slices/settingsSlice';
@@ -1723,6 +1723,12 @@ class StateManagerClass {
    * Clear current state (used before loading a layout)
    */
   private clearCurrentState(dispatch: Dispatch): void {
+    // A replacement is not a close, but every old leaf releases this window's
+    // binding, including leaves whose create is still waiting on a host.
+    const trees = (window as any).__REDUX_STORE__?.getState().panes.treesByTabId ?? {};
+    for (const tree of Object.values(trees)) {
+      for (const leaf of getAllTerminalIds(tree as PaneNode | null)) terminalService.detachTerminal(leaf);
+    }
     // Clear the local tab panes mapping
     clearTabPanes();
     // Clear all tabs first

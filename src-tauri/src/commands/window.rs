@@ -375,20 +375,32 @@ pub fn flush_session_ack(state: State<'_, AppState>, window: tauri::WebviewWindo
 
 #[tauri::command]
 pub fn stash_detach_payload(
+    window: tauri::Window,
     state: State<'_, AppState>,
     token: String,
     payload: serde_json::Value,
 ) -> Result<(), String> {
+    state.detach_payload_sources.insert(token.clone(), window.label().to_string());
     state.detach_payloads.insert(token, payload);
     Ok(())
 }
 
 #[tauri::command]
 pub fn take_detach_payload(
+    window: tauri::Window,
     state: State<'_, AppState>,
     token: String,
 ) -> Result<Option<serde_json::Value>, String> {
-    Ok(state.detach_payloads.remove(&token).map(|(_, v)| v))
+    let payload = state.detach_payloads.remove(&token).map(|(_, v)| v);
+    if let Some((_, source)) = state.detach_payload_sources.remove(&token) {
+        // Taking back one's own stash is cancellation, not a move.
+        if source != window.label() {
+            if let Some(tree) = payload.as_ref().and_then(|p| p.get("paneTree")) {
+                state.session_bindings.release_tree(tree, &source, std::time::Instant::now());
+            }
+        }
+    }
+    Ok(payload)
 }
 
 /// Open a new app window that will reconstruct the detached tab/pane. The token

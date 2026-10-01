@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { HostGeneration, TerminalSnapshot, SessionHandoffTake, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
+import type { HostGeneration, TerminalSnapshot, ShellBinding, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -122,12 +122,8 @@ interface ElectronAPI {
   openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
   registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
   forgetRestoringLeaf: (leafId: string) => Promise<void>;
-  /// Offer the terminal this window's create produced for the leaf to the window that has the
-  /// pane now. False (nothing offered) unless `processId` is the terminal registered for the leaf.
-  offerSessionHandoff: (leafId: string, processId: string) => Promise<boolean>;
-  /// Take the offered terminal (single use); otherwise say whether the create that may still offer
-  /// it is running.
-  takeSessionHandoff: (leafId: string) => Promise<SessionHandoffTake>;
+  bindShell: (leafId: string, processId?: string) => Promise<ShellBinding>;
+  releaseShellBinding: (leafId: string) => Promise<void>;
   closeTerminal: (id: string) => Promise<void>;
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
   writeToTerminal: (id: string, data: string) => Promise<void>;
@@ -482,8 +478,8 @@ const tauriBridge: ElectronAPI = {
 
   registerRestoringLeaves: async (leaves) => invoke<void>('register_restoring_leaves', { leaves }),
   forgetRestoringLeaf: async (leafId) => invoke<void>('forget_restoring_leaf', { leafId }),
-  offerSessionHandoff: async (leafId, processId) => invoke<boolean>('offer_session_handoff', { leafId, processId }),
-  takeSessionHandoff: async (leafId) => invoke<SessionHandoffTake>('take_session_handoff', { leafId }),
+  bindShell: async (leafId, processId) => invoke<ShellBinding>('bind_shell', { leafId, processId }),
+  releaseShellBinding: async (leafId) => invoke<void>('release_shell_binding', { leafId }),
   closeTerminal: async (id) => {
     return invoke('close_terminal', { id });
   },

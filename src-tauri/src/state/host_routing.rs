@@ -52,6 +52,13 @@ pub(super) trait RoutingPort: AdoptionPort {
     fn claims(&self) -> &Arc<DashMap<String, HostSessionClaim>>;
     fn restoring_keys(&self) -> &DashMap<String, Instant>;
     fn closed_unowned(&self) -> &DashMap<String, Instant>;
+    fn restoring(&self, key: &str, now: Instant) -> bool {
+        host_registry::is_restoring_key(self.restoring_keys(), key, now)
+    }
+    fn refresh_restore(&self, key: &str, now: Instant) {
+        host_registry::refresh_restoring_key(self.restoring_keys(), key, now);
+    }
+    fn preserve_restore(&self, _key: &str, _now: Instant) -> bool { false }
 }
 
 fn pending(reason: impl std::fmt::Display) -> String {
@@ -132,10 +139,10 @@ pub(super) async fn place<P: RoutingPort>(
         return Err(Busy::Lifecycle(reason).to_string());
     }
     let keyed = override_key
-        || host_registry::is_restoring_key(port.restoring_keys(), session_key, Instant::now())
+        || port.restoring(session_key, Instant::now())
         || host_registry::reserved_channel(port.claims(), session_key).is_some();
     if keyed {
-        host_registry::refresh_restoring_key(port.restoring_keys(), session_key, Instant::now());
+        port.refresh_restore(session_key, Instant::now());
     }
 
     if let Err(e) = ensure_hosts(port).await {
@@ -214,13 +221,27 @@ pub(super) async fn place<P: RoutingPort>(
 /// The create is going ahead: nothing waits for this key any more, and a close
 /// recorded for it while its host was unknown is superseded.
 fn settle<P: RoutingPort>(port: &P, session_key: &str) {
-    host_registry::forget_restoring_key(port.restoring_keys(), session_key, None);
+    if !port.preserve_restore(session_key, Instant::now()) {
+        host_registry::forget_restoring_key(port.restoring_keys(), session_key, None);
+    }
     host_registry::forget_closed_unowned(port.closed_unowned(), session_key, None);
 }
 
 impl<R: Runtime> RoutingPort for AppState<R> {
     fn claims(&self) -> &Arc<DashMap<String, HostSessionClaim>> {
         &self.host_session_claims
+    }
+
+    fn restoring(&self, key: &str, _now: Instant) -> bool {
+        self.is_restoring_key(key)
+    }
+
+    fn refresh_restore(&self, key: &str, _now: Instant) {
+        self.refresh_restoring_key(key);
+    }
+
+    fn preserve_restore(&self, key: &str, now: Instant) -> bool {
+        self.session_bindings.has_key_intent(key, now)
     }
 
     fn restoring_keys(&self) -> &DashMap<String, Instant> {

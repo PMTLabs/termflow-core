@@ -1,4 +1,4 @@
-import { ElectronAPI, HostGeneration, SessionHandoffTake, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { ElectronAPI, HostGeneration, ShellBinding, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { getStoredApiToken } from '../services/profileScope';
@@ -192,9 +192,11 @@ class BrowserBridge implements ElectronAPI {
 
     async forgetRestoringLeaf(_leafId: string): Promise<void> { }
 
-    /// A browser session has no other window to hand a session to or from.
-    async offerSessionHandoff(_leafId: string, _processId: string): Promise<boolean> { return false; }
-    async takeSessionHandoff(_leafId: string): Promise<SessionHandoffTake> { return { status: 'none' }; }
+    // Browser terminals are single-window REST shells, not desktop bindings.
+    async bindShell(_leafId: string, processId?: string): Promise<ShellBinding> {
+        return processId ? { status: 'bound', processId } : { status: 'none' };
+    }
+    async releaseShellBinding(_leafId: string): Promise<void> { }
 
     async closeTerminal(id: string): Promise<void> {
         try {

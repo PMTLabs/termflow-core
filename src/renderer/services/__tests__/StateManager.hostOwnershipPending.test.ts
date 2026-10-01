@@ -217,21 +217,26 @@ test('user-created, API-created and split-created fresh leaves do not register',
   expect(register).not.toHaveBeenCalled();
 });
 
-test('clearCurrentState cancels a waiting leaf by absence without forgetting its restore intent', async () => {
+test('clearCurrentState releases all window leaves and cancels a wait without recording a close', async () => {
   store.dispatch(addTab({ id: 'tb-wait', title: 'Waiting' }));
   store.dispatch(addTabTree({ tabId: 'tb-wait', tree: leaf('tm-wait') }));
+  store.dispatch(addTab({ id: 'tb-background', title: 'Background' }));
+  store.dispatch(addTabTree({ tabId: 'tb-background', tree: leaf('tm-background') }));
   const api = {
     createTerminal: jest.fn().mockRejectedValue('host-ownership-pending: delayed'),
     forgetRestoringLeaf: jest.fn().mockResolvedValue(undefined),
+    releaseShellBinding: jest.fn().mockResolvedValue(undefined),
   };
   delete (window as any).electronAPI;
   const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any);
   const creating = service.createTerminal('tm-wait');
   await flush();
+  (window as any).electronAPI = api;
   (StateManager as any).clearCurrentState(store.dispatch);
   await jest.advanceTimersByTimeAsync(1000);
   expect(await creating).toBe('');
   expect(api.createTerminal).toHaveBeenCalledTimes(1);
+  expect(api.releaseShellBinding.mock.calls.map(([id]) => id).sort()).toEqual(['tm-background', 'tm-wait']);
   expect(api.forgetRestoringLeaf).not.toHaveBeenCalled();
 });
 

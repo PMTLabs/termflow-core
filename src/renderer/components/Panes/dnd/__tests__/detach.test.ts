@@ -310,9 +310,12 @@ describe('detach clears the session-exit records of terminals leaving this windo
      * The leak itself: only `tm-live` travels, so `tm-exited` is removed from this window by a
      * path that clears nothing. Its record has to go with it.
      */
-    it('clears the pane that did not travel', () => {
+    it('clears and releases the pane omitted from the live-process payload', () => {
+      const { terminalService } = jest.requireMock('../../../../services/TerminalService');
+      terminalService.detachTerminal.mockClear();
       removeSourceTab('tab-1', ['tm-live']);
       expect(cleared()).toContain('tm-exited');
+      expect(terminalService.detachTerminal.mock.calls.map(([id]: [string]) => id).sort()).toEqual(['tm-exited', 'tm-live']);
     });
 
     it('clears the carried pane too — no invariant required', () => {
@@ -346,9 +349,12 @@ describe('detach clears the session-exit records of terminals leaving this windo
       expect(cleared()).toEqual(['tm-exited']);
     });
 
-    it('clears nothing when no terminal was handed over', () => {
+    it('releases the removed leaf even when it was omitted from the live-process payload', () => {
+      const { terminalService } = jest.requireMock('../../../../services/TerminalService');
+      terminalService.detachTerminal.mockClear();
       removeSourcePane('tab-1', 'pn-b', []);
-      expect(cleared()).toEqual([]);
+      expect(cleared()).toEqual(['tm-exited']);
+      expect(terminalService.detachTerminal).toHaveBeenCalledWith('tm-exited');
     });
 
     // Paired with the clear: the handoff itself must still happen, or this would be satisfiable

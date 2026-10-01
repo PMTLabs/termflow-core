@@ -233,6 +233,7 @@ pub fn begin_global_pane_drag(
     token: String,
     payload: serde_json::Value,
 ) -> Result<(), String> {
+    state.detach_payload_sources.insert(token.clone(), window.label().to_string());
     state.detach_payloads.insert(token.clone(), payload);
     *state.active_global_drag.lock().map_err(|e| e.to_string())? = Some(GlobalDrag {
         token: token.clone(),
@@ -247,17 +248,22 @@ pub fn begin_global_pane_drag(
 /// its copy. Single-use: returns None if already claimed/cancelled.
 #[tauri::command]
 pub fn claim_global_pane_drag(
+    window: tauri::Window,
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
 ) -> Result<Option<serde_json::Value>, String> {
     let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
-        Some(g) if g.token == token => {
+        Some(g) if g.token == token && g.source_label != window.label() => {
             let source_label = g.source_label.clone();
             *guard = None;
             drop(guard);
             let payload = state.detach_payloads.remove(&token).map(|(_, v)| v);
+            state.detach_payload_sources.remove(&token);
+            if let Some(tree) = payload.as_ref().and_then(|p| p.get("paneTree")) {
+                state.session_bindings.release_tree(tree, &source_label, std::time::Instant::now());
+            }
             if let Some(src) = app_handle.get_webview_window(&source_label) {
                 let _ = src.emit("pane-drag:claimed", token.clone());
             }
@@ -304,6 +310,7 @@ pub fn cancel_global_pane_drag(
     }
     drop(guard);
     state.detach_payloads.remove(&token);
+    state.detach_payload_sources.remove(&token);
     let _ = app_handle.emit("pane-drag:ended", ());
     Ok(())
 }

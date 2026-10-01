@@ -519,6 +519,22 @@ pub(super) fn forget_restoring_leaf(maps: &IntentMaps, leaf_id: &str, now: Insta
     mark_closed_unowned(maps.restoring_keys, maps.closed_unowned, &key, now);
 }
 
+/// Close intent belongs to a window incarnation, while the host restore barrier
+/// is aggregated by session key. Closing one copy must not unkey another copy.
+pub(super) fn close_leaf_for_window(
+    maps: &IntentMaps,
+    bindings: &crate::session_bindings::SessionBindings,
+    identity: &crate::identity_index::IdentityIndex,
+    leaf_id: &str,
+    window: &str,
+    now: Instant,
+) -> Option<String> {
+    let registered = identity.process_for_leaf(leaf_id);
+    bindings.close_registered_with(leaf_id, window, registered.as_deref(), now, |other_intent| {
+        if !other_intent { forget_restoring_leaf(maps, leaf_id, now); }
+    })
+}
+
 /// Forget which leaves waited under a key that is no longer waited for.
 pub(super) fn prune_restoring_leaf_keys(
     restoring_leaf_keys: &DashMap<String, String>,

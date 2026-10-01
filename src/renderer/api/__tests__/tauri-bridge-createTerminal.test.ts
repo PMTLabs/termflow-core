@@ -47,21 +47,21 @@ describe('tauriBridge restore intent contract', () => {
     expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-migrated' });
   });
 
-  it('offers a session by the leaf identity and the process it created, with camelCase argument keys', async () => {
-    invokeMock.mockResolvedValueOnce(true);
-    await expect(tauriBridge.offerSessionHandoff('tm-moved', 'pc-created')).resolves.toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith('offer_session_handoff', { leafId: 'tm-moved', processId: 'pc-created' });
+  it('releases a binding by leaf without an offer or a caller-supplied window label', async () => {
+    await tauriBridge.releaseShellBinding('tm-moved');
+    expect(invokeMock).toHaveBeenCalledWith('release_shell_binding', { leafId: 'tm-moved' });
   });
 
-  it('takes an offered session by the leaf identity, with a camelCase argument key', async () => {
-    invokeMock.mockResolvedValueOnce({ status: 'taken', processId: 'pc-offered' });
-    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual({ status: 'taken', processId: 'pc-offered' });
-    expect(invokeMock).toHaveBeenCalledWith('take_session_handoff', { leafId: 'tm-moved' });
+  it('binds the registered leaf with an optional expected process identity', async () => {
+    invokeMock.mockResolvedValueOnce({ status: 'bound', processId: 'pc-created' });
+    await expect(tauriBridge.bindShell('tm-moved', 'pc-created')).resolves.toEqual({ status: 'bound', processId: 'pc-created' });
+    expect(invokeMock).toHaveBeenCalledWith('bind_shell', { leafId: 'tm-moved', processId: 'pc-created' });
   });
 
-  it.each([{ status: 'inFlight' }, { status: 'none' }])('passes the take answer %j through unchanged', async answer => {
+  it.each([{ status: 'pending' }, { status: 'refused' }, { status: 'none' }])('passes the binding answer %j through unchanged', async answer => {
     invokeMock.mockResolvedValueOnce(answer);
-    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual(answer);
+    await expect(tauriBridge.bindShell('tm-moved')).resolves.toEqual(answer);
+    expect(invokeMock).toHaveBeenCalledWith('bind_shell', { leafId: 'tm-moved', processId: undefined });
   });
 
   it('surfaces register failure instead of allowing an unkeyed mount', async () => {

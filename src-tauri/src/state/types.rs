@@ -521,6 +521,7 @@ pub struct AppState<R: Runtime = Wry> {
     // Single-use payloads handed off when detaching a tab/pane into a new window
     // (or dropping a pane onto another window). Keyed by a token passed via URL.
     pub detach_payloads: Arc<DashMap<String, serde_json::Value>>,
+    pub detach_payload_sources: Arc<DashMap<String, String>>,
     // The in-flight cross-window pane drag, if any (Phase 4 target-claims broker).
     pub active_global_drag: Arc<Mutex<Option<GlobalDrag>>>,
     // Each window's display title (the active tab's title), keyed by window label.
@@ -634,7 +635,7 @@ pub struct AppState<R: Runtime = Wry> {
     pub identity: crate::identity_index::IdentityIndex,
     /// Shells a window created for a pane that had already moved away, waiting for
     /// the window that has the pane to take them (single use, short TTL).
-    pub handoff_offers: crate::session_handoff::HandoffOffers,
+    pub session_bindings: crate::session_bindings::SessionBindings,
     // Sessions the sidecar still held when we connected (survived a hot-swap),
     // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
     // `create_host_terminal` reattaches to (instead of respawning) any tab_id
@@ -757,6 +758,7 @@ impl<R: Runtime> Clone for AppState<R> {
             jwt_secret: self.jwt_secret.clone(),
             app_handle: self.app_handle.clone(),
             detach_payloads: self.detach_payloads.clone(),
+            detach_payload_sources: self.detach_payload_sources.clone(),
             active_global_drag: self.active_global_drag.clone(),
             window_titles: self.window_titles.clone(),
             windows: self.windows.clone(),
@@ -784,7 +786,7 @@ impl<R: Runtime> Clone for AppState<R> {
             sibling_hold: self.sibling_hold.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
-            handoff_offers: self.handoff_offers.clone(),
+            session_bindings: self.session_bindings.clone(),
             host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_released: self.host_restore_released.clone(),

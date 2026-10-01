@@ -48,7 +48,9 @@ fn root_leaf_owner_to_reserve(tab_id: Option<&str>, owning_tab_id: Option<&str>)
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn create_terminal(
+    window: tauri::Window,
     state: State<'_, AppState>,
     cols: u16,
     rows: u16,
@@ -151,7 +153,10 @@ pub async fn create_terminal(
     // id. The `enabled()` gate now lives INSIDE `spawn_routed` so no caller can
     // spawn without making the decision (plan 019 §2.1).
     if let Some(tid) = tab_id.clone() {
-        return spawn_routed(
+        // Reserve window ownership before any barrier wait. A release or close
+        // from another webview can now overtake even an unresolved restore.
+        let creating = state.session_bindings.begin_create(&tid, window.label(), std::time::Instant::now())?;
+        let result = spawn_routed(
             state.inner(),
             SpawnRequest {
                 leaf_id: tid,
@@ -170,6 +175,13 @@ pub async fn create_terminal(
             },
         )
         .await;
+        if let Ok(process_id) = &result {
+            if !creating.complete(process_id, std::time::Instant::now()) {
+                close_terminal_process(state.inner(), process_id.clone())?;
+                return Err("shell closed while create was running".into());
+            }
+        }
+        return result;
     }
 
     // Restore path: if this renderer id has scrollback persisted from a prior
@@ -230,48 +242,66 @@ pub struct RestoringLeaf {
 /// panes from mounting — the caller retries.
 #[tauri::command]
 pub fn register_restoring_leaves(
+    window: tauri::Window,
     state: State<'_, AppState>,
     leaves: Vec<RestoringLeaf>,
 ) -> Result<(), String> {
     state.reap_expired_restore_intents();
     for leaf in &leaves {
-        state.register_restoring_leaf(&leaf.leaf_id, leaf.session_key.as_deref());
+        let key = crate::state::effective_session_key(&leaf.leaf_id, leaf.session_key.as_deref());
+        state.session_bindings.register_intent_with(&leaf.leaf_id, &key, window.label(), std::time::Instant::now(), || {
+            state.register_restoring_leaf(&leaf.leaf_id, leaf.session_key.as_deref());
+        });
     }
     Ok(())
 }
 
-/// A restored pane that never found its session was closed. Its session, if a
-/// host reports it later, is closed rather than adopted or shown as recovered.
+/// Closing a leaf is authoritative even if another window is creating its
+/// shell. Only this window's restore intent is removed.
 #[tauri::command]
-pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Result<(), String> {
-    state.forget_restoring_leaf(&leaf_id);
+pub fn forget_restoring_leaf(
+    window: tauri::Window,
+    state: State<'_, AppState>,
+    leaf_id: String,
+) -> Result<(), String> {
+    let process = state.close_leaf_for_window(&leaf_id, window.label());
+    if let Some(process) = process {
+        close_terminal_process(state.inner(), process)?;
+    }
     Ok(())
 }
 
-/// A pane moved to another window while its first create was still in flight, and
-/// the window it left won that create. That window binds nothing and offers the
-/// terminal its create produced to whichever window has the pane now.
-/// `false` (and no offer) unless `process_id` is the terminal registered for the leaf.
+/// Bind only when no other window holds this shell. The label is supplied by
+/// Tauri, never by the renderer. Publication waits for the final spawn result.
 #[tauri::command]
-pub fn offer_session_handoff(
+pub fn bind_shell(
+    window: tauri::Window,
     state: State<'_, AppState>,
     leaf_id: String,
-    process_id: String,
-) -> Result<bool, String> {
-    Ok(state.handoff_offers.offer(&state.identity, &leaf_id, &process_id, std::time::Instant::now()))
+    process_id: Option<String>,
+) -> crate::session_bindings::BindResult {
+    let process = state.identity.process_for_leaf(&leaf_id);
+    if process_id.is_some() && process_id != process {
+        return crate::session_bindings::BindResult::None;
+    }
+    let now = std::time::Instant::now();
+    let result = state.session_bindings.bind(&leaf_id, window.label(), process.as_deref(), now);
+    if let crate::session_bindings::BindResult::Bound { process_id } = &result {
+        let key = state.terminals.get(process_id).map(|t| t.session_key.clone());
+        if let Some(key) = key {
+            state.session_bindings.forget_key_if_no_intents(&key, now, || {
+                state.forget_restoring_key(&key);
+            });
+        }
+    }
+    result
 }
 
-/// The moved pane's own create was refused because the window it left won the
-/// session: take the terminal that window offered. The offer is removed in the
-/// same step, so only one window can ever adopt it. With no live offer (or when
-/// the registered terminal has changed) the answer says whether the winner's
-/// create is still running, in which case the offer may yet arrive.
+/// Moves release ownership, not close intent. A late release from the old
+/// holder cannot remove the destination's binding.
 #[tauri::command]
-pub fn take_session_handoff(
-    state: State<'_, AppState>,
-    leaf_id: String,
-) -> Result<crate::session_handoff::HandoffTake, String> {
-    Ok(state.handoff_offers.take(&state.identity, &leaf_id, std::time::Instant::now()))
+pub fn release_shell_binding(window: tauri::Window, state: State<'_, AppState>, leaf_id: String) {
+    state.session_bindings.release(&leaf_id, window.label(), std::time::Instant::now());
 }
 
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane
@@ -495,12 +525,6 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             }
         }
     };
-    // The session's claim is held from here on. A window that asked for the same
-    // leaf and was refused asks this mark whether to keep waiting for the offer
-    // this create may make when it returns; it must outlast the host round trip
-    // below, which the claim's own state does not (`Registered` comes first).
-    let _create_in_flight = state.handoff_offers.begin_create(&id);
-
     // The injected-hook decision (interactive PowerShell). Command-suggest's
     // renderer-side prompt gate reads this back over the API to re-arm on reload.
     let prompt_hook = pty_manager::shell_emits_prompt_osc(
@@ -722,6 +746,9 @@ fn register_host_terminal(
             title_color: None,
         },
     );
+    if let Some(leaf) = ident.leaf.as_deref() {
+        state.session_bindings.stage_process(leaf, id);
+    }
     // After the terminal is observable: whoever asks which host serves it now
     // gets an answer.
     state.notify_terminal_generations();
@@ -1040,6 +1067,11 @@ pub async fn close_terminal(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    close_terminal_process(state.inner(), id)
+}
+
+/// Shared by explicit close, close-during-create, and unbound-shell cleanup.
+pub(crate) fn close_terminal_process<R: tauri::Runtime>(state: &AppState<R>, id: String) -> Result<(), String> {
     // Timed alongside `[SPAWN]` so a close/open pair can be read as one sequence:
     // whether the cost sits in this command or in the sidecar's answer to the
     // NEXT spawn tells you which side to look at.
@@ -1049,8 +1081,18 @@ pub async fn close_terminal(
     let (pid, tab_id) = if let Some(terminal) = state.terminals.get(&id) {
         (terminal.pid, terminal.renderer_terminal_id.clone())
     } else {
-        return Err("Terminal not found".to_string());
+        return Ok(()); // An exit or another close already removed this process.
     };
+    if let Some(leaf) = tab_id.as_deref() {
+        state.session_bindings.close(leaf, "");
+        if !state.session_bindings.has_intent(leaf, std::time::Instant::now()) {
+            state.mark_closed_unowned(&state.terminals.get(&id).map(|t| t.session_key.clone()).unwrap_or_else(|| leaf.to_string()));
+        }
+    }
+
+    if state.session_bindings.defer_process_close(&id) {
+        return Ok(());
+    }
 
     // Host-owned: tell the sidecar to close the session (it kills the child);
     // otherwise kill the local process tree.
@@ -1738,37 +1780,24 @@ mod root_leaf_reservation_tests {
     }
 }
 
-/// The hand-off answers "ask again" while a create for the leaf is running, and
-/// only `spawn_routed` knows that. The mark has to start once the session's claim
-/// is held (a refused create would otherwise mark itself) and has to cover the
-/// registration and host round trip that follow it.
+/// Window ownership must cover the barrier wait as well as the host request.
+/// API creates remain headless until a renderer binds their final registration.
 #[cfg(test)]
 mod create_in_flight_mark_tests {
     use crate::automation_engine::test_host::strip_comments;
 
-    fn spawn_routed_body() -> String {
-        let source = strip_comments(include_str!("terminal.rs"));
-        let start = source.find("async fn spawn_routed(").expect("spawn_routed is defined here");
-        let end = source[start..].find("struct HostIdentity").expect("spawn_routed is followed by HostIdentity");
-        source[start..start + end].to_string()
-    }
-
     #[test]
-    fn spawn_routed_marks_its_create_in_flight_after_the_claim_and_before_registering() {
-        let body = spawn_routed_body();
-        let marks: Vec<_> = body.match_indices("handoff_offers.begin_create(").map(|(at, _)| at).collect();
-        assert_eq!(marks.len(), 1, "exactly one mark, held for the whole create");
-        let at = marks[0];
-        let after = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is called in spawn_routed"));
-        assert!(after("place_create(") < at, "marked only once the host placement holds the claim");
-        assert!(after("claim_host_registration(") < at, "the elevated claim comes before the mark too");
-        assert!(at < after("register_host_terminal("), "marked before the terminal is registered");
-        assert!(at < after("attach_confirmed("), "marked before the slow attach round trip");
-        assert!(at < after("spawn_session("), "marked before the slow spawn round trip");
-        let line = body[body[..at].rfind('\n').map_or(0, |n| n + 1)..].lines().next().unwrap();
-        assert!(
-            line.contains("let _create_in_flight ="),
-            "bound to a named guard, not dropped at once: {line}"
-        );
+    fn renderer_create_reserves_binding_before_routing_and_closes_an_overtaken_result() {
+        let source = strip_comments(include_str!("terminal.rs"));
+        let start = source.find("pub async fn create_terminal(").unwrap();
+        let end = source[start..].find("pub async fn report_host_restore_settled(").unwrap();
+        let body = &source[start..start + end];
+        let mark = body.find("session_bindings.begin_create(").unwrap();
+        assert_eq!(body.matches("session_bindings.begin_create(").count(), 1);
+        assert!(mark < body.find("let result = spawn_routed(").unwrap());
+        assert!(body.contains("if !creating.complete(process_id,"));
+        assert!(body.contains("close_terminal_process(state.inner(), process_id.clone())?"));
+        assert!(source.contains("window.label()"));
+        assert!(!body.contains("handoff_offers"));
     }
 }

@@ -14,7 +14,7 @@ import { setZoom, ZOOM_DEFAULT } from '../../../store/slices/zoomSlice';
 import { getCwdSnapshot, setCwdSnapshot } from '../../../services/cwdSnapshot';
 import { generateId } from '../../../utils/id';
 import { computeZone } from './zone';
-import { tabHasNoPanes, getAllTerminalIds } from '../../../store/slices/paneTreeOps';
+import { tabHasNoPanes, getAllTerminalIds, findLeaf } from '../../../store/slices/paneTreeOps';
 import { clearSessionClosed } from '../../../store/slices/sessionExitSlice';
 import { DetachPayload, DetachTerminal } from './types';
 
@@ -129,6 +129,8 @@ export function newDetachToken(): string {
 
 /** Remove a just-moved pane from its source tab, closing the tab if it empties. */
 export function removeSourcePane(sourceTabId: string, sourcePaneId: string, terminalIds: string[] = []): void {
+  const tree = store.getState().panes.treesByTabId[sourceTabId];
+  const removed = new Set([...getAllTerminalIds(findLeaf(tree ?? null, sourcePaneId)), ...terminalIds]);
   store.dispatch(removePaneFromTab({ tabId: sourceTabId, paneId: sourcePaneId }));
   // Detaching the last pane hands the terminal to another WINDOW, so there is nothing left
   // here to keep the tab open for. `tabHasNoPanes` owns the "is it empty" rule — an emptied
@@ -144,7 +146,7 @@ export function removeSourcePane(sourceTabId: string, sourcePaneId: string, term
   // `openWindowWithPayload` bailing on an empty terminal list. `buildPaneDetachPayload` has no
   // such guard, so `PaneDragController` can begin a cross-window drag of a dead pane and call
   // this on claim or on an orphan drop.
-  terminalIds.forEach((id) => {
+  removed.forEach((id) => {
     store.dispatch(clearSessionClosed({ terminalId: id }));
     terminalService.detachTerminal(id);
   });
@@ -217,7 +219,7 @@ export function removeSourceTab(tabId: string, terminalIds: string[]): void {
   store.dispatch(removeTabTree(tabId));
   store.dispatch(removeTab(tabId));
   removed.forEach((id) => store.dispatch(clearSessionClosed({ terminalId: id })));
-  terminalIds.forEach((id) => terminalService.detachTerminal(id));
+  removed.forEach((id) => terminalService.detachTerminal(id));
 }
 
 /** Detach an entire tab (its whole pane tree) into a new window. */

@@ -597,6 +597,48 @@ fn leaf_keys_of_keys_nobody_waits_for_are_pruned() {
 }
 
 #[test]
+fn closing_one_window_keeps_the_other_copy_keyed_and_hidden_from_orphan_surfacing() {
+    let i = Intent::new(&[]);
+    let bindings = crate::session_bindings::SessionBindings::default();
+    let identity = crate::identity_index::IdentityIndex::new();
+    let now = Instant::now();
+    for window in ["source", "other"] {
+        bindings.register_intent_with("tm-leaf", "tb-old", window, now, || {
+            assert!(register_restoring_leaf(&i.maps(), "tm-leaf", Some("tb-old"), now));
+        });
+    }
+    let creating = bindings.begin_create("tm-leaf", "source", now).unwrap();
+    bindings.stage_process("tm-leaf", "pc-source");
+    identity.index("pc-source", Some("tm-leaf"), "tb-old");
+    assert_eq!(close_leaf_for_window(&i.maps(), &bindings, &identity, "tm-leaf", "source", now), None);
+    assert!(i.restoring.contains_key("tb-old"));
+    assert!(i.leaf_keys.contains_key("tm-leaf"));
+    assert!(!i.closed.contains_key("tb-old"));
+    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tb-old", now), OrphanVerdict::Restoring);
+    assert!(!creating.complete("pc-source", now), "the source's actual shell must be closed");
+    bindings.forget_process("pc-source");
+    identity.unindex("pc-source");
+    assert_eq!(close_leaf_for_window(&i.maps(), &bindings, &identity, "tm-leaf", "other", now), None);
+    assert!(!i.restoring.contains_key("tb-old"));
+    assert!(i.closed.contains_key("tb-old"));
+}
+
+#[test]
+fn another_windows_close_does_not_close_a_provisional_registration_before_spawn_returns() {
+    let i = Intent::new(&[]);
+    let bindings = crate::session_bindings::SessionBindings::default();
+    let identity = crate::identity_index::IdentityIndex::new();
+    let now = Instant::now();
+    register_restoring_leaf(&i.maps(), "tm-leaf", None, now);
+    let creating = bindings.begin_create("tm-leaf", "source", now).unwrap();
+    bindings.stage_process("tm-leaf", "pc-provisional");
+    identity.index("pc-provisional", Some("tm-leaf"), "tm-leaf");
+    assert_eq!(close_leaf_for_window(&i.maps(), &bindings, &identity, "tm-leaf", "destination", now), None);
+    assert!(i.closed.contains_key("tm-leaf"));
+    assert!(!creating.complete("pc-final-fallback", now), "close the final shell, not a provisional identity");
+}
+
+#[test]
 fn a_pane_is_known_by_its_override_key_else_its_leaf() {
     assert_eq!(effective_session_key("tm-leaf", None), "tm-leaf");
     assert_eq!(effective_session_key("tm-leaf", Some("tb-old")), "tb-old");

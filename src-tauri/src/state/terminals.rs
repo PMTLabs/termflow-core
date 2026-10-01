@@ -281,6 +281,7 @@ impl<R: Runtime> AppState<R> {
             jwt_secret,
             app_handle,
             detach_payloads: Arc::new(DashMap::new()),
+            detach_payload_sources: Arc::new(DashMap::new()),
             active_global_drag: Arc::new(Mutex::new(None)),
             window_titles: Arc::new(DashMap::new()),
             windows: Arc::new(crate::window_registry::WindowTracker::load_default()),
@@ -312,7 +313,7 @@ impl<R: Runtime> AppState<R> {
             sibling_hold: Arc::default(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
-            handoff_offers: crate::session_handoff::HandoffOffers::new(),
+            session_bindings: crate::session_bindings::SessionBindings::default(),
             host_session_claims: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
             host_restore_released: Arc::new(AtomicBool::new(false)),
@@ -912,6 +913,9 @@ impl<R: Runtime> AppState<R> {
     /// Runs the sweep over every host. `false` means it did NOT complete and must
     /// stay retryable.
     async fn run_host_restore_sweep(&self) -> bool {
+        for process_id in self.session_bindings.reap_unbound(std::time::Instant::now()) {
+            let _ = crate::commands::close_terminal_process(self, process_id);
+        }
         super::host_adoption::sweep(self).await
     }
 
@@ -1029,6 +1033,13 @@ impl<R: Runtime> AppState<R> {
         host_registry::forget_restoring_leaf(&self.intent_maps(), leaf_id, std::time::Instant::now())
     }
 
+    pub fn close_leaf_for_window(&self, leaf_id: &str, window: &str) -> Option<String> {
+        host_registry::close_leaf_for_window(
+            &self.intent_maps(), &self.session_bindings, &self.identity,
+            leaf_id, window, std::time::Instant::now(),
+        )
+    }
+
     /// Log and announce, once, sessions that two hosts both claim to hold.
     pub(super) fn note_duplicate_sessions(&self, session_keys: &[String]) {
         use tauri::Emitter;
@@ -1040,11 +1051,15 @@ impl<R: Runtime> AppState<R> {
 
     /// Extend a restore intent's life; every keyed create calls this.
     pub fn refresh_restoring_key(&self, session_key: &str) {
-        host_registry::refresh_restoring_key(&self.restoring_keys, session_key, std::time::Instant::now())
+        let now = std::time::Instant::now();
+        self.session_bindings.refresh_intents(session_key, now);
+        host_registry::refresh_restoring_key(&self.restoring_keys, session_key, now)
     }
 
     pub fn is_restoring_key(&self, session_key: &str) -> bool {
-        host_registry::is_restoring_key(&self.restoring_keys, session_key, std::time::Instant::now())
+        let now = std::time::Instant::now();
+        self.session_bindings.has_key_intent(session_key, now)
+            || host_registry::is_restoring_key(&self.restoring_keys, session_key, now)
     }
 
     /// Remove a restore intent (bound, closed, or no longer waiting). The TTL
@@ -1324,6 +1339,7 @@ impl<R: Runtime> AppState<R> {
         // durable id to a process that no longer exists. One remover, at the same
         // choke point every other per-terminal map is torn down from.
         self.identity.unindex(id);
+        self.session_bindings.forget_process(id);
         self.shell_writer_channels.remove(id);
         self.ptys.remove(id);
         self.terminal_screens.remove(id);

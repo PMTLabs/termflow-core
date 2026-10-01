@@ -65,6 +65,11 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
         // is retrying while a host answers), and turning the session into a
         // recovered tab would put a second owner on it. A session whose pane
         // the user closed while waiting is closed rather than shown.
+        // Window-scoped intent can remain after the aggregate key was consumed
+        // by another copy's successful bind. It still suppresses recovery.
+        if port.restoring(&orphan.tab_id, std::time::Instant::now()) {
+            continue;
+        }
         match host_registry::orphan_verdict(
             port.restoring_keys(),
             port.closed_unowned(),

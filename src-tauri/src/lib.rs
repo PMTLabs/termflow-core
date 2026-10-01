@@ -1,6 +1,6 @@
 pub mod sibling_coord;
 pub mod identity_index;
-pub mod session_handoff;
+pub mod session_bindings;
 pub mod state;
 pub mod console_window;
 pub mod context_menu;
@@ -876,8 +876,8 @@ pub fn run() {
         commands::report_host_restore_settled,
         commands::register_restoring_leaves,
         commands::forget_restoring_leaf,
-        commands::offer_session_handoff,
-        commands::take_session_handoff,
+        commands::bind_shell,
+        commands::release_shell_binding,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
@@ -1055,6 +1055,7 @@ pub fn run() {
             // one's "already hidden" and skip its first real put_IsVisible.
             crate::webview_power::forget(window.label());
             if let Some(state) = app.try_state::<AppState>() {
+                state.session_bindings.destroy_window(window.label(), std::time::Instant::now());
                 let restore_state = (*state).clone();
                 let destroyed_label = window.label().to_string();
                 tauri::async_runtime::spawn(async move {
