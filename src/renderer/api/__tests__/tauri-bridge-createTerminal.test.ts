@@ -47,16 +47,21 @@ describe('tauriBridge restore intent contract', () => {
     expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-migrated' });
   });
 
-  it('offers a session by the leaf identity, with a camelCase argument key', async () => {
+  it('offers a session by the leaf identity and the process it created, with camelCase argument keys', async () => {
     invokeMock.mockResolvedValueOnce(true);
-    await expect(tauriBridge.offerSessionHandoff('tm-moved')).resolves.toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith('offer_session_handoff', { leafId: 'tm-moved' });
+    await expect(tauriBridge.offerSessionHandoff('tm-moved', 'pc-created')).resolves.toBe(true);
+    expect(invokeMock).toHaveBeenCalledWith('offer_session_handoff', { leafId: 'tm-moved', processId: 'pc-created' });
   });
 
   it('takes an offered session by the leaf identity, with a camelCase argument key', async () => {
-    invokeMock.mockResolvedValueOnce('pc-offered');
-    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toBe('pc-offered');
+    invokeMock.mockResolvedValueOnce({ status: 'taken', processId: 'pc-offered' });
+    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual({ status: 'taken', processId: 'pc-offered' });
     expect(invokeMock).toHaveBeenCalledWith('take_session_handoff', { leafId: 'tm-moved' });
+  });
+
+  it.each([{ status: 'inFlight' }, { status: 'none' }])('passes the take answer %j through unchanged', async answer => {
+    invokeMock.mockResolvedValueOnce(answer);
+    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual(answer);
   });
 
   it('surfaces register failure instead of allowing an unkeyed mount', async () => {

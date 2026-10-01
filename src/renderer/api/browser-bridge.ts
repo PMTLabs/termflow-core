@@ -1,4 +1,4 @@
-import { ElectronAPI, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { ElectronAPI, SessionHandoffTake, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { getStoredApiToken } from '../services/profileScope';
@@ -193,8 +193,8 @@ class BrowserBridge implements ElectronAPI {
     async forgetRestoringLeaf(_leafId: string): Promise<void> { }
 
     /// A browser session has no other window to hand a session to or from.
-    async offerSessionHandoff(_leafId: string): Promise<boolean> { return false; }
-    async takeSessionHandoff(_leafId: string): Promise<string | null> { return null; }
+    async offerSessionHandoff(_leafId: string, _processId: string): Promise<boolean> { return false; }
+    async takeSessionHandoff(_leafId: string): Promise<SessionHandoffTake> { return { status: 'none' }; }
 
     async closeTerminal(id: string): Promise<void> {
         try {

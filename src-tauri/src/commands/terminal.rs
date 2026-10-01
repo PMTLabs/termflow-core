@@ -250,19 +250,27 @@ pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Res
 
 /// A pane moved to another window while its first create was still in flight, and
 /// the window it left won that create. That window binds nothing and offers the
-/// terminal registered for the leaf to whichever window has the pane now.
-/// `false` (and no offer) when no terminal is registered for the leaf.
+/// terminal its create produced to whichever window has the pane now.
+/// `false` (and no offer) unless `process_id` is the terminal registered for the leaf.
 #[tauri::command]
-pub fn offer_session_handoff(state: State<'_, AppState>, leaf_id: String) -> Result<bool, String> {
-    Ok(state.handoff_offers.offer(&state.identity, &leaf_id, std::time::Instant::now()))
+pub fn offer_session_handoff(
+    state: State<'_, AppState>,
+    leaf_id: String,
+    process_id: String,
+) -> Result<bool, String> {
+    Ok(state.handoff_offers.offer(&state.identity, &leaf_id, &process_id, std::time::Instant::now()))
 }
 
 /// The moved pane's own create was refused because the window it left won the
-/// session: take the terminal that window offered. Returns the process id and
-/// removes the offer in the same step, so only one window can ever adopt it;
-/// `None` when there is no live offer (or the registered terminal has changed).
+/// session: take the terminal that window offered. The offer is removed in the
+/// same step, so only one window can ever adopt it. With no live offer (or when
+/// the registered terminal has changed) the answer says whether the winner's
+/// create is still running, in which case the offer may yet arrive.
 #[tauri::command]
-pub fn take_session_handoff(state: State<'_, AppState>, leaf_id: String) -> Result<Option<String>, String> {
+pub fn take_session_handoff(
+    state: State<'_, AppState>,
+    leaf_id: String,
+) -> Result<crate::session_handoff::HandoffTake, String> {
     Ok(state.handoff_offers.take(&state.identity, &leaf_id, std::time::Instant::now()))
 }
 
@@ -487,6 +495,11 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             }
         }
     };
+    // The session's claim is held from here on. A window that asked for the same
+    // leaf and was refused asks this mark whether to keep waiting for the offer
+    // this create may make when it returns; it must outlast the host round trip
+    // below, which the claim's own state does not (`Registered` comes first).
+    let _create_in_flight = state.handoff_offers.begin_create(&id);
 
     // The injected-hook decision (interactive PowerShell). Command-suggest's
     // renderer-side prompt gate reads this back over the API to re-arm on reload.
@@ -1713,3 +1726,37 @@ mod root_leaf_reservation_tests {
     }
 }
 
+/// The hand-off answers "ask again" while a create for the leaf is running, and
+/// only `spawn_routed` knows that. The mark has to start once the session's claim
+/// is held (a refused create would otherwise mark itself) and has to cover the
+/// registration and host round trip that follow it.
+#[cfg(test)]
+mod create_in_flight_mark_tests {
+    use crate::automation_engine::test_host::strip_comments;
+
+    fn spawn_routed_body() -> String {
+        let source = strip_comments(include_str!("terminal.rs"));
+        let start = source.find("async fn spawn_routed(").expect("spawn_routed is defined here");
+        let end = source[start..].find("struct HostIdentity").expect("spawn_routed is followed by HostIdentity");
+        source[start..start + end].to_string()
+    }
+
+    #[test]
+    fn spawn_routed_marks_its_create_in_flight_after_the_claim_and_before_registering() {
+        let body = spawn_routed_body();
+        let marks: Vec<_> = body.match_indices("handoff_offers.begin_create(").map(|(at, _)| at).collect();
+        assert_eq!(marks.len(), 1, "exactly one mark, held for the whole create");
+        let at = marks[0];
+        let after = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle} is called in spawn_routed"));
+        assert!(after("place_create(") < at, "marked only once the host placement holds the claim");
+        assert!(after("claim_host_registration(") < at, "the elevated claim comes before the mark too");
+        assert!(at < after("register_host_terminal("), "marked before the terminal is registered");
+        assert!(at < after("attach_confirmed("), "marked before the slow attach round trip");
+        assert!(at < after("spawn_session("), "marked before the slow spawn round trip");
+        let line = body[body[..at].rfind('\n').map_or(0, |n| n + 1)..].lines().next().unwrap();
+        assert!(
+            line.contains("let _create_in_flight ="),
+            "bound to a named guard, not dropped at once: {line}"
+        );
+    }
+}

@@ -6,8 +6,8 @@ test('browser bridge fails closed when host restore registration is unavailable'
 });
 
 test('browser bridge has no other window to hand a session to or from', async () => {
-  await expect(browserBridge.offerSessionHandoff('tm-moved')).resolves.toBe(false);
-  await expect(browserBridge.takeSessionHandoff('tm-moved')).resolves.toBeNull();
+  await expect(browserBridge.offerSessionHandoff('tm-moved', 'pc-1')).resolves.toBe(false);
+  await expect(browserBridge.takeSessionHandoff('tm-moved')).resolves.toEqual({ status: 'none' });
 });
 
 test('browser bridge has no unowned host intent to forget', async () => {

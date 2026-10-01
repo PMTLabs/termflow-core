@@ -9,10 +9,15 @@ import { reassertLabelAfterSpawn } from './terminalLabelSync';
 import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
 import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
 
-// The offering window's create may return a moment after the destination's is
-// refused, so the destination asks a few times before giving up.
-const HANDOFF_TAKE_ATTEMPTS = 3;
-const HANDOFF_TAKE_DELAY_MS = 200;
+// The destination's create is refused as soon as the other window holds the session, but that
+// window offers it only once its own create returns, which can take as long as the host
+// request (bounded at 10 s). While the backend says a create for the leaf is still running the
+// destination keeps asking, for longer than that bound; when nothing is running it asks only a
+// few times, enough to cover the offer's own round trip.
+const HANDOFF_IN_FLIGHT_POLL_MS = 250;
+const HANDOFF_IN_FLIGHT_BUDGET_MS = 15_000;
+const HANDOFF_IDLE_ATTEMPTS = 3;
+const HANDOFF_IDLE_DELAY_MS = 200;
 
 export type HostWaitState = 'waiting' | 'retry' | undefined;
 
@@ -44,9 +49,10 @@ export class TerminalServiceClass {
   // `renderer_terminal_id`, breaking the PRIMARY KEY invariant. Cleared in a
   // `finally` so a failed create does not permanently poison the leaf.
   private inFlightCreates: Map<string, Promise<string>> = new Map();
-  // Leaves closed (not moved) while their create was in flight. A create that comes
-  // back for a leaf this window no longer has closes the new shell instead of
-  // offering it to another window when the user closed the pane.
+  // Leaves closed (not moved) in THIS window while their create was in flight. A create
+  // that comes back for a leaf this window no longer has closes the new shell instead of
+  // offering it to another window when the user closed the pane here. A close in any
+  // other window is not seen by this one.
   private closedWhileCreating: Set<string> = new Set();
 
   private hostWaitStates = new Map<string, HostWaitState>();
@@ -259,42 +265,56 @@ export class TerminalServiceClass {
 
   /**
    * Bind to the session another window offered for this leaf. The offer may still
-   * be on its way (the other window's create returned just now), so a few short
-   * retries. `undefined` when no offer shows up (a recovery pane that lost to
-   * another pane, or a shell another window is showing, keeps its refusal); `''`
-   * when the leaf left this window meanwhile.
+   * be on its way: while the backend reports the other window's create as running
+   * this keeps asking (up to the in-flight budget); once nothing is running it asks
+   * a few more times, counted from the last answer that said something was. `undefined`
+   * when no offer shows up (a recovery pane that lost to another pane, or a shell
+   * another window is showing, keeps its refusal); `''` when the leaf left this window
+   * meanwhile.
    */
   private async takeOfferedSession(terminalId: string): Promise<string | undefined> {
-    for (let attempt = 0; attempt < HANDOFF_TAKE_ATTEMPTS; attempt++) {
-      if (attempt > 0) {
-        await new Promise(resolve => setTimeout(resolve, HANDOFF_TAKE_DELAY_MS));
+    const deadline = Date.now() + HANDOFF_IN_FLIGHT_BUDGET_MS;
+    let idleAnswers = 0;
+    let delay = 0;
+    while (true) {
+      if (delay > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay));
         if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) return '';
       }
-      let processId: string | null | undefined;
+      let answer: Awaited<ReturnType<typeof window.electronAPI.takeSessionHandoff>> | undefined;
       try {
-        processId = await this.api().takeSessionHandoff?.(terminalId);
+        answer = await this.api().takeSessionHandoff?.(terminalId);
       } catch (error) {
         console.warn(`TerminalService: could not take the offered session of ${terminalId}:`, error);
         return undefined;
       }
-      if (!processId) continue;
-      if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
-        // The offer is spent; whoever has the pane now needs it again.
-        await this.releaseAbsentCreate(terminalId, processId);
-        return '';
+      if (answer?.status === 'taken') {
+        const processId = answer.processId;
+        if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
+          // The offer is spent; whoever has the pane now needs it again.
+          await this.releaseAbsentCreate(terminalId, processId);
+          return '';
+        }
+        console.log(`TerminalService: ${terminalId} took over the session ${processId} offered for it`);
+        this.bindCreated(terminalId, processId, undefined);
+        return processId;
       }
-      console.log(`TerminalService: ${terminalId} took over the session ${processId} offered for it`);
-      this.bindCreated(terminalId, processId, undefined);
-      return processId;
+      if (answer?.status === 'inFlight') {
+        if (Date.now() >= deadline) return undefined;
+        idleAnswers = 0;
+        delay = HANDOFF_IN_FLIGHT_POLL_MS;
+        continue;
+      }
+      if (++idleAnswers >= HANDOFF_IDLE_ATTEMPTS) return undefined;
+      delay = HANDOFF_IDLE_DELAY_MS;
     }
-    return undefined;
   }
 
   /**
    * A create produced `processId` for a leaf this window no longer has. A pane the
-   * user closed gets its new shell closed; a pane that moved has the shell offered
-   * to the window that has it now. Binding it here would leave two windows holding
-   * one shell.
+   * user closed in this window gets its new shell closed; a pane that moved has the
+   * shell offered to the window that has it now. Binding it here would leave two
+   * windows holding one shell.
    */
   private async releaseAbsentCreate(terminalId: string, processId: string): Promise<void> {
     if (this.closedWhileCreating.has(terminalId)) {
@@ -308,7 +328,7 @@ export class TerminalServiceClass {
     }
     console.log(`TerminalService: ${terminalId} left this window during its create; offering process ${processId} to its new window`);
     try {
-      await this.api().offerSessionHandoff?.(terminalId);
+      await this.api().offerSessionHandoff?.(terminalId, processId);
     } catch (error) {
       console.warn(`TerminalService: could not offer the session of ${terminalId}:`, error);
     }
