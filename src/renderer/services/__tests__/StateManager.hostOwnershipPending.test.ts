@@ -243,6 +243,9 @@ function unregisteredInstallers(source: string): string[] {
     if ((ts.isMethodDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) && node.body) {
       const calls: ts.CallExpression[] = [];
       const walk = (child: ts.Node) => {
+        // A nested body is not executed by entering the loader. Check its own
+        // installers separately instead of crediting its calls to the parent.
+        if (ts.isFunctionLike(child)) return;
         if (ts.isCallExpression(child)) calls.push(child);
         ts.forEachChild(child, walk);
       };
@@ -265,9 +268,37 @@ function unregisteredInstallers(source: string): string[] {
   return failures;
 }
 
+test('installer census credits loader-body registration, not an uncalled nested closure', () => {
+  expect(unregisteredInstallers(`class Loader {
+    async load(data) {
+      const deferred = async () => { await this.registerRestoringTrees(data); };
+      this.restoreTabPanesInPlace(data);
+    }
+  }`)).toEqual(['load']);
+  expect(unregisteredInstallers(`class Loader {
+    async load(data) {
+      await this.registerRestoringTrees(data);
+      this.restoreTabPanesInPlace(data);
+    }
+  }`)).toEqual([]);
+});
+
 test('persisted tree installer census requires registration before every install operation', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'StateManager.ts'), 'utf8');
   expect(unregisteredInstallers(source)).toEqual([]);
+  const ast = ts.createSourceFile('StateManager.ts', source, ts.ScriptTarget.Latest, true);
+  const counts: Record<string, number> = {};
+  const count = (node: ts.Node) => {
+    if (ts.isCallExpression(node)) {
+      const name = ts.isPropertyAccessExpression(node.expression) ? node.expression.name.text : node.expression.getText(ast);
+      if (['addTabTree', 'restoreTabPanesInPlace', 'populateWorkspace', 'registerRestoringTrees'].includes(name)) {
+        counts[name] = (counts[name] ?? 0) + 1;
+      }
+    }
+    ts.forEachChild(node, count);
+  };
+  count(ast);
+  expect(counts).toEqual({ addTabTree: 4, restoreTabPanesInPlace: 3, populateWorkspace: 2, registerRestoringTrees: 3 });
   // Prove an installer nobody named in this test cannot evade the census.
   expect(unregisteredInstallers('class Loader { newInstaller(data, dispatch) { dispatch(addTabTree({ tree: data.paneTree })); } }')).toEqual(['newInstaller']);
   expect(unregisteredInstallers('function newHelper(data, dispatch) { dispatch(addTabTree({ tree: data.paneTree })); }')).toEqual(['newHelper']);
@@ -298,10 +329,10 @@ test('persisted tree installer census requires registration before every install
   };
   scan(renderer);
   expect(otherInstallers).toEqual({
-    'App.tsx': 1, // recovered host session, already reserved
-    'services/apiCreatedTab.ts': 1, // fresh API leaf
+    'App.tsx': 1, // fresh API tab/split fallback; reserved recovery uses apiCreatedTab
+    'services/apiCreatedTab.ts': 1, // fresh API leaf, already-bound process, or reserved recovery
     'services/restoreHiddenAgentTerminals.ts': 1, // already-bound live process
-    'components/Canvas/CanvasMode.tsx': 1, // moves an existing leaf
+    'components/Canvas/CanvasMode.tsx': 1, // fresh canvas-port spawn
     'components/TerminalContainer.tsx': 2, // mirror adoption / fresh tree seeding
     'components/Panes/dnd/detach.ts': 1, // cross-window handoff, not a close or a layout load
   });

@@ -182,6 +182,28 @@ test('handleRestart surfaces a host-ownership-pending toast and never registers 
   expect(api.registerRestoringLeaves).not.toHaveBeenCalled();
 });
 
+test('handleRestart surfaces lifecycle busy after its short retry budget', async () => {
+  seed(activeStore);
+  const create = jest.fn().mockRejectedValue(new Error('LIFECYCLE_BUSY: TermFlow is updating'));
+  const api = apiFor(create);
+  activeService = useService(activeStore, api);
+  activeService.registerExistingTerminal('tm-wait', 'pc-ended');
+  activeStore.dispatch(markSessionClosed({ terminalId: 'tm-wait', exitCode: 0 }));
+  act(() => mount('tm-wait'));
+  await flush();
+  const restart = [...container.querySelectorAll('button')].find(button => button.textContent === 'Restart');
+  expect(restart).toBeDefined();
+  act(() => restart!.click());
+  await flush();
+  await act(async () => { await jest.advanceTimersByTimeAsync(10_000); });
+  expect(create).toHaveBeenCalledTimes(21);
+  expect(activeStore.getState().ui.toasts).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'warning', message: expect.stringContaining('exiting or updating') }),
+  ]));
+  expect(api.registerRestoringLeaves).not.toHaveBeenCalled();
+  expect(activeStore.getState().sessionExit.byTerminalId['tm-wait']).toBeDefined();
+});
+
 // A host whose keyed creates park in flight (as the backend does at its barrier) until the
 // test lets them claim the session. The first claim wins it and that create then keeps running
 // (the host's attach or spawn request) until the test completes it; a later claim is refused as

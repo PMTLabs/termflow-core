@@ -233,6 +233,7 @@ pub fn register_restoring_leaves(
     state: State<'_, AppState>,
     leaves: Vec<RestoringLeaf>,
 ) -> Result<(), String> {
+    log::info!("[GEN] registering {} restoring leaves", leaves.len());
     state.reap_expired_restore_intents();
     for leaf in &leaves {
         state.register_restoring_leaf(&leaf.leaf_id, leaf.session_key.as_deref());
@@ -244,6 +245,7 @@ pub fn register_restoring_leaves(
 /// host reports it later, is closed rather than adopted or shown as recovered.
 #[tauri::command]
 pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Result<(), String> {
+    log::info!("[GEN] closing unbound restoring leaf {leaf_id}");
     state.forget_restoring_leaf(&leaf_id);
     Ok(())
 }

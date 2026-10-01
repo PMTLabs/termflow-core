@@ -18,6 +18,10 @@ mod engine_host;
 mod reattach;
 #[cfg(test)]
 mod source_scan;
+#[cfg(test)]
+mod wiring_tests;
+#[cfg(test)]
+pub(crate) use host_adoption::wiring_tests::exercise_generations;
 
 pub use types::*;
 pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, strip_cursor_state_tail, tail_text_with};

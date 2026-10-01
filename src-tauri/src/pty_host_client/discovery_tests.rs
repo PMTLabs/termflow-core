@@ -87,6 +87,24 @@ fn legacy_current_when_gate_off_or_no_generation() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn gate_on_discovery_routes_new_create_offload_exit_and_retirement_across_two_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    record(dir.path(), None, 1);
+    record(dir.path(), Some(A), 2);
+    let current = endpoint(super::endpoints::named_generation(Some(A), true));
+    crate::state::exercise_generations(current.clone(), discover(dir.path(), &current)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn gate_off_still_routes_qualified_survivors_through_every_lifecycle() {
+    let dir = tempfile::tempdir().unwrap();
+    record(dir.path(), None, 1);
+    record(dir.path(), Some(A), 2);
+    let current = endpoint(super::endpoints::named_generation(Some(A), false));
+    crate::state::exercise_generations(current.clone(), discover(dir.path(), &current)).await;
+}
+
 #[test]
 fn alias_probe_and_record_dedupe() {
     let dir = tempfile::tempdir().unwrap();

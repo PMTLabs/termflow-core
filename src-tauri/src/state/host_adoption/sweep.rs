@@ -8,8 +8,9 @@
 
 use super::panes::{live_client, surface_orphans, PanePort};
 use super::reconnect::reconnect_disconnected;
-use super::{rediscover_hosts, HostChannel, PtyHostClient};
+use super::{listing_is_current, rediscover_hosts, HostChannel, PtyHostClient};
 use crate::state::reattach::plan_reattach;
+use crate::state::host_table::Admission;
 
 /// The hosts this app is connected to right now, current first.
 fn connected_hosts<P: PanePort>(port: &P) -> Vec<(HostChannel, PtyHostClient)> {
@@ -30,6 +31,7 @@ fn connected_hosts<P: PanePort>(port: &P) -> Vec<(HostChannel, PtyHostClient)> {
 /// host could not be reached or did not answer its listing, and an unanswered
 /// listing is unknown, never empty, so nothing is surfaced or torn down on it.
 pub(in crate::state) async fn sweep<P: PanePort>(port: &P) -> bool {
+    log::debug!("[GEN] sweeping terminal hosts");
     let mut complete = true;
     // Registered hosts whose connection is down get their reconnect again; only
     // one that is back, or found dead and dropped, counts as settled.
@@ -46,12 +48,20 @@ pub(in crate::state) async fn sweep<P: PanePort>(port: &P) -> bool {
         complete = false;
     }
     for (channel, client) in connected_hosts(port) {
+        let Some(epoch) = port.table().epoch(channel) else { continue };
         // An unanswered listing is unknown, never empty: do not surface or tear down.
         let Some(sessions) = client.list_sessions().await else {
             log::warn!("[HOTSWAP] {channel:?} did not answer the sweep's listing");
             complete = false;
             continue;
         };
+        // A reconnect or retirement can finish while the listing is in flight.
+        // Its older answer must not reserve sessions on a superseded connection.
+        if !listing_is_current(port.table(), channel, epoch, &client, Admission::Open) {
+            log::info!("[GEN] discarding superseded sweep listing from {channel:?} epoch {epoch}");
+            complete = false;
+            continue;
+        }
         // What this host is compared with is what this host owns.
         let claims: Vec<String> = port.panes_on(channel).into_keys().collect();
         let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());

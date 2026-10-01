@@ -35,6 +35,15 @@ pub(super) enum ListBehavior {
     /// Answers the first `answered` listing requests of each connection at once
     /// and every later one only after `delay`: a host that has become slow.
     SlowAfter { answered: usize, delay: Duration },
+    /// Pause later replies, then change the connection immediately after answering.
+    GatedAfter { answered: usize, gate: Arc<ListGate> },
+}
+
+#[derive(Default)]
+pub(super) struct ListGate {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+    pub after_answer: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 #[derive(Clone)]
@@ -293,7 +302,7 @@ async fn serve(
                         let now = Instant::now();
                         !(world_start + *from <= now && now < world_start + *to)
                     }
-                    ListBehavior::SlowAfter { .. } => true,
+                    ListBehavior::SlowAfter { .. } | ListBehavior::GatedAfter { .. } => true,
                 };
                 // A session the host was told to close is no longer listed once its
                 // close has taken effect.
@@ -312,8 +321,23 @@ async fn serve(
             _ => None,
         };
         if let Some(reply) = reply {
+            let gate = match &spec.list {
+                ListBehavior::GatedAfter { answered, gate } if listings > *answered && matches!(&reply, Response::SessionList { .. }) => Some(gate),
+                _ => None,
+            };
+            if let Some(gate) = gate {
+                gate.reached.notify_one();
+                gate.release.notified().await;
+            }
             if write_frame(&mut wr, &Frame::Resp(reply)).await.is_err() {
                 break;
+            }
+            // On a current-thread runtime this runs before the reader/adopter
+            // consumes the reply just written into the duplex buffer.
+            if let Some(gate) = gate {
+                if let Some(change) = gate.after_answer.lock().unwrap().take() {
+                    change();
+                }
             }
         }
     }
@@ -351,7 +375,7 @@ fn still_open(
             }) && !ended_here(&s.tab_id).is_some_and(|e| !e.listed_dead)
         })
         .map(|s| SessionMeta { alive: s.alive && ended_here(&s.tab_id).is_none(), ..s.clone() })
-        .chain(begun)
+        .chain(begun.into_iter().filter(|s| ended_here(&s.tab_id).is_none()))
         .collect()
 }
 

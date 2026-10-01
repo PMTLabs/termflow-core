@@ -157,6 +157,25 @@ pub(super) fn session_registered_on_any_channel(
     })
 }
 
+/// Resolve an inbound session only on its owning channel and current connection.
+/// A duplicate key on another host must not feed or end the registered shell.
+pub(super) fn resolve_inbound(
+    host_terminals: &DashMap<String, HostChannel>,
+    identity: &crate::identity_index::IdentityIndex,
+    table: &super::host_table::HostTable,
+    channel: HostChannel,
+    epoch: u64,
+    session_key: &str,
+) -> Option<String> {
+    if !table.is_current(channel, epoch)
+        || table.admission(channel) == Some(super::host_table::Admission::Retired)
+    {
+        return None;
+    }
+    let process = identity.process_for_session(session_key)?;
+    host_terminals.get(&process).is_some_and(|owner| *owner == channel).then_some(process)
+}
+
 // ---- pending closes -------------------------------------------------------
 
 /// Consume the tombstone for `session_key` if it is owed to `channel`. A host
@@ -637,3 +656,5 @@ pub(super) fn first_report(reported: &AtomicBool) -> bool {
 
 #[cfg(test)]
 mod registry_tests;
+#[cfg(test)]
+mod inbound_tests;

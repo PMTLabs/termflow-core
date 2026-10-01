@@ -210,6 +210,7 @@ impl PtyHostClient {
     /// Requests still waiting are failed and the pending map is emptied.
     /// Returns whether the stream was released within the bound.
     pub async fn close_transport(&self) -> bool {
+        log::debug!("[GEN] closing terminal host transport intentionally");
         const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
         if self.conn.begin_close() {
             self.alive.store(false, Ordering::Release);
@@ -607,10 +608,10 @@ where
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
                     // Ring bookkeeping stays in the HOST's id space — it is the
                     // host's own offset, and reattach replays from it.
-                    deps.stream_offsets
-                        .insert(tab_id.clone(), offset + bytes.len() as u64);
                     match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
                         Some(id) => {
+                            deps.stream_offsets
+                                .insert(tab_id.clone(), offset + bytes.len() as u64);
                             let _ = deps.output_tx.send(ChannelPayload { id, data: bytes });
                             deps.output_produced.fetch_add(1, Ordering::Relaxed);
                         }

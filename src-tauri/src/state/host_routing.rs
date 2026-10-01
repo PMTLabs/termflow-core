@@ -129,8 +129,10 @@ pub(super) async fn place<P: RoutingPort>(
     // front: once exit has begun closing the hosts none of them is a usable target
     // any more, and the create would be run in this process instead of refused.
     if let Some(reason) = port.table().lifecycle_reason() {
+        log::info!("[GEN] create {session_key} refused during {reason:?}");
         return Err(Busy::Lifecycle(reason).to_string());
     }
+    log::debug!("[GEN] placing terminal {session_key} (override={override_key})");
     let keyed = override_key
         || host_registry::is_restoring_key(port.restoring_keys(), session_key, Instant::now())
         || host_registry::reserved_channel(port.claims(), session_key).is_some();
@@ -193,6 +195,7 @@ pub(super) async fn place<P: RoutingPort>(
         match claimed {
             Some((pid, from)) if from == channel => {
                 settle(port, session_key);
+                log::info!("[GEN] attaching {session_key} on {channel:?} (pid {pid})");
                 return Ok(Placement::Attach { channel, client, pid, ticket });
             }
             // The claim moved to another host, or vanished, between looking and
@@ -201,6 +204,7 @@ pub(super) async fn place<P: RoutingPort>(
             None if held_by.is_some() => continue,
             None => {
                 settle(port, session_key);
+                log::info!("[GEN] spawning {session_key} on {channel:?}");
                 return Ok(Placement::Spawn { channel, client, ticket });
             }
         }

@@ -28,6 +28,8 @@
 //! ordering and the failure policy are testable over fake hosts without a Tauri
 //! `AppHandle` or an updater.
 
+use super::host_adoption::listing_is_current;
+use super::host_table::Admission;
 use super::host_lifecycle::{begin_full_update, origins, owned_hosts, owned_hosts_now, unresolved_refusal};
 use super::host_lifecycle::{CloseBounds, LifecyclePort, OwnedHost};
 use super::types::AppState;
@@ -178,22 +180,25 @@ pub(super) trait FullUpdatePort: LifecyclePort {
 
 async fn scope_of<P: FullUpdatePort>(port: &P, hosts: &[OwnedHost]) -> Scope {
     let answers = join_all(hosts.iter().map(|host| async move {
-        match &host.client {
-            Some(client) => client.list_sessions_within(SCOPE_LIST_BOUND).await,
-            None => None,
-        }
+        let channel = host.channel?;
+        let epoch = port.table().epoch(channel)?;
+        let client = host.client.as_ref()?;
+        let sessions = client.list_sessions_within(SCOPE_LIST_BOUND).await?;
+        Some((channel, epoch, client, sessions))
     }))
     .await;
     let mut shell_count = port.local_shells();
     let mut unknown = false;
     for answer in answers {
         match answer {
-            Some(sessions) => {
+            // A fast reply may have become stale while another host was listing.
+            Some((channel, epoch, client, sessions))
+                if listing_is_current(port.table(), channel, epoch, client, Admission::Open) => {
                 let live = sessions.iter().filter(|s| s.alive).count();
                 shell_count = shell_count.saturating_add(u32::try_from(live).unwrap_or(u32::MAX));
             }
             // A host that did not answer holds an unknown number: never none.
-            None => unknown = true,
+            _ => unknown = true,
         }
     }
     Scope { shell_count, unknown }
@@ -226,6 +231,8 @@ where
     L: FnOnce(I) -> Fut + Send,
     Fut: Future<Output = Result<(), String>> + Send,
 {
+    log::info!("[GEN] preparing update {} (marker mode {:?}, confirmed={})",
+        target.version, target.marker_mode, confirm.is_some());
     // Prepare: nothing is stopped, nothing is changed.
     let hosts = owned_hosts(port).await;
     let marker = survival_mode(target.marker_mode);
@@ -347,6 +354,7 @@ pub(super) fn availability<P: FullUpdatePort>(
 ) -> Result<Availability, String> {
     let hosts = owned_hosts_now(port);
     let (mode, reasons) = effective_mode(survival_mode(marker_mode), &origins(&hosts));
+    log::debug!("[GEN] update availability: {mode:?}, reasons={reasons:?}");
     match mode {
         UpdateMode::Offload => offload_preflight()?,
         UpdateMode::Full => live_siblings_refusal(port)?,

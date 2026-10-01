@@ -69,7 +69,7 @@ impl<R: Runtime> AppState<R> {
     /// The callbacks every host connection shares: wire its Exit/Gap into
     /// cleanup + emit / repaint, and translate the host's session keys into our
     /// process ids. Only what happens when the connection drops differs.
-    fn host_deps(&self, lifecycle_token: String, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
+    fn host_deps(&self, lifecycle_token: String, channel: HostChannel, epoch: u64, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
         let st_exit = self.clone();
         let st_gap = self.clone();
         PtyHostDeps {
@@ -112,7 +112,7 @@ impl<R: Runtime> AppState<R> {
             // (design 014 §A3). An unknown session is DROPPED, never echoed.
             resolve_process: {
                 let st = self.clone();
-                Arc::new(move |k: &str| st.identity.process_for_session(k))
+                Arc::new(move |k: &str| host_registry::resolve_inbound(&st.host_terminals, &st.identity, &st.host_table, channel, epoch, k))
             },
             on_disconnect,
             stream_offsets: self.host_stream_offsets.clone(),
@@ -190,7 +190,7 @@ impl<R: Runtime> AppState<R> {
         // Generation for this connection: on_disconnect only nulls `pty_host` if
         // its generation is still current (a dead old client can't clobber a new).
         let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
-        let deps = self.host_deps(token.clone(), self.primary_disconnect(my_gen));
+        let deps = self.host_deps(token.clone(), HostChannel::Primary, my_gen, self.primary_disconnect(my_gen));
         // Advertised host pid (if any): connect_or_spawn refuses to spawn a
         // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
         let (mut client, origin) = crate::pty_host_client::connect_or_spawn(
@@ -217,6 +217,8 @@ impl<R: Runtime> AppState<R> {
         let flags = host_flags(&plan, &candidate.endpoint)?;
         let deps = self.host_deps(
             crate::pty_host_client::resolve_token(),
+            HostChannel::Frozen(id),
+            epoch,
             self.frozen_disconnect(id, epoch, candidate.endpoint.clone()),
         );
         let grace = if candidate.pid.is_some() { GRACE_LIVE_HOST } else { GRACE_ENDPOINT_ONLY };

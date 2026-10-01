@@ -87,6 +87,116 @@ async fn keyed_create(port: &FakePort, session_key: &str) -> Keyed {
     }
 }
 
+#[tokio::test]
+async fn answered_relist_superseded_before_consumption_cannot_reserve_or_settle_closes() {
+    let gate = Arc::new(ListGate::default());
+    let world = World::new();
+    world.add_host(CURRENT, HostSpec { list: ListBehavior::GatedAfter { answered: 1, gate: gate.clone() }, ..HostSpec::default() });
+    let port = FakePort::new(&world, CURRENT);
+    port.set_candidates(vec![current()]);
+    rediscover_hosts(&port).await.unwrap();
+    let old = port.current_client().unwrap();
+    world.begin_session(CURRENT, meta("stale-shell", 731));
+    world.begin_session(CURRENT, meta("owed-close", 732));
+    port.0.host_close_pending.insert("owed-close".into(), HostChannel::Primary);
+    port.0.host_close_pending.insert("absent-close".into(), HostChannel::Primary);
+    let relist = tokio::spawn({ let port = port.clone(); async move {
+        adopt(&port, &current(), HostRole::Current, Instant::now() + ADOPTION_DEADLINE).await
+    } });
+    tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
+    world.end_session(CURRENT, "stale-shell");
+    world.end_session(CURRENT, "owed-close");
+    let replacement = port.connect(&current(), HostRole::Current, None).await.unwrap();
+    *gate.after_answer.lock().unwrap() = Some(Box::new({ let port = port.clone(); let epoch = replacement.epoch; let replacement = replacement.client.clone(); move || {
+        assert!(port.table().publish(HostChannel::Primary, epoch));
+        port.publish_current(&replacement).unwrap();
+    } }));
+    gate.release.notify_one();
+    assert!(matches!(relist.await.unwrap(), Err(Failure::Superseded)));
+    assert!(port.0.claims.is_empty(), "stale answers must not reserve on the replacement channel");
+    assert_eq!(port.0.host_close_pending.len(), 2, "neither delivered nor absent closes may be pruned");
+    assert_eq!(world.count_everywhere("Close"), 0);
+    assert_eq!(port.0.listings.lock().unwrap().len(), 1);
+    use crate::state::host_routing::{place, Placement};
+    let session_key = "stale-shell";
+    match place(&port, session_key, true).await.unwrap() {
+        Placement::Spawn { channel, client, ticket } => {
+            assert_eq!(channel, HostChannel::Primary);
+            assert_eq!(client.spawn_session(session_key, &spawn_spec()).await, Ok(4242));
+            drop(ticket);
+        }
+        _ => panic!("a stale claim must not turn a fresh session into an attach"),
+    }
+    assert_eq!(world.sessions(CURRENT, "Spawn"), ["stale-shell"]);
+    assert_eq!(world.count_everywhere("Attach"), 0);
+    old.close_transport().await;
+    replacement.client.close_transport().await;
+}
+
+#[tokio::test]
+async fn answered_frozen_relist_retired_before_consumption_leaves_no_claims() {
+    let gate = Arc::new(ListGate::default());
+    let (world, port) = machine(&[("h1", HostSpec {
+        list: ListBehavior::GatedAfter { answered: 1, gate: gate.clone() }, ..HostSpec::default()
+    })]);
+    rediscover_hosts(&port).await.unwrap();
+    let host = port.frozen_hosts().pop().unwrap();
+    let channel = HostChannel::Frozen(host.id);
+    world.begin_session("h1", meta("late-shell", 731));
+    world.begin_session("h1", meta("owed-close", 732));
+    port.0.host_close_pending.insert("owed-close".into(), channel);
+    port.0.host_close_pending.insert("absent-close".into(), channel);
+    let relist = tokio::spawn({ let port = port.clone(); async move {
+        adopt(&port, &frozen("h1"), HostRole::Frozen, Instant::now() + ADOPTION_DEADLINE).await
+    } });
+    tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
+    *gate.after_answer.lock().unwrap() = Some(Box::new({ let port = port.clone(); move || {
+        port.table().drain_host(channel).unwrap().retire();
+    } }));
+    gate.release.notify_one();
+    assert!(matches!(relist.await.unwrap(), Err(Failure::Superseded)));
+    assert!(port.0.claims.is_empty(), "no ownership may be recreated on a retired host");
+    assert_eq!(port.0.host_close_pending.len(), 2);
+    assert_eq!(world.count_everywhere("Close"), 0);
+    assert_eq!(port.table().admission(channel), Some(Admission::Retired));
+    host.client.close_transport().await;
+    port.current_client().unwrap().close_transport().await;
+}
+
+#[tokio::test]
+async fn unpublished_answer_cannot_apply_when_admission_rejects_publication() {
+    for role in [HostRole::Current, HostRole::Frozen] {
+        let gate = Arc::new(ListGate::default());
+        let world = World::new();
+        let endpoint = if role == HostRole::Current { CURRENT } else { "h1" };
+        world.add_host(endpoint, HostSpec {
+            sessions: vec![meta("unpublished-shell", 731), meta("owed-close", 732)],
+            list: ListBehavior::GatedAfter { answered: 0, gate: gate.clone() },
+            ..HostSpec::default()
+        });
+        let port = FakePort::new(&world, CURRENT);
+        let channel = if role == HostRole::Current { HostChannel::Primary } else { HostChannel::Frozen(FrozenId(1)) };
+        port.0.host_close_pending.insert("owed-close".into(), channel);
+        port.0.host_close_pending.insert("absent-close".into(), channel);
+        let adoption = tokio::spawn({ let port = port.clone(); async move {
+            adopt(&port, &candidate(endpoint, role), role, Instant::now() + ADOPTION_DEADLINE).await
+        } });
+        tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
+        *gate.after_answer.lock().unwrap() = Some(Box::new({ let port = port.clone(); move || {
+            assert!(port.table().publish(channel, port.table().reserve_epoch()));
+            port.table().drain_host(channel).unwrap().retire();
+        } }));
+        gate.release.notify_one();
+        assert!(matches!(adoption.await.unwrap(), Err(Failure::Superseded)));
+        assert!(port.0.claims.is_empty());
+        assert_eq!(port.0.host_close_pending.len(), 2);
+        assert!(port.0.listings.lock().unwrap().is_empty());
+        assert_eq!(world.count_everywhere("Close"), 0);
+        assert!(port.current_client().is_none());
+        assert!(port.frozen_hosts().is_empty());
+    }
+}
+
 // ---- concurrency ------------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

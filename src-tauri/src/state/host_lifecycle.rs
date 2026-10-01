@@ -323,6 +323,7 @@ type Named = (String, PtyHostClient);
 async fn disarm_hosts(hosts: &[Named]) -> bool {
     let acked = join_all(hosts.iter().map(|(name, client)| async move {
         let acknowledged = client.disarm().await;
+        log::info!("[GEN] disarm {name}: acknowledged={acknowledged}");
         if !acknowledged {
             log::error!("[HOTSWAP] {name} never acknowledged the disarm; it may keep holding its detach window");
         }
@@ -342,7 +343,9 @@ async fn arm_hosts(
     purpose: Option<ArmDetachPurpose>,
 ) -> Result<(), String> {
     let results = join_all(hosts.iter().map(|(name, client)| async move {
-        (name, client.arm_detach(timeout_secs, token, purpose).await)
+        let result = client.arm_detach(timeout_secs, token, purpose).await;
+        log::info!("[GEN] arm {name}: acknowledged={}", result.is_ok());
+        (name, result)
     }))
     .await;
     let failed: Vec<String> =
@@ -503,6 +506,7 @@ async fn close_admission<P: LifecyclePort>(
     bound: Duration,
     strict: bool,
 ) -> Result<QuiesceGuard, String> {
+    log::info!("[GEN] closing terminal admission for {reason:?} (strict={strict})");
     let guard = port.table().quiesce(reason, bound).await.map_err(|busy| busy.to_string())?;
     if !guard.drained() {
         log::warn!("[GEN] {reason:?}: operations still in flight on {:?}", guard.holders());
@@ -605,6 +609,7 @@ fn shutdown_capable(candidate: &HostCandidate) -> bool {
 /// disconnect is final, and close the stream so it sees EOF. With a `deadline` the
 /// acknowledgements are not waited for past it; the stream is closed either way.
 async fn release_host(name: &str, client: &PtyHostClient, deadline: Option<Instant>) -> Option<String> {
+    log::info!("[GEN] releasing {name}: disarm, shutdown, transport close");
     let announce = async {
         let mut problem = None;
         if !client.disarm().await {
@@ -633,7 +638,9 @@ async fn release_host(name: &str, client: &PtyHostClient, deadline: Option<Insta
         }),
         None => announce.await,
     };
-    if !client.close_transport().await {
+    let closed = client.close_transport().await;
+    log::info!("[GEN] release {name}: problem={problem:?}, transport_closed={closed}");
+    if !closed {
         log::warn!("quit: the connection to {name} did not close in time");
     }
     problem
@@ -700,6 +707,7 @@ pub(super) async fn exit_hosts<P: LifecyclePort>(port: &P) -> ExitReport {
 /// exit quiesce may take over from an update's: a full update closes the hosts
 /// under the admission it already holds, and nothing reopens it afterwards.
 pub(super) async fn exit_hosts_within<P: LifecyclePort>(port: &P, bounds: Option<CloseBounds>) -> ExitReport {
+    log::info!("[GEN] closing every terminal host for Exit");
     let guard = match port.table().quiesce(QuiesceReason::Exit, EXIT_QUIESCE_BOUND).await {
         Ok(guard) => Some(guard),
         Err(busy) => {

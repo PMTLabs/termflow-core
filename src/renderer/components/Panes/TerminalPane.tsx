@@ -23,7 +23,7 @@ import { reattachPromptGate, takeArmProbePending } from '../../services/reattach
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { getPaneStartupStatus } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
-import { isHostOwnershipPending } from '../../services/hostOwnershipPending';
+import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
 import { isAdminUacCancelled } from '../../services/adminTabActions';
@@ -615,6 +615,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     } catch (error) {
       if (isHostOwnershipPending(error)) {
         dispatch(addToast({ message: 'Waiting for terminal host. Please retry when the host is available.', type: 'warning' }));
+      } else if (isLifecycleBusy(error)) {
+        dispatch(addToast({ message: 'TermFlow is exiting or updating. Please retry when it is ready.', type: 'warning' }));
       } else {
         console.error('TerminalPane: Failed to restart session:', error);
       }
