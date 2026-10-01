@@ -32,10 +32,7 @@ async fn execute(port: &FakePort, process: &str, placement: Placement) -> String
         Placement::Spawn { channel, client, ticket, session_key } => {
             port.register_terminal(process, &session_key, channel);
             assert_eq!(client.spawn_session(&session_key, &spec()).await.unwrap(), 4242);
-            if let Some(mut claim) = port.0.claims.get_mut(&session_key) {
-                claim.state = crate::state::HostSessionClaimState::Registered;
-                claim.process_id = Some(process.to_string());
-            }
+            assert!(ticket.complete_key(process));
             drop(ticket);
             session_key
         }
@@ -43,6 +40,7 @@ async fn execute(port: &FakePort, process: &str, placement: Placement) -> String
             port.register_terminal(process, &session_key, channel);
             assert!(pid > 0);
             assert_eq!(client.attach_confirmed(&session_key, 0).await, Some(true));
+            assert!(ticket.complete_key(process));
             drop(ticket);
             session_key
         }
@@ -66,7 +64,7 @@ async fn hosted_process_and_session_ids_use_injected_uuid_bits_and_fail_before_p
         let (world, port) = machine(vec![], ids);
         assert_eq!(place_process(&port, "tm-leaf", None).await.err().unwrap(), "random source failed");
         assert_eq!(world.count_everywhere("Spawn"), 0);
-        assert!(port.0.claims.is_empty());
+        assert!(port.table().keys().is_empty());
         assert!(port.0.terminals.is_empty());
         assert_eq!(port.table().inflight(HostChannel::Primary), 0);
     }
@@ -81,13 +79,10 @@ async fn a_live_session_collision_redraws_instead_of_spawning_the_existing_key()
         port.register_terminal("pc-control", &first, HostChannel::Primary);
         if claim_only {
             port.table().routes().remove_process("pc-control");
-            port.0.claims.insert(first.clone(), crate::state::HostSessionClaim {
-                state: crate::state::HostSessionClaimState::Registered,
-                pid: 11, process_id: Some("pc-control".into()), channel: HostChannel::Primary,
-            });
-            assert!(port.0.claims.contains_key(&first));
+            assert_eq!(port.table().keys().state(HostChannel::Primary, &first), Some(crate::state::KeyState::Bound("pc-control".into())));
             assert!(!port.table().routes().contains(HostChannel::Primary, &first));
         } else {
+            port.table().keys().clear_fixture();
             assert!(port.table().routes().contains(HostChannel::Primary, &first));
         }
         let placement = place_for_leaf(&port, "tm-leaf", None).await.unwrap();
@@ -133,14 +128,14 @@ async fn listings_choose_own_leaf_then_exact_override_then_legacy_and_leave_ambi
             let mut recovered = port.0.recovered.lock().unwrap().clone();
             recovered.sort();
             assert_eq!(recovered, vec![own.clone(), second.clone()]);
-            assert!(port.0.claims.contains_key(&own));
-            assert!(port.0.claims.contains_key(&second));
+            assert!(port.table().keys().eligible(HostChannel::Primary, &own));
+            assert!(port.table().keys().eligible(HostChannel::Primary, &second));
         }
     }
 
     let (world, port) = machine(vec![meta(&own, 11), meta("tm-leaf", 22)], draws(&[C]));
     ensure_hosts(&port).await.unwrap();
-    crate::state::host_registry::claim_registration(&port.0.claims, &own, HostChannel::Primary).unwrap();
+    port.table().keys().stage(HostChannel::Primary, &own, crate::state::StageMode::Attach).unwrap();
     let chosen = execute(&port, "pc-unclaimed", place_for_leaf(&port, "tm-leaf", Some(&own)).await.unwrap()).await;
     assert_eq!(chosen, "tm-leaf", "a claimed own-leaf key and claimed override are both skipped");
     assert_eq!(world.sessions(HOST, "Attach"), vec!["tm-leaf"]);
@@ -178,10 +173,10 @@ async fn late_frames_for_a_closed_key_never_feed_or_end_the_replacement() {
     port.table().routes().remove_process("pc-first");
     port.0.host_terminals.remove("pc-first");
     port.0.terminals.remove("pc-first");
-    port.0.claims.remove(&first);
+    port.table().keys().close(HostChannel::Primary, &first);
     let client = port.current_client().unwrap();
     let session_key = first.as_str();
-    client.close(session_key);
+    port.table().keys().close(HostChannel::Primary, session_key);
     let listed = client.list_sessions().await.unwrap();
     assert!(!listed.iter().any(|meta| meta.tab_id == first), "FIFO listing proves Close was applied");
     assert_eq!(world.sessions(HOST, "Close"), vec![first.clone()]);

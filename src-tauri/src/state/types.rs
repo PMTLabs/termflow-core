@@ -27,27 +27,6 @@ pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
 /// 2J-cleared frames never enter scrollback, so this stays TUI-safe.
 pub const SCROLLBACK_LINES: usize = 5000;
 
-/// Exclusive recovery/registration ownership for one pty-host session.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HostSessionClaimState {
-    Reserved,
-    RegistrationInProgress,
-    Registered,
-}
-
-#[derive(Clone, Debug)]
-pub struct HostSessionClaim {
-    pub state: HostSessionClaimState,
-    pub pid: u32,
-    /// Process identity currently registered under this session, if any. This
-    /// stops a stale exit callback from retiring a replacement's claim.
-    pub process_id: Option<String>,
-    /// The host the session lives on. A Reserved claim comes from one host's
-    /// listing, so attaching must go to that same host; a fresh claim records
-    /// where the spawn is headed.
-    pub channel: crate::elevated_host::HostChannel,
-}
-
 /// One surviving host of an older generation. It keeps serving the shells it
 /// already holds; new terminals are never routed to it while a current host is
 /// usable.
@@ -626,11 +605,6 @@ pub struct AppState<R: Runtime = Wry> {
     /// Shells a window created for a pane that had already moved away, waiting for
     /// the window that has the pane to take them (single use, short TTL).
     pub handoff_offers: crate::session_handoff::HandoffOffers,
-    // Sessions the sidecar still held when we connected (survived a hot-swap),
-    // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
-    // `create_host_terminal` reattaches to (instead of respawning) any tab_id
-    // present here, restoring the real pid.
-    pub host_session_claims: Arc<DashMap<String, HostSessionClaim>>,
     pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
     pub host_restore_released: Arc<AtomicBool>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
@@ -664,14 +638,6 @@ pub struct AppState<R: Runtime = Wry> {
     // every session twice (duplicate replay into live parsers). A queued pass
     // re-snapshots after the first finishes, so its replay is ~empty.
     pub host_recovering: Arc<tokio::sync::Mutex<()>>,
-    // Closes that could not reach the host (pipe was down): host_close records
-    // the tab here and the next successful connect delivers the deferred Close
-    // — otherwise the session lingers alive in the host as an adoptable zombie
-    // the user explicitly closed (review 007 C-2).
-    //
-    // The value is the host the close is owed to. Hosts answer their listings
-    // independently, so one host's answer may only settle its own tombstones.
-    pub host_close_pending: Arc<DashMap<String, crate::elevated_host::HostChannel>>,
     // Session keys of panes restored from a saved layout that have not yet
     // found their session (value: when the intent was last refreshed). While a
     // key is here its pane waits for the owning host instead of being spawned
@@ -777,7 +743,6 @@ impl<R: Runtime> Clone for AppState<R> {
             identity: self.identity.clone(),
             ids: self.ids.clone(),
             handoff_offers: self.handoff_offers.clone(),
-            host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_released: self.host_restore_released.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
@@ -785,7 +750,6 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host_connecting: self.pty_host_connecting.clone(),
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
-            host_close_pending: self.host_close_pending.clone(),
             restoring_keys: self.restoring_keys.clone(),
             closed_unowned: self.closed_unowned.clone(),
             restoring_leaf_keys: self.restoring_leaf_keys.clone(),

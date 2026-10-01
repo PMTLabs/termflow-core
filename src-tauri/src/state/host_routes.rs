@@ -25,6 +25,10 @@ impl HostRoutes {
         self.entries.contains_key(&(channel, key.to_string()))
     }
 
+    pub fn remove_key(&self, channel: HostChannel, key: &str) {
+        self.entries.remove(&(channel, key.to_string()));
+    }
+
     pub fn remove_process(&self, process: &str) {
         self.entries.retain(|_, route| route.process != process);
     }

@@ -9,10 +9,8 @@
 //! starvation, no recursive-read deadlock and no lock order to get wrong. The
 //! one hazard left is a forgotten `Ticket`, which is RAII for that reason.
 
-use super::host_registry;
-use super::types::HostSessionClaim;
+use super::{HostKeys, KeyStage};
 use crate::elevated_host::HostChannel;
-use dashmap::DashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{watch, Notify};
@@ -124,6 +122,7 @@ impl Inner {
 struct Shared {
     inner: Mutex<Inner>,
     routes: super::HostRoutes,
+    keys: HostKeys,
     /// Total tickets in flight, level-triggered so a quiesce can never miss the
     /// moment it reaches zero.
     inflight: watch::Sender<u32>,
@@ -153,6 +152,7 @@ impl Default for HostTable {
 
 impl HostTable {
     pub fn new() -> Self {
+        let routes = super::HostRoutes::default();
         Self {
             shared: Arc::new(Shared {
                 inner: Mutex::new(Inner {
@@ -163,10 +163,13 @@ impl HostTable {
                     next_holder: 0,
                 }),
                 inflight: watch::channel(0).0,
-                routes: super::HostRoutes::default(),
+                keys: HostKeys::new(routes.clone()),
+                routes,
             }),
         }
     }
+
+    pub fn keys(&self) -> &HostKeys { &self.shared.keys }
 
     pub fn routes(&self) -> &super::HostRoutes {
         &self.shared.routes
@@ -384,19 +387,12 @@ enum TicketTarget {
 pub struct Ticket {
     shared: Arc<Shared>,
     target: TicketTarget,
-    claims: Vec<ClaimUndo>,
-}
-
-struct ClaimUndo {
-    claims: Arc<DashMap<String, HostSessionClaim>>,
-    session_key: String,
-    /// The Reserved claim to put back; `None` when the claim was a fresh one.
-    restore: Option<HostSessionClaim>,
+    stages: Vec<KeyStage>,
 }
 
 impl Ticket {
     fn new(shared: &Arc<Shared>, target: TicketTarget) -> Self {
-        Self { shared: shared.clone(), target, claims: Vec::new() }
+        Self { shared: shared.clone(), target, stages: Vec::new() }
     }
 
     /// The host this ticket was taken on; `None` for an adoption.
@@ -407,26 +403,23 @@ impl Ticket {
         }
     }
 
-    /// Hand the ticket the claim transition this operation just made with
-    /// `claim_registration`: `claimed` is what it returned (`Some` when it took
-    /// over a Reserved entry). Unless the operation reaches `Registered`, dropping
-    /// the ticket puts the claim back as it was.
-    pub fn guard_claim(
-        &mut self,
-        claims: &Arc<DashMap<String, HostSessionClaim>>,
-        session_key: &str,
-        claimed: Option<(u32, HostChannel)>,
-    ) {
-        self.claims.push(ClaimUndo {
-            claims: claims.clone(),
-            session_key: session_key.to_string(),
-            restore: claimed.map(|(pid, channel)| HostSessionClaim {
-                state: super::types::HostSessionClaimState::Reserved,
-                pid,
-                process_id: None,
-                channel,
-            }),
-        });
+    /// Dropping unfinished work releases an Attach without owning its session,
+    /// but retires an unknown-result Spawn with an exact-key Close.
+    pub fn guard_key(&mut self, stage: KeyStage) { self.stages.push(stage); }
+
+    pub fn publish_key(&self, process: &str) -> bool {
+        self.stages.last().is_some_and(|s| {
+            let epoch = self.shared.lock().hosts.iter().find(|h| h.channel == s.channel).map_or(0, |h| h.epoch);
+            self.shared.keys.publish(s, process, epoch)
+        })
+    }
+
+    pub fn complete_key(&self, process: &str) -> bool {
+        self.stages.last().is_some_and(|s| self.shared.keys.complete(s, process))
+    }
+
+    pub fn abort_key(&self) {
+        for stage in &self.stages { self.shared.keys.abort(stage); }
     }
 }
 
@@ -444,8 +437,8 @@ impl Drop for Ticket {
             }
             self.shared.publish_inflight(&inner);
         }
-        for undo in self.claims.drain(..) {
-            host_registry::release_unfinished_claim(&undo.claims, &undo.session_key, undo.restore);
+        for stage in self.stages.drain(..) {
+            self.shared.keys.abort(&stage);
         }
     }
 }

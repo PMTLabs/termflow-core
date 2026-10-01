@@ -17,7 +17,6 @@
 //! implements, so the timing and the interleavings are testable over fake hosts.
 
 use super::host_adoption::{barrier_key, listing_is_current, PanePort};
-use super::host_registry;
 use super::host_table::{Admission, DrainRefusal, QuiesceReason, TickerHandle};
 use super::types::FrozenHost;
 use crate::elevated_host::{FrozenId, HostChannel};
@@ -207,13 +206,13 @@ fn is_frozen<P: PanePort>(port: &P, host: &FrozenHost) -> bool {
 /// connection that was asked; an answered one also settles the claims it shows to
 /// be moot.
 async fn sample<P: PanePort>(port: &P, seen: &Seen, admission: Admission) -> Sample {
-    let listed = seen.host.client.list_sessions_within(SAMPLE_TIMEOUT).await;
+    let listed = seen.host.client.list_sessions_numbered_within(SAMPLE_TIMEOUT).await;
     let Some(sessions) = listed else { return Sample::Unanswered };
     if !listing_is_current(port.table(), seen.channel, seen.epoch, &seen.host.client, admission) {
         return Sample::Unanswered;
     }
     if admission == Admission::Open {
-        host_registry::drop_stale_reserved_claims(port.claims(), seen.channel, &sessions);
+        port.table().keys().listing(seen.channel, &sessions, |_| false);
     }
     Sample::Answered { alive: sessions.iter().filter(|s| s.alive).count() }
 }
@@ -231,7 +230,7 @@ fn facts<P: PanePort>(port: &P, seen: &Seen, sample: Sample, empty_for: Duration
         current_usable: current_usable(port),
         sample,
         panes: port.panes_on(seen.channel).len(),
-        unfinished_claims: host_registry::unfinished_claims_on(port.claims(), seen.channel),
+        unfinished_claims: port.table().keys().unfinished_on(seen.channel),
         ticket_in_flight: port.table().inflight(seen.channel) > 0,
         empty_for,
     }
@@ -271,7 +270,7 @@ async fn look<P: PanePort>(port: &P, id: FrozenId, emptiness: &mut Emptiness) ->
 
     let answer = sample(port, &seen, Admission::Open).await;
     let panes = port.panes_on(seen.channel).len();
-    let claims = host_registry::unfinished_claims_on(port.claims(), seen.channel);
+    let claims = port.table().keys().unfinished_on(seen.channel);
     let empty_for =
         emptiness.observe(Instant::now(), observation_is_empty(answer, panes, claims, current_usable(port)));
     match retire_decision(&facts(port, &seen, answer, empty_for)) {

@@ -454,7 +454,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // the actual `Spawn` frame) is IDENTICAL for both sidecars — only how we get
     // a client, and what happens if we can't, differs. The ticket keeps the host
     // admitting this create until it is done.
-    let (process_id, channel, client, claimed_pid, _ticket, session_key) = if elevated {
+    let (process_id, channel, client, claimed_pid, ticket, session_key) = if elevated {
         let process_id = state.ids.mint_process_id()?;
         // Plan 045 R7: an elevated request never falls back in-process — that
         // would put an unprivileged shell behind an "Administrator" badge, a
@@ -492,6 +492,10 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             }
         }
     };
+    let ticket = ticket.expect("hosted placement has admission");
+    if !ticket.publish_key(&process_id) {
+        return Err("host-ownership-pending: staged session changed before publication".into());
+    }
     // The session's claim is held from here on. A window that asked for the same
     // leaf and was refused asks this mark whether to keep waiting for the offer
     // this create may make when it returns; it must outlast the host round trip
@@ -512,7 +516,6 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     if let Some(pid) = claimed_pid {
         let ident = host_identity_for_process(&process_id, &session_key, Some(&id), owning_tab_id.as_deref());
         register_host_terminal(state, &ident, pid, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
-        state.host_session_registered(&session_key, &process_id);
         // Backlog 011: this is the core-restart hot-swap reattach, which reconcile
         // (empty terminal list) could not seed. Stash the hook so the renderer can
         // re-arm the command-suggest prompt gate once createTerminal resolves.
@@ -531,6 +534,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
             None => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, legacy attach)"),
         }
         client.nudge_repaint(&session_key, cols, rows);
+        ticket.complete_key(&process_id);
         return Ok(process_id);
     }
 
@@ -540,7 +544,6 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     // consumer's "unknown id" gate.
     let ident = host_identity_for_process(&process_id, &session_key, Some(&id), owning_tab_id.as_deref());
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
-    state.host_session_registered(&session_key, &process_id);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
@@ -574,6 +577,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     }
     match spawned {
         Ok(pid) => {
+            ticket.complete_key(&process_id);
             if let Some(mut t) = state.terminals.get_mut(&process_id) {
                 t.pid = pid;
             }
@@ -582,6 +586,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
         Err(e) => {
             // Undo the provisional registration. Clean up by the PROCESS id —
             // that is what was registered.
+            ticket.abort_key();
             state.cleanup_terminal_state(&process_id);
             if channel == crate::elevated_host::HostChannel::Elevated {
                 // Never host_fallback for an elevated request (R7): fail visibly
@@ -697,10 +702,6 @@ fn register_host_terminal(
     let owner = ident.owner.clone();
     state.init_screen(id, rows, cols);
     state.host_terminals.insert(id.to_string(), channel);
-    // Register before Spawn/Attach can release early output or replay bytes.
-    if let Some(epoch) = state.host_table.epoch(channel) {
-        state.host_table.routes().register(channel, &ident.session_key, id, epoch);
-    }
     state.identity.index(id, leaf.as_deref(), &ident.session_key);
     state.terminals.insert(
         id.to_string(),
@@ -1162,39 +1163,28 @@ mod scrollback_restore_tests {
     #[test]
     fn surfacing_an_orphan_reserves_the_listed_pid_for_reattach() {
         let (_app, state) = mock_state();
-        state.surface_host_orphans(
-            vec![termflow_pty_protocol::SessionMeta {
-                tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
-            }],
-            crate::elevated_host::HostChannel::Primary,
-        );
-
-        assert_eq!(
-            state.claim_host_registration("S", crate::elevated_host::HostChannel::Primary),
-            Ok(Some((4242, crate::elevated_host::HostChannel::Primary)))
-        );
+        let channel = crate::elevated_host::HostChannel::Primary;
+        let sessions = vec![termflow_pty_protocol::SessionMeta {
+            tab_id: "S".into(), pid: 4242, head_offset: 0, tail_offset: 0, alive: true,
+        }];
+        state.host_table.keys().listing(channel, &crate::pty_host_client::SessionListing { request_no: 1, sessions: sessions.clone() }, |_| false);
+        state.surface_host_orphans(sessions, channel);
+        let (stage, pid) = state.host_table.keys().stage(channel, "S", crate::state::StageMode::Attach).unwrap();
+        assert_eq!((pid, stage.channel), (4242, channel));
     }
 
     #[test]
     fn claim_retirement_preserves_a_replacement_until_its_owner_exits() {
-        use crate::state::{HostSessionClaim, HostSessionClaimState};
-
+        use crate::state::{KeyState, CloseState, StageMode};
         let (_app, state) = mock_state();
-        state.host_session_claims.insert("S".into(), HostSessionClaim {
-            state: HostSessionClaimState::Registered,
-            pid: 4242,
-            process_id: Some("pc-replacement".into()),
-            channel: crate::elevated_host::HostChannel::Primary,
-        });
-
-        state.forget_host_session_claim_if_owner("S", "pc-stale-exit");
-        let replacement = state.host_session_claims.get("S").expect("replacement claim survives stale retirement");
-        assert_eq!(replacement.state, HostSessionClaimState::Registered);
-        assert_eq!(replacement.process_id.as_deref(), Some("pc-replacement"));
-        drop(replacement);
-
-        state.forget_host_session_claim_if_owner("S", "pc-replacement");
-        assert!(state.host_session_claims.get("S").is_none());
+        let channel = crate::elevated_host::HostChannel::Primary;
+        let keys = state.host_table.keys();
+        let (stage, _) = keys.stage(channel, "S", StageMode::Spawn).unwrap();
+        assert!(keys.complete(&stage, "pc-replacement"));
+        state.retire_host_process("pc-stale-exit");
+        assert_eq!(keys.state(channel, "S"), Some(KeyState::Bound("pc-replacement".into())));
+        state.retire_host_process("pc-replacement");
+        assert_eq!(keys.state(channel, "S"), Some(KeyState::Ending { close: CloseState::None, stamp: Some(0) }));
     }
 
     /// The ratchet itself: stage_scrollback must seed the freshly-initialized

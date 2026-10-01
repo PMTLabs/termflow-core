@@ -22,6 +22,8 @@ use crate::pty_host_client::{HostCandidate, HostRole, PtyHostClient};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use crate::pty_host_client::SessionListing;
+#[cfg(test)]
 use termflow_pty_protocol::SessionMeta;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -433,7 +435,7 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Opened, ConnectFailure>> + Send;
     /// Reserve what `channel`'s answered listing reports and settle the closes
     /// owed to it. `None` = the host never answered; nothing is changed.
-    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&[SessionMeta]>);
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&SessionListing>);
     /// Publish the current host's client. Refuses one whose connection already
     /// dropped during setup, which nothing would ever clear.
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String>;
@@ -459,13 +461,13 @@ fn connected_keys<P: AdoptionPort>(port: &P) -> Vec<String> {
 /// Ask the host to hold nothing against us, then list what it has. The lifecycle
 /// frame goes first so that a host whose absence clock is about to expire is
 /// revoked before a slow listing is waited on. `None` = never answered.
-async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<Vec<SessionMeta>> {
+async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<SessionListing> {
     let work = async {
         if !client.disarm().await {
             log::warn!("[GEN] host did not acknowledge the disarm");
         }
         for attempt in 0..LIST_ATTEMPTS {
-            if let Some(sessions) = client.list_sessions_within(LIST_ATTEMPT_TIMEOUT).await {
+            if let Some(sessions) = client.list_sessions_numbered_within(LIST_ATTEMPT_TIMEOUT).await {
                 return Some(sessions);
             }
             if !client.is_alive() {
@@ -498,7 +500,7 @@ fn apply_validated_listing<P: AdoptionPort>(
     channel: HostChannel,
     epoch: u64,
     client: &PtyHostClient,
-    listing: Option<&[SessionMeta]>,
+    listing: Option<&SessionListing>,
 ) -> Result<(), Failure> {
     if !listing_is_current(port.table(), channel, epoch, client, Admission::Open) {
         return Err(Failure::Superseded);
@@ -509,7 +511,7 @@ fn apply_validated_listing<P: AdoptionPort>(
 
 const CONNECTION_LOST: &str = "connection lost during setup";
 
-fn resolution_of(listing: &Option<Vec<SessionMeta>>) -> Resolution {
+fn resolution_of(listing: &Option<SessionListing>) -> Resolution {
     match listing {
         Some(_) => Resolution::Resolved,
         None => Resolution::Unresolved("the host did not answer ListSessions".into()),
@@ -558,7 +560,7 @@ async fn adopt<P: AdoptionPort>(
         // Already connected; only its listing is missing.
         let epoch = port.table().epoch(channel).unwrap_or(0);
         let listing = settle(&client, deadline).await;
-        apply_validated_listing(port, channel, epoch, &client, listing.as_deref())?;
+        apply_validated_listing(port, channel, epoch, &client, listing.as_ref())?;
         return Ok(Adopted { resolution: resolution_of(&listing), channel, epoch });
     }
 
@@ -574,6 +576,8 @@ async fn adopt<P: AdoptionPort>(
             false => Failure::Other(failure.reason),
         })?;
     let client = opened.client;
+    let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));
+    client.bind_sessions(port.table().keys(), channel, opened.epoch);
     let listing = settle(&client, deadline).await;
     let (channel, epoch) = match (role, frozen) {
         (HostRole::Frozen, Some((id, epoch))) => {
@@ -601,7 +605,7 @@ async fn adopt<P: AdoptionPort>(
                 frozen_connection_lost(port.table(), port.barrier(), id, epoch, &candidate.endpoint);
                 return Err(Failure::ConnectionLost);
             }
-            apply_validated_listing(port, channel, epoch, &client, listing.as_deref())?;
+            apply_validated_listing(port, channel, epoch, &client, listing.as_ref())?;
             port.frozen_adopted(id);
             (channel, epoch)
         }
@@ -613,7 +617,7 @@ async fn adopt<P: AdoptionPort>(
                 return Err(Failure::Superseded);
             }
             port.publish_current(&client).map_err(Failure::Other)?;
-            apply_validated_listing(port, HostChannel::Primary, opened.epoch, &client, listing.as_deref())?;
+            apply_validated_listing(port, HostChannel::Primary, opened.epoch, &client, listing.as_ref())?;
             (HostChannel::Primary, opened.epoch)
         }
     };
@@ -915,6 +919,8 @@ mod sweep_tests;
 mod routing_tests;
 #[cfg(test)]
 mod incarnation_tests;
+#[cfg(test)]
+mod key_lifecycle_tests;
 #[cfg(test)]
 mod retire_tests;
 #[cfg(test)]

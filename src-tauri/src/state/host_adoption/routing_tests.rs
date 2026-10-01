@@ -6,7 +6,7 @@ use super::*;
 use crate::state::host_registry::{self, OrphanVerdict};
 use crate::state::host_routing::{place, spawn_target, Placement, HOST_OWNERSHIP_PENDING};
 use crate::state::host_table::QuiesceReason;
-use crate::state::types::HostSessionClaimState;
+use crate::state::host_keys::KeyKind;
 use std::time::{Instant as StdInstant, SystemTime};
 use termflow_pty_protocol::SpawnSpec;
 
@@ -281,8 +281,8 @@ async fn a_new_tab_spawns_on_the_current_host_only_and_leaves_the_old_hosts_sess
     assert_eq!(world.count("h1", "Close"), 0);
     let h1 = HostChannel::Frozen(FrozenId(1));
     for key in ["k1", "k2"] {
-        let claim = port.0.claims.get(key).unwrap();
-        assert_eq!((claim.state.clone(), claim.channel), (crate::state::types::HostSessionClaimState::Reserved, h1));
+        let claim = port.table().keys().snapshot(key).unwrap();
+        assert_eq!((claim.state, claim.channel), (KeyKind::Listed, h1));
     }
 }
 
@@ -465,9 +465,9 @@ fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits
     let panes = source_of("host_adoption/panes.rs");
     let body = fn_body(&panes, "pub(in crate::state) fn surface_orphans<");
     let verdict = body.find("host_registry::orphan_verdict(").expect("surfacing must consult the verdict");
-    let reserve = body.find("host_registry::reserve_session(").expect("surfacing reserves the session");
+    let eligible = body.find(".keys().eligible(").expect("surfacing requires a listed key");
     let emit = body.find("port.announce_recovered(").expect("surfacing announces the recovered session");
-    assert!(verdict < reserve && verdict < emit, "the verdict must come first");
+    assert!(eligible < emit && verdict < emit, "a listed key and a Surface verdict must precede emission");
     for needle in ["OrphanVerdict::Restoring =>", "OrphanVerdict::CloseUnowned =>"] {
         let arm = &body[body.find(needle).unwrap_or_else(|| panic!("no {needle} arm"))..];
         let arm = &arm[..arm.find("continue;").expect("the arm leaves the loop iteration")];
@@ -519,7 +519,7 @@ async fn closing_a_waiting_pane_closes_the_shell_when_its_host_resolves() {
     tokio::time::sleep(SEC).await;
     assert!(port.barrier().unresolved().is_empty(), "the host did resolve");
     assert_eq!(world.sessions("h1", "Close"), vec!["tm-wait".to_string()], "the Close reached the host that held it");
-    assert!(port.0.claims.get("tm-wait").is_none(), "and nothing is left to adopt it");
+    assert!(!port.table().keys().eligible(HostChannel::Frozen(FrozenId(1)), "tm-wait"), "nothing ending is attachable");
     assert_eq!(world.count_everywhere("Spawn"), 0);
     assert_eq!(world.count(CURRENT, "Close"), 0);
 }
@@ -538,7 +538,7 @@ async fn closed_unowned_never_closes_a_registered_session() {
     assert_eq!(port.frozen_ids(), vec![FrozenId(1)]);
     assert_eq!(world.count("h1", "Close"), 0, "a registered session is never closed on the strength of an old close");
     assert!(port.duplicates().is_empty(), "it is registered on the very host that reports it");
-    assert!(port.0.claims.get("tm-reused").is_none(), "already owned: nothing to reserve");
+    assert_eq!(port.table().keys().state(h1, "tm-reused"), Some(crate::state::KeyState::Bound("pc-new".into())), "already owned");
 }
 
 #[tokio::test(start_paused = true)]
@@ -558,8 +558,9 @@ async fn duplicate_session_key_across_channels_is_reported() {
     assert_eq!(world.count(CURRENT, "Close"), 0);
     assert_eq!(world.count_everywhere("Attach"), 0);
     assert_eq!(world.count_everywhere("Spawn"), 0);
-    assert!(port.0.claims.get("tm-dup").is_none(), "no second owner is reserved for it");
-    assert!(port.0.claims.get("tm-ok").is_some(), "other sessions are adopted as usual");
+    assert_eq!(port.table().keys().state(HostChannel::Primary, "tm-dup"), Some(crate::state::KeyState::Bound("pc-1".into())));
+    assert!(port.table().keys().eligible(HostChannel::Frozen(FrozenId(1)), "tm-dup"), "the other host's key is listed, not automatically owned");
+    assert!(port.table().keys().contains_key("tm-ok"), "other sessions are adopted as usual");
 }
 
 // ---- a host whose connection dropped -----------------------------------------
@@ -593,8 +594,8 @@ async fn a_keyed_create_for_a_session_on_a_host_that_is_reconnecting_waits_and_t
     assert!(is_pending(&err), "{err}");
     assert_eq!(world.count("h1", "Attach"), 0, "nothing was attached on the dead connection");
     assert_eq!(
-        port.0.claims.get("k1").map(|c| (c.state.clone(), c.channel)),
-        Some((HostSessionClaimState::Reserved, h1)),
+        port.table().keys().snapshot("k1").map(|c| (c.state, c.channel)),
+        Some((KeyKind::Listed, h1)),
         "and the session is still reserved for the pane that will retry"
     );
 

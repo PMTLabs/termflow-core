@@ -72,10 +72,6 @@ pub(super) fn plan_reconnect(
 
 pub(super) fn session_needs_surface(is_registered: bool) -> bool { !is_registered }
 
-fn claim_is_owned_by(claim: &HostSessionClaim, process_id: &str) -> bool {
-    claim.process_id.as_deref() == Some(process_id)
-}
-
 pub const HOST_SESSION_CONTENDED: &str = "host-session-contended";
 
 #[cfg(test)]
@@ -152,24 +148,20 @@ mod restore_sweep_gate_tests {
             .map(|start| &source[start..])
             .and_then(|rest| rest.split("/// Reconcile").next())
             .expect("surface_orphans body");
-        let reserve = body.find("host_registry::reserve_session(port.claims(), &orphan.tab_id, orphan.pid, channel);").expect("orphan must reserve its listed PID on the listing host's channel");
+        let eligible = body.find(".keys().eligible(channel, &orphan.tab_id)").expect("orphan must be a listed key on this channel");
         let emit = body.find("port.announce_recovered(").expect("orphan must emit recovery event");
-        assert!(reserve < emit, "reservation must precede recovery emission");
+        assert!(eligible < emit, "listed-key qualification must precede recovery emission");
     }
 
     #[test]
     fn host_claim_retirement_uses_atomic_owner_guard_at_every_site() {
         let source = include_str!("terminals.rs").replace("\r\n", "\n");
-        let retirement = source
-            .rfind("\n    pub fn forget_host_session_claim_if_owner")
-            .map(|start| &source[start..])
-            .and_then(|rest| rest.split("    /// Resolve either a PTY process id").next())
-            .expect("claim retirement body");
-        assert!(retirement.contains("remove_if"), "claim retirement must use DashMap::remove_if atomically");
-        assert!(
-            retirement.contains("claim_is_owned_by(claim, process_id)"),
-            "claim retirement must check that the stored claim belongs to process_id"
-        );
+        let retirement = crate::state::source_scan::fn_body(&source, "pub fn retire_host_process(");
+        assert!(retirement.contains("self.host_table.keys().exit_process(process_id)"));
+        let keys = include_str!("host_keys.rs");
+        let end = crate::state::source_scan::fn_body(keys, "pub fn exit_process(");
+        assert!(end.contains("self.lock()") && end.contains("KeyState::Bound(process.to_string())"),
+            "ending must check the stored process under the key mutex");
         let teardown = source
             .rfind("\n    pub fn teardown_host_terminal")
             .map(|start| &source[start..])
@@ -180,43 +172,16 @@ mod restore_sweep_gate_tests {
         // outright — which would leak the claim and bring back the exit-then-Restart
         // refusal this retirement exists to prevent. Pin the presence too.
         assert!(
-            teardown.contains("forget_host_session_claim_if_owner(&key, id)"),
+            teardown.contains("retire_host_process(id)"),
             "teardown must still retire the claim it owns"
         );
     }
 }
 
 impl<R: Runtime> AppState<R> {
-    /// Reserve a listed host session for the renderer which already knows it.
-    /// This is an entry operation so recovery cannot slip a second owner between
-    /// the observation and reservation.
-    pub fn reserve_host_session(&self, session_key: &str, pid: u32, channel: HostChannel) {
-        host_registry::reserve_session(&self.host_session_claims, session_key, pid, channel);
-    }
-
-    /// Claim a session for backend registration. A recovery create consumes the
-    /// Reserved entry established from a host's authoritative listing and gets
-    /// back that host's pid and channel; `fresh_channel` is where a fresh spawn
-    /// (no Reserved entry) is headed.
-    pub fn claim_host_registration(
-        &self,
-        session_key: &str,
-        fresh_channel: HostChannel,
-    ) -> Result<Option<(u32, HostChannel)>, String> {
-        host_registry::claim_registration(&self.host_session_claims, session_key, fresh_channel)
-    }
-
-    pub fn host_session_registered(&self, session_key: &str, process_id: &str) {
-        if let Some(mut claim) = self.host_session_claims.get_mut(session_key) {
-            claim.process_id = Some(process_id.to_string());
-            claim.state = HostSessionClaimState::Registered;
-        }
-    }
-
-    /// Retire only the registration owned by this exact process. A late Exit for
-    /// an old process must not erase a replacement which reused the session key.
-    pub fn forget_host_session_claim_if_owner(&self, session_key: &str, process_id: &str) {
-        self.host_session_claims.remove_if(session_key, |_, claim| claim_is_owned_by(claim, process_id));
+    /// Exit cleanup is qualified by the exact process, never by a reused leaf.
+    pub fn retire_host_process(&self, process_id: &str) {
+        self.host_table.keys().exit_process(process_id);
     }
 
     /// Resolve either a PTY process id (`pc-*`) or a renderer leaf (`tb-*` / `tm-*`)
@@ -314,7 +279,6 @@ impl<R: Runtime> AppState<R> {
             identity: crate::identity_index::IdentityIndex::new(),
             ids: super::IdAllocator::default(),
             handoff_offers: crate::session_handoff::HandoffOffers::new(),
-            host_session_claims: Arc::new(DashMap::new()),
             host_restore_pending_windows: Arc::new(DashMap::new()),
             host_restore_released: Arc::new(AtomicBool::new(false)),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
@@ -322,7 +286,6 @@ impl<R: Runtime> AppState<R> {
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
             host_stream_offsets: Arc::new(DashMap::new()),
             host_recovering: Arc::new(tokio::sync::Mutex::new(())),
-            host_close_pending: Arc::new(DashMap::new()),
             restoring_keys: Arc::new(DashMap::new()),
             closed_unowned: Arc::new(DashMap::new()),
             restoring_leaf_keys: Arc::new(DashMap::new()),
@@ -769,7 +732,7 @@ impl<R: Runtime> AppState<R> {
                 st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
                 st_exit.forget_host_terminal(&process_id);
                 st_exit.host_stream_offsets.remove(&session_key);
-                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
+                st_exit.retire_host_process(&process_id);
                 st_exit.identity.unindex(&process_id);
                 st_exit.cleanup_terminal_state(&process_id);
                 let _ = st_exit.app_handle.emit(
@@ -815,6 +778,7 @@ impl<R: Runtime> AppState<R> {
         };
 
         let client = crate::pty_host_client::wire_client(rd, wr, deps);
+        client.bind_sessions(self.host_table.keys(), HostChannel::Elevated, epoch);
         self.elevated_host.publish(client, launched);
         Ok(())
     }
@@ -838,7 +802,7 @@ impl<R: Runtime> AppState<R> {
         self.forget_host_terminal(id);
         if let Some(key) = session_key {
             self.host_stream_offsets.remove(&key);
-            self.forget_host_session_claim_if_owner(&key, id);
+            self.retire_host_process(id);
         }
         self.cleanup_terminal_state(id);
         let _ = self.app_handle.emit(
@@ -969,17 +933,6 @@ impl<R: Runtime> AppState<R> {
     /// registration for this session key.
     pub fn session_registered_on_any_channel(&self, session_key: &str) -> bool {
         host_registry::session_registered_on_any_channel(&self.host_terminals, &self.terminals, session_key)
-    }
-
-    /// Consume the deferred close owed to `channel` for this session, if any.
-    pub fn take_pending_close(&self, session_key: &str, channel: HostChannel) -> bool {
-        host_registry::take_pending_close(&self.host_close_pending, session_key, channel)
-    }
-
-    /// Drop the deferred closes owed to `channel`, after that host's answered
-    /// listing; closes owed to other hosts are left for their own listings.
-    pub fn prune_pending_closes(&self, channel: HostChannel) {
-        host_registry::prune_pending_closes(&self.host_close_pending, channel)
     }
 
     pub fn next_frozen_id(&self) -> FrozenId {
@@ -1149,9 +1102,8 @@ impl<R: Runtime> AppState<R> {
     /// If `id` is host-owned, forget it and (if connected) tell the sidecar to
     /// close the session. Returns true if it was host-owned (so the caller skips
     /// the local kill) even when the client is gone — there is no local process.
-    /// A close that cannot reach the host (pipe down / dead client) is recorded
-    /// in `host_close_pending` and delivered on the next successful connect, so
-    /// the session can't linger in the host as an adoptable zombie.
+    /// An ending that cannot reach the host stays pending and is delivered
+    /// before the next connection lists sessions.
     pub fn host_close(&self, id: &str) -> bool {
         use tauri::Emitter;
         let Some(channel) = self.host_channel_for(id) else {
@@ -1167,10 +1119,10 @@ impl<R: Runtime> AppState<R> {
         // Pending closes are replayed against the HOST later, so they are recorded
         // in the host id space, and against the host that owns the session: the
         // tombstone carries its channel.
-        host_registry::route_close(&self.host_close_pending, channel, &session_key, self.client_for_channel(channel));
+        host_registry::route_close(self.host_table.keys(), channel, &session_key);
         self.forget_host_terminal(id);
         self.host_stream_offsets.remove(&session_key);
-        self.forget_host_session_claim_if_owner(&session_key, id);
+        self.retire_host_process(id);
 
         // Announce the end HERE, because nothing downstream will.
         //
@@ -1310,11 +1262,7 @@ impl<R: Runtime> AppState<R> {
         // to fall back on. Reading the leaf after `terminals.remove` yields `None` and the purge
         // silently does nothing, which is invisible: the symptom is a restarted terminal that is
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
-        let (leaf, session_key) = self
-            .terminals
-            .get(id)
-            .map(|t| (t.renderer_terminal_id.clone(), t.session_key.clone()))
-            .unwrap_or((None, id.to_string()));
+        let leaf = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone());
         if let Some(leaf) = leaf {
             self.automations.runtime.forget_terminal(&leaf);
         }
@@ -1348,8 +1296,8 @@ impl<R: Runtime> AppState<R> {
         // Forget host ownership too, so a sidecar-hosted terminal doesn't linger
         // in the routing set after its state is torn down. Idempotent when a
         // caller (`teardown_host_terminal`, `host_close`) already removed it.
+        self.retire_host_process(id);
         self.forget_host_terminal(id);
-        self.forget_host_session_claim_if_owner(&session_key, id);
     }
 }
 
@@ -1659,7 +1607,7 @@ mod host_close_announces_tests {
     /// Or every assertion below is about an empty string.
     #[test]
     fn found_the_method_it_is_reading() {
-        assert!(body_of("host_close").contains("host_close_pending"));
+        assert!(body_of("host_close").contains("route_close(self.host_table.keys(), channel, &session_key)"));
     }
 
     /// An over-long slice makes "host_close emits" a statement about the rest of the file —

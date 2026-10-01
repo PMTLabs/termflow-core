@@ -50,7 +50,7 @@ pub(in crate::state) async fn sweep<P: PanePort>(port: &P) -> bool {
     for (channel, client) in connected_hosts(port) {
         let Some(epoch) = port.table().epoch(channel) else { continue };
         // An unanswered listing is unknown, never empty: do not surface or tear down.
-        let Some(sessions) = client.list_sessions().await else {
+        let Some(sessions) = client.list_sessions_numbered().await else {
             log::warn!("[HOTSWAP] {channel:?} did not answer the sweep's listing");
             complete = false;
             continue;
@@ -62,6 +62,7 @@ pub(in crate::state) async fn sweep<P: PanePort>(port: &P) -> bool {
             complete = false;
             continue;
         }
+        port.apply_listing(channel, &client, Some(&sessions));
         // What this host is compared with is what this host owns.
         let claims: Vec<String> = port.panes_on(channel).into_keys().collect();
         let plan = plan_reattach(&claims, &sessions, &std::collections::HashMap::new());

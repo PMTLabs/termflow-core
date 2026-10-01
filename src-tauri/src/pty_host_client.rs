@@ -124,8 +124,38 @@ fn host_enabled(is_windows: bool, is_unix: bool, env: Option<&str>) -> bool {
 #[cfg(test)]
 mod enabled_tests;
 
+#[cfg(test)]
+mod raw_session_controls {
+    use super::*;
+    impl PtyHostClient {
+        pub fn close(&self, tab_id: &str) {
+            let _ = self.outbound.send(Frame::Ctrl(Control::Close { tab_id: tab_id.to_string() }));
+        }
+    }
+}
+
+/// An answered listing retains the enqueue number that qualifies its evidence.
+#[derive(Clone, Debug)]
+pub struct SessionListing {
+    pub request_no: u64,
+    pub sessions: Vec<SessionMeta>,
+}
+
+impl std::ops::Deref for SessionListing {
+    type Target = [SessionMeta];
+    fn deref(&self) -> &Self::Target { &self.sessions }
+}
+
+#[derive(Clone)]
+struct SessionBinding {
+    keys: crate::state::HostKeys,
+    channel: crate::elevated_host::HostChannel,
+    epoch: u64,
+}
+
 #[derive(Clone)]
 pub struct PtyHostClient {
+    sessions: Arc<Mutex<SessionBinding>>,
     outbound: UnboundedSender<Frame>,
     pending: PendingMap,
     req_ctr: Arc<AtomicU64>,
@@ -161,6 +191,11 @@ pub struct PtyHostClient {
 }
 
 impl PtyHostClient {
+    pub(crate) fn bind_sessions(&self, keys: &crate::state::HostKeys, channel: crate::elevated_host::HostChannel, epoch: u64) {
+        *self.sessions.lock().unwrap() = SessionBinding { keys: keys.clone(), channel, epoch };
+        keys.connect(channel, epoch, self.outbound.clone(), self.alive.clone());
+    }
+
     /// Retention advertised for this connected host. `Unknown` covers legacy,
     /// absent, incomplete, and non-contract records; it never implies
     /// indefinite retention.
@@ -217,6 +252,8 @@ impl PtyHostClient {
             self.conn.cancel();
         }
         self.pending.lock().unwrap().clear();
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.disconnect(binding.channel, binding.epoch);
         self.conn.halves_released(BOUND).await
     }
 
@@ -301,12 +338,6 @@ impl PtyHostClient {
             tab_id: tab_id.to_string(),
             cols,
             rows,
-        }));
-    }
-
-    pub fn close(&self, tab_id: &str) {
-        let _ = self.outbound.send(Frame::Ctrl(Control::Close {
-            tab_id: tab_id.to_string(),
         }));
     }
 
@@ -424,16 +455,33 @@ impl PtyHostClient {
     /// removed from the pending map, so asking again and again of a host that never
     /// answers does not accumulate entries there; a late reply is discarded.
     pub async fn list_sessions_within(&self, timeout: std::time::Duration) -> Option<Vec<SessionMeta>> {
-        let token = self.lifecycle_token.to_string();
-        match self
-            .request_within(timeout, move |req| Control::ListSessions {
-                req,
-                token: Some(token),
-            })
-            .await
-        {
-            Some(Response::SessionList { sessions, .. }) => Some(sessions),
-            _ => None,
+        self.list_sessions_numbered_within(timeout).await.map(|listing| listing.sessions)
+    }
+
+    pub async fn list_sessions_numbered(&self) -> Option<SessionListing> {
+        self.list_sessions_numbered_within(std::time::Duration::from_secs(10)).await
+    }
+
+    pub async fn list_sessions_numbered_within(&self, timeout: std::time::Duration) -> Option<SessionListing> {
+        let req = self.next_req();
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(req, tx);
+        let binding = self.sessions.lock().unwrap().clone();
+        let request_no = binding.keys.enqueue_listing(binding.channel, || {
+            self.is_alive() && self.outbound.send(Frame::Ctrl(Control::ListSessions {
+                req, token: Some(self.lifecycle_token.to_string()),
+            })).is_ok()
+        });
+        let Some(request_no) = request_no else {
+            self.pending.lock().unwrap().remove(&req);
+            return None;
+        };
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Response::SessionList { sessions, .. })) => Some(SessionListing { request_no, sessions }),
+            _ => {
+                self.pending.lock().unwrap().remove(&req);
+                None
+            }
         }
     }
 
@@ -554,10 +602,15 @@ where
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
     let conn = ConnState::new();
+    let sessions = Arc::new(Mutex::new(SessionBinding {
+        keys: crate::state::HostKeys::default(), channel: crate::elevated_host::HostChannel::Primary, epoch: 0,
+    }));
+    let sessions_r = sessions.clone();
     let end = Arc::new(ConnLoss {
         conn: conn.clone(),
         alive: alive.clone(),
         pending: pending.clone(),
+        sessions: sessions.clone(),
         on_disconnect: deps.on_disconnect.clone(),
     });
 
@@ -630,7 +683,10 @@ where
                     // An exit for an unknown session still has cleanup value, but
                     // there is no process-keyed state to clean, so drop it rather
                     // than inventing an id.
-                    match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                    let process = route_inbound(&tab_id, |k| (deps.resolve_process)(k));
+                    let binding = sessions_r.lock().unwrap().clone();
+                    binding.keys.observe_exit(binding.channel, binding.epoch, &tab_id);
+                    match process {
                         Some(id) => (deps.on_exit)(id, tab_id, exit_cwd),
                         None => log::warn!("pty-host: dropping Exit for unknown session {tab_id}"),
                     }
@@ -656,6 +712,7 @@ where
     });
 
     PtyHostClient {
+        sessions,
         outbound,
         pending,
         req_ctr,
@@ -678,6 +735,7 @@ struct ConnLoss {
     conn: Arc<ConnState>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pending: PendingMap,
+    sessions: Arc<Mutex<SessionBinding>>,
     on_disconnect: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -693,6 +751,8 @@ impl ConnLoss {
         self.alive.store(false, Ordering::Release);
         self.conn.cancel();
         self.pending.lock().unwrap().clear();
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.disconnect(binding.channel, binding.epoch);
         (self.on_disconnect)();
     }
 }

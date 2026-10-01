@@ -367,7 +367,7 @@ async fn crashed_frozen_host_is_dropped_and_offload_is_not_refused() {
         assert_eq!(port.0.table.admission(HostChannel::Frozen(dead)), Some(Admission::Retired));
     }
     assert!(!port.barrier().is_tracked("crashed") && !port.barrier().is_tracked("vanished"));
-    assert!(port.0.claims.iter().all(|c| c.channel == HostChannel::Frozen(ids[2])), "nothing is still reserved on a dead host");
+    assert!(port.table().keys().listed().iter().all(|(channel, _)| *channel == HostChannel::Frozen(ids[2])), "nothing is still reserved on a dead host");
 }
 
 #[tokio::test(start_paused = true)]
@@ -379,7 +379,7 @@ async fn a_dropped_dead_host_leaves_nothing_that_blocks_an_offload() {
     let lost = epoch_of(&port, id);
     drop_connection(&world, "crashed").await;
     // A close owed to the host when it died can never be delivered.
-    port.0.host_close_pending.insert("k9".into(), h);
+    port.table().keys().seed_pending(h, "k9");
     world.add_host("crashed", HostSpec { refused: true, ..HostSpec::default() });
     port.set_candidates(vec![candidate(CURRENT, HostRole::Current)]);
 
@@ -388,7 +388,7 @@ async fn a_dropped_dead_host_leaves_nothing_that_blocks_an_offload() {
     let owned: Vec<OwnedHost> = owned_hosts_now(&port);
     assert_eq!(owned.len(), 1, "only the current host is owned: {:?}", owned.iter().map(|o| &o.endpoint).collect::<Vec<_>>());
     assert!(offload_refusal(&owned).is_ok(), "the dead host is not owned, so it cannot refuse an offload");
-    assert!(port.0.host_close_pending.is_empty());
+    assert_eq!(port.table().keys().state(h, "k9"), None);
     assert!(port.frozen_hosts().is_empty());
     // And a rediscovery does not bring it back while nothing lives there.
     rediscover_hosts(&port).await.unwrap();
@@ -519,7 +519,7 @@ async fn an_answered_second_listing_that_loses_its_pipe_keeps_the_queued_reconne
     assert_eq!(world.count_everywhere("Attach"), 0, "the stale listing must not reattach");
     assert_eq!(world.count_everywhere("Close"), 0);
     assert_eq!(port.0.listings.lock().unwrap().len(), 3, "current, initial frozen, and first reconnect adoption only");
-    assert_eq!(port.0.claims.len(), 1, "no stale orphan claims were added");
+    assert_eq!(port.table().keys().len(), 1, "no stale orphan keys were added");
     recovered.release.notify_one();
     // The second listing on the final connection uses the same gate.
     tokio::time::timeout(secs(2), recovered.reached.notified()).await.unwrap();

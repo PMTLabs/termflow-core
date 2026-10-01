@@ -17,12 +17,11 @@
 use super::host_adoption::{ensure_hosts, AdoptionPort};
 use super::host_registry;
 use super::host_table::{Admission, Busy, Ticket, LIFECYCLE_BUSY};
-use super::types::{AppState, HostSessionClaim, HostSessionClaimState};
-use super::{IdAllocator, restore_candidate, parse_session_key, SessionKeyKind};
+use super::types::AppState;
+use super::{IdAllocator, KeyStage, StageMode, parse_session_key, SessionKeyKind};
 use crate::elevated_host::HostChannel;
 use crate::pty_host_client::PtyHostClient;
 use dashmap::DashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::Runtime;
 
@@ -50,50 +49,34 @@ pub enum Placement {
 
 /// What the router needs from the application beyond adoption.
 pub(super) trait RoutingPort: AdoptionPort {
-    fn claims(&self) -> &Arc<DashMap<String, HostSessionClaim>>;
     fn restoring_keys(&self) -> &DashMap<String, Instant>;
     fn closed_unowned(&self) -> &DashMap<String, Instant>;
     fn ids(&self) -> &IdAllocator;
     fn surface_ambiguous(&self, keys: &[String]);
 
-    fn register_route(&self, channel: HostChannel, key: &str, process: &str) {
-        if let Some(epoch) = self.table().epoch(channel) {
-            self.table().routes().register(channel, key, process, epoch);
-        }
+    fn register_route(&self, channel: HostChannel, key: &str, process: &str) -> bool {
+        self.table().epoch(channel).is_some_and(|epoch| self.table().keys().restore_route(channel, key, process, epoch))
     }
 }
 
 /// Claim the fresh key before publishing a shell. The live collision check is a
 /// defensive redraw, not the uniqueness proof: the UUID retains 122 random bits.
-pub(super) fn claim_fresh_session<P: RoutingPort>(port: &P, leaf: &str, channel: HostChannel) -> Result<String, String> {
-    use dashmap::mapref::entry::Entry;
+pub(super) fn claim_fresh_session<P: RoutingPort>(port: &P, leaf: &str, channel: HostChannel) -> Result<KeyStage, String> {
     loop {
         let key = port.ids().mint_session_key(leaf)?;
-        if port.table().routes().contains(channel, &key) {
-            continue;
-        }
-        if let Entry::Vacant(entry) = port.claims().entry(key.clone()) {
-            entry.insert(HostSessionClaim {
-                state: HostSessionClaimState::RegistrationInProgress, pid: 0,
-                process_id: None, channel,
-            });
-            return Ok(key);
+        if port.table().keys().occupied(channel, &key) { continue; }
+        match port.table().keys().stage(channel, &key, StageMode::Spawn) {
+            Ok((stage, _)) => return Ok(stage),
+            Err(e) if e.starts_with("host-session-contended:") => continue,
+            Err(e) => return Err(e),
         }
     }
 }
 
-pub(super) fn candidate<P: RoutingPort>(port: &P, leaf: &str, override_key: Option<&str>) -> Option<String> {
-    let listed: Vec<String> = port.claims().iter()
-        .filter(|claim| claim.state == HostSessionClaimState::Reserved)
-        .map(|claim| claim.key().clone()).collect();
-    restore_candidate(leaf, override_key, listed.iter().map(String::as_str)).map(str::to_string)
-}
-
 fn surface_ambiguity<P: RoutingPort>(port: &P, leaf: &str) {
-    let own: Vec<_> = port.claims().iter()
-        .filter(|claim| claim.state == HostSessionClaimState::Reserved
-            && parse_session_key(claim.key()) == SessionKeyKind::V2 { owner_leaf: leaf })
-        .map(|claim| claim.key().clone()).collect();
+    let own: Vec<_> = port.table().keys().listed().into_iter()
+        .filter(|(_, key)| parse_session_key(key) == SessionKeyKind::V2 { owner_leaf: leaf })
+        .map(|(_, key)| key).collect();
     if own.len() > 1 {
         port.surface_ambiguous(&own);
     }
@@ -181,7 +164,7 @@ pub(super) async fn place_for_leaf<P: RoutingPort>(
     log::debug!("[GEN] placing terminal {leaf} (override={override_key:?})");
     let keyed = override_key.is_some()
         || host_registry::is_restoring_key(port.restoring_keys(), session_key, Instant::now())
-        || host_registry::reserved_channel(port.claims(), session_key).is_some();
+        || port.table().keys().candidate(leaf, override_key).is_some();
     if keyed {
         host_registry::refresh_restoring_key(port.restoring_keys(), session_key, Instant::now());
     }
@@ -203,8 +186,8 @@ pub(super) async fn place_for_leaf<P: RoutingPort>(
 
     let mut refused = None;
     for _ in 0..PLACE_ATTEMPTS {
-        let selected = candidate(port, leaf, override_key);
-        let held_by = selected.as_deref().and_then(|key| host_registry::reserved_channel(port.claims(), key));
+        let selected = port.table().keys().candidate(leaf, override_key);
+        let held_by = selected.as_ref().map(|(channel, _)| *channel);
         let (channel, client) = match held_by {
             Some(channel) => match client_of(port, channel) {
                 Some(client) => (channel, client),
@@ -238,27 +221,20 @@ pub(super) async fn place_for_leaf<P: RoutingPort>(
             }
         };
         let Some(selected) = selected else {
-            let key = claim_fresh_session(port, leaf, channel)?;
-            ticket.guard_claim(port.claims(), &key, None);
+            let stage = claim_fresh_session(port, leaf, channel)?;
+            let key = stage.key.clone();
+            ticket.guard_key(stage);
             surface_ambiguity(port, leaf);
             settle(port, session_key);
             log::info!("[GEN] spawning {key} on {channel:?}");
             return Ok(Placement::Spawn { channel, client, ticket, session_key: key });
         };
-        let claimed = host_registry::claim_registration(port.claims(), &selected, channel)?;
-        ticket.guard_claim(port.claims(), &selected, claimed);
-        match claimed {
-            Some((pid, from)) if from == channel => {
-                settle(port, session_key);
-                log::info!("[GEN] attaching {selected} on {channel:?} (pid {pid})");
-                return Ok(Placement::Attach { channel, client, pid, ticket, session_key: selected });
-            }
-            // The claim moved to another host, or vanished, between looking and
-            // taking it. Dropping the ticket puts it back; plan again.
-            Some(_) => continue,
-            None if held_by.is_some() => continue,
-            None => continue,
-        }
+        let (_, selected) = selected;
+        let (stage, pid) = port.table().keys().stage(channel, &selected, StageMode::Attach)?;
+        ticket.guard_key(stage);
+        settle(port, session_key);
+        log::info!("[GEN] attaching {selected} on {channel:?} (pid {pid})");
+        return Ok(Placement::Attach { channel, client, pid, ticket, session_key: selected });
     }
     match refused {
         Some(busy) => Ok(Placement::InProcess { reason: busy.to_string() }),
@@ -287,10 +263,6 @@ fn settle<P: RoutingPort>(port: &P, session_key: &str) {
 }
 
 impl<R: Runtime> RoutingPort for AppState<R> {
-    fn claims(&self) -> &Arc<DashMap<String, HostSessionClaim>> {
-        &self.host_session_claims
-    }
-
     fn restoring_keys(&self) -> &DashMap<String, Instant> {
         &self.restoring_keys
     }
@@ -315,19 +287,15 @@ impl<R: Runtime> AppState<R> {
     pub(crate) fn place_elevated_create(&self, leaf: &str, override_key: Option<&str>, client: PtyHostClient) -> Result<Placement, String> {
         let channel = HostChannel::Elevated;
         let mut ticket = begin_ticket(self, channel).map_err(|e| e.to_string())?;
-        if let Some(key) = candidate(self, leaf, override_key) {
-            let claimed = host_registry::claim_registration(&self.host_session_claims, &key, channel)?;
-            ticket.guard_claim(&self.host_session_claims, &key, claimed);
-            if let Some((pid, owner)) = claimed {
-                if owner != channel {
-                    return Err(pending("session belongs to a different terminal host"));
-                }
-                return Ok(Placement::Attach { channel, client, pid, ticket, session_key: key });
-            }
-            return Err(pending("session changed while placing it"));
+        if let Some((owner, key)) = self.host_table.keys().candidate(leaf, override_key) {
+            if owner != channel { return Err(pending("session belongs to a different terminal host")); }
+            let (stage, pid) = self.host_table.keys().stage(channel, &key, StageMode::Attach)?;
+            ticket.guard_key(stage);
+            return Ok(Placement::Attach { channel, client, pid, ticket, session_key: key });
         }
-        let key = claim_fresh_session(self, leaf, channel)?;
-        ticket.guard_claim(&self.host_session_claims, &key, None);
+        let stage = claim_fresh_session(self, leaf, channel)?;
+        let key = stage.key.clone();
+        ticket.guard_key(stage);
         surface_ambiguity(self, leaf);
         Ok(Placement::Spawn { channel, client, ticket, session_key: key })
     }

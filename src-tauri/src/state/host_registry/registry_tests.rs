@@ -1,4 +1,7 @@
 use super::*;
+use crate::state::{KeyState, CloseState, StageMode};
+use crate::pty_host_client::SessionListing;
+use termflow_pty_protocol::SessionMeta;
 use crate::pty_host_client::{wire_client, PtyHostDeps};
 use std::sync::Arc;
 use termflow_pty_protocol::{read_frame, Data, Frame};
@@ -111,28 +114,17 @@ fn primary_key_map_excludes_frozen() {
 
 #[test]
 fn claim_keeps_channel() {
-    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
-
-    reserve_session(&claims, "tm-a", 4242, FROZEN_2);
-    // A second reservation for the same key (another host reporting it) must not
-    // move the claim to that host.
-    reserve_session(&claims, "tm-a", 9999, PRIMARY);
-
-    assert_eq!(
-        claim_registration(&claims, "tm-a", PRIMARY),
-        Ok(Some((4242, FROZEN_2))),
-        "the claim must hand back the host that listed the session, not the create's own target"
-    );
-    assert_eq!(claims.get("tm-a").unwrap().state, HostSessionClaimState::RegistrationInProgress);
-    assert!(
-        claim_registration(&claims, "tm-a", PRIMARY).unwrap_err().starts_with(HOST_SESSION_CONTENDED),
-        "a consumed reservation is claimed by another recovery"
-    );
-
-    // A vacant key is a fresh spawn: no pid to restore, and the claim remembers
-    // where the spawn is headed.
-    assert_eq!(claim_registration(&claims, "tm-fresh", FROZEN_1), Ok(None));
-    assert_eq!(claims.get("tm-fresh").unwrap().channel, FROZEN_1);
+    let keys = HostKeys::default();
+    keys.listing(FROZEN_2, &answer(1, vec![listed("tm-a", true)]), |_| false);
+    keys.listing(PRIMARY, &answer(1, vec![listed("tm-a", true)]), |_| false);
+    let (stage, pid) = keys.stage(FROZEN_2, "tm-a", StageMode::Attach).unwrap();
+    assert_eq!((pid, stage.channel), (7, FROZEN_2));
+    assert_eq!(keys.state(FROZEN_2, "tm-a"), Some(KeyState::Held(stage.cg)));
+    assert!(keys.stage(FROZEN_2, "tm-a", StageMode::Attach).unwrap_err().starts_with("host-session-contended:"));
+    assert!(keys.eligible(PRIMARY, "tm-a"), "another host's identical key is independent");
+    let (fresh, pid) = keys.stage(FROZEN_1, "tm-fresh", StageMode::Spawn).unwrap();
+    assert_eq!(pid, 0);
+    assert_eq!(keys.state(FROZEN_1, "tm-fresh"), Some(KeyState::Held(fresh.cg)));
 }
 
 // ---- pending closes ---------------------------------------------------------
@@ -141,42 +133,28 @@ fn claim_keeps_channel() {
 /// session. A's empty answer is authoritative for A only.
 #[test]
 fn pending_close_b_survives_empty_list_from_a() {
-    let pending: DashMap<String, HostChannel> = DashMap::new();
-    pending.insert("tm-a".into(), PRIMARY);
-    pending.insert("tm-b".into(), FROZEN_1);
-
-    // A reconnects and lists nothing.
-    prune_pending_closes(&pending, PRIMARY);
-    assert!(!pending.contains_key("tm-a"), "A's own tombstone is moot after A's empty answer");
-    assert_eq!(
-        pending.get("tm-b").map(|c| *c),
-        Some(FROZEN_1),
-        "B's tombstone must survive an answer that was never B's"
-    );
-
-    // A host that reports B's key without owing it the close must not consume it.
-    assert!(!take_pending_close(&pending, "tm-b", PRIMARY));
-    assert!(pending.contains_key("tm-b"));
-
-    // B reconnects and lists the session: the close is delivered, once.
-    assert!(take_pending_close(&pending, "tm-b", FROZEN_1));
-    assert!(!take_pending_close(&pending, "tm-b", FROZEN_1));
+    let keys = HostKeys::default();
+    keys.close(PRIMARY, "tm-a");
+    keys.close(FROZEN_1, "tm-b");
+    let pending = Some(KeyState::Ending { close: CloseState::Pending, stamp: None });
+    assert_eq!(keys.state(PRIMARY, "tm-a"), pending);
+    assert_eq!(keys.state(FROZEN_1, "tm-b"), pending);
+    keys.listing(PRIMARY, &answer(1, vec![]), |_| false);
+    assert_eq!(keys.state(PRIMARY, "tm-a"), pending, "undelivered effects cannot be released");
+    assert_eq!(keys.state(FROZEN_1, "tm-b"), pending);
+    keys.listing(PRIMARY, &answer(2, vec![listed("tm-b", true)]), |_| false);
+    assert!(keys.eligible(PRIMARY, "tm-b"), "same text on another channel has no outstanding effect");
+    assert_eq!(keys.state(FROZEN_1, "tm-b"), pending);
 }
 
 #[test]
 fn a_non_empty_list_prunes_only_its_own_leftover_tombstones() {
-    let pending: DashMap<String, HostChannel> = DashMap::new();
-    pending.insert("tm-listed".into(), FROZEN_1);
-    pending.insert("tm-gone".into(), FROZEN_1);
-    pending.insert("tm-other-host".into(), PRIMARY);
-
-    // The listing names tm-listed: delivered. tm-gone is absent from the same
-    // answer: moot. The other host's tombstone is not this answer's to settle.
-    assert!(take_pending_close(&pending, "tm-listed", FROZEN_1));
-    prune_pending_closes(&pending, FROZEN_1);
-
-    assert!(!pending.contains_key("tm-gone"));
-    assert!(pending.contains_key("tm-other-host"));
+    let keys = HostKeys::default();
+    for (channel, key) in [(FROZEN_1, "tm-listed"), (FROZEN_1, "tm-gone"), (PRIMARY, "tm-other-host")] { keys.close(channel, key); }
+    keys.listing(FROZEN_1, &answer(1, vec![listed("tm-listed", true)]), |_| false);
+    for (channel, key) in [(FROZEN_1, "tm-listed"), (FROZEN_1, "tm-gone"), (PRIMARY, "tm-other-host")] {
+        assert_eq!(keys.state(channel, key), Some(KeyState::Ending { close: CloseState::Pending, stamp: None }));
+    }
 }
 
 // ---- frozen registry --------------------------------------------------------
@@ -289,12 +267,13 @@ fn the_leaf_entry_point_skips_an_in_process_terminal_too() {
 }
 
 #[test]
-fn a_close_that_cannot_reach_the_elevated_host_is_dropped_not_owed() {
-    let pending: DashMap<String, HostChannel> = DashMap::new();
-    route_close(&pending, HostChannel::Elevated, "tm-e", None);
-    assert!(pending.is_empty(), "the elevated host is never reconnected, so there is nothing to deliver to");
-    route_close(&pending, FROZEN_1, "tm-f", None);
-    assert_eq!(pending.get("tm-f").map(|c| *c.value()), Some(FROZEN_1), "an older host is owed it, by name");
+fn a_close_that_cannot_reach_a_host_stays_owed_on_its_exact_channel() {
+    let keys = HostKeys::default();
+    route_close(&keys, HostChannel::Elevated, "tm-e");
+    route_close(&keys, FROZEN_1, "tm-f");
+    for (channel, key) in [(HostChannel::Elevated, "tm-e"), (FROZEN_1, "tm-f")] {
+        assert_eq!(keys.state(channel, key), Some(KeyState::Ending { close: CloseState::Pending, stamp: None }));
+    }
 }
 
 #[test]
@@ -372,9 +351,8 @@ fn closed_unowned_never_closes_a_registered_session() {
 // ---- single-remover census --------------------------------------------------
 
 /// Each of these maps is written from many places but may only be shrunk by one
-/// function (two for `host_close_pending` and `restoring_leaf_keys`, whose two
-/// shapes of removal are the two halves of an answered listing, and of a close
-/// plus the expiry sweep): a removal anywhere else bypasses the host scoping or
+/// function (two for `restoring_leaf_keys`, for a close and the expiry sweep):
+/// a removal anywhere else bypasses the host scoping or
 /// the expiry re-check and is invisible at runtime.
 ///
 /// The files scanned are every production source under `src/state` and
@@ -447,6 +425,9 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
             "{expected} was not scanned: the census would be vacuous"
         );
     }
+    for obsolete in ["host_close_pending", "host_session_claims"] {
+        assert!(sources.iter().all(|(_, text)| !text.contains(obsolete)), "{obsolete} must not remain a parallel key authority");
+    }
     let registry = &sources.iter().find(|(name, _)| name == "state/host_registry.rs").unwrap().1;
 
     // (needle, the only functions whose body may contain it)
@@ -468,17 +449,7 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
             &["closed_unowned.remove(", "closed_unowned.remove_if(", "closed_unowned.retain(", "closed_unowned.clear("],
             &["pub(super) fn forget_closed_unowned("],
         ),
-        (
-            &["host_close_pending.remove(", "host_close_pending.remove_if(", "host_close_pending.retain(", "host_close_pending.clear("],
-            &["pub(super) fn take_pending_close(", "pub(super) fn prune_pending_closes("],
-        ),
-        (
-            // Claims listed by a host that is gone for good, or that its answered
-            // listing shows to be moot, are dropped as a set; every other claim
-            // leaves through its owner-guarded or transaction-guarded path.
-            &["host_session_claims.retain(", "host_session_claims.clear("],
-            &["pub(super) fn forget_reserved_claims_on(", "pub(super) fn drop_stale_reserved_claims("],
-        ),
+
     ];
 
     for (needles, allowed) in rules {
@@ -625,71 +596,65 @@ fn a_duplicate_session_is_announced_once() {
 }
 
 #[test]
-fn only_a_reserved_claim_names_the_host_holding_a_session() {
-    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
-    assert_eq!(reserved_channel(&claims, "tm-a"), None);
-    reserve_session(&claims, "tm-a", 4, FROZEN_2);
-    assert_eq!(reserved_channel(&claims, "tm-a"), Some(FROZEN_2));
-    claim_registration(&claims, "tm-a", PRIMARY).unwrap();
-    assert_eq!(reserved_channel(&claims, "tm-a"), None, "a session already being taken over is not waiting");
+fn only_a_listed_key_is_a_restore_candidate() {
+    let keys = HostKeys::default();
+    assert_eq!(keys.candidate("tm-a", None), None);
+    keys.listing(FROZEN_2, &answer(1, vec![listed("tm-a", true)]), |_| false);
+    assert_eq!(keys.candidate("tm-a", None), Some((FROZEN_2, "tm-a".into())));
+    keys.stage(FROZEN_2, "tm-a", StageMode::Attach).unwrap();
+    assert_eq!(keys.candidate("tm-a", None), None);
 }
 
-// ---- claims a host's listing shows to be moot ---------------------------------
-
-fn claim_in(state: HostSessionClaimState, channel: HostChannel) -> HostSessionClaim {
-    HostSessionClaim { state, pid: 7, process_id: None, channel }
-}
+fn answer(request_no: u64, sessions: Vec<SessionMeta>) -> SessionListing { SessionListing { request_no, sessions } }
 
 fn listed(key: &str, alive: bool) -> SessionMeta {
     SessionMeta { tab_id: key.into(), pid: 7, head_offset: 0, tail_offset: 0, alive }
 }
 
 #[test]
-fn an_answered_listing_drops_a_reserved_claim_for_a_session_that_is_absent_or_dead() {
-    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
-    for key in ["live", "absent", "dead"] {
-        claims.insert(key.into(), claim_in(HostSessionClaimState::Reserved, FROZEN_1));
+fn an_answered_listing_removes_absent_keys_and_excludes_dead_keys_from_host_occupancy() {
+    let keys = HostKeys::default();
+    keys.listing(FROZEN_1, &answer(1, ["live", "absent", "dead"].map(|k| listed(k, true)).to_vec()), |_| false);
+    assert_eq!(keys.unfinished_on(FROZEN_1), 3);
+    keys.listing(FROZEN_1, &answer(2, vec![listed("live", true), listed("dead", false)]), |_| false);
+    assert!(keys.eligible(FROZEN_1, "live"));
+    assert_eq!(keys.state(FROZEN_1, "absent"), None);
+    assert_eq!(keys.unfinished_on(FROZEN_1), 1, "dead listed sessions do not prevent empty-host retirement");
+}
+
+#[test]
+fn a_listing_never_drops_a_key_that_is_held_or_bound() {
+    let keys = HostKeys::default();
+    let (taking, _) = keys.stage(FROZEN_1, "taking", StageMode::Spawn).unwrap();
+    let (bound, _) = keys.stage(FROZEN_1, "held", StageMode::Spawn).unwrap();
+    assert!(keys.complete(&bound, "pc-held"));
+    keys.listing(FROZEN_1, &answer(1, vec![]), |_| false);
+    assert_eq!(keys.state(FROZEN_1, "taking"), Some(KeyState::Held(taking.cg)));
+    assert_eq!(keys.state(FROZEN_1, "held"), Some(KeyState::Bound("pc-held".into())));
+}
+
+#[test]
+fn a_hosts_listing_only_settles_the_keys_of_that_host() {
+    let keys = HostKeys::default();
+    for (channel, key) in [(FROZEN_1, "on-1"), (FROZEN_2, "on-2"), (PRIMARY, "on-primary")] {
+        keys.listing(channel, &answer(1, vec![listed(key, true)]), |_| false);
+        assert!(keys.eligible(channel, key));
     }
-    drop_stale_reserved_claims(&claims, FROZEN_1, &[listed("live", true), listed("dead", false)]);
-
-    assert!(claims.contains_key("live"), "its session is still running");
-    assert!(!claims.contains_key("absent"), "a session the host no longer has");
-    assert!(!claims.contains_key("dead"), "a session the host lists as ended");
+    keys.listing(FROZEN_1, &answer(2, vec![]), |_| false);
+    assert_eq!(keys.state(FROZEN_1, "on-1"), None);
+    assert!(keys.eligible(FROZEN_2, "on-2"));
+    assert!(keys.eligible(PRIMARY, "on-primary"));
 }
 
 #[test]
-fn a_listing_never_drops_a_claim_that_is_being_registered_or_is_registered() {
-    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
-    claims.insert("taking".into(), claim_in(HostSessionClaimState::RegistrationInProgress, FROZEN_1));
-    claims.insert("held".into(), claim_in(HostSessionClaimState::Registered, FROZEN_1));
-    drop_stale_reserved_claims(&claims, FROZEN_1, &[]);
-
-    assert!(claims.contains_key("taking"), "a create is taking this session right now");
-    assert!(claims.contains_key("held"), "its pane retires it when the session exits");
-}
-
-#[test]
-fn a_hosts_listing_only_settles_the_claims_of_that_host() {
-    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
-    claims.insert("on-1".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_1));
-    claims.insert("on-2".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_2));
-    claims.insert("on-primary".into(), claim_in(HostSessionClaimState::Reserved, PRIMARY));
-    drop_stale_reserved_claims(&claims, FROZEN_1, &[]);
-
-    assert!(!claims.contains_key("on-1"));
-    assert!(claims.contains_key("on-2"), "another older host's session is not in this answer");
-    assert!(claims.contains_key("on-primary"));
-}
-
-#[test]
-fn unfinished_claims_are_counted_per_host_and_exclude_registered_ones() {
-    let claims: DashMap<String, HostSessionClaim> = DashMap::new();
-    claims.insert("reserved".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_1));
-    claims.insert("taking".into(), claim_in(HostSessionClaimState::RegistrationInProgress, FROZEN_1));
-    claims.insert("registered".into(), claim_in(HostSessionClaimState::Registered, FROZEN_1));
-    claims.insert("elsewhere".into(), claim_in(HostSessionClaimState::Reserved, FROZEN_2));
-
-    assert_eq!(unfinished_claims_on(&claims, FROZEN_1), 2);
-    assert_eq!(unfinished_claims_on(&claims, FROZEN_2), 1);
-    assert_eq!(unfinished_claims_on(&claims, PRIMARY), 0);
+fn unfinished_keys_are_counted_per_host_and_exclude_bound_ones() {
+    let keys = HostKeys::default();
+    keys.listing(FROZEN_1, &answer(1, vec![listed("reserved", true)]), |_| false);
+    keys.listing(FROZEN_2, &answer(1, vec![listed("elsewhere", true)]), |_| false);
+    keys.stage(FROZEN_1, "taking", StageMode::Spawn).unwrap();
+    let (registered, _) = keys.stage(FROZEN_1, "registered", StageMode::Spawn).unwrap();
+    assert!(keys.complete(&registered, "pc-registered"));
+    assert_eq!(keys.unfinished_on(FROZEN_1), 2);
+    assert_eq!(keys.unfinished_on(FROZEN_2), 1);
+    assert_eq!(keys.unfinished_on(PRIMARY), 0);
 }

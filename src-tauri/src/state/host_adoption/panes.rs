@@ -60,6 +60,7 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
         if !session_needs_surface(port.registered_on_any_channel(&orphan.tab_id)) {
             continue;
         }
+        if !port.table().keys().eligible(channel, &orphan.tab_id) { continue; }
         // Not registered yet does not mean unwanted. A pane restored from a
         // saved layout may still be waiting for this very session (its create
         // is retrying while a host answers), and turning the session into a
@@ -78,16 +79,14 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
             }
             OrphanVerdict::CloseUnowned => {
                 log::info!("[HOTSWAP] closing {}: its pane was closed before its host was known", orphan.tab_id);
-                if let Some(client) = live_client(port, channel) {
-                    client.close(&orphan.tab_id);
-                }
+                port.table().keys().close_listed(channel, &orphan.tab_id, || {
+                    host_registry::unowned_close_due(port.closed_unowned(),
+                        port.registered_on_any_channel(&orphan.tab_id), &orphan.tab_id, std::time::Instant::now())
+                });
                 continue;
             }
         }
-        // This emission carries the authoritative PID from the host listing.
-        // Reserve it so a recovery create can never degrade into a fresh spawn
-        // merely because the reservation was absent.
-        host_registry::reserve_session(port.claims(), &orphan.tab_id, orphan.pid, channel);
+        // The answered listing already recorded this exact key and PID.
         port.announce_recovered(&orphan.tab_id);
     }
 }
@@ -128,10 +127,10 @@ pub(super) async fn reattach_listed<P: PanePort>(
         // `a.tab_id` is a SESSION key; ownership lives under the process id.
         let Some(process_id) = by_session.get(&a.tab_id).cloned().filter(|p| port.pane_is_host_owned(p)) else {
             log::info!("[HOTSWAP] {} was closed while disconnected; closing its host session", a.tab_id);
-            client.close(&a.tab_id);
+            host_registry::route_close(port.table().keys(), channel, &a.tab_id);
             continue;
         };
-        port.register_route(channel, &a.tab_id, &process_id);
+        if !port.register_route(channel, &a.tab_id, &process_id) { continue; }
         match client.attach_confirmed(&a.tab_id, a.from_offset).await {
             Some(true) => log::info!(
                 "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",

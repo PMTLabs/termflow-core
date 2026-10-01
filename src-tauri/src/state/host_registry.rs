@@ -5,10 +5,8 @@
 //! parameter names deliberately equal the field names so the source census in
 //! `terminals.rs` can see every removal.
 
-use super::terminals::HOST_SESSION_CONTENDED;
-use super::types::{
-    session_key_of, FrozenHost, HostSessionClaim, HostSessionClaimState, Terminal,
-};
+use super::types::{session_key_of, FrozenHost, Terminal};
+use super::HostKeys;
 use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::PtyHostClient;
 use dashmap::DashMap;
@@ -16,7 +14,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use termflow_pty_protocol::SessionMeta;
 
 /// How long a restore intent or an unowned close is remembered. Restore intent
 /// is refreshed by every keyed create, so this only reaps leaves nobody retries.
@@ -24,99 +21,6 @@ pub(super) const RESTORE_INTENT_TTL: Duration = Duration::from_secs(15 * 60);
 
 fn intent_expired(stamped: Instant, now: Instant) -> bool {
     now.saturating_duration_since(stamped) >= RESTORE_INTENT_TTL
-}
-
-// ---- claims ---------------------------------------------------------------
-
-/// Reserve a listed session for the renderer which already knows it, on the
-/// host whose listing reported it. An entry operation so recovery cannot slip a
-/// second owner between the observation and the reservation.
-pub(super) fn reserve_session(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    session_key: &str,
-    pid: u32,
-    channel: HostChannel,
-) {
-    host_session_claims
-        .entry(session_key.to_string())
-        .or_insert(HostSessionClaim {
-            state: HostSessionClaimState::Reserved,
-            pid,
-            process_id: None,
-            channel,
-        });
-}
-
-/// Claim a session for backend registration. A recovery create consumes the
-/// Reserved entry established from a host's authoritative listing and gets back
-/// the pid AND the host that listing came from. A vacant key is a fresh spawn:
-/// the claim records `fresh_channel`, where that spawn is headed.
-pub(super) fn claim_registration(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    session_key: &str,
-    fresh_channel: HostChannel,
-) -> Result<Option<(u32, HostChannel)>, String> {
-    use dashmap::mapref::entry::Entry;
-    match host_session_claims.entry(session_key.to_string()) {
-        Entry::Vacant(v) => {
-            v.insert(HostSessionClaim {
-                state: HostSessionClaimState::RegistrationInProgress,
-                pid: 0,
-                process_id: None,
-                channel: fresh_channel,
-            });
-            Ok(None)
-        }
-        Entry::Occupied(mut o) => match o.get().state {
-            HostSessionClaimState::Reserved => {
-                let (pid, channel) = (o.get().pid, o.get().channel);
-                o.get_mut().state = HostSessionClaimState::RegistrationInProgress;
-                Ok(Some((pid, channel)))
-            }
-            HostSessionClaimState::Registered => Err(format!(
-                "{HOST_SESSION_CONTENDED}: host session {session_key} is already registered"
-            )),
-            _ => Err(format!(
-                "{HOST_SESSION_CONTENDED}: host session {session_key} is claimed by another recovery"
-            )),
-        },
-    }
-}
-
-/// Undo a claim transition whose operation never got as far as `Registered`: a
-/// taken-over Reserved claim is put back (`restore`) so a retry can claim it
-/// again, a fresh claim is removed. A claim that did reach `Registered` (or
-/// belongs to someone else by now) is left alone.
-pub(super) fn release_unfinished_claim(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    session_key: &str,
-    restore: Option<HostSessionClaim>,
-) {
-    use dashmap::mapref::entry::Entry;
-    if let Entry::Occupied(mut o) = host_session_claims.entry(session_key.to_string()) {
-        if o.get().state == HostSessionClaimState::RegistrationInProgress {
-            match restore {
-                Some(reserved) => {
-                    o.insert(reserved);
-                }
-                None => {
-                    o.remove();
-                }
-            }
-        }
-    }
-}
-
-/// The host that listed `session_key` and is waiting for a pane to take it over,
-/// when no pane has done so yet.
-pub(super) fn reserved_channel(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    session_key: &str,
-) -> Option<HostChannel> {
-    host_session_claims
-        .get(session_key)
-        .filter(|claim| claim.state == HostSessionClaimState::Reserved)
-        .map(|claim| claim.channel)
 }
 
 // ---- session-key maps -----------------------------------------------------
@@ -175,71 +79,6 @@ pub(super) fn resolve_inbound(
         table.routes().record_drop();
         None
     }
-}
-
-// ---- pending closes -------------------------------------------------------
-
-/// Consume the tombstone for `session_key` if it is owed to `channel`. A host
-/// reporting a key whose close is owed to a different host leaves it alone.
-pub(super) fn take_pending_close(
-    host_close_pending: &DashMap<String, HostChannel>,
-    session_key: &str,
-    channel: HostChannel,
-) -> bool {
-    host_close_pending
-        .remove_if(session_key, |_, owed_to| *owed_to == channel)
-        .is_some()
-}
-
-/// Drop the tombstones owed to `channel` — an answered listing from that host
-/// no longer has them. Tombstones owed to other hosts are untouched: only their
-/// own host's answer can say they are moot.
-pub(super) fn prune_pending_closes(
-    host_close_pending: &DashMap<String, HostChannel>,
-    channel: HostChannel,
-) {
-    host_close_pending.retain(|_, owed_to| *owed_to != channel);
-}
-
-/// Drop the claims a host listed but no pane has taken over. For a host that is
-/// gone for good: its sessions went with it, and a restoring pane must not wait
-/// for a session on a host nobody can reach.
-pub(super) fn forget_reserved_claims_on(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    channel: HostChannel,
-) {
-    host_session_claims
-        .retain(|_, claim| !(claim.state == HostSessionClaimState::Reserved && claim.channel == channel));
-}
-
-/// Drop the claims a host's answered listing shows to be moot: a session it
-/// reserved that the host no longer lists alive. Nothing will ever take it over,
-/// and while the claim stands the host looks occupied. A claim whose registration
-/// is in progress is a create that is taking the session right now and is left to
-/// finish; so is a registered one, which `on_exit` retires.
-pub(super) fn drop_stale_reserved_claims(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    channel: HostChannel,
-    listed: &[SessionMeta],
-) {
-    host_session_claims.retain(|key, claim| {
-        !(claim.state == HostSessionClaimState::Reserved
-            && claim.channel == channel
-            && !listed.iter().any(|s| s.alive && s.tab_id == *key))
-    });
-}
-
-/// Claims on `channel` that a pane has not finished taking over (reserved for a
-/// pane that has not come, or a registration in progress). A registered claim has
-/// its pane in `host_terminals` and is counted there.
-pub(super) fn unfinished_claims_on(
-    host_session_claims: &DashMap<String, HostSessionClaim>,
-    channel: HostChannel,
-) -> usize {
-    host_session_claims
-        .iter()
-        .filter(|c| c.channel == channel && c.state != HostSessionClaimState::Registered)
-        .count()
 }
 
 // ---- live operations on a terminal ------------------------------------------
@@ -315,24 +154,9 @@ pub(super) fn route_repaint(
     true
 }
 
-/// Tell the host that owns a closed session to close it, or owe it that close.
-/// A host with no live connection (a pipe that dropped, a reconnect in flight)
-/// is told on its next answered listing, and only by that host: the tombstone
-/// carries its channel. The elevated host is never reconnected, so a close that
-/// cannot reach it is simply dropped.
-pub(super) fn route_close(
-    host_close_pending: &DashMap<String, HostChannel>,
-    channel: HostChannel,
-    session_key: &str,
-    client: Option<PtyHostClient>,
-) {
-    match client {
-        Some(client) if client.is_alive() => client.close(session_key),
-        _ if channel != HostChannel::Elevated => {
-            host_close_pending.insert(session_key.to_string(), channel);
-        }
-        _ => {}
-    }
+/// Ending remains ineligible until a later answered listing proves the effect.
+pub(super) fn route_close(keys: &HostKeys, channel: HostChannel, session_key: &str) {
+    keys.close(channel, session_key);
 }
 
 // ---- frozen host registry -------------------------------------------------
@@ -553,8 +377,7 @@ pub(super) fn prune_restoring_leaf_keys(
 pub(super) struct ListingMaps<'a> {
     pub host_terminals: &'a DashMap<String, HostChannel>,
     pub terminals: &'a DashMap<String, Terminal>,
-    pub host_session_claims: &'a DashMap<String, HostSessionClaim>,
-    pub host_close_pending: &'a DashMap<String, HostChannel>,
+    pub keys: &'a HostKeys,
     pub closed_unowned: &'a DashMap<String, Instant>,
 }
 
@@ -566,8 +389,7 @@ pub(super) struct ListingMaps<'a> {
 pub(super) fn apply_answered_listing(
     maps: &ListingMaps,
     channel: HostChannel,
-    client: &PtyHostClient,
-    surviving: &[SessionMeta],
+    listing: &crate::pty_host_client::SessionListing,
     now: Instant,
 ) -> Vec<String> {
     // `meta.tab_id` is a SESSION key and `host_terminals` is keyed by process
@@ -575,32 +397,12 @@ pub(super) fn apply_answered_listing(
     // directly makes every live pane look unowned, which queues it for adoption
     // and lets a concurrent create re-adopt a LIVE session at offset 0 straight
     // into its parser.
+    maps.keys.listing(channel, listing, |key| unowned_close_due(maps.closed_unowned,
+        session_registered_on_any_channel(maps.host_terminals, maps.terminals, key), key, now));
     let owned_sessions = sessions_by_key(maps.host_terminals, maps.terminals, channel);
     let mut duplicates = Vec::new();
-    for meta in surviving {
-        // A close that couldn't reach the host while the pipe was down: deliver
-        // it now instead of re-adopting the session.
-        if take_pending_close(maps.host_close_pending, &meta.tab_id, channel) {
-            log::info!(
-                "[HOTSWAP] delivering deferred close for {} (closed while disconnected)",
-                meta.tab_id
-            );
-            client.close(&meta.tab_id);
-            // The host may still list the session for a moment after being told to
-            // close it. A listing taken in that moment must close it again, not
-            // hand it back to the user as a recovered terminal.
-            maps.closed_unowned.insert(meta.tab_id.clone(), now);
-            continue;
-        }
+    for meta in &listing.sessions {
         let registered = session_registered_on_any_channel(maps.host_terminals, maps.terminals, &meta.tab_id);
-        if unowned_close_due(maps.closed_unowned, registered, &meta.tab_id, now) {
-            log::info!(
-                "[HOTSWAP] closing {}: its pane was closed before its host was known",
-                meta.tab_id
-            );
-            client.close(&meta.tab_id);
-            continue;
-        }
         // Only sessions the GUI does NOT already own belong in the adoption
         // queue. During an in-place pipe-drop recovery the live tabs are still
         // registered; queueing them would let a concurrent create re-adopt one
@@ -617,7 +419,6 @@ pub(super) fn apply_answered_listing(
             duplicates.push(meta.tab_id.clone());
             continue;
         }
-        reserve_session(maps.host_session_claims, &meta.tab_id, meta.pid, channel);
     }
     duplicates
 }

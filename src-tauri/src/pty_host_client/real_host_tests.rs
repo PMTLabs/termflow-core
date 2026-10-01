@@ -8,6 +8,8 @@
 //! processes up by name. When the host binary has not been built the tests skip
 //! with a message.
 use super::*;
+#[path = "real_key_exit_tests.rs"]
+mod real_key_exit_tests;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;

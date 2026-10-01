@@ -14,7 +14,7 @@ use crate::elevated_host::FrozenId;
 use crate::state::host_table::{Admission, DrainRefusal, QuiesceReason};
 use futures::future::join_all;
 use std::time::Duration;
-use termflow_pty_protocol::SessionMeta;
+use crate::pty_host_client::SessionListing;
 use tokio::time::Instant;
 
 /// Waits between reconnect attempts, whichever host dropped.
@@ -23,9 +23,9 @@ pub(in crate::state) const RECONNECT_BACKOFF_MS: &[u64] = &[500, 1000, 2000, 400
 /// Ask a freshly reconnected host for its sessions. Only an ANSWERED listing is
 /// authority: a timeout or dead pipe must never read as "the host has no
 /// sessions", which would tear down every live pane on a transport failure.
-async fn list_with_retries(client: &PtyHostClient) -> Option<Vec<SessionMeta>> {
+async fn list_with_retries(client: &PtyHostClient) -> Option<SessionListing> {
     for attempt in 0..LIST_ATTEMPTS {
-        if let Some(sessions) = client.list_sessions().await {
+        if let Some(sessions) = client.list_sessions_numbered().await {
             return Some(sessions);
         }
         if attempt + 1 < LIST_ATTEMPTS {
@@ -90,6 +90,7 @@ pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_m
         log::warn!("[HOTSWAP] recovery superseded (epoch {epoch} stale); aborting pass");
         return;
     }
+    port.apply_listing(channel, &client, Some(&sessions));
     reattach_listed(port, channel, &client, &tabs, &sessions, &still_current).await;
 }
 
@@ -220,6 +221,7 @@ async fn reconnect_frozen_pass<P: PanePort>(
                 let still_current = || listing_is_current(port.table(), channel, adopted.epoch, &client, Admission::Open);
                 match list_with_retries(&client).await {
                     Some(sessions) if still_current() => {
+                        port.apply_listing(channel, &client, Some(&sessions));
                         reattach_listed(port, channel, &client, &tabs, &sessions, &still_current).await;
                     }
                     Some(_) => {

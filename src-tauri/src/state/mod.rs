@@ -1,6 +1,7 @@
 mod types;
 mod incarnation_ids;
 mod host_routes;
+mod host_keys;
 mod terminals;
 mod host_registry;
 mod host_retire;
@@ -28,6 +29,7 @@ pub(crate) use host_adoption::wiring_tests::exercise_generations;
 pub use types::*;
 pub use incarnation_ids::{IdAllocator, mint_process_id, mint_session_key, parse_session_key, restore_candidate, SessionKeyKind};
 pub use host_routes::HostRoutes;
+pub use host_keys::{HostKeys, KeyState, CloseState, KeyStage, StageMode};
 pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, strip_cursor_state_tail, tail_text_with};
 pub use reattach::{ReattachAction, ReattachPlan, plan_reattach};
 pub use host_table::{Admission, Busy, DrainGuard, DrainRefusal, HostTable, QuiesceGuard, QuiesceReason, Ticket, LIFECYCLE_BUSY};

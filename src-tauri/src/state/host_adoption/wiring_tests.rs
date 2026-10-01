@@ -27,7 +27,7 @@ pub(crate) async fn exercise_generations(current: String, candidates: Vec<HostCa
         // These fake peers implement Shutdown; mirror the capability negotiation.
         frozen.client.set_shutdown_control(true);
         port.current_client().unwrap().set_shutdown_control(true);
-        assert_eq!(port.0.claims.get("tm-old").unwrap().channel, channel);
+        assert_eq!(port.table().keys().snapshot("tm-old").unwrap().channel, channel);
 
         let spec = SpawnSpec { shell: "test-shell".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 };
         let old_session_key = "tm-old";
