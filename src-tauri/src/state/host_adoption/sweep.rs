@@ -8,7 +8,7 @@
 
 use super::panes::{live_client, surface_orphans, PanePort};
 use super::reconnect::reconnect_disconnected;
-use super::{rediscover_hosts, HostChannel, PtyHostClient};
+use super::{listing_is_current, rediscover_hosts, HostChannel, PtyHostClient};
 use crate::state::reattach::plan_reattach;
 use crate::state::host_table::Admission;
 
@@ -57,10 +57,7 @@ pub(in crate::state) async fn sweep<P: PanePort>(port: &P) -> bool {
         };
         // A reconnect or retirement can finish while the listing is in flight.
         // Its older answer must not reserve sessions on a superseded connection.
-        if !port.table().is_current(channel, epoch)
-            || port.table().admission(channel) != Some(Admission::Open)
-            || !client.is_alive()
-        {
+        if !listing_is_current(port.table(), channel, epoch, &client, Admission::Open) {
             log::info!("[GEN] discarding superseded sweep listing from {channel:?} epoch {epoch}");
             complete = false;
             continue;

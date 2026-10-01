@@ -28,6 +28,8 @@
 //! ordering and the failure policy are testable over fake hosts without a Tauri
 //! `AppHandle` or an updater.
 
+use super::host_adoption::listing_is_current;
+use super::host_table::Admission;
 use super::host_lifecycle::{begin_full_update, origins, owned_hosts, owned_hosts_now, unresolved_refusal};
 use super::host_lifecycle::{CloseBounds, LifecyclePort, OwnedHost};
 use super::types::AppState;
@@ -178,10 +180,11 @@ pub(super) trait FullUpdatePort: LifecyclePort {
 
 async fn scope_of<P: FullUpdatePort>(port: &P, hosts: &[OwnedHost]) -> Scope {
     let answers = join_all(hosts.iter().map(|host| async move {
-        match &host.client {
-            Some(client) => client.list_sessions_within(SCOPE_LIST_BOUND).await,
-            None => None,
-        }
+        let channel = host.channel?;
+        let epoch = port.table().epoch(channel)?;
+        let client = host.client.as_ref()?;
+        let sessions = client.list_sessions_within(SCOPE_LIST_BOUND).await?;
+        listing_is_current(port.table(), channel, epoch, client, Admission::Open).then_some(sessions)
     }))
     .await;
     let mut shell_count = port.local_shells();

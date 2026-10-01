@@ -46,6 +46,27 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
     assert_eq!(*offsets.get("tm-new").unwrap(), 101);
     assert_eq!(*offsets.get("tm-old").unwrap(), 201);
 
+    // Positive controls: both owners must receive Gap and Exit, not merely
+    // reject frames addressed to someone else. These callbacks do not clean up.
+    for (n, key) in ["tm-new", "tm-old"].iter().enumerate() {
+        let (client, server) = &mut connections[n];
+        for data in [Data::Gap { tab_id: key.to_string(), at_offset: 1 }, Data::Exit { tab_id: key.to_string(), exit_cwd: None }] {
+            write_frame(server, &Frame::Data(data)).await.unwrap();
+        }
+        let listing = tokio::spawn({ let client = client.clone(); async move { client.list_sessions().await } });
+        let req = match read_frame(server).await.unwrap().unwrap() {
+            Frame::Ctrl(Control::ListSessions { req, .. }) => req,
+            other => panic!("unexpected {other:?}"),
+        };
+        write_frame(server, &Frame::Resp(Response::SessionList { req, sessions: vec![] })).await.unwrap();
+        assert!(listing.await.unwrap().is_some());
+    }
+    assert_eq!(*events.lock().unwrap(), vec![
+        ("gap", "pc-new".to_string()), ("exit", "pc-new".to_string()),
+        ("gap", "pc-old".to_string()), ("exit", "pc-old".to_string()),
+    ]);
+    events.lock().unwrap().clear();
+
     // A duplicate key on the wrong host, then a stale connection to the right host.
     for stale in [false, true] {
         let (client, server) = &mut connections[1];

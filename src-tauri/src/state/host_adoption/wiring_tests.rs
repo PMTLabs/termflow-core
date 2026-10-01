@@ -1,4 +1,7 @@
-//! Full multi-host flow over the real client and fake external host boundaries.
+//! Multi-host placement and lifecycle over real clients and fake host boundaries.
+// Covers placement and lifecycle; the command layer is covered by
+// host_adoption::routing_tests::spawn_routed_has_no_other_pty_host_clone (source census).
+// The fake port does not supply the Tauri AppHandle needed by spawn_routed on Windows.
 use super::fake_hosts::*;
 use super::*;
 use crate::state::host_lifecycle::{begin_offload, exit_hosts};
@@ -27,6 +30,18 @@ pub(crate) async fn exercise_generations(current: String, candidates: Vec<HostCa
         assert_eq!(port.0.claims.get("tm-old").unwrap().channel, channel);
 
         let spec = SpawnSpec { shell: "test-shell".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 };
+        let old_session_key = "tm-old";
+        match place(&port, old_session_key, true).await.unwrap() {
+            Placement::Attach { channel: target, client, pid, ticket } => {
+                assert_eq!(target, channel, "the old shell must attach on the frozen host");
+                assert_eq!(pid, shell.pid, "attach retains the old process identity");
+                assert_eq!(client.attach_confirmed(old_session_key, shell.tail_offset).await, Some(true));
+                drop(ticket);
+            }
+            _ => panic!("a keyed old shell must attach, never spawn"),
+        }
+        assert_eq!(world.sessions(&old, "Attach"), ["tm-old"]);
+        assert_eq!(world.count(&current, "Attach"), 0);
         let session_key = "tm-new";
         match place(&port, session_key, false).await.unwrap() {
             Placement::Spawn { channel, client, ticket } => {

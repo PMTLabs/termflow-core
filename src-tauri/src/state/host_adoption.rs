@@ -479,6 +479,33 @@ async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<Vec<Session
     tokio::time::timeout_at(deadline, work).await.unwrap_or(None)
 }
 
+/// Validate an awaited answer before it can affect ownership or lifecycle state.
+/// Retirement's final, read-only confirmation expects Draining; all ownership
+/// mutations require Open admission.
+pub(super) fn listing_is_current(
+    table: &HostTable,
+    channel: HostChannel,
+    epoch: u64,
+    client: &PtyHostClient,
+    admission: Admission,
+) -> bool {
+    table.is_current(channel, epoch) && table.admission(channel) == Some(admission) && client.is_alive()
+}
+
+fn apply_validated_listing<P: AdoptionPort>(
+    port: &P,
+    channel: HostChannel,
+    epoch: u64,
+    client: &PtyHostClient,
+    listing: Option<&[SessionMeta]>,
+) -> Result<(), Failure> {
+    if !listing_is_current(port.table(), channel, epoch, client, Admission::Open) {
+        return Err(Failure::Superseded);
+    }
+    port.apply_listing(channel, client, listing);
+    Ok(())
+}
+
 const CONNECTION_LOST: &str = "connection lost during setup";
 
 fn resolution_of(listing: &Option<Vec<SessionMeta>>) -> Resolution {
@@ -530,7 +557,7 @@ async fn adopt<P: AdoptionPort>(
         // Already connected; only its listing is missing.
         let epoch = port.table().epoch(channel).unwrap_or(0);
         let listing = settle(&client, deadline).await;
-        port.apply_listing(channel, &client, listing.as_deref());
+        apply_validated_listing(port, channel, epoch, &client, listing.as_deref())?;
         return Ok(Adopted { resolution: resolution_of(&listing), channel, epoch });
     }
 
@@ -550,7 +577,6 @@ async fn adopt<P: AdoptionPort>(
     let (channel, epoch) = match (role, frozen) {
         (HostRole::Frozen, Some((id, epoch))) => {
             let channel = HostChannel::Frozen(id);
-            port.apply_listing(channel, &client, listing.as_deref());
             // Admission first, as for the current host below: a create that sees the
             // client must find a slot to take a ticket on. A host retired while it
             // was being reconnected must not be brought back by the connection.
@@ -574,15 +600,19 @@ async fn adopt<P: AdoptionPort>(
                 frozen_connection_lost(port.table(), port.barrier(), id, epoch, &candidate.endpoint);
                 return Err(Failure::ConnectionLost);
             }
+            apply_validated_listing(port, channel, epoch, &client, listing.as_deref())?;
             port.frozen_adopted(id);
             (channel, epoch)
         }
         _ => {
-            port.apply_listing(HostChannel::Primary, &client, listing.as_deref());
             // Admission first: a create that sees the client must find a slot to
             // take a ticket on, or it would pass the host over.
-            publish_admission(port, HostChannel::Primary, opened.epoch);
+            if !publish_admission(port, HostChannel::Primary, opened.epoch) {
+                client.close_transport().await;
+                return Err(Failure::Superseded);
+            }
             port.publish_current(&client).map_err(Failure::Other)?;
+            apply_validated_listing(port, HostChannel::Primary, opened.epoch, &client, listing.as_deref())?;
             (HostChannel::Primary, opened.epoch)
         }
     };
@@ -593,6 +623,9 @@ async fn adopt<P: AdoptionPort>(
 /// draining or retired as it is, and says so; an adoption must not do that
 /// silently.
 fn publish_admission<P: AdoptionPort>(port: &P, channel: HostChannel, epoch: u64) -> bool {
+    if port.table().epoch(channel).is_some_and(|current| current > epoch) {
+        return false;
+    }
     let admitted = port.table().publish(channel, epoch);
     if !admitted {
         log::warn!("[GEN] {channel:?} is draining or retired; its connection was not opened for admission");
@@ -605,7 +638,7 @@ enum Failure {
     /// The connection dropped after the host was adopted; the barrier already
     /// says so (`frozen_connection_lost`), and recording a failure would undo it.
     ConnectionLost,
-    /// The host was retired while it was being reconnected.
+    /// The connection or admission changed while its listing was awaited.
     Superseded,
     /// Nothing listens on the host's endpoint.
     EndpointGone(String),
@@ -616,7 +649,7 @@ impl Failure {
     fn into_message(self) -> String {
         match self {
             Failure::ConnectionLost => CONNECTION_LOST.to_string(),
-            Failure::Superseded => "the terminal host was retired".to_string(),
+            Failure::Superseded => "the terminal host connection or admission changed".to_string(),
             Failure::EndpointGone(reason) | Failure::Other(reason) => reason,
         }
     }

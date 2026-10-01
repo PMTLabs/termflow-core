@@ -243,6 +243,9 @@ function unregisteredInstallers(source: string): string[] {
     if ((ts.isMethodDeclaration(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) && node.body) {
       const calls: ts.CallExpression[] = [];
       const walk = (child: ts.Node) => {
+        // A nested body is not executed by entering the loader. Check its own
+        // installers separately instead of crediting its calls to the parent.
+        if (ts.isFunctionLike(child)) return;
         if (ts.isCallExpression(child)) calls.push(child);
         ts.forEachChild(child, walk);
       };
@@ -264,6 +267,21 @@ function unregisteredInstallers(source: string): string[] {
   visit(ast);
   return failures;
 }
+
+test('installer census credits loader-body registration, not an uncalled nested closure', () => {
+  expect(unregisteredInstallers(`class Loader {
+    async load(data) {
+      const deferred = async () => { await this.registerRestoringTrees(data); };
+      this.restoreTabPanesInPlace(data);
+    }
+  }`)).toEqual(['load']);
+  expect(unregisteredInstallers(`class Loader {
+    async load(data) {
+      await this.registerRestoringTrees(data);
+      this.restoreTabPanesInPlace(data);
+    }
+  }`)).toEqual([]);
+});
 
 test('persisted tree installer census requires registration before every install operation', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'StateManager.ts'), 'utf8');

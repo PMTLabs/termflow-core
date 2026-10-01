@@ -38,6 +38,30 @@ fn census(needle: &str, classified: &[(&str, &str)]) {
 }
 
 #[test]
+fn listing_side_effect_callers_share_post_await_validation() {
+    census(".apply_listing(", &[("state/host_adoption.rs", "apply_validated_listing")]);
+    census("host_registry::apply_answered_listing(", &[("state/host_port.rs", "apply_listing")]);
+    census("apply_validated_listing(port,", &[
+        ("state/host_adoption.rs", "adopt"),
+        ("state/host_adoption.rs", "adopt"),
+        ("state/host_adoption.rs", "adopt"),
+    ]);
+    let adoption = production(include_str!("host_adoption.rs"));
+    let checked = fn_body(&adoption, "fn apply_validated_listing<");
+    assert!(checked.contains("return Err(Failure::Superseded)"));
+    assert!(checked.find("listing_is_current(").unwrap() < checked.find(".apply_listing(").unwrap());
+    for (source, signature) in [
+        (include_str!("host_adoption/reconnect.rs"), "async fn reconnect_primary<"),
+        (include_str!("host_adoption/reconnect.rs"), "async fn reconnect_frozen_pass<"),
+        (include_str!("host_adoption/sweep.rs"), "async fn sweep<"),
+        (include_str!("host_retire.rs"), "async fn sample<"),
+        (include_str!("update_full.rs"), "async fn scope_of<"),
+    ] {
+        assert!(fn_body(&production(source), signature).contains("listing_is_current("), "{signature} must validate its awaited answers");
+    }
+}
+
+#[test]
 fn every_primary_client_access_has_a_scope() {
     census(".pty_host_clone(", &[
         ("state/terminals.rs", "client_for_channel"), // routed: Primary arm only

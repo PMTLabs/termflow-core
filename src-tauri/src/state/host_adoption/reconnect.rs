@@ -7,7 +7,7 @@
 
 use super::panes::{reattach_listed, PanePort};
 use super::{
-    adopt, barrier_key, reconnect_current, wait_for_reopen, Failure, FrozenHost, HostChannel, HostRole, PtyHostClient,
+    adopt, barrier_key, listing_is_current, reconnect_current, wait_for_reopen, Failure, FrozenHost, HostChannel, HostRole, PtyHostClient,
     ADOPTION_DEADLINE, LIFECYCLE_BUSY, LIST_ATTEMPTS, LIST_RETRY_PAUSE,
 };
 use crate::elevated_host::FrozenId;
@@ -77,7 +77,7 @@ pub(in crate::state) async fn reconnect_primary<P: PanePort>(port: &P, backoff_m
     // newer connection lands) mid-pass, a NEWER recovery owns the state —
     // this pass must stop before any attach/teardown.
     let Some(epoch) = port.table().epoch(channel) else { return };
-    let still_current = || port.table().is_current(channel, epoch) && port.current_client().is_some();
+    let still_current = || listing_is_current(port.table(), channel, epoch, &client, Admission::Open);
     let Some(sessions) = list_with_retries(&client).await else {
         log::error!(
             "[HOTSWAP] host never answered ListSessions during recovery; \
@@ -213,12 +213,15 @@ async fn reconnect_frozen_pass<P: PanePort>(
             Ok(adopted) => {
                 port.barrier().finish(key, &host.endpoint, HostRole::Frozen, adopted.resolution);
                 let Some(client) = registered(port, id).map(|h| h.client) else { return FrozenReconnect::Inert };
-                let still_current = || port.table().is_current(channel, adopted.epoch) && client.is_alive();
+                let still_current = || listing_is_current(port.table(), channel, adopted.epoch, &client, Admission::Open);
                 match list_with_retries(&client).await {
                     Some(sessions) if still_current() => {
                         reattach_listed(port, channel, &client, &tabs, &sessions, &still_current).await;
                     }
-                    Some(_) => log::warn!("[GEN] reconnect of {} superseded; aborting pass", host.endpoint),
+                    Some(_) => {
+                        log::warn!("[GEN] reconnect of {} superseded; aborting pass", host.endpoint);
+                        return FrozenReconnect::Inert;
+                    }
                     None => log::error!(
                         "[GEN] terminal host {} never answered ListSessions after reconnecting; \
                          leaving {} pane(s) untouched",

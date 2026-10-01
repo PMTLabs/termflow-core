@@ -16,7 +16,7 @@
 //! only gathers them. Everything runs against [`PanePort`], which `AppState`
 //! implements, so the timing and the interleavings are testable over fake hosts.
 
-use super::host_adoption::{barrier_key, PanePort};
+use super::host_adoption::{barrier_key, listing_is_current, PanePort};
 use super::host_registry;
 use super::host_table::{Admission, DrainRefusal, QuiesceReason, TickerHandle};
 use super::types::FrozenHost;
@@ -206,13 +206,15 @@ fn is_frozen<P: PanePort>(port: &P, host: &FrozenHost) -> bool {
 /// Ask the host what it holds. The answer counts only if it came through the
 /// connection that was asked; an answered one also settles the claims it shows to
 /// be moot.
-async fn sample<P: PanePort>(port: &P, seen: &Seen) -> Sample {
+async fn sample<P: PanePort>(port: &P, seen: &Seen, admission: Admission) -> Sample {
     let listed = seen.host.client.list_sessions_within(SAMPLE_TIMEOUT).await;
     let Some(sessions) = listed else { return Sample::Unanswered };
-    if !port.table().is_current(seen.channel, seen.epoch) || !seen.host.client.is_alive() {
+    if !listing_is_current(port.table(), seen.channel, seen.epoch, &seen.host.client, admission) {
         return Sample::Unanswered;
     }
-    host_registry::drop_stale_reserved_claims(port.claims(), seen.channel, &sessions);
+    if admission == Admission::Open {
+        host_registry::drop_stale_reserved_claims(port.claims(), seen.channel, &sessions);
+    }
     Sample::Answered { alive: sessions.iter().filter(|s| s.alive).count() }
 }
 
@@ -267,7 +269,7 @@ async fn look<P: PanePort>(port: &P, id: FrozenId, emptiness: &mut Emptiness) ->
         return if port.frozen_hosts().iter().any(|h| h.id == id) { Next::Go } else { Next::Stop };
     };
 
-    let answer = sample(port, &seen).await;
+    let answer = sample(port, &seen, Admission::Open).await;
     let panes = port.panes_on(seen.channel).len();
     let claims = host_registry::unfinished_claims_on(port.claims(), seen.channel);
     let empty_for =
@@ -304,7 +306,7 @@ async fn retire<P: PanePort>(port: &P, seen: &Seen, emptiness: &mut Emptiness) -
     };
     log::info!("[GEN] terminal host {endpoint} has been empty for {EMPTY_FOR:?}; checking once more before retiring it");
 
-    let answer = sample(port, seen).await;
+    let answer = sample(port, seen, Admission::Draining).await;
     let still_this_host = port.table().epoch(seen.channel) == Some(seen.epoch)
         && port.frozen_hosts().iter().any(|h| h.id == seen.host.id && h.client.is_alive());
     let confirmed = still_this_host
