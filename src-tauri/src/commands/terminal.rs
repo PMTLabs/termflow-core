@@ -222,13 +222,14 @@ pub struct RestoringLeaf {
 /// panes from mounting — the caller retries.
 #[tauri::command]
 pub fn register_restoring_leaves(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     leaves: Vec<RestoringLeaf>,
 ) -> Result<(), String> {
     log::info!("[GEN] registering {} restoring leaves", leaves.len());
     state.reap_expired_restore_intents();
     for leaf in &leaves {
-        state.register_restoring_leaf(&leaf.leaf_id, leaf.session_key.as_deref());
+        state.register_restoring_leaf(window.label(), &leaf.leaf_id, leaf.session_key.as_deref());
     }
     Ok(())
 }
@@ -236,9 +237,9 @@ pub fn register_restoring_leaves(
 /// A restored pane that never found its session was closed. Its session, if a
 /// host reports it later, is closed rather than adopted or shown as recovered.
 #[tauri::command]
-pub fn forget_restoring_leaf(state: State<'_, AppState>, leaf_id: String) -> Result<(), String> {
+pub fn forget_restoring_leaf(window: tauri::WebviewWindow, state: State<'_, AppState>, leaf_id: String) -> Result<(), String> {
     log::info!("[GEN] closing unbound restoring leaf {leaf_id}");
-    state.forget_restoring_leaf(&leaf_id);
+    state.forget_restoring_leaf(window.label(), &leaf_id);
     Ok(())
 }
 

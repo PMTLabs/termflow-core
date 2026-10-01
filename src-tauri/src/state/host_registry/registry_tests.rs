@@ -232,13 +232,14 @@ fn frozen_ids_are_never_reused() {
 #[test]
 fn restore_intent_skips_a_key_that_is_already_registered() {
     let t = tables(&[("pc-1", "tm-live", FROZEN_1)]);
-    let restoring: DashMap<String, Instant> = DashMap::new();
+    let keys = HostKeys::default();
+    let maps = IntentMaps { keys: &keys, terminals: &t.terminals };
     let now = Instant::now();
 
-    assert!(!register_restoring_key(&restoring, &t.terminals, "tm-live", now));
-    assert!(register_restoring_key(&restoring, &t.terminals, "tm-waiting", now));
-    assert!(is_restoring_key(&restoring, "tm-waiting", now));
-    assert!(!is_restoring_key(&restoring, "tm-live", now), "a live key would never be removed again");
+    assert!(!register_restoring_leaf(&maps, "main", "tm-live", None, now));
+    assert!(register_restoring_leaf(&maps, "main", "tm-waiting", None, now));
+    assert!(keys.is_restoring_key("tm-waiting", now));
+    assert!(!keys.is_restoring_key("tm-live", now), "a live key would never be removed again");
 }
 
 /// A shell running in this process (the fallback when no host is usable) is a live
@@ -248,22 +249,23 @@ fn restore_intent_skips_a_key_that_is_already_registered() {
 fn restore_intent_skips_a_key_held_by_an_in_process_terminal() {
     let t = tables(&[("pc-host", "tm-hosted", FROZEN_1)]);
     t.terminals.insert("pc-local".into(), terminal("pc-local", "tm-local"));
-    let restoring: DashMap<String, Instant> = DashMap::new();
+    let keys = HostKeys::default();
+    let maps = IntentMaps { keys: &keys, terminals: &t.terminals };
     let now = Instant::now();
 
     assert!(!t.registered_anywhere("tm-local"), "no host owns it");
-    assert!(!register_restoring_key(&restoring, &t.terminals, "tm-local", now));
-    assert!(!register_restoring_key(&restoring, &t.terminals, "tm-hosted", now));
-    assert!(restoring.is_empty(), "nothing would ever remove these");
-    assert!(register_restoring_key(&restoring, &t.terminals, "tm-waiting", now));
+    assert!(!register_restoring_leaf(&maps, "main", "tm-local", None, now));
+    assert!(!register_restoring_leaf(&maps, "main", "tm-hosted", None, now));
+    assert_eq!(keys.holder_count(), 0, "nothing would ever remove these");
+    assert!(register_restoring_leaf(&maps, "main", "tm-waiting", None, now));
 }
 
 #[test]
 fn the_leaf_entry_point_skips_an_in_process_terminal_too() {
     let i = Intent::new(&[]);
     i.tables.terminals.insert("pc-local".into(), terminal("pc-local", "tm-local"));
-    assert!(!register_restoring_leaf(&i.maps(), "tm-local", None, Instant::now()));
-    assert!(i.restoring.is_empty());
+    assert!(!register_restoring_leaf(&i.maps(), "main", "tm-local", None, Instant::now()));
+    assert_eq!(i.keys.holder_count(), 0);
 }
 
 #[test]
@@ -278,26 +280,21 @@ fn a_close_that_cannot_reach_a_host_stays_owed_on_its_exact_channel() {
 
 #[test]
 fn restore_intent_expires_unless_refreshed_and_a_reap_cannot_drop_a_refreshed_one() {
-    let restoring: DashMap<String, Instant> = DashMap::new();
+    let i = Intent::new(&[]);
     let t0 = Instant::now();
-    restoring.insert("tm-idle".into(), t0);
-    restoring.insert("tm-retried".into(), t0);
-
+    for leaf in ["tm-idle", "tm-retried"] { assert!(register_restoring_leaf(&i.maps(), "main", leaf, None, t0)); }
+    assert_eq!(i.keys.holder_count(), 2);
     let later = t0 + RESTORE_INTENT_TTL + Duration::from_secs(1);
-    refresh_restoring_key(&restoring, "tm-retried", later);
-    assert!(!is_restoring_key(&restoring, "tm-idle", later));
-    assert!(is_restoring_key(&restoring, "tm-retried", later));
-
-    // The remover re-checks expiry itself: a stale reap decision cannot discard
-    // an intent refreshed after it was made.
-    assert!(!forget_restoring_key(&restoring, "tm-retried", Some(later)));
-    reap_expired_restoring_keys(&restoring, later);
-    assert!(!restoring.contains_key("tm-idle"));
-    assert!(restoring.contains_key("tm-retried"));
-
-    refresh_restoring_key(&restoring, "tm-never-registered", later);
-    assert!(!restoring.contains_key("tm-never-registered"), "a refresh never creates an intent");
-    assert!(forget_restoring_key(&restoring, "tm-retried", None));
+    i.keys.refresh_restoring_key("tm-retried", later);
+    assert!(!i.keys.is_restoring_key("tm-idle", later));
+    assert!(i.keys.is_restoring_key("tm-retried", later));
+    i.keys.reap_expired_restore_intents(later);
+    assert_eq!(i.keys.holder_count(), 1);
+    assert!(i.keys.is_restoring_key("tm-retried", later));
+    i.keys.refresh_restoring_key("tm-never-registered", later);
+    assert!(!i.keys.is_restoring_key("tm-never-registered", later), "a refresh never creates an intent");
+    i.keys.settle_restoring_leaf("tm-retried", None);
+    assert_eq!(i.keys.holder_count(), 0);
 }
 
 /// Whichever host reports the key, the answer is the same: the verdict has no
@@ -305,27 +302,25 @@ fn restore_intent_expires_unless_refreshed_and_a_reap_cannot_drop_a_refreshed_on
 #[test]
 fn closed_unowned_key_is_closed_when_any_host_reports_it() {
     let t = tables(&[]);
-    let restoring: DashMap<String, Instant> = DashMap::new();
-    let closed: DashMap<String, Instant> = DashMap::new();
+    let keys = HostKeys::default();
+    let maps = IntentMaps { keys: &keys, terminals: &t.terminals };
     let now = Instant::now();
-    restoring.insert("tm-closed".into(), now);
-
-    mark_closed_unowned(&restoring, &closed, "tm-closed", now);
-    assert!(!restoring.contains_key("tm-closed"), "the pane is gone: nothing waits for the key any more");
+    assert!(register_restoring_leaf(&maps, "main", "tm-closed", None, now));
+    forget_restoring_leaf(&maps, "main", "tm-closed", now);
+    assert!(!keys.is_restoring_key("tm-closed", now), "the pane is gone: nothing waits for the key any more");
 
     for reporting_host in [PRIMARY, FROZEN_1, FROZEN_2] {
         assert!(
-            unowned_close_due(&closed, t.registered_anywhere("tm-closed"), "tm-closed", now),
+            keys.unowned_close_due(t.registered_anywhere("tm-closed"), "tm-closed", now),
             "a listing from {reporting_host:?} must close the session"
         );
     }
-    assert!(!unowned_close_due(&closed, false, "tm-unrelated", now));
-
-    // Consumed by a fresh keyed spawn/attach, or by the TTL — not by the verdict.
-    assert!(closed.contains_key("tm-closed"));
-    assert!(!unowned_close_due(&closed, false, "tm-closed", now + RESTORE_INTENT_TTL + Duration::from_secs(1)));
-    assert!(forget_closed_unowned(&closed, "tm-closed", None));
-    assert!(!unowned_close_due(&closed, false, "tm-closed", now));
+    assert!(!keys.unowned_close_due(false, "tm-unrelated", now));
+    assert_eq!(keys.marker_count(), 1);
+    assert!(!keys.unowned_close_due(false, "tm-closed", now + RESTORE_INTENT_TTL + Duration::from_secs(1)));
+    keys.settle_restoring_leaf("tm-closed", None);
+    assert_eq!(keys.marker_count(), 0);
+    assert!(!keys.unowned_close_due(false, "tm-closed", now));
 }
 
 /// A saved layout reloaded after the close registers a NEW session under the
@@ -333,27 +328,25 @@ fn closed_unowned_key_is_closed_when_any_host_reports_it() {
 /// terminal the user just opened.
 #[test]
 fn closed_unowned_never_closes_a_registered_session() {
-    let closed: DashMap<String, Instant> = DashMap::new();
+    let keys = HostKeys::default();
     let now = Instant::now();
-    closed.insert("tm-reused".into(), now);
+    keys.forget_restoring_leaf("main", "tm-reused", now);
 
     for owner in [PRIMARY, FROZEN_1] {
         let t = tables(&[("pc-new", "tm-reused", owner)]);
         assert!(
-            !unowned_close_due(&closed, t.registered_anywhere("tm-reused"), "tm-reused", now),
+            !keys.unowned_close_due(t.registered_anywhere("tm-reused"), "tm-reused", now),
             "a session registered on {owner:?} must not be closed"
         );
     }
     let unregistered = tables(&[]);
-    assert!(unowned_close_due(&closed, unregistered.registered_anywhere("tm-reused"), "tm-reused", now));
+    assert!(keys.unowned_close_due(unregistered.registered_anywhere("tm-reused"), "tm-reused", now));
 }
 
-// ---- single-remover census --------------------------------------------------
+// ---- single-authority census ------------------------------------------------
 
-/// Each of these maps is written from many places but may only be shrunk by one
-/// function (two for `restoring_leaf_keys`, for a close and the expiry sweep):
-/// a removal anywhere else bypasses the host scoping or
-/// the expiry re-check and is invisible at runtime.
+/// Restore holders and their markers must share the session authority rather
+/// than leave a parallel key-only protection map behind.
 ///
 /// The files scanned are every production source under `src/state` and
 /// `src/commands`, found by walking the directories, so a new file that grows a
@@ -377,11 +370,6 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
         }
         out.push('\n');
         out
-    }
-    fn fn_span(src: &str, signature: &str) -> std::ops::Range<usize> {
-        let start = src.find(signature).unwrap_or_else(|| panic!("`{signature}` not found"));
-        let end = src[start..].find("\n}\n").expect("fn end at column 0") + start;
-        start..end
     }
     /// Production sources below `dir` (relative to `src`): test files, which build
     /// their own maps, are not part of the application.
@@ -428,55 +416,17 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
     for obsolete in ["host_close_pending", "host_session_claims"] {
         assert!(sources.iter().all(|(_, text)| !text.contains(obsolete)), "{obsolete} must not remain a parallel key authority");
     }
-    let registry = &sources.iter().find(|(name, _)| name == "state/host_registry.rs").unwrap().1;
-
-    // (needle, the only functions whose body may contain it)
-    let rules: &[(&[&str], &[&str])] = &[
-        (
-            &["restoring_keys.remove(", "restoring_keys.remove_if(", "restoring_keys.retain(", "restoring_keys.clear("],
-            &["pub(super) fn forget_restoring_key("],
-        ),
-        (
-            &[
-                "restoring_leaf_keys.remove(",
-                "restoring_leaf_keys.remove_if(",
-                "restoring_leaf_keys.retain(",
-                "restoring_leaf_keys.clear(",
-            ],
-            &["pub(super) fn forget_restoring_leaf(", "pub(super) fn prune_restoring_leaf_keys("],
-        ),
-        (
-            &["closed_unowned.remove(", "closed_unowned.remove_if(", "closed_unowned.retain(", "closed_unowned.clear("],
-            &["pub(super) fn forget_closed_unowned("],
-        ),
-
-    ];
-
-    for (needles, allowed) in rules {
-        let allowed_spans: Vec<_> = allowed.iter().map(|sig| fn_span(registry, sig)).collect();
-        for needle in *needles {
-            let mut offset = 0;
-            while let Some(rel) = registry[offset..].find(needle) {
-                let at = offset + rel;
-                assert!(
-                    allowed_spans.iter().any(|s| s.contains(&at)),
-                    "`{needle}` outside its chokepoint in host_registry.rs at byte {at}"
-                );
-                offset = at + needle.len();
-            }
-            for (name, src) in sources.iter().filter(|(name, _)| name != "state/host_registry.rs") {
-                assert!(
-                    !src.contains(needle),
-                    "`{needle}` found in {name}: route it through the chokepoint in host_registry.rs"
-                );
-            }
-        }
-        for sig in *allowed {
-            let body = &registry[fn_span(registry, sig)];
-            assert!(
-                needles.iter().any(|n| body.contains(n)),
-                "chokepoint `{sig}` no longer removes anything — the census above is vacuous"
-            );
+    let obsolete = ["restoring_keys", "restoring_leaf_keys"];
+    let hits = |text: &str| obsolete.iter().filter(|name| text.contains(**name)).count();
+    assert_eq!(hits(&production("pub restoring_keys: DashMap<String, Instant>;")), 1, "planted authority must be found");
+    assert_eq!(hits(&production("#[cfg(test)]\nmod tests { pub restoring_keys: DashMap<String, Instant>; }")), 0);
+    for (name, source) in &sources { assert_eq!(hits(source), 0, "parallel restore authority in {name}"); }
+    let keys = &sources.iter().find(|(name, _)| name == "state/host_keys.rs").unwrap().1;
+    assert_eq!(keys.matches("restore_holders: HashMap<").count(), 1);
+    assert_eq!(keys.matches("closed_unowned: HashMap<").count(), 1);
+    for (name, text) in &sources {
+        if name != "state/host_keys.rs" && name != "state/host_keys/restore.rs" {
+            assert!(!text.contains("restore_holders") && !text.contains("closed_unowned"), "restore facts outside ownership in {name}");
         }
     }
 }
@@ -484,27 +434,21 @@ fn registry_maps_are_only_shrunk_by_their_chokepoints() {
 // ---- restore intent by pane ---------------------------------------------------
 
 struct Intent {
-    restoring: DashMap<String, Instant>,
-    leaf_keys: DashMap<String, String>,
-    closed: DashMap<String, Instant>,
+    keys: HostKeys,
     tables: Tables,
 }
 
 impl Intent {
     fn new(entries: &[(&str, &str, HostChannel)]) -> Self {
         Self {
-            restoring: DashMap::new(),
-            leaf_keys: DashMap::new(),
-            closed: DashMap::new(),
+            keys: HostKeys::default(),
             tables: tables(entries),
         }
     }
 
     fn maps(&self) -> IntentMaps<'_> {
         IntentMaps {
-            restoring_keys: &self.restoring,
-            restoring_leaf_keys: &self.leaf_keys,
-            closed_unowned: &self.closed,
+            keys: &self.keys,
             terminals: &self.tables.terminals,
         }
     }
@@ -519,18 +463,16 @@ fn closing_a_migrated_waiting_pane_marks_the_key_it_waited_under() {
     let i = Intent::new(&[]);
     let now = Instant::now();
 
-    assert!(register_restoring_leaf(&i.maps(), "tm-new", Some("tb-old"), now));
-    assert!(i.restoring.contains_key("tb-old") && !i.restoring.contains_key("tm-new"));
-
-    forget_restoring_leaf(&i.maps(), "tm-new", now);
-    assert!(i.closed.contains_key("tb-old"), "the session it waited for is the one to close");
-    assert!(!i.closed.contains_key("tm-new"));
-    assert!(i.restoring.is_empty() && i.leaf_keys.is_empty());
-
-    // A pane that waited under its own leaf is closed by that leaf.
-    assert!(register_restoring_leaf(&i.maps(), "tm-plain", None, now));
-    forget_restoring_leaf(&i.maps(), "tm-plain", now);
-    assert!(i.closed.contains_key("tm-plain") && i.restoring.is_empty());
+    assert!(register_restoring_leaf(&i.maps(), "main", "tm-new", Some("tb-old"), now));
+    assert!(i.keys.is_restoring_key("tb-old", now) && i.keys.is_restoring_key("tm-new", now));
+    forget_restoring_leaf(&i.maps(), "main", "tm-new", now);
+    assert!(i.keys.unowned_close_due(false, "tb-old", now), "the session it waited for is one to close");
+    assert!(i.keys.unowned_close_due(false, "tm-new", now), "the marker carries the whole alias set");
+    assert_eq!(i.keys.holder_count(), 0);
+    assert!(register_restoring_leaf(&i.maps(), "main", "tm-plain", None, now));
+    forget_restoring_leaf(&i.maps(), "main", "tm-plain", now);
+    assert!(i.keys.unowned_close_due(false, "tm-plain", now));
+    assert_eq!(i.keys.holder_count(), 0);
 }
 
 /// Restoring a pane again supersedes an earlier close of it: otherwise the host
@@ -540,31 +482,30 @@ fn closing_a_migrated_waiting_pane_marks_the_key_it_waited_under() {
 fn restoring_a_pane_again_supersedes_its_earlier_close() {
     let i = Intent::new(&[]);
     let now = Instant::now();
-    forget_restoring_leaf(&i.maps(), "tm-back", now);
-    assert!(unowned_close_due(&i.closed, false, "tm-back", now));
-
-    assert!(register_restoring_leaf(&i.maps(), "tm-back", None, now));
-    assert!(!unowned_close_due(&i.closed, false, "tm-back", now));
-    assert!(i.restoring.contains_key("tm-back"));
+    forget_restoring_leaf(&i.maps(), "main", "tm-back", now);
+    assert!(i.keys.unowned_close_due(false, "tm-back", now));
+    assert!(register_restoring_leaf(&i.maps(), "main", "tm-back", None, now));
+    assert!(!i.keys.unowned_close_due(false, "tm-back", now));
+    assert!(i.keys.is_restoring_key("tm-back", now));
 
     // A key that is live was never restored, so an earlier close of it stands.
     let live = Intent::new(&[("pc-1", "tm-live", PRIMARY)]);
-    forget_restoring_leaf(&live.maps(), "tm-live", now);
-    assert!(!register_restoring_leaf(&live.maps(), "tm-live", None, now));
-    assert!(live.closed.contains_key("tm-live"));
+    forget_restoring_leaf(&live.maps(), "main", "tm-live", now);
+    assert!(!register_restoring_leaf(&live.maps(), "main", "tm-live", None, now));
+    assert_eq!(live.keys.marker_count(), 1);
 }
 
 #[test]
-fn leaf_keys_of_keys_nobody_waits_for_are_pruned() {
+fn registration_settles_only_its_leafs_holder() {
     let i = Intent::new(&[]);
     let now = Instant::now();
-    register_restoring_leaf(&i.maps(), "tm-a", Some("tb-a"), now);
-    register_restoring_leaf(&i.maps(), "tm-b", Some("tb-b"), now);
-    forget_restoring_key(&i.restoring, "tb-a", None); // bound
-
-    prune_restoring_leaf_keys(&i.leaf_keys, &i.restoring);
-    assert!(!i.leaf_keys.contains_key("tm-a"));
-    assert!(i.leaf_keys.contains_key("tm-b"));
+    assert!(register_restoring_leaf(&i.maps(), "main", "tm-a", Some("tb-a"), now));
+    assert!(register_restoring_leaf(&i.maps(), "main", "tm-b", Some("tb-b"), now));
+    assert_eq!(i.keys.holder_count(), 2);
+    i.keys.settle_restoring_leaf("tm-a", Some("tb-a"));
+    assert_eq!(i.keys.holder_count(), 1);
+    assert!(i.keys.holder_stamp("main", "tm-a").is_none());
+    assert!(i.keys.holder_stamp("main", "tm-b").is_some());
 }
 
 #[test]
@@ -577,15 +518,15 @@ fn a_pane_is_known_by_its_override_key_else_its_leaf() {
 fn orphan_verdict_separates_restoring_closed_and_stray_sessions() {
     let i = Intent::new(&[]);
     let now = Instant::now();
-    i.restoring.insert("tm-wait".into(), now);
-    i.closed.insert("tm-gone".into(), now);
+    assert!(register_restoring_leaf(&i.maps(), "main", "tm-wait", None, now));
+    forget_restoring_leaf(&i.maps(), "main", "tm-gone", now);
 
-    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-wait", now), OrphanVerdict::Restoring);
-    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-gone", now), OrphanVerdict::CloseUnowned);
-    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-stray", now), OrphanVerdict::Surface);
+    assert_eq!(orphan_verdict(&i.keys, "tm-wait", now), OrphanVerdict::Restoring);
+    assert_eq!(orphan_verdict(&i.keys, "tm-gone", now), OrphanVerdict::CloseUnowned);
+    assert_eq!(orphan_verdict(&i.keys, "tm-stray", now), OrphanVerdict::Surface);
     // An intent nobody refreshed no longer hides a session.
     let later = now + RESTORE_INTENT_TTL + Duration::from_secs(1);
-    assert_eq!(orphan_verdict(&i.restoring, &i.closed, "tm-wait", later), OrphanVerdict::Surface);
+    assert_eq!(orphan_verdict(&i.keys, "tm-wait", later), OrphanVerdict::Surface);
 }
 
 #[test]

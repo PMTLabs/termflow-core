@@ -926,6 +926,8 @@ mod owner_tests;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
+mod restore_holder_tests;
+#[cfg(test)]
 mod retire_tests;
 #[cfg(test)]
 mod retire_real_tests;

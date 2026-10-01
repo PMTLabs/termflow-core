@@ -519,9 +519,6 @@ pub(super) struct Inner {
     current: Mutex<Option<PtyHostClient>>,
     frozen: Mutex<Vec<FrozenHost>>,
     next_id: AtomicU32,
-    pub restoring_keys: DashMap<String, std::time::Instant>,
-    pub restoring_leaf_keys: DashMap<String, String>,
-    pub closed_unowned: DashMap<String, std::time::Instant>,
     pub host_terminals: DashMap<String, HostChannel>,
     pub terminals: DashMap<String, Terminal>,
     pub discovers: AtomicUsize,
@@ -641,9 +638,6 @@ impl FakePort {
             current: Mutex::new(None),
             frozen: Mutex::new(Vec::new()),
             next_id: AtomicU32::new(1),
-            restoring_keys: DashMap::new(),
-            restoring_leaf_keys: DashMap::new(),
-            closed_unowned: DashMap::new(),
             host_terminals: DashMap::new(),
             terminals: DashMap::new(),
             discovers: AtomicUsize::new(0),
@@ -789,9 +783,7 @@ impl FakePort {
 
     pub fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
         host_registry::IntentMaps {
-            restoring_keys: &self.0.restoring_keys,
-            restoring_leaf_keys: &self.0.restoring_leaf_keys,
-            closed_unowned: &self.0.closed_unowned,
+            keys: self.0.table.keys(),
             terminals: &self.0.terminals,
         }
     }
@@ -936,7 +928,6 @@ impl AdoptionPort for FakePort {
                 host_terminals: &self.0.host_terminals,
                 terminals: &self.0.terminals,
                 keys: self.table().keys(),
-                closed_unowned: &self.0.closed_unowned,
             },
             channel,
             sessions,
@@ -1019,14 +1010,6 @@ impl PanePort for FakePort {
 }
 
 impl RoutingPort for FakePort {
-    fn restoring_keys(&self) -> &DashMap<String, std::time::Instant> {
-        &self.0.restoring_keys
-    }
-
-    fn closed_unowned(&self) -> &DashMap<String, std::time::Instant> {
-        &self.0.closed_unowned
-    }
-
     fn ids(&self) -> &crate::state::IdAllocator {
         &self.0.ids
     }

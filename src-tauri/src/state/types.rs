@@ -632,19 +632,6 @@ pub struct AppState<R: Runtime = Wry> {
     // every session twice (duplicate replay into live parsers). A queued pass
     // re-snapshots after the first finishes, so its replay is ~empty.
     pub host_recovering: Arc<tokio::sync::Mutex<()>>,
-    // Session keys of panes restored from a saved layout that have not yet
-    // found their session (value: when the intent was last refreshed). While a
-    // key is here its pane waits for the owning host instead of being spawned
-    // fresh, and its session is not surfaced as a recovered terminal.
-    pub restoring_keys: Arc<DashMap<String, std::time::Instant>>,
-    // Session keys the user closed while their owning host was still unknown
-    // (value: when). Whichever host later reports such a key, and no
-    // registration on any channel exists for it, closes the session instead of
-    // adopting it.
-    pub closed_unowned: Arc<DashMap<String, std::time::Instant>>,
-    // Restored panes whose session key differs from their leaf (leaf -> key), so
-    // closing the pane by leaf can find the key it was waiting under.
-    pub restoring_leaf_keys: Arc<DashMap<String, String>>,
     // Set once a session key was found registered on one host while another host
     // also reported it, so the user is told about that only once.
     pub duplicate_session_noticed: Arc<AtomicBool>,
@@ -743,9 +730,6 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host_connecting: self.pty_host_connecting.clone(),
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
-            restoring_keys: self.restoring_keys.clone(),
-            closed_unowned: self.closed_unowned.clone(),
-            restoring_leaf_keys: self.restoring_leaf_keys.clone(),
             duplicate_session_noticed: self.duplicate_session_noticed.clone(),
             recovering: self.recovering.clone(),
             restart_in_flight: self.restart_in_flight.clone(),

@@ -139,19 +139,20 @@ fn every_frozen_channel_expression_is_classified() {
 
 #[test]
 fn restoring_intent_producers_and_consumers_are_classified() {
-    census(".register_restoring_leaf(", &[("commands/terminal.rs", "register_restoring_leaves")]);
-    census(".forget_restoring_leaf(", &[("commands/terminal.rs", "forget_restoring_leaf")]);
-    census(".restoring_keys()", &[
-        ("state/host_routing.rs", "place_owned"), // classification and TTL refresh
+    census(".register_restoring_leaf(", &[
+        ("commands/terminal.rs", "register_restoring_leaves"),
+        ("state/host_registry.rs", "register_restoring_leaf"),
+    ]);
+    census(".forget_restoring_leaf(", &[
+        ("commands/terminal.rs", "forget_restoring_leaf"),
+        ("state/host_registry.rs", "forget_restoring_leaf"),
+    ]);
+    census(".is_restoring_key(", &[("state/host_routing.rs", "place_owned")]);
+    census(".refresh_restoring_key(", &[
         ("state/host_routing.rs", "place_owned"),
-        ("state/host_routing.rs", "settle"), // successful placement consumes intent
-        ("state/host_adoption/panes.rs", "surface_orphans"), // every orphan path skips waiting keys
+        ("state/host_routing.rs", "place_elevated_create"),
     ]);
-    census(".closed_unowned()", &[
-        ("state/host_routing.rs", "settle"), // a wanted create supersedes a close
-        ("state/host_adoption/panes.rs", "surface_orphans"), // close rather than surface
-        ("state/host_adoption/panes.rs", "surface_orphans"), // decision rechecked under the key mutex
-    ]);
+    census("host_registry::orphan_verdict(", &[("state/host_adoption/panes.rs", "surface_orphans")]);
     census("host_registry::apply_answered_listing(", &[("state/host_port.rs", "apply_listing")]);
 }
 

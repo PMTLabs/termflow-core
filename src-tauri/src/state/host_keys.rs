@@ -10,6 +10,7 @@ use termflow_pty_protocol::{Control, Frame};
 use tokio::sync::mpsc::UnboundedSender;
 
 mod owners;
+mod restore;
 pub use owners::{Admission as CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
 
 pub const ENDING_CAP: usize = 4096;
@@ -52,6 +53,8 @@ struct Inner {
     channels: HashMap<HostChannel, Channel>,
     sequence: u64,
     owners: HashMap<String, owners::Row>,
+    restore_holders: HashMap<(String, String), restore::Intent>,
+    closed_unowned: HashMap<(String, String), restore::Intent>,
     cap: usize,
 }
 
@@ -65,7 +68,8 @@ impl Default for HostKeys {
 impl HostKeys {
     pub fn new(routes: HostRoutes) -> Self {
         Self { inner: Arc::new(Mutex::new(Inner {
-            keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(), cap: ENDING_CAP,
+            keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
+            restore_holders: HashMap::new(), closed_unowned: HashMap::new(), cap: ENDING_CAP,
         })), routes }
     }
 
@@ -202,7 +206,7 @@ impl HostKeys {
 
     pub fn close_listed(&self, channel: HostChannel, key: &str, due: impl FnOnce() -> bool) {
         let mut inner = self.lock();
-        if inner.keys.get(&(channel, key.to_string())).is_some_and(|r| r.state == KeyState::Listed) && due() {
+        if inner.keys.get(&(channel, key.to_string())).is_some_and(|r| r.state == KeyState::Listed) && Self::unowned_due(&inner, key, std::time::Instant::now()) && due() {
             Self::end(&mut inner, channel, key, CloseState::Pending);
         }
     }
@@ -295,6 +299,10 @@ impl HostKeys {
     /// Apply only answered listings. The unowned-close decision and the cell
     /// change occur in this same critical section; transport errors never enter.
     pub fn listing(&self, channel: HostChannel, listing: &SessionListing, close_unowned: impl Fn(&str) -> bool) {
+        self.listing_at(channel, listing, std::time::Instant::now(), close_unowned);
+    }
+
+    pub(crate) fn listing_at(&self, channel: HostChannel, listing: &SessionListing, now: std::time::Instant, close_unowned: impl Fn(&str) -> bool) {
         let mut inner = self.lock();
         let ch = inner.channels.entry(channel).or_default();
         if listing.request_no <= ch.answered { return; }
@@ -320,7 +328,7 @@ impl HostKeys {
             if r.state == KeyState::Listed {
                 r.pid = meta.pid;
                 r.alive = meta.alive;
-                if close_unowned(&meta.tab_id) {
+                if Self::unowned_due(&inner, &meta.tab_id, now) && close_unowned(&meta.tab_id) {
                     Self::end(&mut inner, channel, &meta.tab_id, CloseState::Pending);
                 }
             }

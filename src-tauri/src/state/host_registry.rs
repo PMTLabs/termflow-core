@@ -1,9 +1,5 @@
-//! Ownership bookkeeping for pty-host sessions, kept as free functions over the
-//! `AppState` maps so the rules are unit-testable without a Tauri `AppHandle`
-//! (the `integration-tests` feature that builds one breaks the Windows test
-//! binary). `AppState` methods in `terminals.rs` are thin wrappers; the
-//! parameter names deliberately equal the field names so the source census in
-//! `terminals.rs` can see every removal.
+//! Ownership bookkeeping over the terminal projection and the shared session
+//! authority. Free functions keep the rules testable without a Tauri AppHandle.
 
 use super::types::{session_key_of, FrozenHost, Terminal};
 use super::HostKeys;
@@ -15,13 +11,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// How long a restore intent or an unowned close is remembered. Restore intent
-/// is refreshed by every keyed create, so this only reaps leaves nobody retries.
+/// Restore retries refresh this lifetime; marker expiry can only reduce closes.
 pub(super) const RESTORE_INTENT_TTL: Duration = Duration::from_secs(15 * 60);
-
-fn intent_expired(stamped: Instant, now: Instant) -> bool {
-    now.saturating_duration_since(stamped) >= RESTORE_INTENT_TTL
-}
 
 // ---- session-key maps -----------------------------------------------------
 
@@ -189,186 +180,37 @@ pub(super) fn frozen_hosts_snapshot(frozen_hosts: &Mutex<Vec<FrozenHost>>) -> Ve
 
 // ---- restore intent -------------------------------------------------------
 
-/// Record that the pane owning `session_key` is being restored and must wait
-/// for its host. A key that already has a live terminal is skipped, whichever
-/// host or this process runs it: a renderer reload binds those without a create,
-/// so nothing would ever remove the entry. Returns whether the key was recorded.
-pub(super) fn register_restoring_key(
-    restoring_keys: &DashMap<String, Instant>,
-    terminals: &DashMap<String, Terminal>,
-    session_key: &str,
-    now: Instant,
-) -> bool {
-    if terminals.iter().any(|t| session_key_of(&t) == session_key) {
-        return false;
-    }
-    restoring_keys.insert(session_key.to_string(), now);
-    true
-}
-
-/// Extend an existing intent's life (every keyed create calls this). Never
-/// creates one.
-pub(super) fn refresh_restoring_key(
-    restoring_keys: &DashMap<String, Instant>,
-    session_key: &str,
-    now: Instant,
-) {
-    if let Some(mut stamped) = restoring_keys.get_mut(session_key) {
-        *stamped = now;
-    }
-}
-
-pub(super) fn is_restoring_key(
-    restoring_keys: &DashMap<String, Instant>,
-    session_key: &str,
-    now: Instant,
-) -> bool {
-    restoring_keys
-        .get(session_key)
-        .is_some_and(|stamped| !intent_expired(*stamped, now))
-}
-
-/// The SINGLE place `restoring_keys` entries are removed. `expired_at: None`
-/// removes unconditionally; `Some(now)` removes only an entry still expired at
-/// that moment, so a reap cannot discard an intent a create just refreshed.
-pub(super) fn forget_restoring_key(
-    restoring_keys: &DashMap<String, Instant>,
-    session_key: &str,
-    expired_at: Option<Instant>,
-) -> bool {
-    match expired_at {
-        None => restoring_keys.remove(session_key).is_some(),
-        Some(now) => restoring_keys
-            .remove_if(session_key, |_, stamped| intent_expired(*stamped, now))
-            .is_some(),
-    }
-}
-
-pub(super) fn reap_expired_restoring_keys(restoring_keys: &DashMap<String, Instant>, now: Instant) {
-    let expired: Vec<String> = restoring_keys
-        .iter()
-        .filter(|e| intent_expired(*e.value(), now))
-        .map(|e| e.key().clone())
-        .collect();
-    for key in expired {
-        forget_restoring_key(restoring_keys, &key, Some(now));
-    }
-}
-
-// ---- closes while the owning host was unknown ----------------------------
-
-/// The user closed a restored pane that never found its session: stop waiting
-/// for it and remember to close the session if any host ever reports it.
-pub(super) fn mark_closed_unowned(
-    restoring_keys: &DashMap<String, Instant>,
-    closed_unowned: &DashMap<String, Instant>,
-    session_key: &str,
-    now: Instant,
-) {
-    forget_restoring_key(restoring_keys, session_key, None);
-    closed_unowned.insert(session_key.to_string(), now);
-}
-
-/// Should a session with this key, just reported by ANY host's answered
-/// listing, be closed instead of adopted or surfaced? Only when the user closed
-/// its pane while the owner was unknown AND nothing is registered for the key
-/// on any channel — a new session reusing the key (a saved layout reloaded
-/// after the close) must never be closed. Deliberately takes no host: it does
-/// not matter which host reports it. Does not consume the entry; a fresh keyed
-/// spawn or attach does, through `forget_closed_unowned`.
-pub(super) fn unowned_close_due(
-    closed_unowned: &DashMap<String, Instant>,
-    registered_on_any_channel: bool,
-    session_key: &str,
-    now: Instant,
-) -> bool {
-    !registered_on_any_channel
-        && closed_unowned
-            .get(session_key)
-            .is_some_and(|stamped| !intent_expired(*stamped, now))
-}
-
-/// The SINGLE place `closed_unowned` entries are removed; `expired_at` has the
-/// same meaning as in `forget_restoring_key`.
-pub(super) fn forget_closed_unowned(
-    closed_unowned: &DashMap<String, Instant>,
-    session_key: &str,
-    expired_at: Option<Instant>,
-) -> bool {
-    match expired_at {
-        None => closed_unowned.remove(session_key).is_some(),
-        Some(now) => closed_unowned
-            .remove_if(session_key, |_, stamped| intent_expired(*stamped, now))
-            .is_some(),
-    }
-}
-
-pub(super) fn reap_expired_closed_unowned(closed_unowned: &DashMap<String, Instant>, now: Instant) {
-    let expired: Vec<String> = closed_unowned
-        .iter()
-        .filter(|e| intent_expired(*e.value(), now))
-        .map(|e| e.key().clone())
-        .collect();
-    for key in expired {
-        forget_closed_unowned(closed_unowned, &key, Some(now));
-    }
-}
-
-// ---- restore intent by pane ------------------------------------------------
-
 /// The name a pane's session has on the host: the key a migrated pane still
 /// carries, else its leaf. The one place the two are told apart.
 pub fn effective_session_key(leaf_id: &str, session_key: Option<&str>) -> String {
     session_key.unwrap_or(leaf_id).to_string()
 }
 
-/// The maps restore intent lives in.
+/// Ownership authority and legacy terminal projection used at registration.
 pub(super) struct IntentMaps<'a> {
-    pub restoring_keys: &'a DashMap<String, Instant>,
-    pub restoring_leaf_keys: &'a DashMap<String, String>,
-    pub closed_unowned: &'a DashMap<String, Instant>,
+    pub keys: &'a HostKeys,
     pub terminals: &'a DashMap<String, Terminal>,
 }
 
-/// A persisted pane is about to mount: from now on a create for its session key
-/// is a restore and waits for the hosts. Returns whether intent was recorded (a
-/// key that is already live is not).
+/// A persisted pane is about to mount. Live terminals bind without a create,
+/// so they do not leave a waiting holder behind on renderer reload.
 pub(super) fn register_restoring_leaf(
     maps: &IntentMaps,
+    label: &str,
     leaf_id: &str,
     session_key: Option<&str>,
     now: Instant,
 ) -> bool {
     let key = effective_session_key(leaf_id, session_key);
-    if !register_restoring_key(maps.restoring_keys, maps.terminals, &key, now) {
-        return false;
-    }
-    // The pane is being restored again, so an earlier close of it no longer
-    // stands: the session it waits for is wanted.
-    forget_closed_unowned(maps.closed_unowned, &key, None);
-    if key != leaf_id {
-        maps.restoring_leaf_keys.insert(leaf_id.to_string(), key);
-    }
-    true
+    maps.keys.register_restoring_leaf(label, leaf_id, session_key, now, || {
+        maps.terminals.iter().any(|t| t.renderer_terminal_id.as_deref() == Some(leaf_id) || session_key_of(&t) == key)
+    })
 }
 
-/// The user closed a pane that never found its session. The renderer names the
-/// pane by leaf; the key it was waiting under may be a migrated one.
-pub(super) fn forget_restoring_leaf(maps: &IntentMaps, leaf_id: &str, now: Instant) {
-    let key = maps
-        .restoring_leaf_keys
-        .remove(leaf_id)
-        .map(|(_, key)| key)
-        .unwrap_or_else(|| leaf_id.to_string());
-    mark_closed_unowned(maps.restoring_keys, maps.closed_unowned, &key, now);
-}
-
-/// Forget which leaves waited under a key that is no longer waited for.
-pub(super) fn prune_restoring_leaf_keys(
-    restoring_leaf_keys: &DashMap<String, String>,
-    restoring_keys: &DashMap<String, Instant>,
-) {
-    restoring_leaf_keys.retain(|_, key| restoring_keys.contains_key(key));
+/// Forget only this window's holder; its alias marker cannot override a holder
+/// belonging to another restoring pane.
+pub(super) fn forget_restoring_leaf(maps: &IntentMaps, label: &str, leaf_id: &str, now: Instant) {
+    maps.keys.forget_restoring_leaf(label, leaf_id, now);
 }
 
 // ---- what a host's listing does ---------------------------------------------
@@ -378,14 +220,10 @@ pub(super) struct ListingMaps<'a> {
     pub host_terminals: &'a DashMap<String, HostChannel>,
     pub terminals: &'a DashMap<String, Terminal>,
     pub keys: &'a HostKeys,
-    pub closed_unowned: &'a DashMap<String, Instant>,
 }
 
-/// Settle the sessions `channel`'s host reported: deliver a close that was owed
-/// to it, close a session whose pane was closed before its host was known, and
-/// reserve the rest for the pane that will claim them. Returns the keys the host
-/// reported that are already registered on a different host: two hosts holding
-/// one session must be reported, but nothing is killed for it.
+/// Apply answered evidence and the unowned-close policy in the key cell's
+/// critical section. Duplicate sessions on another host are reported, not killed.
 pub(super) fn apply_answered_listing(
     maps: &ListingMaps,
     channel: HostChannel,
@@ -397,8 +235,8 @@ pub(super) fn apply_answered_listing(
     // directly makes every live pane look unowned, which queues it for adoption
     // and lets a concurrent create re-adopt a LIVE session at offset 0 straight
     // into its parser.
-    maps.keys.listing(channel, listing, |key| unowned_close_due(maps.closed_unowned,
-        session_registered_on_any_channel(maps.host_terminals, maps.terminals, key), key, now));
+    maps.keys.listing_at(channel, listing, now, |key|
+        !session_registered_on_any_channel(maps.host_terminals, maps.terminals, key));
     let owned_sessions = sessions_by_key(maps.host_terminals, maps.terminals, channel);
     let mut duplicates = Vec::new();
     for meta in &listing.sessions {
@@ -436,19 +274,8 @@ pub(super) enum OrphanVerdict {
 }
 
 /// Decide for a live session with no registration on any channel.
-pub(super) fn orphan_verdict(
-    restoring_keys: &DashMap<String, Instant>,
-    closed_unowned: &DashMap<String, Instant>,
-    session_key: &str,
-    now: Instant,
-) -> OrphanVerdict {
-    if unowned_close_due(closed_unowned, false, session_key, now) {
-        OrphanVerdict::CloseUnowned
-    } else if is_restoring_key(restoring_keys, session_key, now) {
-        OrphanVerdict::Restoring
-    } else {
-        OrphanVerdict::Surface
-    }
+pub(super) fn orphan_verdict(keys: &HostKeys, session_key: &str, now: Instant) -> OrphanVerdict {
+    keys.orphan_verdict(session_key, now)
 }
 
 /// True for the first caller only: a notice that must be raised once.

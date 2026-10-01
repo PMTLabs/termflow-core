@@ -15,13 +15,11 @@
 //! the routing rules are testable over fake hosts without a Tauri `AppHandle`.
 
 use super::host_adoption::{ensure_hosts, AdoptionPort};
-use super::host_registry;
 use super::host_table::{Admission, Busy, Ticket, LIFECYCLE_BUSY};
 use super::types::AppState;
 use super::{IdAllocator, KeyStage, StageMode, parse_session_key, SessionKeyKind};
 use crate::elevated_host::HostChannel;
 use crate::pty_host_client::PtyHostClient;
-use dashmap::DashMap;
 use std::time::{Duration, Instant};
 use tauri::Runtime;
 
@@ -49,8 +47,6 @@ pub enum Placement {
 
 /// What the router needs from the application beyond adoption.
 pub(super) trait RoutingPort: AdoptionPort {
-    fn restoring_keys(&self) -> &DashMap<String, Instant>;
-    fn closed_unowned(&self) -> &DashMap<String, Instant>;
     fn ids(&self) -> &IdAllocator;
     fn surface_ambiguous(&self, keys: &[String]);
 
@@ -159,10 +155,10 @@ pub(super) async fn place_owned<P: RoutingPort>(port: &P, leaf: &str, override_k
     }
     log::debug!("[GEN] placing terminal {leaf} (override={override_key:?})");
     let keyed = override_key.is_some()
-        || host_registry::is_restoring_key(port.restoring_keys(), session_key, Instant::now())
+        || port.table().keys().is_restoring_key(session_key, Instant::now())
         || port.table().keys().candidate(leaf, override_key).is_some();
     if keyed {
-        host_registry::refresh_restoring_key(port.restoring_keys(), session_key, Instant::now());
+        port.table().keys().refresh_restoring_key(session_key, Instant::now());
     }
 
     if let Err(e) = ensure_hosts(port).await {
@@ -221,14 +217,16 @@ pub(super) async fn place_owned<P: RoutingPort>(port: &P, leaf: &str, override_k
             let key = stage.key.clone();
             ticket.guard_key(stage);
             surface_ambiguity(port, leaf);
-            settle(port, session_key);
+            #[cfg(test)]
+            if owner.is_none() { port.table().keys().settle_restoring_leaf(leaf, Some(&key)); }
             log::info!("[GEN] spawning {key} on {channel:?}");
             return Ok(Placement::Spawn { channel, client, ticket, session_key: key });
         };
         let (_, selected) = selected;
         let (stage, pid) = stage_key(port, leaf, owner, channel, &selected, StageMode::Attach)?;
         ticket.guard_key(stage);
-        settle(port, session_key);
+        #[cfg(test)]
+        if owner.is_none() { port.table().keys().settle_restoring_leaf(leaf, Some(&selected)); }
         log::info!("[GEN] attaching {selected} on {channel:?} (pid {pid})");
         return Ok(Placement::Attach { channel, client, pid, ticket, session_key: selected });
     }
@@ -250,22 +248,7 @@ fn begin_ticket<P: RoutingPort>(port: &P, channel: HostChannel) -> Result<Ticket
     port.table().begin(channel)
 }
 
-/// The create is going ahead: nothing waits for this key any more, and a close
-/// recorded for it while its host was unknown is superseded.
-fn settle<P: RoutingPort>(port: &P, session_key: &str) {
-    host_registry::forget_restoring_key(port.restoring_keys(), session_key, None);
-    host_registry::forget_closed_unowned(port.closed_unowned(), session_key, None);
-}
-
 impl<R: Runtime> RoutingPort for AppState<R> {
-    fn restoring_keys(&self) -> &DashMap<String, Instant> {
-        &self.restoring_keys
-    }
-
-    fn closed_unowned(&self) -> &DashMap<String, Instant> {
-        &self.closed_unowned
-    }
-
     fn ids(&self) -> &IdAllocator {
         &self.ids
     }
@@ -282,6 +265,7 @@ impl<R: Runtime> AppState<R> {
     pub(crate) fn place_elevated_create(&self, leaf: &str, override_key: Option<&str>, client: PtyHostClient, cg: u64, process: &str) -> Result<Placement, String> {
         let channel = HostChannel::Elevated;
         let mut ticket = begin_ticket(self, channel).map_err(|e| e.to_string())?;
+        self.host_table.keys().refresh_restoring_key(override_key.unwrap_or(leaf), Instant::now());
         if let Some((owner, key)) = self.host_table.keys().candidate(leaf, override_key) {
             if owner != channel { return Err(pending("session belongs to a different terminal host")); }
             let (stage, pid) = stage_key(self, leaf, Some((cg, process)), channel, &key, StageMode::Attach)?;

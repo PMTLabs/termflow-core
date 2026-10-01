@@ -285,9 +285,6 @@ impl<R: Runtime> AppState<R> {
             pty_host_connecting: Arc::new(tokio::sync::Mutex::new(())),
             host_stream_offsets: Arc::new(DashMap::new()),
             host_recovering: Arc::new(tokio::sync::Mutex::new(())),
-            restoring_keys: Arc::new(DashMap::new()),
-            closed_unowned: Arc::new(DashMap::new()),
-            restoring_leaf_keys: Arc::new(DashMap::new()),
             duplicate_session_noticed: Arc::new(AtomicBool::new(false)),
             recovering: Arc::new(AtomicBool::new(false)),
             restart_in_flight: Arc::new(AtomicBool::new(false)),
@@ -946,33 +943,20 @@ impl<R: Runtime> AppState<R> {
 
     fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
         host_registry::IntentMaps {
-            restoring_keys: &self.restoring_keys,
-            restoring_leaf_keys: &self.restoring_leaf_keys,
-            closed_unowned: &self.closed_unowned,
+            keys: self.host_table.keys(),
             terminals: &self.terminals,
         }
     }
 
-    /// Record that the pane owning this key is being restored and must wait
-    /// for its host. Skips a key that already has a live terminal.
-    pub fn register_restoring_key(&self, session_key: &str) -> bool {
-        host_registry::register_restoring_key(
-            &self.restoring_keys,
-            &self.terminals,
-            session_key,
-            std::time::Instant::now(),
-        )
-    }
-
     /// A persisted pane is about to mount: its session key (`session_key` if it
     /// has a migrated one, else its leaf) is a restore from now on.
-    pub fn register_restoring_leaf(&self, leaf_id: &str, session_key: Option<&str>) -> bool {
-        host_registry::register_restoring_leaf(&self.intent_maps(), leaf_id, session_key, std::time::Instant::now())
+    pub fn register_restoring_leaf(&self, label: &str, leaf_id: &str, session_key: Option<&str>) -> bool {
+        host_registry::register_restoring_leaf(&self.intent_maps(), label, leaf_id, session_key, std::time::Instant::now())
     }
 
     /// The user closed a restored pane that never found its session.
-    pub fn forget_restoring_leaf(&self, leaf_id: &str) {
-        host_registry::forget_restoring_leaf(&self.intent_maps(), leaf_id, std::time::Instant::now())
+    pub fn forget_restoring_leaf(&self, label: &str, leaf_id: &str) {
+        host_registry::forget_restoring_leaf(&self.intent_maps(), label, leaf_id, std::time::Instant::now())
     }
 
     /// Log and announce, once, sessions that two hosts both claim to hold.
@@ -984,54 +968,9 @@ impl<R: Runtime> AppState<R> {
         let _ = self.app_handle.emit("pty-host:duplicate-session", serde_json::json!({ "sessionKeys": session_keys }));
     }
 
-    /// Extend a restore intent's life; every keyed create calls this.
-    pub fn refresh_restoring_key(&self, session_key: &str) {
-        host_registry::refresh_restoring_key(&self.restoring_keys, session_key, std::time::Instant::now())
-    }
-
-    pub fn is_restoring_key(&self, session_key: &str) -> bool {
-        host_registry::is_restoring_key(&self.restoring_keys, session_key, std::time::Instant::now())
-    }
-
-    /// Remove a restore intent (bound, closed, or no longer waiting). The TTL
-    /// reap goes through the same remover.
-    pub fn forget_restoring_key(&self, session_key: &str) -> bool {
-        host_registry::forget_restoring_key(&self.restoring_keys, session_key, None)
-    }
-
-    /// The user closed a restored pane that never found its session.
-    pub fn mark_closed_unowned(&self, session_key: &str) {
-        host_registry::mark_closed_unowned(
-            &self.restoring_keys,
-            &self.closed_unowned,
-            session_key,
-            std::time::Instant::now(),
-        )
-    }
-
-    /// Should the session with this key, reported by any host, be closed
-    /// instead of adopted or surfaced?
-    pub fn unowned_close_due(&self, session_key: &str) -> bool {
-        host_registry::unowned_close_due(
-            &self.closed_unowned,
-            self.session_registered_on_any_channel(session_key),
-            session_key,
-            std::time::Instant::now(),
-        )
-    }
-
-    /// Remove an unowned close. A fresh keyed spawn or attach for the key
-    /// calls this; the TTL reap goes through the same remover.
-    pub fn forget_closed_unowned(&self, session_key: &str) -> bool {
-        host_registry::forget_closed_unowned(&self.closed_unowned, session_key, None)
-    }
-
     /// Drop restore intents and unowned closes nobody refreshed within the TTL.
     pub fn reap_expired_restore_intents(&self) {
-        let now = std::time::Instant::now();
-        host_registry::reap_expired_restoring_keys(&self.restoring_keys, now);
-        host_registry::reap_expired_closed_unowned(&self.closed_unowned, now);
-        host_registry::prune_restoring_leaf_keys(&self.restoring_leaf_keys, &self.restoring_keys);
+        self.host_table.keys().reap_expired_restore_intents(std::time::Instant::now());
     }
 
     /// Normalise any caller-supplied terminal reference to this run's map key.

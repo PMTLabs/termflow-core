@@ -283,7 +283,6 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
                 host_terminals: &self.host_terminals,
                 terminals: &self.terminals,
                 keys: self.host_table.keys(),
-                closed_unowned: &self.closed_unowned,
             }, channel, listing, std::time::Instant::now(),
         );
         self.note_duplicate_sessions(&duplicates);

@@ -111,6 +111,7 @@ impl HostKeys {
             *target = Some(StagedShell { process: process.into(), stage: stage.clone().map_or(ShellStage::Local, ShellStage::Hosted) });
             *staged_exited = false;
         }
+        Self::settle_restore(&mut inner, leaf, hosted.map(|(_, key, _)| key));
         Ok((stage, pid, old))
     }
 
@@ -145,6 +146,9 @@ impl HostKeys {
                 if record.state == KeyState::Held(cg) { record.state = KeyState::Bound(shell.process.clone()); }
             }
         }
+        Self::settle_restore(&mut inner, leaf, match &shell.stage {
+            ShellStage::Hosted(stage) => Some(&stage.key), ShellStage::Local => None,
+        });
         if let Some(policy) = cancel { Completion::Cancel(policy) } else {
             inner.owners.get(leaf).unwrap().outcome.send_replace(Some(Ok(shell.process.clone())));
             Completion::Registered

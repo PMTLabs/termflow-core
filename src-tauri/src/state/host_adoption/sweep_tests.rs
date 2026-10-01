@@ -163,7 +163,7 @@ async fn orphan_sweep_does_not_surface_a_restoring_key_on_a_frozen_host() {
     ensure_hosts(&port).await.unwrap();
     tokio::time::sleep(SEC).await;
     let h1 = frozen_channel(&port, "h1");
-    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "tm-wait", None, StdInstant::now()));
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", "tm-wait", None, StdInstant::now()));
 
     assert!(sweep(&port).await);
     assert_eq!(recovered(&port), vec!["tm-stray".to_string()], "the waiting pane's session is not turned into a recovered tab");

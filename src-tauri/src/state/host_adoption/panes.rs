@@ -67,8 +67,7 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
         // recovered tab would put a second owner on it. A session whose pane
         // the user closed while waiting is closed rather than shown.
         match host_registry::orphan_verdict(
-            port.restoring_keys(),
-            port.closed_unowned(),
+            port.table().keys(),
             &orphan.tab_id,
             std::time::Instant::now(),
         ) {
@@ -80,8 +79,7 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
             OrphanVerdict::CloseUnowned => {
                 log::info!("[HOTSWAP] closing {}: its pane was closed before its host was known", orphan.tab_id);
                 port.table().keys().close_listed(channel, &orphan.tab_id, || {
-                    host_registry::unowned_close_due(port.closed_unowned(),
-                        port.registered_on_any_channel(&orphan.tab_id), &orphan.tab_id, std::time::Instant::now())
+                    !port.registered_on_any_channel(&orphan.tab_id)
                 });
                 continue;
             }
