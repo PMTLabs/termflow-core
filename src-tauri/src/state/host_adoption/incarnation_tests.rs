@@ -209,6 +209,7 @@ async fn same_key_on_another_channel_and_on_a_superseded_epoch_is_dropped() {
     let mut receiver = port.0.output.subscribe();
     output(&port, &mut receiver, &world, &key, b"current-control").await;
     for (endpoint, stale) in [("other-channel", false), (HOST, true)] {
+        world.wait_for_connection(endpoint, 0).await;
         let gate = Arc::new(EventGate::default());
         for frame in [
             Data::Stdout { tab_id: key.clone(), offset: 999, bytes: b"wrong-connection".to_vec() },

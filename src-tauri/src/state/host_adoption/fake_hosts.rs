@@ -313,6 +313,16 @@ impl World {
         self.log.lock().unwrap().iter().filter(|r| r.host == host).map(|r| r.frame.clone()).collect()
     }
 
+    /// Wait until the client has opened `connection` on `host`; a connection is
+    /// registered when the client dials, which can trail the call that asked for it.
+    pub async fn wait_for_connection(&self, host: &str, connection: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while !self.connections.lock().unwrap().contains_key(&(host.to_owned(), connection)) {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the host connection was never opened");
+    }
+
     /// Deliver on an exact connection, even when Close already removed the key.
     pub fn inject_frame(&self, host: &str, connection: usize, frame: Frame, gate: Option<Arc<EventGate>>) {
         self.connections.lock().unwrap().get(&(host.to_owned(), connection))
