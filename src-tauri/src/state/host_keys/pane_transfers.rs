@@ -3,6 +3,7 @@ use super::*;
 impl HostKeys {
     pub(super) fn stash_panes(inner: &mut Inner, page: PageIdentity, tx: &str, pairs: Vec<PaneEntry>, ui: Option<serde_json::Value>, now: Instant) -> PaneResult {
         if tx.is_empty() || inner.panes.transfers.contains_key(tx) { return rejected("transfer token already staged or empty"); }
+        if pairs.is_empty() { return rejected("transfer has no members"); }
         let mut leaves = std::collections::HashSet::new();
         for pair in &pairs {
             if pair.pi.pg != page.pg || !leaves.insert(pair.descriptor.leaf.clone()) { return rejected("invalid transfer members"); }
@@ -72,13 +73,14 @@ impl HostKeys {
             let owns = inner.owners.get(leaf).is_some_and(|r| r.owner == (Owner::Transfer { tx: tx.into(), taken: true }));
             if owns {
                 if let Some(entry) = entries.iter().find(|e| &e.descriptor.leaf == leaf) {
-                    inner.owners.get_mut(leaf).unwrap().owner = Owner::Pane(entry.pi);
-                } else if !Self::remove_held(inner, leaf) { inner.owners.get_mut(leaf).unwrap().owner = Owner::Orphaned; }
+                    let row = inner.owners.get_mut(leaf).unwrap();
+                    row.owner = Owner::Pane(entry.pi);
+                    if !row.started { row.admitted_pg = Some(pg); }
+                } else if !Self::release_idle_owner(inner, leaf) { inner.owners.get_mut(leaf).unwrap().owner = Owner::Orphaned; }
             }
             inner.panes.holders.remove(&member.pi);
         }
-        inner.panes.transfers.remove(tx);
-        if inner.panes.active_drag.as_deref() == Some(tx) { inner.panes.active_drag = None; }
+        Self::end_transfer_record(inner, tx);
         PaneResult::Ok
     }
     pub(super) fn cancel_panes(inner: &mut Inner, tx: &str) -> PaneResult {
@@ -86,15 +88,22 @@ impl HostKeys {
         Self::finish_transfer(inner, tx, true);
         PaneResult::Ok
     }
-    fn finish_transfer(inner: &mut Inner, tx: &str, cancel: bool) {
-        let Some(transfer) = inner.panes.transfers.remove(tx) else { return; };
+    pub(super) fn clear_active_drag(inner: &mut Inner, tx: &str) {
         if inner.panes.active_drag.as_deref() == Some(tx) { inner.panes.active_drag = None; }
+    }
+    fn end_transfer_record(inner: &mut Inner, tx: &str) -> Option<Transfer> {
+        let transfer = inner.panes.transfers.remove(tx)?;
+        Self::clear_active_drag(inner, tx);
         if transfer.taken.borrow().is_none() { transfer.taken.send_replace(Some(false)); }
+        Some(transfer)
+    }
+    fn finish_transfer(inner: &mut Inner, tx: &str, cancel: bool) {
+        let Some(transfer) = Self::end_transfer_record(inner, tx) else { return; };
         let source_live = inner.window_pages.window_of(transfer.source).is_some();
         for member in &transfer.members {
             let leaf = &member.descriptor.leaf;
             if inner.owners.get(leaf).is_some_and(|r| matches!(&r.owner, Owner::Transfer { tx: owner_tx, .. } if owner_tx == tx))
-                && !Self::remove_held(inner, leaf) {
+                && !Self::release_idle_owner(inner, leaf) {
                 inner.owners.get_mut(leaf).unwrap().owner = if cancel && source_live { Owner::Parked { pg: transfer.source, by: member.pi } } else { Owner::Orphaned };
             }
             inner.panes.holders.remove(&member.pi);
@@ -114,7 +123,7 @@ impl HostKeys {
             _ => false,
         }).map(|(leaf, _)| leaf.clone()).collect();
         for leaf in leaves {
-            if !Self::remove_held(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned; }
+            if !Self::release_idle_owner(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned; }
         }
         let abandoned: Vec<_> = inner.panes.transfers.iter().filter(|(_, t)| t.destination.is_some_and(|pg| pages.contains(&pg))).map(|(tx, _)| tx.clone()).collect();
         for tx in abandoned { Self::finish_transfer(inner, &tx, false); }
@@ -130,7 +139,7 @@ impl HostKeys {
         if let Some(tx) = tx {
             if let Some(transfer) = inner.panes.transfers.get_mut(&tx) {
                 transfer.members.retain(|m| m.descriptor.leaf != leaf);
-                if transfer.members.is_empty() { inner.panes.transfers.remove(&tx); }
+                if transfer.members.is_empty() { Self::end_transfer_record(inner, &tx); }
             }
         }
     }

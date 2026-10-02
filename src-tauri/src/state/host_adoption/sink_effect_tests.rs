@@ -108,7 +108,8 @@ async fn same_leaf_restore_holder_survives_aborted_owner_projection_cleanup() {
     let now = Instant::now();
     assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "C", "tm-C", Some("shared"), now));
     let (cg, p, ticket) = stage(&port, CHANNEL, "tm-P", "shared");
-    assert!(!host_registry::register_restoring_leaf(&port.intent_maps(), "reload", "tm-P", Some("shared"), now));
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "reload", "tm-P", Some("shared"), now));
+    assert!(keys.has_test_holder("reload", "tm-P"));
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (resume_tx, resume_rx) = std::sync::mpsc::channel();
     let cleanup = std::thread::spawn({ let port = port.clone(); let p = p.clone(); move || {

@@ -96,7 +96,7 @@ pub(super) struct Transfer {
 pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Default, Debug)]
-pub(crate) struct PaneEffects { pub closes: Vec<String>, pub wake_transfers: bool }
+pub(crate) struct PaneEffects { pub closes: Vec<String>, pub wake_transfers: bool, pub release_restore_sweep: bool }
 
 fn rejected(message: &str) -> PaneResult { PaneResult::Rejected { message: message.into() } }
 impl HostKeys {
@@ -116,7 +116,7 @@ impl HostKeys {
         Self::expire_transfers_locked(&mut inner, now);
         let timed = matches!(&request.op, PaneOp::Stash { .. } | PaneOp::Take { .. });
         let mut effects = PaneEffects::default();
-        let result = Self::apply_pane_op(&mut inner, page, request.op, now, &mut effects.closes);
+        let result = Self::apply_pane_op(&mut inner, page, request.op, now, &mut effects);
         effects.wake_transfers = timed && matches!(result, PaneResult::Ok | PaneResult::Taken { .. });
         let stream = inner.panes.streams.get_mut(&page.pg).unwrap();
         stream.next = next;
@@ -124,7 +124,7 @@ impl HostKeys {
         Ok((PaneReply::Ack { result }, effects))
     }
 
-    fn apply_pane_op(inner: &mut Inner, page: PageIdentity, op: PaneOp, now: Instant, effects: &mut Vec<String>) -> PaneResult {
+    fn apply_pane_op(inner: &mut Inner, page: PageIdentity, op: PaneOp, now: Instant, effects: &mut PaneEffects) -> PaneResult {
         match op {
             PaneOp::Enter { panes } => Self::enter_panes(inner, page.pg, &panes),
             PaneOp::AdmitCreate { pi, mode } => {
@@ -143,11 +143,11 @@ impl HostKeys {
             PaneOp::Close { pi } => {
                 if pi.pg != page.pg { return rejected("pane belongs to another page"); }
                 let leaf = inner.owners.iter().find(|(leaf, row)| Self::authority(inner, &row.owner, leaf, pi)).map(|(leaf, _)| leaf.clone());
-                Self::forget_pane_holder(inner, pi, now);
+                Self::forget_pane_holder(inner, pi, leaf.is_some(), now);
                 inner.panes.present.remove(&pi);
                 let Some(leaf) = leaf else { return PaneResult::Contended; };
                 Self::remove_transfer_member(inner, &leaf);
-                Self::close_leaf_locked(inner, &leaf, CloseStorage::Delete, effects);
+                Self::close_leaf_locked(inner, &leaf, CloseStorage::Delete, &mut effects.closes);
                 PaneResult::Ok
             }
             PaneOp::Stash { tx, pairs, ui } => Self::stash_panes(inner, page, &tx, pairs, ui, now),
@@ -157,6 +157,7 @@ impl HostKeys {
             PaneOp::Settle => {
                 let ended = inner.window_pages.settle(page).expect("validated sender page");
                 Self::end_pages_locked(inner, &ended);
+                effects.release_restore_sweep = inner.window_pages.settle_restore_participant(page);
                 PaneResult::Ok
             }
         }
@@ -239,7 +240,7 @@ impl HostKeys {
     fn depart_pane(inner: &mut Inner, pi: PaneIdentity) {
         let leaves: Vec<_> = inner.owners.iter().filter(|(_, r)| r.owner == Owner::Pane(pi)).map(|(l, _)| l.clone()).collect();
         for leaf in leaves {
-            if !Self::remove_held(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Parked { pg: pi.pg, by: pi }; }
+            if !Self::release_idle_owner(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Parked { pg: pi.pg, by: pi }; }
         }
         inner.panes.present.remove(&pi);
         inner.panes.holders.remove(&pi);
@@ -250,7 +251,11 @@ impl HostKeys {
         let row = inner.owners.get_mut(leaf).filter(|r| r.cg == cg && (r.admitted_pg == Some(pg) || matches!(r.owner, Owner::Pane(pi) if pi.pg == pg)))
             .ok_or("host-ownership-pending: create has no matching admission")?;
         match &row.state {
-            OwnerState::Placing { .. } if !row.started => { row.started = true; Ok(CreateAdmission::Run(cg)) },
+            OwnerState::Placing { .. } if !row.started => {
+                if !matches!(row.owner, Owner::Pane(pi) if pi.pg == pg) { return Err("host-ownership-pending: create owner changed".into()); }
+                row.started = true;
+                Ok(CreateAdmission::Run(cg))
+            },
             OwnerState::Placing { .. } => Ok(CreateAdmission::Join(row.outcome.subscribe())),
             OwnerState::Registered(s) => Ok(CreateAdmission::Existing(s.process.clone())),
             _ => Err("host-ownership-pending: admitted placement ended".into()),

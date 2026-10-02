@@ -9,6 +9,8 @@ use std::collections::HashMap;
 
 #[path = "pane_transfer_effect_tests.rs"]
 mod transfer_tests;
+#[path = "pane_lifecycle_effect_tests.rs"]
+mod lifecycle_tests;
 
 struct Page { label: &'static str, wi: u64, pg: u64, seq: u64, incarnation: u64 }
 impl Page {
@@ -207,13 +209,20 @@ async fn close_cancels_admitted_unstarted_and_gated_placements_but_not_control()
             gate.wait_reached(1).await;
         }
         assert_eq!(page.send(&port, PaneOp::Close { pi: entry.pi }).0, PaneResult::Ok);
-        assert!(matches!(port.table().keys().owner_state("tm-cancel"), Some((_, OwnerState::Placing { cancel: Some(CloseStorage::Delete), .. }))));
+        if started {
+            assert!(matches!(port.table().keys().owner_state("tm-cancel"), Some((_, OwnerState::Placing { cancel: Some(CloseStorage::Delete), .. }))));
+        } else {
+            assert!(port.table().keys().owner_state("tm-cancel").is_none());
+        }
         let control = page.enter(&port, "tm-control");
         page.admit(&port, &control);
         assert_eq!(port.table().keys().pane_owner("tm-control"), Some(Owner::Pane(control.pi)));
         if !started {
-            task = Some(tokio::spawn({ let port = port.clone(); let pg = page.pg; async move { run(&port, "owner", pg, "tm-cancel", cg).await } }));
-            gate.wait_reached(1).await;
+            assert!(run(&port, "owner", page.pg, "tm-cancel", cg).await.unwrap_err().starts_with("host-ownership-pending:"));
+            assert_eq!(world.count_everywhere("Spawn"), 0);
+            assert_eq!(world.count_everywhere("Close"), 0);
+            assert!(port.0.deleted.lock().unwrap().is_empty());
+            continue;
         }
         assert_eq!(world.count_everywhere("Spawn"), 1);
         gate.release();

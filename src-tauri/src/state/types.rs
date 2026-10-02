@@ -603,7 +603,6 @@ pub struct AppState<R: Runtime = Wry> {
     pub identity: crate::identity_index::IdentityIndex,
     /// Shared injectable source of opaque shell-run identities.
     pub ids: super::IdAllocator,
-    pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
     pub host_restore_released: Arc<AtomicBool>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
     // hot-swap (core restart). Set by spawn_routed's reattach branch, drained once by the
@@ -725,7 +724,6 @@ impl<R: Runtime> Clone for AppState<R> {
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
             ids: self.ids.clone(),
-            host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_released: self.host_restore_released.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
             pty_host_gen: self.pty_host_gen.clone(),

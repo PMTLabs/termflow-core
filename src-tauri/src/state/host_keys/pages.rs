@@ -24,6 +24,7 @@ pub(super) struct WindowPages {
     building: HashMap<String, u64>,
     committed: HashMap<String, u64>,
     pages: BTreeMap<u64, u64>,
+    host_restore_pending_windows: HashMap<String, u64>,
 }
 
 impl WindowPages {
@@ -70,6 +71,7 @@ impl WindowPages {
         // A listener may execute after build returns but before it commits.
         self.cancel(label, wi);
         if self.committed.get(label) == Some(&wi) { self.committed.remove(label); }
+        self.retire_restore_participant(label, wi);
         self.end_matching(wi, None)
     }
 
@@ -89,6 +91,19 @@ impl WindowPages {
         let wi = self.window_of(pg).ok_or("page is no longer live")?;
         if self.committed.get(label) != Some(&wi) { return Err("page does not belong to calling window".into()); }
         Ok(PageIdentity { wi, pg })
+    }
+
+    fn retire_restore_participant(&mut self, label: &str, wi: u64) -> bool {
+        if self.host_restore_pending_windows.get(label) != Some(&wi) { return false; }
+        self.host_restore_pending_windows.remove(label);
+        true
+    }
+
+    pub(super) fn settle_restore_participant(&mut self, page: PageIdentity) -> bool {
+        let Some((label, wi)) = self.label_of(page.pg) else { return false; };
+        if self.latest_page(label) != Some(page) { return false; }
+        let label = label.to_string();
+        self.retire_restore_participant(&label, wi)
     }
 
     pub(super) fn settle(&mut self, page: PageIdentity) -> Result<Vec<PageIdentity>, String> {
@@ -117,6 +132,17 @@ impl Drop for WindowBuildGuard {
 }
 
 impl HostKeys {
+    pub(crate) fn begin_restore_participation(&self, windows: impl IntoIterator<Item = String>) {
+        let mut inner = self.lock();
+        let pages = &mut inner.window_pages;
+        pages.host_restore_pending_windows.clear();
+        for label in windows {
+            if let Some(&wi) = pages.committed.get(&label) { pages.host_restore_pending_windows.insert(label, wi); }
+        }
+    }
+
+    pub(crate) fn restore_pending_count(&self) -> usize { self.lock().window_pages.host_restore_pending_windows.len() }
+
     pub(crate) fn reserve_window(&self, label: &str) -> Result<WindowBuildGuard, String> {
         let wi = self.lock().window_pages.reserve(label)?;
         Ok(WindowBuildGuard { keys: self.clone(), label: label.to_string(), wi })

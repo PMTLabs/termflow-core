@@ -879,7 +879,6 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
-        commands::report_host_restore_settled,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
@@ -1060,11 +1059,6 @@ pub fn run() {
             // one's "already hidden" and skip its first real put_IsVisible.
             crate::webview_power::forget(window.label());
             if let Some(state) = app.try_state::<AppState>() {
-                let restore_state = (*state).clone();
-                let destroyed_label = window.label().to_string();
-                tauri::async_runtime::spawn(async move {
-                    restore_state.host_restore_window_destroyed(&destroyed_label).await;
-                });
                 state.window_titles.remove(window.label());
                 // Plan 018: a closed window must not be recreated at the next
                 // start. Persisted immediately, not debounced — the process may

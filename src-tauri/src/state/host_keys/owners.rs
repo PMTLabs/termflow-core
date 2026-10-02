@@ -203,6 +203,7 @@ impl HostKeys {
     }
 
     fn close_row_locked(inner: &mut Inner, leaf: String, policy: CloseStorage) -> CloseAction {
+        if Self::release_unstarted(inner, &leaf) { return CloseAction::Cancelled; }
         let Some(row) = inner.owners.get_mut(&leaf) else { return CloseAction::Missing };
         match &mut row.state {
             OwnerState::Placing { cancel, .. } => {
@@ -222,6 +223,20 @@ impl HostKeys {
     pub(super) fn close_leaf_locked(inner: &mut Inner, leaf: &str, policy: CloseStorage, effects: &mut Vec<String>) {
         if Self::remove_held(inner, leaf) { return; }
         if let CloseAction::End { process, .. } = Self::close_row_locked(inner, leaf.into(), policy) { effects.push(process); }
+    }
+
+    /// No worker has claimed this promise, so ending its owner cannot leave
+    /// anyone responsible for completing it. Staged/in-flight work is retained.
+    pub(super) fn release_unstarted(inner: &mut Inner, leaf: &str) -> bool {
+        if !inner.owners.get(leaf).is_some_and(|r| !r.started && matches!(r.state,
+            OwnerState::Placing { stage: None, .. })) { return false; }
+        let row = inner.owners.remove(leaf).unwrap();
+        row.outcome.send_replace(Some(Err(retry())));
+        true
+    }
+
+    pub(super) fn release_idle_owner(inner: &mut Inner, leaf: &str) -> bool {
+        Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf)
     }
 
     /// Held rows have no shell, key or storage to end. Registered and Closing

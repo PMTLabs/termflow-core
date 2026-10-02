@@ -201,15 +201,6 @@ pub(super) fn resolve_profile(profile_id: Option<&str>, cwd: Option<String>) -> 
     (shell_name, shell_path, shell_args, shell_cwd)
 }
 
-#[tauri::command]
-pub async fn report_host_restore_settled(
-    state: State<'_, AppState>,
-    window_label: String,
-) -> Result<(), String> {
-    state.report_host_restore_settled(window_label).await;
-    Ok(())
-}
-
 /// Give this shell's ConPTY pseudo-console window an owner: the window the pane
 /// currently lives in. Without it, dialogs a console program parents to
 /// `GetConsoleWindow()` (Azure CLI's WAM sign-in, credential prompts) open

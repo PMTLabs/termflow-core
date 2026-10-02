@@ -22,6 +22,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("canvas_store.rs", &["delete_edge", "delete_edges_for", "insert_edge", "schema", "update_label"], "DB mutex; shell writers retain leaf stripes/current owner; user edits are durable intent"),
     ("commands/config_history.rs", &["merge_config"], "out of scope user command/directory history merge"),
     ("commands/drag.rs", &["begin_global_pane_drag", "cancel_global_pane_drag", "claim_global_pane_drag", "resolve_orphan_global_drag", "resolve_tab_drop", "show_drag_preview"], "native notifications queued by ownership-qualified pg/wi/tx sinks with immutable page receipts; preview geometry is UI intent"),
+    ("commands/panes.rs", &["pane_op"], "qualified Settle post-effect schedules shared sweep outside ownership/FIFO"),
     ("commands/terminal.rs", &["create_terminal", "host_fallback", "stage_scrollback"], "new unique/full pc replay and prompt-hook projections; original owner completion"),
     ("commands/terminal.rs", &["register_host_terminal"], "Placing original pc under ownership mutex through index/projection inserts"),
     ("commands/terminal.rs", &["run_create"], "original cg/pc/key and client epoch at publication/enqueue; admission ticket"),
@@ -66,11 +67,11 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_keys/delivery.rs", &["delivery_sender"], "immutable FIFO recovery capability; framework callback outside ownership mutex"),
     ("state/host_keys/effects.rs", &["close_original", "publish_route_on", "recover_listed"], "original session or Listed/holder qualification under ownership mutex through route/Close/delivery enqueue"),
     ("state/host_keys/owners.rs", &["write"], "sorted leaf stripes/current Registered pc qualification retained through storage callback"),
-    ("state/host_keys/owners.rs", &["abort_create", "admit_create", "close_row_locked", "complete_shell", "end_process", "release_stage", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
-    ("state/host_keys/pages.rs", &["register_page"], "committed window and checked page identity under ownership mutex through stream installation"),
+    ("state/host_keys/owners.rs", &["abort_create", "admit_create", "close_row_locked", "complete_shell", "end_process", "release_stage", "release_unstarted", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
+    ("state/host_keys/pages.rs", &["begin_restore_participation", "cancel", "commit", "destroy", "end_matching", "register", "register_page", "reserve", "retire_restore_participant"], "committed wi/page and startup participation in ownership mutex; shared page-end cleanup and compare-retirement"),
     ("state/host_keys/panes.rs", &["admit_pane", "admitted_work", "apply_pane_op", "bind_pane", "depart_pane", "insert_panes", "pane_op_at"], "sender window/page, exact pi/cg/pc and next-seq qualification under ownership mutex; immutable close pc dispatched to stripe-qualified end_process"),
     ("state/host_keys/pane_payloads.rs", &["begin_pane_drag", "claim_pane_drag", "end_pane_drag", "route_pane_transfer"], "original sender pg/wi/tx and target committed page rechecked under ownership through nonblocking delivery enqueue; immutable page receipts rejected by successor renderers"),
-    ("state/host_keys/pane_transfers.rs", &["adopt_panes", "end_pane_pages", "finish_transfer", "remove_transfer_member", "stash_panes", "take_panes"], "original page/tx/member/owner qualification at atomic mutation under ownership mutex; deadlines release ownership only; shell endings remain stripe-qualified"),
+    ("state/host_keys/pane_transfers.rs", &["adopt_panes", "clear_active_drag", "end_pane_pages", "end_transfer_record", "finish_transfer", "remove_transfer_member", "stash_panes", "take_panes"], "original page/tx/member/owner qualification at atomic mutation under ownership mutex; deadlines release ownership only; shell endings remain stripe-qualified"),
     ("state/host_keys/restore.rs", &["forget_pane_holder", "register_pane_holder", "settle_pane_restore", "reap_expired_restore_intents", "settle_restore_markers"], "owner/holder/alias/marker facts in one ownership mutex"),
     ("state/host_lifecycle.rs", &["sibling_arm"], "hold slot mutex; unique checked arm token and exact original clients/quiesce"),
     ("state/host_lifecycle.rs", &["release_host"], "retained exit/quiesce authority and exact client transport"),
@@ -83,7 +84,8 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_table.rs", &["retire", "retire_when_open"], "retained channel drain epoch under admission mutex; retirement flag controls exact guard release"),
     ("state/host_routes.rs", &["register", "remove_channel", "remove_epoch", "remove_key", "remove_process"], "caller retains ownership mutex through route mutation, or exact non-reused pc/epoch removal"),
     ("state/owner_lifecycle.rs", &["complete_create", "end_shell"], "original owner cg/pc; leaf stripes and ownership retained through storage/removal"),
-    ("state/terminals.rs", &["begin_host_restore_sweep", "host_restore_window_destroyed", "report_host_restore_settled"], "out of scope durable window restore participation; no shell-addressed effect"),
+    ("state/terminals.rs", &["begin_host_restore_sweep"], "startup participants captured as committed wi under ownership; sweep I/O outside ownership"),
+    ("window_lifetime.rs", &["commit"], "captured-wi destroy retires participation before scheduling out-of-stream sweep"),
     ("state/terminals.rs", &["init_screen", "feed_screen"], "retained non-reused pc parser; initial publication inside Placing authority"),
     ("state/terminals.rs", &["cleanup_terminal_maps", "teardown_host_terminal"], "exact full pc removals; key offset deletion under authority; shell storage stripe"),
     ("state/terminals.rs", &["ensure_elevated_host_inner"], "connecting serialization; captured epoch compare-clear; retained launched process"),
@@ -162,13 +164,121 @@ fn hits(source: &str) -> BTreeSet<String> {
         r"\*self\.(?:client|proc)\s*\.|\*slot\s*=|\b(?:slot|client|proc)\s*\.\s*take\s*\(|self\.current\s*(?:=|\.\s*(?:take|replace)\s*\()|",
         r"\.\s*(?:persist_snapshot|persist_terminal_history|persist_history_snapshot|insert_edge|delete_edges_for|write_shells)\s*\(|",
         r"\.\s*(?:emit|emit_to|execute|execute_batch|close_transport|shutdown_idle|shutdown|clear_client_on|clear_client|install_if_current|clear_if_current|take_if_current)\s*\(|",
-        r"\binner\s*\.\s*panes\s*\.\s*active_drag\s*=|\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
+        r"\.\s*(?:begin_restore_participation|schedule_host_restore_release)\s*\(|\bself\s*\.\s*(?:building|committed|pages)\s*\.\s*(?:insert|remove|retain|clear)\s*\(|\binner\s*\.\s*panes\s*\.\s*active_drag\s*=|\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
         r"\b(?:terminals|host_terminals|stream_offsets|host_stream_offsets|writers|masters|screens|screen_history|identity_index|identity|leaf_to_process|shell_writer_channels|ptys|terminal_history|terminal_screens|terminal_focus_reporting|tmux_sessions|terminal_cwds|history_dirty|replay_prefix|host_restore_pending_windows|reattach_prompt_hooks|routes|local_processes|restore_holders|closed_unowned|owners|keys|entries)(?:\(\))?\s*(?:\.\s*(?:lock\(\)|unwrap\(\)|keys\(\)|routes\(\)))?\s*\.\s*(?:insert|remove|remove_key|remove_process|remove_channel|remove_epoch|retain|clear|entry|get_mut|register|index|unindex|connect|disconnect)\s*\("
     )).unwrap();
     let spans = fn_spans(&text);
     pattern.find_iter(&text).filter_map(|hit| {
         spans.iter().filter(|(_, body)| body.contains(&hit.start())).min_by_key(|(_, body)| body.len()).map(|(name, _)| name.clone())
     }).collect()
+}
+
+// Terminal primitives list their lexical guards; orchestration entries name the
+// shared teardown they must call. This is a lexical census, not a dataflow proof.
+const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
+    ("state/host_keys/owners.rs", "abort_create", &["release_stage", "outcome.send_replace"]),
+    ("state/host_keys/owners.rs", "complete_shell", &["end_staged_exit", "settle_pane_restore"]),
+    ("state/host_keys/owners.rs", "end_process", &["mark_end", "outcome.send_replace"]),
+    ("state/host_keys/owners.rs", "remove_held", &["OwnerState::Held"]),
+    ("state/host_keys/owners.rs", "release_unstarted", &["!r.started", "outcome.send_replace"]),
+    ("state/host_keys/owners.rs", "release_idle_owner", &["remove_held", "release_unstarted"]),
+    ("state/host_keys/owners.rs", "close_row_locked", &["release_unstarted"]),
+    ("state/host_keys/owners.rs", "close_leaf_locked", &["remove_held", "close_row_locked"]),
+    ("state/host_keys/owners.rs", "close_process", &["close_row_locked"]),
+    ("state/host_keys/panes.rs", "apply_pane_op", &["forget_pane_holder", "remove_transfer_member", "end_pages_locked", "settle_restore_participant"]),
+    ("state/host_keys/panes.rs", "admit_pane", &["shell_of", "holders.remove"]),
+    ("state/host_keys/panes.rs", "bind_pane", &["bindable", "holders.remove"]),
+    ("state/host_keys/panes.rs", "depart_pane", &["release_idle_owner"]),
+    ("state/host_keys/panes.rs", "admitted_work", &["window_pages.sender", "Owner::Pane"]),
+    ("state/host_keys/panes.rs", "close_process_reap", &["remove_transfer_member", "close_leaf_locked"]),
+    ("state/host_keys/panes.rs", "pane_op_at", &["apply_pane_op", "expire_transfers_locked"]),
+    ("state/host_keys/pane_payloads.rs", "begin_pane_drag", &["delivery_sender", "expire_transfers_locked"]),
+    ("state/host_keys/pane_payloads.rs", "route_pane_transfer", &["delivery_sender", "expire_transfers_locked"]),
+    ("state/host_keys/pane_payloads.rs", "verify_transfer_source", &["expire_transfers_locked"]),
+    ("state/host_keys/pane_payloads.rs", "claim_pane_drag", &["clear_active_drag"]),
+    ("state/host_keys/pane_payloads.rs", "end_pane_drag", &["clear_active_drag"]),
+    ("state/host_keys/pane_transfers.rs", "stash_panes", &["remove_transfer_member"]),
+    ("state/host_keys/pane_transfers.rs", "take_panes", &["finish_transfer"]),
+    ("state/host_keys/pane_transfers.rs", "adopt_panes", &["release_idle_owner", "end_transfer_record"]),
+    ("state/host_keys/pane_transfers.rs", "cancel_panes", &["finish_transfer"]),
+    ("state/host_keys/pane_transfers.rs", "clear_active_drag", &["active_drag.as_deref"]),
+    ("state/host_keys/pane_transfers.rs", "end_transfer_record", &["clear_active_drag", "taken.send_replace"]),
+    ("state/host_keys/pane_transfers.rs", "finish_transfer", &["end_transfer_record", "release_idle_owner"]),
+    ("state/host_keys/pane_transfers.rs", "expire_transfers_locked", &["finish_transfer"]),
+    ("state/host_keys/pane_transfers.rs", "expire_transfers", &["expire_transfers_locked"]),
+    ("state/host_keys/pane_transfers.rs", "end_pane_pages", &["release_idle_owner", "finish_transfer"]),
+    ("state/host_keys/pane_transfers.rs", "remove_transfer_member", &["end_transfer_record"]),
+    ("state/host_keys/restore.rs", "register_pane_holder", &["OwnerState::Registered", "OwnerState::Closing"]),
+    ("state/host_keys/restore.rs", "forget_pane_holder", &["transfers.values", "!authorized"]),
+    ("state/host_keys/restore.rs", "settle_pane_restore", &["row.owner"]),
+    ("state/host_keys/restore.rs", "settle_restore_markers", &["intersects"]),
+    ("state/host_keys/restore.rs", "reap_expired_restore_intents", &["m.live"]),
+    ("state/host_keys/pages.rs", "cancel", &["building.get"]),
+    ("state/host_keys/pages.rs", "commit", &["cancel"]),
+    ("state/host_keys/pages.rs", "end_matching", &["pages.remove"]),
+    ("state/host_keys/pages.rs", "destroy", &["retire_restore_participant", "end_matching"]),
+    ("state/host_keys/pages.rs", "retire_restore_participant", &["host_restore_pending_windows.get"]),
+    ("state/host_keys/pages.rs", "settle_restore_participant", &["latest_page", "retire_restore_participant"]),
+    ("state/host_keys/pages.rs", "settle", &["end_matching"]),
+    ("state/host_keys/pages.rs", "begin_restore_participation", &["committed.get"]),
+    ("state/host_keys/pages.rs", "destroy_window", &["end_pages_locked"]),
+    ("state/host_keys/pages.rs", "end_pages_locked", &["end_pane_pages"]),
+];
+
+fn lifecycle_removers(source: &str) -> BTreeSet<String> {
+    let text = production(source);
+    let pattern = Regex::new(concat!(
+        r"\b(?:transfers|members|holders|present|streams|incarnation_high|closed_unowned|owners|building|committed|pages|host_restore_pending_windows)\s*\.\s*(?:remove|retain|clear)\s*\(|",
+        r"\bcommitted\s*\.\s*insert\s*\(|\brow\s*\.\s*(?:owner|state|started|admitted_pg)\s*=|\bactive_drag\s*=\s*None\b|",
+        r"\b(?:remove_held|release_unstarted|release_idle_owner|end_transfer_record|clear_active_drag|finish_transfer|end_pages_locked|end_matching|retire_restore_participant|close_leaf_locked|close_row_locked|remove_transfer_member|forget_pane_holder|depart_pane|settle_pane_restore|end_pane_pages|apply_pane_op|expire_transfers_locked)\s*\("
+    )).unwrap();
+    let spans = fn_spans(&text);
+    pattern.find_iter(&text).filter_map(|hit| spans.iter()
+        .filter(|(_, range)| range.contains(&hit.start())).min_by_key(|(_, range)| range.len())
+        .map(|(name, _)| name.clone())).collect()
+}
+
+fn lifecycle_violations(file: &str, source: &str) -> Vec<String> {
+    let text = production(source);
+    let spans = fn_spans(&text);
+    lifecycle_removers(source).into_iter().filter(|name| {
+        let Some((_, _, helpers)) = LIFECYCLE_REMOVERS.iter().find(|(path, allowed, _)| *path == file && *allowed == name) else { return true; };
+        let (_, range) = spans.iter().find(|(found, _)| found == name).unwrap();
+        helpers.iter().any(|helper| !text[range.clone()].contains(helper))
+    }).collect()
+}
+
+#[test]
+fn entity_removers_are_listed_with_their_auxiliary_teardown() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut corpus = Vec::new();
+    sources(&root, &root, &mut corpus);
+    // These entities live in this table; unrelated maps called `pages` are not
+    // ownership pages. A new sibling table file is included automatically.
+    let corpus: Vec<_> = corpus.into_iter().filter(|(file, _)| file.starts_with("state/host_keys/")).collect();
+    for required in ["pages.rs", "panes.rs", "pane_transfers.rs", "owners.rs", "restore.rs", "pane_payloads.rs"] {
+        assert!(corpus.iter().any(|(file, _)| file.ends_with(required)), "missing {required}");
+    }
+    for (file, source) in &corpus {
+        assert!(lifecycle_violations(file, source).is_empty(), "unlisted remover or missing auxiliary teardown in {file}: {:?}", lifecycle_violations(file, source));
+    }
+    for (file, name, _) in LIFECYCLE_REMOVERS {
+        let (_, source) = corpus.iter().find(|(path, _)| path == file).unwrap();
+        assert!(lifecycle_removers(source).contains(*name), "stale remover {file}:{name}");
+    }
+}
+
+#[test]
+fn planted_entity_remover_and_missing_shared_teardown_are_rejected() {
+    for body in ["inner.panes.transfers.remove(tx);", "inner.panes.active_drag = None;", "inner.panes.holders.remove(pi);",
+        "inner.closed_unowned.clear();", "inner.owners.remove(leaf);", "self.pages.remove(pg);", "self.host_restore_pending_windows.remove(label);",
+        "row.owner = Owner::Orphaned;", "row.started = false;"] {
+        let planted = format!("fn new_remover() {{ {body} }}");
+        assert_eq!(lifecycle_violations("state/host_keys/new.rs", &planted), vec!["new_remover"]);
+    }
+    let missing = "fn end_transfer_record() { inner.panes.transfers.remove(tx); }";
+    assert_eq!(lifecycle_violations("state/host_keys/pane_transfers.rs", missing), vec!["end_transfer_record"]);
+    assert!(lifecycle_removers("#[cfg(test)] mod tests { fn fixture() { inner.owners.clear(); } }").is_empty());
 }
 
 fn sources(dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
@@ -227,6 +337,12 @@ fn planted_wire_projection_store_route_emit_and_lifecycle_sinks_are_detected() {
         ("new_barrier_claim", "entry.reconnecting = false; entry.reconnect_again = true;"),
         ("new_barrier_retirement", "entry.retired = true;"),
         ("new_barrier_rerun", "std::mem::take(&mut entry.reconnect_again);"),
+        ("new_page_remover", "self.pages.remove(&pg);"),
+        ("new_window_remover", "self.committed.remove(label);"),
+        ("new_drag_remover", "inner.panes.active_drag = None;"),
+        ("new_transfer_remover", "inner.panes.transfers.remove(tx);"),
+        ("new_holder_remover", "inner.panes.holders.remove(pi);"),
+        ("new_sweep_remover", "self.host_restore_pending_windows.remove(label);"),
     ] {
         let planted = format!("async fn {name}() {{ {body} }}");
         assert_eq!(unlisted("new_sink.rs", &planted), vec![name]);

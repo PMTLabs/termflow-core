@@ -64,15 +64,18 @@ impl HostKeys {
     }
 
     pub(super) fn register_pane_holder(inner: &mut Inner, pi: super::panes::PaneIdentity, descriptor: &super::panes::PaneDescriptor) {
-        // A staged or registered shell in this leaf's current row already has
-        // its placement. Another leaf sharing the override is not that proof.
-        if inner.owners.get(&descriptor.leaf).is_some_and(|r| owners::shell_of(&r.state).is_some()) { return; }
+        // A completed placement needs no restore intent. A staged Attach can
+        // still fail, so it is not proof for a newly present copy.
+        if inner.owners.get(&descriptor.leaf).is_some_and(|r| matches!(r.state, OwnerState::Registered(_) | OwnerState::Closing(_))) { return; }
         let aliases = Aliases::new(&descriptor.leaf, descriptor.override_key.as_deref());
         inner.closed_unowned.retain(|_, marker| !marker.aliases.intersects(&aliases));
         inner.panes.holders.insert(pi, aliases);
     }
 
-    pub(super) fn forget_pane_holder(inner: &mut Inner, pi: super::panes::PaneIdentity, now: Instant) {
+    pub(super) fn forget_pane_holder(inner: &mut Inner, pi: super::panes::PaneIdentity, authorized: bool, now: Instant) {
+        // A transfer carries this capability even if work aborts and removes
+        // its owner row. Only an authorized source may close a carried member.
+        if !authorized && inner.panes.transfers.values().any(|t| t.members.iter().any(|m| m.pi == pi)) { return; }
         let aliases = inner.panes.holders.remove(&pi).or_else(|| inner.panes.present.get(&pi)
             .map(|d| Aliases::new(&d.leaf, d.override_key.as_deref())));
         if let Some(aliases) = aliases {

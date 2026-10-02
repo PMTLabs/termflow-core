@@ -79,6 +79,8 @@ pub struct HostKeys {
     deliveries: Arc<std::sync::OnceLock<std::sync::mpsc::Sender<delivery::Delivery>>>,
     #[cfg(test)]
     pub(crate) route_hook: EffectHook,
+    #[cfg(test)]
+    pub(crate) delivery_init_hook: EffectHook,
 }
 
 impl Default for HostKeys {
@@ -95,6 +97,8 @@ impl HostKeys {
         })), routes, deliveries: Arc::default(),
             #[cfg(test)]
             route_hook: Arc::default(),
+            #[cfg(test)]
+            delivery_init_hook: Arc::default(),
         }
     }
 

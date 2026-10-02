@@ -182,7 +182,8 @@ async fn an_alias_holder_registers_while_another_leaf_is_attaching_and_survives_
     gate.wait_reached(1).await;
     assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "R", "tm-R", Some("shared"), now));
     assert!(port.table().keys().has_test_holder("R", "tm-R"));
-    assert!(!host_registry::register_restoring_leaf(&port.intent_maps(), "P-reload", "tm-P", Some("shared"), now));
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "P-reload", "tm-P", Some("shared"), now));
+    assert!(port.table().keys().has_test_holder("P-reload", "tm-P"));
     host_registry::forget_restoring_leaf(&port.intent_maps(), "C", "tm-C", now);
     abort(&port, "tm-P", cg, &p);
     drop(ticket);
@@ -195,6 +196,8 @@ async fn an_alias_holder_registers_while_another_leaf_is_attaching_and_survives_
     assert_eq!(world.count_everywhere("Close"), 0);
     assert!(listing.sessions.iter().any(|s| s.tab_id == "shared" && s.alive && s.pid == 4242));
     assert_eq!(port.table().keys().state(PRIMARY, "shared"), Some(KeyState::Listed));
+    assert!(port.table().keys().has_test_holder("R", "tm-R"));
+    host_registry::forget_restoring_leaf(&port.intent_maps(), "P-reload", "tm-P", now);
     assert!(port.table().keys().has_test_holder("R", "tm-R"));
     // Forgetting the final holder is a positive close control.
     host_registry::forget_restoring_leaf(&port.intent_maps(), "R", "tm-R", now);

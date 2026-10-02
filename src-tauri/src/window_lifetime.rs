@@ -12,12 +12,14 @@ pub(crate) fn commit(build: WindowBuildGuard, window: &tauri::WebviewWindow) -> 
     let (label, wi) = build.identity();
     let label = label.to_string();
     let keys = build.keys();
+    let app = window.app_handle().clone();
     // Queue the listener before publishing the window. If it observes destruction
     // before commit, it invalidates this exact reservation. The runtime may still
     // drop the queued listener if destruction precedes its installation.
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             keys.destroy_window(&label, wi);
+            if let Some(state) = app.try_state::<crate::state::AppState>() { state.schedule_host_restore_release(); }
         }
     });
     build.commit()

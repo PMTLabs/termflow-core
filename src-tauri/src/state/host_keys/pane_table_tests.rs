@@ -7,6 +7,8 @@ mod transfer_tests;
 mod end_tests;
 #[path = "pane_payload_tests.rs"]
 mod payload_tests;
+#[path = "pane_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 struct Page { label: &'static str, wi: u64, pg: u64, seq: u64, incarnation: u64 }
 impl Page {
@@ -204,7 +206,8 @@ fn page_end_orphans_live_shells_removes_held_and_preserves_other_window() {
     assert_eq!(keys.pane_owner("tm-owned"), Some(Owner::Pane(owned.pi)));
     assert_eq!(keys.pane_owner("tm-waiting"), Some(Owner::Pane(held.pi)));
     assert_eq!(keys.destroy_window("owner", page.wi).len(), 1);
-    for leaf in ["tm-owned", "tm-parked", "tm-pending"] { assert_eq!(keys.pane_owner(leaf), Some(Owner::Orphaned)); }
+    for leaf in ["tm-owned", "tm-parked"] { assert_eq!(keys.pane_owner(leaf), Some(Owner::Orphaned)); }
+    assert!(keys.owner_state("tm-pending").is_none());
     assert_eq!(keys.pane_owner("tm-control"), Some(Owner::Pane(control.pi)));
     assert_eq!(keys.pane_owner("tm-waiting"), Some(Owner::Pane(held.pi)));
     assert!(keys.pane_op("owner", PaneRequest { pg: page.pg, seq: page.seq + 1, op: PaneOp::Settle }).is_err());

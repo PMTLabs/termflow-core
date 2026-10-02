@@ -9,6 +9,10 @@ fn native_ownership_handlers_validate_sender_and_keep_host_work_outside_stream()
     assert!(op.contains("dispatch_closes(state.inner(), effects.closes)"));
     assert!(!op.contains(".await") && !op.contains("run_create"));
     assert!(op.contains("if effects.wake_transfers"));
+    assert!(op.contains("if effects.release_restore_sweep { state.schedule_host_restore_release(); }"));
+    let schedule = fn_body(include_str!("terminals.rs"), "fn schedule_host_restore_release(");
+    assert!(schedule.contains("tauri::async_runtime::spawn("));
+    assert!(schedule.contains("state.release_host_restore_sweep(false).await"));
     let dispatch = fn_body(&commands, "fn dispatch_closes(");
     assert!(dispatch.contains("spawn_blocking"));
     assert!(dispatch.contains("state.end_shell(&pc, EndKind::Close(CloseStorage::Delete))"));
@@ -54,7 +58,7 @@ fn page_sender_and_original_window_end_remain_qualified_at_mutation() {
     let end = production(include_str!("host_keys/pane_transfers.rs"));
     let end = fn_body(&end, "fn end_pane_pages(");
     assert!(end.contains("pages.contains(&pi.pg)") && end.contains("pages.contains(&pg)"));
-    assert!(end.contains("Self::remove_held(inner, &leaf)"));
+    assert!(end.contains("Self::release_idle_owner(inner, &leaf)"));
     assert!(!end.contains("close_process") && !end.contains("kill_process") && !end.contains("emit("));
 }
 

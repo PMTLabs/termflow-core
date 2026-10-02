@@ -26,6 +26,7 @@ fn schedule_transfer_expiry(keys: crate::state::HostKeys) {
 pub(crate) fn pane_op(window: WebviewWindow, state: State<'_, AppState>, request: PaneRequest) -> Result<PaneReply, String> {
     let (reply, effects) = state.host_table.keys().pane_op(window.label(), request)?;
     dispatch_closes(state.inner(), effects.closes);
+    if effects.release_restore_sweep { state.schedule_host_restore_release(); }
     // A timer releases only abandoned ownership; it never closes a shell. Take
     // resets the stamp, so an earlier timer cannot expire a newer Taken state.
     if effects.wake_transfers {
