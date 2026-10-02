@@ -145,6 +145,7 @@ async fn close_while_frozen_disconnected_is_deferred_and_delivered_on_that_hosts
     assert_eq!(t.table.keys().state(h1, "k1"), None, "a post-close listing released the ending");
     // The session that was closed is not brought back as a recovered terminal, and
     // the pane that is still open is reattached in place.
+    port.table().keys().flush_deliveries();
     assert!(port.0.recovered.lock().unwrap().is_empty());
     assert_eq!(world.sessions("h1", "Attach"), vec!["k2".to_string()]);
 }
@@ -191,6 +192,7 @@ async fn a_listing_taken_just_after_a_deferred_close_does_not_bring_the_pane_bac
     assert_eq!(outcome, super::reconnect::FrozenReconnect::Reconnected);
     tokio::time::sleep(SEC).await;
 
+    port.table().keys().flush_deliveries();
     assert!(port.0.recovered.lock().unwrap().is_empty(), "the pane the user closed was not offered back");
     assert_eq!(
         world.sessions("h1", "Close"),

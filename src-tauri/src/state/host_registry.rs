@@ -98,13 +98,12 @@ pub(super) fn route_write(
     client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
 ) -> bool {
     let _ = (host_terminals, terminals);
-    keys.with_registered(id, |shell| {
-        let super::ShellStage::Hosted(stage) = &shell.stage else { return false };
-        match client_for(stage.channel) {
-            Some(client) => { let session_key = &stage.key; client.write_stdin(session_key, bytes) }
-            None => false,
-        }
-    }).unwrap_or(false)
+    let Some(shell) = keys.with_registered(id, Clone::clone) else { return false; };
+    let super::ShellStage::Hosted(stage) = &shell.stage else { return false; };
+    match client_for(stage.channel) {
+        Some(client) => client.write_registered(keys, id, stage.channel, &stage.key, bytes),
+        None => false,
+    }
 }
 
 /// Forward a resize to the host that owns `id`; false as for [`route_write`].
@@ -118,13 +117,12 @@ pub(super) fn route_resize(
     client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
 ) -> bool {
     let _ = (host_terminals, terminals);
-    keys.with_registered(id, |shell| {
-        let super::ShellStage::Hosted(stage) = &shell.stage else { return false };
-        match client_for(stage.channel) {
-            Some(client) => { let session_key = &stage.key; client.resize(session_key, cols, rows) }
-            None => false,
-        }
-    }).unwrap_or(false)
+    let Some(shell) = keys.with_registered(id, Clone::clone) else { return false; };
+    let super::ShellStage::Hosted(stage) = &shell.stage else { return false; };
+    match client_for(stage.channel) {
+        Some(client) => client.resize_registered(keys, id, stage.channel, &stage.key, cols, rows),
+        None => false,
+    }
 }
 
 /// Nudge the owning host to repaint `id`. True when `id` is host-owned, whether
@@ -141,7 +139,7 @@ pub(super) fn route_repaint(
     let info = terminals.get(id).map(|t| (t.cols, t.rows));
     if let Some((cols, rows)) = info {
         if let Some(client) = client_for(channel) {
-            keys.enqueue_session(&identity, || { client.nudge_repaint(&session_key, cols, rows); true });
+            client.repaint_owned(&identity, cols, rows);
         }
     }
     true
@@ -189,10 +187,9 @@ pub fn effective_session_key(leaf_id: &str, session_key: Option<&str>) -> String
     session_key.unwrap_or(leaf_id).to_string()
 }
 
-/// Ownership authority and legacy terminal projection used at registration.
+/// Restore registration consults only the ownership authority.
 pub(super) struct IntentMaps<'a> {
     pub keys: &'a HostKeys,
-    pub terminals: &'a DashMap<String, Terminal>,
 }
 
 /// A persisted pane is about to mount. Live terminals bind without a create,
@@ -204,9 +201,7 @@ pub(super) fn register_restoring_leaf(
     session_key: Option<&str>,
     now: Instant,
 ) -> bool {
-    maps.keys.register_restoring_leaf(label, leaf_id, session_key, now, || {
-        maps.terminals.iter().any(|t| t.renderer_terminal_id.as_deref() == Some(leaf_id))
-    })
+    maps.keys.register_restoring_leaf(label, leaf_id, session_key, now)
 }
 
 /// Forget only this window's holder; its alias marker cannot override a holder
@@ -229,6 +224,7 @@ pub(super) struct ListingMaps<'a> {
 pub(super) fn apply_answered_listing(
     maps: &ListingMaps,
     channel: HostChannel,
+    source: &PtyHostClient,
     listing: &crate::pty_host_client::SessionListing,
     now: Instant,
 ) -> Vec<String> {
@@ -237,8 +233,8 @@ pub(super) fn apply_answered_listing(
     // directly makes every live pane look unowned, which queues it for adoption
     // and lets a concurrent create re-adopt a LIVE session at offset 0 straight
     // into its parser.
-    maps.keys.listing_at(channel, listing, now, |key|
-        !session_registered_on_any_channel(maps.host_terminals, maps.terminals, key));
+    let unregistered = |key: &str| !session_registered_on_any_channel(maps.host_terminals, maps.terminals, key);
+    if !source.apply_listing_on(maps.keys, channel, listing, now, unregistered) { return Vec::new(); }
     let owned_sessions = sessions_by_key(maps.host_terminals, maps.terminals, channel);
     let mut duplicates = Vec::new();
     for meta in &listing.sessions {

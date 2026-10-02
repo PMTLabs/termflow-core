@@ -197,10 +197,10 @@ impl HostTable {
     pub fn publish(&self, channel: HostChannel, epoch: u64) -> bool {
         let mut inner = self.shared.lock();
         match inner.slot_mut(channel) {
-            Some(slot) if slot.admission != Admission::Open => false,
+            Some(slot) if slot.admission != Admission::Open || slot.epoch > epoch => false,
             Some(slot) => {
                 if slot.epoch != epoch {
-                    self.routes().remove_channel(channel);
+                    self.routes().remove_epoch(channel, slot.epoch);
                 }
                 slot.epoch = epoch;
                 true

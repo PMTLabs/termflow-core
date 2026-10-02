@@ -113,6 +113,7 @@ async fn a_real_empty_host_exits_after_the_ticker_retires_it() {
     let channel = HostChannel::Frozen(id);
     let epoch = port.0.table.reserve_epoch().unwrap();
     assert!(port.0.table.publish(channel, epoch));
+    client.bind_sessions(port.table().keys(), channel, epoch);
     port.publish_frozen(FrozenHost {
         id,
         generation: None,

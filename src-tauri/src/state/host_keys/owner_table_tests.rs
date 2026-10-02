@@ -28,6 +28,7 @@ fn exhausted_admission_sequence_changes_no_owner_or_key() {
 fn stale_host_completion_releases_only_its_generation_and_failed_attach_owns_no_close() {
     for mode in [StageMode::Spawn, StageMode::Attach] {
         let keys = HostKeys::default();
+        keys.connect_fixture(HostChannel::Primary, 1);
         if mode == StageMode::Attach {
             keys.listing(HostChannel::Primary, &SessionListing { request_no: 1, sessions: vec![termflow_pty_protocol::SessionMeta {
                 tab_id: "legacy".into(), pid: 17, head_offset: 0, tail_offset: 0, alive: true,

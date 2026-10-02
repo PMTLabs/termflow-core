@@ -33,20 +33,16 @@ impl HostKeys {
         }
     }
 
-    /// The closure is a synchronous, non-blocking enqueue, never host I/O.
-    pub(crate) fn enqueue_session(&self, identity: &SessionIdentity, enqueue: impl FnOnce() -> bool) -> bool {
-        let inner = self.lock();
-        Self::matches_session(&inner, identity) && enqueue()
-    }
-
     pub(crate) fn enqueue_session_on(&self, identity: &SessionIdentity, channel: HostChannel, epoch: u64, enqueue: impl FnOnce() -> bool) -> bool {
         let inner = self.lock();
         identity.channel == channel
-            && inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch)
+            && inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch && c.alive.load(Ordering::Acquire))
             && Self::matches_session(&inner, identity) && enqueue()
     }
 
-    pub(crate) fn recover_listed(&self, channel: HostChannel, key: &str, unregistered: impl FnOnce() -> bool, announce: impl FnOnce()) {
+    pub(crate) fn recover_listed(&self, channel: HostChannel, key: &str, unregistered: impl FnOnce() -> bool, announce: impl FnOnce() + Send + 'static) {
+        // Initialise the worker outside ownership. Delivery may re-enter us.
+        let delivery = self.delivery_sender();
         let mut inner = self.lock();
         if inner.keys.get(&(channel, key.into())).map(|r| &r.state) != Some(&KeyState::Listed)
             || inner.keys.iter().any(|((_, k), r)| k == key && matches!(r.state, KeyState::Held(_) | KeyState::Bound(_)))
@@ -54,7 +50,49 @@ impl HostKeys {
         let now = std::time::Instant::now();
         if Self::protected(&inner, key, now) { return; }
         if Self::unowned_due(&inner, key, now) { Self::end(&mut inner, channel, key, CloseState::Pending); }
-        else { announce(); }
+        else { let _ = delivery.send(Box::new(announce)); }
+    }
+
+    pub(crate) fn publish_route_on(&self, identity: &SessionIdentity, channel: HostChannel, epoch: u64) -> bool {
+        #[cfg(test)]
+        {
+            let hook = self.route_hook.lock().unwrap().clone();
+            if let Some(hook) = hook { hook(); }
+        }
+        self.enqueue_session_on(identity, channel, epoch, || {
+            self.routes.register(channel, &identity.key, &identity.process, epoch);
+            true
+        })
+    }
+
+    pub(crate) fn publish_frame(&self, channel: HostChannel, key: &str, epoch: u64, process: &str, publish: impl FnOnce()) -> bool {
+        let inner = self.lock();
+        let current = inner.channels.get(&channel).and_then(|c| c.connection.as_ref())
+            .is_some_and(|c| c.epoch == epoch && c.alive.load(Ordering::Acquire));
+        if !current || self.routes.resolve(channel, key, epoch, true).as_deref() != Some(process) { return false; }
+        let identity = SessionIdentity { channel, key: key.into(), process: process.into(),
+            cg: inner.owners.values().find(|r| owners::shell_of(&r.state).is_some_and(|s| s.process == process)).map(|r| r.cg) };
+        if !Self::matches_session(&inner, &identity) { return false; }
+        publish();
+        true
+    }
+
+    pub(crate) fn publish_shell_projection<T>(&self, process: &str, publish: impl FnOnce() -> T) -> Option<T> {
+        let inner = self.lock();
+        let valid = inner.owners.values().any(|r| matches!(&r.state,
+            OwnerState::Placing { stage: Some(s), staged_exited: false, .. } if s.process == process));
+        valid.then(publish)
+    }
+
+    pub(crate) fn detach_idle(&self, channel: HostChannel, epoch: u64, detach: impl FnOnce() -> bool) -> bool {
+        let mut inner = self.lock();
+        if inner.owners.values().any(|r| owners::shell_of(&r.state).is_some_and(|s|
+            matches!(&s.stage, ShellStage::Hosted(h) if h.channel == channel)))
+            || inner.keys.iter().any(|((c, _), r)| *c == channel && matches!(r.state, KeyState::Held(_) | KeyState::Bound(_)))
+            || !inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch)
+            || !detach() { return false; }
+        self.disconnect_inner(&mut inner, channel, epoch);
+        true
     }
 
     pub(crate) fn close_original(&self, identity: &SessionIdentity) -> bool {
@@ -75,6 +113,15 @@ impl HostKeys {
         };
         if original { cleanup(); }
         original
+    }
+
+    pub(crate) fn with_registered_on<T>(&self, process: &str, channel: HostChannel, key: &str, epoch: u64, effect: impl FnOnce() -> T) -> Option<T> {
+        let inner = self.lock();
+        if !inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch) { return None; }
+        let valid = inner.owners.values().any(|r| matches!(&r.state, OwnerState::Registered(s)
+            if s.process == process && matches!(&s.stage, ShellStage::Hosted(h) if h.channel == channel && h.key == key)))
+            && inner.keys.get(&(channel, key.into())).map(|r| &r.state) == Some(&KeyState::Bound(process.into()));
+        valid.then(effect)
     }
 
     /// User mutations require a Registered row and its Bound key through enqueue.

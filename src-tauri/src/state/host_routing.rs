@@ -75,8 +75,10 @@ fn surface_ambiguity<P: RoutingPort>(port: &P, leaf: &str) {
         .filter(|(_, key)| parse_session_key(key) == SessionKeyKind::V2 { owner_leaf: leaf }).collect();
     if own.len() > 1 {
         for (channel, key) in own {
+            let delivery_port = port.clone();
+            let delivery_key = key.clone();
             port.table().keys().recover_listed(channel, &key, || true,
-                || port.surface_ambiguous(std::slice::from_ref(&key)));
+                move || delivery_port.surface_ambiguous(std::slice::from_ref(&delivery_key)));
         }
     }
 }

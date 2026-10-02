@@ -110,44 +110,61 @@ impl ElevatedHost {
         *self.proc.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc);
     }
 
-    /// Null the client without touching the process handle — used by
-    /// `on_disconnect` (the pipe already dropped; `shutdown` below still owns
-    /// waiting on the process and logging).
-    pub fn clear_client(&self) {
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    pub(crate) fn clear_client_on<T>(&self, epoch: u64, snapshot: impl FnOnce() -> T) -> Option<T> {
+        let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        if !slot.as_ref().is_some_and(|c| c.session_epoch(HostChannel::Elevated) == Some(epoch)) { return None; }
+        let captured = snapshot();
+        slot.take();
+        Some(captured)
     }
 
-    /// Tear the elevated connection down: drop every clone of the client we
-    /// hold (which drops the writer task's pipe handle, EOF-ing the elevated
-    /// sidecar — see `pty-host`'s `transport::dial`), then wait up to 5s for
-    /// the process to exit on its own. Idempotent: safe to call when already
-    /// torn down (e.g. `on_disconnect` already cleared the client).
-    #[cfg(windows)]
+    /// A queued last-owner cleanup must not detach a connection another create
+    /// has acquired. Admission is closed before the owner check and stays closed
+    /// while the exact transport is cancelled; connection setup is serialized too.
+    pub(crate) async fn shutdown_idle(&self, table: &crate::state::HostTable, epoch: u64) -> bool {
+        let _connecting = self.connecting.lock().await;
+        let Ok(_drain) = table.drain_host(HostChannel::Elevated) else { return false; };
+        if table.epoch(HostChannel::Elevated) != Some(epoch) { return false; }
+        let mut client = None;
+        if !table.keys().detach_idle(HostChannel::Elevated, epoch, || {
+            let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+            if !slot.as_ref().is_some_and(|c| c.session_epoch(HostChannel::Elevated) == Some(epoch)) { return false; }
+            client = slot.take();
+            true
+        }) { return false; }
+        #[cfg(windows)]
+        let proc = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(client) = client { client.close_transport().await; }
+        #[cfg(windows)]
+        self.wait_owned_process(proc).await;
+        true
+    }
+
+    /// Global exit owns closed admission. Stop the transport explicitly: the
+    /// key authority retains a sender, so clone-count EOF is not a shutdown signal.
     pub async fn shutdown(&self) {
+        let _connecting = self.connecting.lock().await;
         let client = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
-        // Dropping the last clone closes the outbound channel, which ends the
-        // writer task and drops its pipe handle — the EOF the elevated
-        // sidecar's dial-out mode exits on (plan 045 §4.1).
-        drop(client);
-
-        let Some(proc) = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-            return;
-        };
-        let pid = proc.pid;
-        let exited = tokio::task::spawn_blocking(move || wait_for_exit(proc, 5_000))
-            .await
-            .unwrap_or(false);
-        if exited {
-            log::info!("[ADMIN] elevated pty-host (pid {pid}) exited after teardown");
-        } else {
-            log::warn!(
-                "[ADMIN] elevated pty-host (pid {pid}) did not exit within 5s of teardown"
-            );
-        }
+        #[cfg(windows)]
+        let proc = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(client) = client { client.close_transport().await; }
+        #[cfg(windows)]
+        self.wait_owned_process(proc).await;
     }
 
-    #[cfg(not(windows))]
-    pub async fn shutdown(&self) {}
+    #[cfg(windows)]
+    async fn wait_owned_process(&self, proc: Option<launch::LaunchedProcess>) {
+        let Some(proc) = proc else { return; };
+        let pid = proc.pid;
+        let exited = tokio::task::spawn_blocking(move || wait_for_exit(proc, 5_000)).await.unwrap_or(false);
+        if exited { log::info!("[ADMIN] elevated pty-host (pid {pid}) exited after teardown"); }
+        else { log::warn!("[ADMIN] elevated pty-host (pid {pid}) did not exit within 5s of teardown"); }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_client(&self, client: PtyHostClient) {
+        *self.client.lock().unwrap() = Some(client);
+    }
 }
 
 #[cfg(windows)]

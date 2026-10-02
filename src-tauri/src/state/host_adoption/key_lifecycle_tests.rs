@@ -211,6 +211,7 @@ async fn existing_closes_above_the_admission_cap_are_retained_and_resent_before_
         assert_eq!(port.table().keys().candidate("tm-restoring", Some(key)), None);
     }
     super::panes::surface_orphans(&port, shells.iter().map(|(_, k)| meta(k, 11)).chain([meta("listed-control", 99)]).collect(), CHANNEL);
+    port.table().keys().flush_deliveries();
     assert_eq!(port.0.recovered.lock().unwrap().as_slice(), &["listed-control"]);
     assert!(port.table().keys().stage(CHANNEL, "new-spawn", StageMode::Spawn).unwrap_err().starts_with("host-ownership-pending:"));
     assert!(port.table().keys().stage(CHANNEL, "listed-control", StageMode::Attach).unwrap_err().starts_with("host-ownership-pending:"));

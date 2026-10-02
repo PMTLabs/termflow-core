@@ -54,9 +54,11 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
     for orphan in orphans {
         // Registration can race the UI pass. Decide and enqueue recovery under
         // the same authority that makes a listed key eligible for attachment.
+        let delivery_port = port.clone();
+        let key = orphan.tab_id.clone();
         port.table().keys().recover_listed(channel, &orphan.tab_id,
             || !port.registered_on_any_channel(&orphan.tab_id),
-            || port.announce_recovered(&orphan.tab_id));
+            move || delivery_port.announce_recovered(&key));
     }
 }
 
@@ -105,11 +107,8 @@ pub(super) async fn reattach_listed<P: PanePort>(
             port.table().keys().close_original(identity);
             continue;
         }
-        let Some(epoch) = port.table().epoch(channel) else { continue };
-        if !port.table().keys().enqueue_session(identity, || {
-            port.table().routes().register(channel, &a.tab_id, &identity.process, epoch);
-            true
-        }) { continue; }
+        let Some(epoch) = client.session_epoch(channel) else { continue };
+        if !port.table().keys().publish_route_on(identity, channel, epoch) { continue; }
         match client.attach_owned(identity, a.from_offset).await {
             Ok(Some(true)) => log::info!(
                 "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",
@@ -130,10 +129,7 @@ pub(super) async fn reattach_listed<P: PanePort>(
         // Dimensions live under the PROCESS id; the nudge goes to the host,
         // so it stays addressed by the session key.
         let (cols, rows) = port.pane_size(&identity.process);
-        port.table().keys().enqueue_session(identity, || {
-            client.nudge_repaint(&a.tab_id, cols, rows);
-            true
-        });
+        client.repaint_owned(identity, cols, rows);
         // The registered terminal remains the exclusive owner across an
         // in-place reconnect; deleting this claim would let a late create
         // register a second identity for the same live host session.

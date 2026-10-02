@@ -35,7 +35,7 @@ async fn listing(port: &FakePort, now: Clock) -> crate::pty_host_client::Session
     let answer = client.list_sessions_numbered().await.unwrap();
     host_registry::apply_answered_listing(&ListingMaps {
         host_terminals: &port.0.host_terminals, terminals: &port.0.terminals, keys: port.table().keys(),
-    }, CHANNEL, &answer, now);
+    }, CHANNEL, &client, &answer, now);
     answer
 }
 async fn fence(port: &FakePort) -> crate::pty_host_client::SessionListing {
@@ -69,6 +69,7 @@ async fn shared_override_remains_live_until_both_restoring_holders_forget() {
     assert!(port.table().keys().eligible(CHANNEL, K));
     assert_eq!(host_registry::orphan_verdict(port.table().keys(), K, now), OrphanVerdict::Restoring);
     super::panes::surface_orphans(&port, answer.sessions, CHANNEL);
+    port.table().keys().flush_deliveries();
     assert_eq!(*port.0.recovered.lock().unwrap(), vec!["tm-stray"], "shared restoring key must not be recovered either");
     assert_eq!(closes(&world), vec!["tm-control"]);
 
@@ -270,13 +271,17 @@ fn restore_commands_use_injected_window_labels_and_close_policy_reads_shared_own
         assert!(fn_body(&commands, &format!("pub fn {name}(")).contains(call));
     }
     let keys = std::fs::read_to_string(root.join("state/host_keys.rs")).unwrap();
-    for name in ["pub(crate) fn listing_at(", "pub fn close_listed("] {
-        let body = fn_body(&keys, name);
-        assert!(body.contains("let mut inner = self.lock()"));
-        assert!(body.contains("Self::unowned_due(&inner,"));
-        assert!(body.contains("KeyState::Listed"));
-        assert!(body.contains("Self::end(&mut inner,"));
-    }
+    let listing = fn_body(&keys, "pub(crate) fn listing_on(");
+    assert!(listing.contains("let mut inner = self.lock()"));
+    assert!(listing.contains("c.epoch == epoch"));
+    assert!(listing.contains("Self::apply_listing(&mut inner,"));
+    let apply = fn_body(&keys, "fn apply_listing(");
+    for needle in ["Self::unowned_due(", "KeyState::Listed", "Self::end(inner,"] { assert!(apply.contains(needle)); }
+    let body = fn_body(&keys, "pub fn close_listed(");
+    assert!(body.contains("let mut inner = self.lock()"));
+    assert!(body.contains("Self::unowned_due(&inner,"));
+    assert!(body.contains("KeyState::Listed"));
+    assert!(body.contains("Self::end(&mut inner,"));
     let restore = std::fs::read_to_string(root.join("state/host_keys/restore.rs")).unwrap();
     let policy = fn_body(&restore, "pub(super) fn unowned_due(");
     for needle in ["Self::protected(inner,", "inner.closed_unowned", "inner.keys", "KeyState::Held", "KeyState::Bound"] { assert!(policy.contains(needle)); }

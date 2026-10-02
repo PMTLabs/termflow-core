@@ -12,6 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 mod owners;
 mod restore;
 mod effects;
+mod delivery;
 pub(crate) use effects::SessionIdentity;
 pub use owners::{Admission as CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
 
@@ -60,8 +61,17 @@ struct Inner {
     cap: usize,
 }
 
+#[cfg(test)]
+type EffectHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 #[derive(Clone)]
-pub struct HostKeys { inner: Arc<Mutex<Inner>>, routes: HostRoutes }
+pub struct HostKeys {
+    inner: Arc<Mutex<Inner>>,
+    routes: HostRoutes,
+    deliveries: Arc<std::sync::OnceLock<std::sync::mpsc::Sender<delivery::Delivery>>>,
+    #[cfg(test)]
+    pub(crate) route_hook: EffectHook,
+}
 
 impl Default for HostKeys {
     fn default() -> Self { Self::new(HostRoutes::default()) }
@@ -72,10 +82,21 @@ impl HostKeys {
         Self { inner: Arc::new(Mutex::new(Inner {
             keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
             restore_holders: HashMap::new(), closed_unowned: HashMap::new(), cap: ENDING_CAP,
-        })), routes }
+        })), routes, deliveries: Arc::default(),
+            #[cfg(test)]
+            route_hook: Arc::default(),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> { self.inner.lock().unwrap_or_else(|e| e.into_inner()) }
+
+    /// Key-only fixtures still install an explicit binding; production never
+    /// publishes a route without a live matching connection.
+    #[cfg(test)]
+    pub(crate) fn connect_fixture(&self, channel: HostChannel, epoch: u64) {
+        let (sender, _) = tokio::sync::mpsc::unbounded_channel();
+        self.connect(channel, epoch, sender, Arc::new(AtomicBool::new(true)));
+    }
 
     #[cfg(test)]
     pub fn set_cap(&self, cap: usize) { self.lock().cap = cap; }
@@ -135,6 +156,7 @@ impl HostKeys {
 
     pub fn publish(&self, stage: &KeyStage, process: &str, epoch: u64) -> bool {
         let inner = self.lock();
+        if !inner.channels.get(&stage.channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch && c.alive.load(Ordering::Acquire)) { return false; }
         if let Some(row) = inner.owners.values().find(|r| r.cg == stage.cg) {
             if !matches!(&row.state, OwnerState::Placing { stage: Some(shell), .. }
                 if shell.process == process && matches!(&shell.stage, ShellStage::Hosted(h) if h.channel == stage.channel && h.key == stage.key)) {
@@ -149,6 +171,7 @@ impl HostKeys {
 
     pub fn restore_route(&self, channel: HostChannel, key: &str, process: &str, epoch: u64) -> bool {
         let inner = self.lock();
+        if !inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch && c.alive.load(Ordering::Acquire)) { return false; }
         if inner.keys.get(&(channel, key.to_string())).is_some_and(|r| r.state == KeyState::Bound(process.to_string())) {
             self.routes.register(channel, key, process, epoch);
             true
@@ -275,12 +298,15 @@ impl HostKeys {
     }
 
     pub fn disconnect(&self, channel: HostChannel, epoch: u64) {
-        let mut inner = self.lock();
+        self.disconnect_inner(&mut self.lock(), channel, epoch);
+    }
+
+    fn disconnect_inner(&self, inner: &mut Inner, channel: HostChannel, epoch: u64) {
         if inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch) {
             inner.channels.get_mut(&channel).unwrap().connection = None;
             self.routes.remove_channel(channel);
         }
-        for ((c, _), r) in &mut inner.keys {
+        for ((c, _), r) in inner.keys.iter_mut() {
             if *c == channel && matches!(r.state, KeyState::Ending { close: CloseState::Sent(e), .. } if e == epoch) {
                 r.state = KeyState::Ending { close: CloseState::Pending, stamp: None };
             }
@@ -307,8 +333,18 @@ impl HostKeys {
         for key in pending { Self::send(&mut inner, channel, &key); }
     }
 
-    pub(crate) fn enqueue_listing(&self, channel: HostChannel, enqueue: impl FnOnce() -> bool) -> Option<u64> {
+    pub(crate) fn enqueue_listing_on(&self, channel: HostChannel, epoch: u64, enqueue: impl FnOnce() -> bool) -> Option<u64> {
         let mut inner = self.lock();
+        if !inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch) { return None; }
+        Self::enqueue_listing_inner(&mut inner, channel, enqueue)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enqueue_listing(&self, channel: HostChannel, enqueue: impl FnOnce() -> bool) -> Option<u64> {
+        Self::enqueue_listing_inner(&mut self.lock(), channel, enqueue)
+    }
+
+    fn enqueue_listing_inner(inner: &mut Inner, channel: HostChannel, enqueue: impl FnOnce() -> bool) -> Option<u64> {
         let ch = inner.channels.entry(channel).or_default();
         let next = ch.requests.checked_add(1)?;
         if !enqueue() { return None; }
@@ -318,12 +354,24 @@ impl HostKeys {
 
     /// Apply only answered listings. The unowned-close decision and the cell
     /// change occur in this same critical section; transport errors never enter.
+    #[cfg(test)]
     pub fn listing(&self, channel: HostChannel, listing: &SessionListing, close_unowned: impl Fn(&str) -> bool) {
         self.listing_at(channel, listing, std::time::Instant::now(), close_unowned);
     }
 
-    pub(crate) fn listing_at(&self, channel: HostChannel, listing: &SessionListing, now: std::time::Instant, close_unowned: impl Fn(&str) -> bool) {
+    pub(crate) fn listing_on(&self, channel: HostChannel, epoch: u64, listing: &SessionListing, now: std::time::Instant, close_unowned: impl Fn(&str) -> bool) -> bool {
         let mut inner = self.lock();
+        if !inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch) { return false; }
+        Self::apply_listing(&mut inner, channel, listing, now, close_unowned);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listing_at(&self, channel: HostChannel, listing: &SessionListing, now: std::time::Instant, close_unowned: impl Fn(&str) -> bool) {
+        Self::apply_listing(&mut self.lock(), channel, listing, now, close_unowned);
+    }
+
+    fn apply_listing(inner: &mut Inner, channel: HostChannel, listing: &SessionListing, now: std::time::Instant, close_unowned: impl Fn(&str) -> bool) {
         let ch = inner.channels.entry(channel).or_default();
         if listing.request_no <= ch.answered { return; }
         ch.answered = listing.request_no;
@@ -348,8 +396,8 @@ impl HostKeys {
             if r.state == KeyState::Listed {
                 r.pid = meta.pid;
                 r.alive = meta.alive;
-                if Self::unowned_due(&inner, &meta.tab_id, now) && close_unowned(&meta.tab_id) {
-                    Self::end(&mut inner, channel, &meta.tab_id, CloseState::Pending);
+                if Self::unowned_due(inner, &meta.tab_id, now) && close_unowned(&meta.tab_id) {
+                    Self::end(inner, channel, &meta.tab_id, CloseState::Pending);
                 }
             }
         }
@@ -374,6 +422,11 @@ impl HostKeys {
 
     #[cfg(test)]
     pub fn contains_key(&self, key: &str) -> bool { self.lock().keys.keys().any(|(_, k)| k == key) }
+
+    #[cfg(test)]
+    pub(crate) fn remove_listed_fixture(&self, channel: HostChannel) {
+        self.lock().keys.retain(|(c, _), r| *c != channel || r.state != KeyState::Listed);
+    }
 
     #[cfg(test)]
     pub fn remove_fixture(&self, key: &str) { self.lock().keys.retain(|(_, k), _| k != key); }
@@ -403,3 +456,5 @@ impl HostKeys {
 mod key_table_tests;
 #[cfg(test)]
 mod owner_table_tests;
+#[cfg(test)]
+mod projection_tests;

@@ -33,6 +33,10 @@ impl HostRoutes {
         self.entries.retain(|_, route| route.process != process);
     }
 
+    pub(crate) fn remove_epoch(&self, channel: HostChannel, epoch: u64) {
+        self.entries.retain(|(owner, _), route| *owner != channel || route.epoch != epoch);
+    }
+
     pub fn remove_channel(&self, channel: HostChannel) {
         self.entries.retain(|(owner, _), _| *owner != channel);
     }

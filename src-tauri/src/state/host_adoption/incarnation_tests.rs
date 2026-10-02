@@ -125,6 +125,7 @@ async fn listings_choose_own_leaf_then_exact_override_then_legacy_and_leave_ambi
             }
         }
         if listed.contains(&second.as_str()) {
+            port.table().keys().flush_deliveries();
             let mut recovered = port.0.recovered.lock().unwrap().clone();
             recovered.sort();
             assert_eq!(recovered, vec![own.clone(), second.clone()]);

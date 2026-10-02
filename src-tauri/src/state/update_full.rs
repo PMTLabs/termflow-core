@@ -194,7 +194,10 @@ async fn scope_of<P: FullUpdatePort>(port: &P, hosts: &[OwnedHost]) -> Scope {
             // A fast reply may have become stale while another host was listing.
             Some((channel, epoch, client, sessions))
                 if listing_is_current(port.table(), channel, epoch, client, Admission::Open) => {
-                port.table().keys().listing(channel, &sessions, |_| false);
+                if !client.apply_listing_on(port.table().keys(), channel, &sessions, std::time::Instant::now(), |_| false) {
+                    unknown = true;
+                    continue;
+                }
                 let live = sessions.iter().filter(|s| s.alive).count();
                 shell_count = shell_count.saturating_add(u32::try_from(live).unwrap_or(u32::MAX));
             }

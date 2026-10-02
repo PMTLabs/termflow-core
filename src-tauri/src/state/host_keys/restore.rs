@@ -30,11 +30,11 @@ impl Intent {
 }
 
 impl HostKeys {
-    pub(crate) fn register_restoring_leaf(&self, label: &str, leaf: &str, override_key: Option<&str>, now: Instant, already_registered: impl FnOnce() -> bool) -> bool {
+    pub(crate) fn register_restoring_leaf(&self, label: &str, leaf: &str, override_key: Option<&str>, now: Instant) -> bool {
         let mut inner = self.lock();
         // Unstaged placement is still waiting for the hosts. Staged or live
         // ownership will bind without another restore registration.
-        if inner.owners.get(leaf).is_some_and(|r| owners::shell_of(&r.state).is_some()) || already_registered() { return false; }
+        if inner.owners.get(leaf).is_some_and(|r| owners::shell_of(&r.state).is_some()) { return false; }
         let aliases = Aliases::new(leaf, override_key);
         inner.closed_unowned.retain(|_, marker| !marker.aliases.intersects(&aliases));
         inner.restore_holders.insert((label.into(), leaf.into()), Intent { aliases, stamp: now });

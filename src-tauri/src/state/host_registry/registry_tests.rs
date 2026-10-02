@@ -47,6 +47,19 @@ fn tables(entries: &[(&str, &str, HostChannel)]) -> Tables {
     t
 }
 
+fn register_rows(keys: &HostKeys, tables: &Tables) {
+    use crate::state::{CreateAdmission, CreateMode, ShellStage, StagedShell, Completion};
+    for t in tables.terminals.iter() {
+        let leaf = t.renderer_terminal_id.as_deref().unwrap();
+        let CreateAdmission::Run(cg) = keys.admit_create(leaf, CreateMode::Mount).unwrap() else { panic!("admission") };
+        let channel = tables.host_terminals.get(t.key()).map(|c| *c);
+        let hosted = channel.map(|c| (c, t.session_key.as_str(), StageMode::Spawn));
+        let (stage, _, _) = keys.stage_shell(leaf, cg, t.key(), hosted).unwrap();
+        let shell = StagedShell { process: t.key().clone(), stage: stage.map_or(ShellStage::Local, ShellStage::Hosted) };
+        assert!(matches!(keys.complete_shell(leaf, cg, &shell), Completion::Registered));
+    }
+}
+
 impl Tables {
     fn registered_anywhere(&self, key: &str) -> bool {
         session_registered_on_any_channel(&self.host_terminals, &self.terminals, key)
@@ -238,7 +251,8 @@ fn frozen_ids_are_never_reused() {
 fn restore_intent_skips_a_key_that_is_already_registered() {
     let t = tables(&[("pc-1", "tm-live", FROZEN_1)]);
     let keys = HostKeys::default();
-    let maps = IntentMaps { keys: &keys, terminals: &t.terminals };
+    register_rows(&keys, &t);
+    let maps = IntentMaps { keys: &keys };
     let now = Instant::now();
 
     assert!(!register_restoring_leaf(&maps, "main", "tm-live", None, now));
@@ -255,7 +269,8 @@ fn restore_intent_skips_a_key_held_by_an_in_process_terminal() {
     let t = tables(&[("pc-host", "tm-hosted", FROZEN_1)]);
     t.terminals.insert("pc-local".into(), terminal("pc-local", "tm-local"));
     let keys = HostKeys::default();
-    let maps = IntentMaps { keys: &keys, terminals: &t.terminals };
+    register_rows(&keys, &t);
+    let maps = IntentMaps { keys: &keys };
     let now = Instant::now();
 
     assert!(!t.registered_anywhere("tm-local"), "no host owns it");
@@ -269,6 +284,7 @@ fn restore_intent_skips_a_key_held_by_an_in_process_terminal() {
 fn the_leaf_entry_point_skips_an_in_process_terminal_too() {
     let i = Intent::new(&[]);
     i.tables.terminals.insert("pc-local".into(), terminal("pc-local", "tm-local"));
+    register_rows(&i.keys, &i.tables);
     assert!(!register_restoring_leaf(&i.maps(), "main", "tm-local", None, Instant::now()));
     assert_eq!(i.keys.holder_count(), 0);
 }
@@ -308,7 +324,7 @@ fn restore_intent_expires_unless_refreshed_and_a_reap_cannot_drop_a_refreshed_on
 fn closed_unowned_key_is_closed_when_any_host_reports_it() {
     let t = tables(&[]);
     let keys = HostKeys::default();
-    let maps = IntentMaps { keys: &keys, terminals: &t.terminals };
+    let maps = IntentMaps { keys: &keys };
     let now = Instant::now();
     assert!(register_restoring_leaf(&maps, "main", "tm-closed", None, now));
     forget_restoring_leaf(&maps, "main", "tm-closed", now);
@@ -445,16 +461,15 @@ struct Intent {
 
 impl Intent {
     fn new(entries: &[(&str, &str, HostChannel)]) -> Self {
-        Self {
-            keys: HostKeys::default(),
-            tables: tables(entries),
-        }
+        let keys = HostKeys::default();
+        let tables = tables(entries);
+        register_rows(&keys, &tables);
+        Self { keys, tables }
     }
 
     fn maps(&self) -> IntentMaps<'_> {
         IntentMaps {
             keys: &self.keys,
-            terminals: &self.tables.terminals,
         }
     }
 }

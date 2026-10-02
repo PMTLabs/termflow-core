@@ -131,7 +131,6 @@ async fn a_real_respawn_uses_a_new_key_and_rejects_held_output_from_the_closed_s
     let table = HostTable::new();
     let epoch = table.reserve_epoch().unwrap();
     assert!(table.publish(HostChannel::Primary, epoch));
-    table.routes().register(HostChannel::Primary, &first_session_key, &process_first, epoch);
     let armed = Arc::new(AtomicBool::new(false));
     let captured = Arc::new(Mutex::new(None));
     let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
@@ -180,6 +179,10 @@ async fn a_real_respawn_uses_a_new_key_and_rejects_held_output_from_the_closed_s
     };
     let (read, write) = tokio::io::split(gui);
     let client = wire_client(read, write, deps);
+    client.bind_sessions(table.keys(), HostChannel::Primary, epoch);
+    let (stage, _) = table.keys().stage(HostChannel::Primary, &first_session_key, crate::state::StageMode::Spawn).unwrap();
+    assert!(table.keys().publish(&stage, &process_first, epoch));
+    assert!(table.keys().complete(&stage, &process_first));
     let spec = SpawnSpec {
         shell: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(),
         args: if cfg!(windows) { vec!["/D".into(), "/Q".into()] } else { vec!["-i".into()] },
@@ -196,7 +199,9 @@ async fn a_real_respawn_uses_a_new_key_and_rejects_held_output_from_the_closed_s
     table.routes().remove_process(&process_first);
     client.close(&first_session_key);
     assert!(!client.list_sessions().await.unwrap().iter().any(|meta| meta.tab_id == first_session_key));
-    table.routes().register(HostChannel::Primary, &second_session_key, &process_second, epoch);
+    let (stage, _) = table.keys().stage(HostChannel::Primary, &second_session_key, crate::state::StageMode::Spawn).unwrap();
+    assert!(table.keys().publish(&stage, &process_second, epoch));
+    assert!(table.keys().complete(&stage, &process_second));
     assert!(client.spawn_session(&second_session_key, &spec).await.unwrap() > 0);
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {

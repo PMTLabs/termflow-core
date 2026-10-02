@@ -154,7 +154,7 @@ mod restore_sweep_gate_tests {
         assert!(eligible < emit, "listed-key qualification must precede recovery emission");
         let authority = crate::state::source_scan::production(include_str!("host_keys/effects.rs"));
         let decision = crate::state::source_scan::fn_body(&authority, "fn recover_listed(");
-        assert!(decision.find("Some(&KeyState::Listed)").unwrap() < decision.find("announce()").unwrap());
+        assert!(decision.find("Some(&KeyState::Listed)").unwrap() < decision.find("delivery.send(Box::new(announce))").unwrap());
         assert!(decision.contains("let mut inner = self.lock()"));
     }
 
@@ -601,8 +601,10 @@ impl<R: Runtime> AppState<R> {
             return;
         }
         let elevated_host = self.elevated_host.clone();
+        let table = self.host_table.clone();
+        let Some(epoch) = elevated_host.client_clone().and_then(|c| c.session_epoch(HostChannel::Elevated)) else { return; };
         tauri::async_runtime::spawn(async move {
-            elevated_host.shutdown().await;
+            elevated_host.shutdown_idle(&table, epoch).await;
         });
     }
 
@@ -757,14 +759,11 @@ impl<R: Runtime> AppState<R> {
                     "[ADMIN] elevated pty-host pipe dropped; ending its session(s) \
                      (no auto-relaunch, no re-prompt)"
                 );
-                st_disc.host_table.routes().remove_channel(HostChannel::Elevated);
-                st_disc.elevated_host.clear_client();
-                let elevated_ids: Vec<String> = st_disc
-                    .host_terminals
-                    .iter()
+                let Some(elevated_ids) = st_disc.elevated_host.clear_client_on(epoch, || st_disc
+                    .host_terminals.iter()
                     .filter(|e| *e.value() == HostChannel::Elevated)
-                    .map(|e| e.key().clone())
-                    .collect();
+                    .map(|e| e.key().clone()).collect::<Vec<String>>()) else { return; };
+                st_disc.host_table.routes().remove_epoch(HostChannel::Elevated, epoch);
                 for id in elevated_ids {
                     st_disc.teardown_host_terminal(&id);
                 }
@@ -950,7 +949,6 @@ impl<R: Runtime> AppState<R> {
     fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
         host_registry::IntentMaps {
             keys: self.host_table.keys(),
-            terminals: &self.terminals,
         }
     }
 

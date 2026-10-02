@@ -22,7 +22,6 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
         let (stream, server) = tokio::io::duplex(4096);
         let (rd, wr) = tokio::io::split(stream);
         let (key, process) = if channel == channels[0] { ("tm-new", "pc-new") } else { ("tm-old", "pc-old") };
-        table.routes().register(channel, key, process, epoch);
         let (hosts, admission) = (owners.clone(), table.clone());
         let (gaps, exits) = (events.clone(), events.clone());
         let deps = PtyHostDeps {
@@ -33,7 +32,12 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
             on_exit: Arc::new(move |process, _, _| exits.lock().unwrap().push(("exit", process))),
             on_disconnect: Arc::new(|| {}),
         };
-        connections.push((wire_client(rd, wr, deps), server));
+        let client = wire_client(rd, wr, deps);
+        client.bind_sessions(table.keys(), channel, epoch);
+        let (stage, _) = table.keys().stage(channel, key, crate::state::StageMode::Spawn).unwrap();
+        assert!(table.keys().publish(&stage, process, epoch));
+        assert!(table.keys().complete(&stage, process));
+        connections.push((client, server));
     }
     for (n, key) in ["tm-new", "tm-old"].iter().enumerate() {
         write_frame(&mut connections[n].1, &Frame::Data(Data::Stdout {

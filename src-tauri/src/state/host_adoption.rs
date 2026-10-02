@@ -380,7 +380,7 @@ pub(super) fn frozen_connection_lost(
     if !table.is_current(channel, epoch) || table.admission(channel) == Some(Admission::Retired) {
         return false;
     }
-    table.routes().remove_channel(channel);
+    table.routes().remove_epoch(channel, epoch);
     barrier.mark_lost(&barrier_key(endpoint), "connection lost");
     true
 }
@@ -925,6 +925,8 @@ mod key_lifecycle_tests;
 mod owner_tests;
 #[cfg(test)]
 mod deferred_effect_tests;
+#[cfg(test)]
+mod sink_effect_tests;
 #[cfg(test)]
 mod elevated_adapter_tests;
 #[cfg(test)]

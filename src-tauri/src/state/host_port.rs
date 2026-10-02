@@ -111,8 +111,11 @@ impl<R: Runtime> AppState<R> {
         Arc::new(move || {
             // Only act if THIS connection is still the current one — a stale
             // old client's disconnect must not clobber a reconnected client.
-            if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
-                return;
+            {
+                let mut slot = st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner());
+                if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen
+                    || slot.as_ref().is_some_and(|c| c.session_epoch(HostChannel::Primary) != Some(my_gen)) { return; }
+                slot.take();
             }
             // Pipe died (sleep/wake, sidecar crash, …). Do NOT tear the
             // sessions down here: the host may be alive and holding every
@@ -120,8 +123,7 @@ impl<R: Runtime> AppState<R> {
             // client, then reconnect-first; only sessions the host no longer
             // has — or a failed reconnect — are torn down.
             log::warn!("[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect");
-            st_disc.host_table.routes().remove_channel(HostChannel::Primary);
-            *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            st_disc.host_table.routes().remove_epoch(HostChannel::Primary, my_gen);
             // The Settings Updates panel caches an offload verdict that is a
             // function of this connection; tell it the answer changed.
             let _ = st_disc.app_handle.emit("pty-host:disconnected", ());
@@ -273,7 +275,7 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
         }
     }
 
-    fn apply_listing(&self, channel: HostChannel, _client: &PtyHostClient, sessions: Option<&SessionListing>) {
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&SessionListing>) {
         let Some(listing) = sessions else {
             log::warn!("[HOTSWAP] host {} did not answer ListSessions; session state left unchanged", host_label(channel));
             return;
@@ -283,7 +285,7 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
                 host_terminals: &self.host_terminals,
                 terminals: &self.terminals,
                 keys: self.host_table.keys(),
-            }, channel, listing, std::time::Instant::now(),
+            }, channel, client, listing, std::time::Instant::now(),
         );
         self.note_duplicate_sessions(&duplicates);
     }

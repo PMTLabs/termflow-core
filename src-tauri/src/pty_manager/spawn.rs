@@ -283,54 +283,57 @@ pub fn spawn_terminal(
 
     // Store writer
     let writer = std::sync::Arc::new(std::sync::Mutex::new(writer));
-    app_state.shell_writer_channels.insert(id.clone(), writer.clone());
+    let published = app_state.host_table.keys().publish_shell_projection(&id, || {
+        app_state.shell_writer_channels.insert(id.clone(), writer.clone());
 
-    // Store master
-    app_state.ptys.insert(id.clone(), std::sync::Mutex::new(pair.master));
+        // Store master
+        app_state.ptys.insert(id.clone(), std::sync::Mutex::new(pair.master));
 
-    // Initialize the authoritative screen parser (source of truth for hydration)
-    app_state.init_screen(&id, rows, cols);
+        // Initialize the authoritative screen parser (source of truth for hydration)
+        app_state.init_screen(&id, rows, cols);
 
-    // Seed restored scrollback into the fresh parser now — after init_screen,
-    // before the reader thread below can deliver any live output.
-    if let Some(seed) = &history_seed {
-        app_state.feed_screen(&id, seed.as_bytes());
-    }
+        // Seed restored scrollback into the fresh parser now — after init_screen,
+        // before the reader thread below can deliver any live output.
+        if let Some(seed) = &history_seed {
+            app_state.feed_screen(&id, seed.as_bytes());
+        }
 
-    // Register the terminal LAST: `terminals` is the existence gate for the
-    // close/delete paths, so nothing may be observable until the writer, pty
-    // master, and screen parser are all in place — otherwise a concurrent
-    // delete could clean up half-constructed state and the remaining inserts
-    // would resurrect orphaned entries no cleanup path ever removes.
-    // Index alongside registration so a `tm-` lookup resolves for in-process
-    // terminals too (design 014 §A3). This path never reaches the pty-host, so
-    // its session key is its own id.
-    app_state.identity.index(&id, renderer_terminal_id.as_deref(), &id);
-    app_state.terminals.insert(id.clone(), Terminal {
-        id: id.clone(),
-        pid,
-        shell: shell_name,
-        name: terminal_name,
-        created_at: chrono::Local::now().to_rfc3339(),
-        cols,
-        rows,
-        backend: TerminalBackend::PortablePty,
-        renderer_terminal_id,
-        owning_tab_id,
-        // In-process: there is no pty-host session, so the key this terminal is
-        // known by IS its own id. Task 4 (design 014 §A2) splits the host path's
-        // three identities; this path has no host to disagree with.
-        session_key: id.clone(),
-        last_input_source: None,
-        last_input_at: None,
-        // Mirrors the injected-hook decision above, so reattach can re-arm the
-        // command-suggest prompt gate (see shell_emits_prompt_osc).
-        prompt_hook: is_powershell && !has_command_flag,
-        display_label: None,
-        title_color: None,
+        // Register the terminal LAST: `terminals` is the existence gate for the
+        // close/delete paths, so nothing may be observable until the writer, pty
+        // master, and screen parser are all in place — otherwise a concurrent
+        // delete could clean up half-constructed state and the remaining inserts
+        // would resurrect orphaned entries no cleanup path ever removes.
+        // Index alongside registration so a `tm-` lookup resolves for in-process
+        // terminals too (design 014 §A3). This path never reaches the pty-host, so
+        // its session key is its own id.
+        app_state.identity.index(&id, renderer_terminal_id.as_deref(), &id);
+        app_state.terminals.insert(id.clone(), Terminal {
+            id: id.clone(),
+            pid,
+            shell: shell_name,
+            name: terminal_name,
+            created_at: chrono::Local::now().to_rfc3339(),
+            cols,
+            rows,
+            backend: TerminalBackend::PortablePty,
+            renderer_terminal_id,
+            owning_tab_id,
+            // In-process: there is no pty-host session, so the key this terminal is
+            // known by IS its own id. Task 4 (design 014 §A2) splits the host path's
+            // three identities; this path has no host to disagree with.
+            session_key: id.clone(),
+            last_input_source: None,
+            last_input_at: None,
+            // Mirrors the injected-hook decision above, so reattach can re-arm the
+            // command-suggest prompt gate (see shell_emits_prompt_osc).
+            prompt_hook: is_powershell && !has_command_flag,
+            display_label: None,
+            title_color: None,
+        });
+
+        app_state.local_processes.insert(id.clone(), process);
     });
-
-    app_state.local_processes.insert(id.clone(), process);
+    if published.is_none() { return Err("host-ownership-pending: local placement changed before publication; retry".into()); }
     unpublished.0 = None;
     app_state.complete_create(&owner_leaf, cg, &crate::state::StagedShell {
         process: id.clone(), stage: crate::state::ShellStage::Local,

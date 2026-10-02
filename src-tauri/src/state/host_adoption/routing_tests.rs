@@ -239,7 +239,13 @@ async fn restoring_key_ttl_refreshed_on_each_keyed_create() {
 #[tokio::test(start_paused = true)]
 async fn restoring_key_not_registered_for_an_already_live_session() {
     let (_world, port) = machine(&[]);
+    ensure_hosts(&port).await.unwrap();
+    let keys = port.table().keys();
+    let crate::state::CreateAdmission::Run(cg) = keys.admit_create("tm-live", crate::state::CreateMode::Mount).unwrap() else { panic!("admission") };
+    let (stage, _, _) = keys.stage_shell("tm-live", cg, "pc-1", Some((HostChannel::Primary, "tm-live", crate::state::StageMode::Spawn))).unwrap();
     port.register_terminal("pc-1", "tm-live", HostChannel::Primary);
+    let shell = crate::state::StagedShell { process: "pc-1".into(), stage: crate::state::ShellStage::Hosted(stage.unwrap()) };
+    assert!(matches!(keys.complete_shell("tm-live", cg, &shell), crate::state::Completion::Registered));
     let maps = port.intent_maps();
     let now = StdInstant::now();
 
@@ -471,10 +477,14 @@ fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits
     let eligible = recovery.find("Some(&KeyState::Listed)").unwrap();
     let protected = recovery.find("Self::protected(").unwrap();
     let ending = recovery.find("Self::end(").unwrap();
-    let announce = recovery.find("announce()").unwrap();
-    assert!(eligible < announce && protected < announce && ending < announce);
+    let enqueue = recovery.find("delivery.send(Box::new(announce))").unwrap();
+    assert!(eligible < enqueue && protected < enqueue && ending < enqueue);
     assert!(recovery.contains("let mut inner = self.lock()"));
-    assert!(recovery.contains("else { announce(); }"), "ending and announcement are exclusive");
+    assert!(recovery.contains("else { let _ = delivery.send"), "ending and recovery enqueue are exclusive");
+    assert!(!recovery.contains("announce()"), "framework delivery must not run under ownership");
+    let worker = source_of("host_keys/delivery.rs");
+    assert!(worker.contains("while let Ok(deliver) = receiver.recv()"));
+    assert!(worker.contains("AssertUnwindSafe(deliver)"));
 
     // The three flows that surface orphans, the primary's pipe-drop recovery, an
     // older host's reconnect (both through `reattach_listed`) and the sweep, all go

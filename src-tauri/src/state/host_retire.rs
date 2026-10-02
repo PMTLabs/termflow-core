@@ -211,8 +211,9 @@ async fn sample<P: PanePort>(port: &P, seen: &Seen, admission: Admission) -> Sam
     if !listing_is_current(port.table(), seen.channel, seen.epoch, &seen.host.client, admission) {
         return Sample::Unanswered;
     }
-    if admission == Admission::Open {
-        port.table().keys().listing(seen.channel, &sessions, |_| false);
+    if admission == Admission::Open
+        && !seen.host.client.apply_listing_on(port.table().keys(), seen.channel, &sessions, std::time::Instant::now(), |_| false) {
+        return Sample::Unanswered;
     }
     Sample::Answered { alive: sessions.iter().filter(|s| s.alive).count() }
 }

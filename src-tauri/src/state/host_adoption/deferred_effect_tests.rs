@@ -9,7 +9,7 @@ use termflow_pty_protocol::{Data, Frame, Control};
 const HOST: &str = "owner-host";
 const PRIMARY: HostChannel = HostChannel::Primary;
 
-fn stage(port: &FakePort, channel: HostChannel, leaf: &str, key: &str) -> (u64, StagedShell, crate::state::Ticket) {
+pub(super) fn stage(port: &FakePort, channel: HostChannel, leaf: &str, key: &str) -> (u64, StagedShell, crate::state::Ticket) {
     let keys = port.table().keys();
     let CreateAdmission::Run(cg) = keys.admit_create(leaf, CreateMode::Mount).unwrap() else { panic!("admission") };
     let pc = port.0.ids.mint_process_id().unwrap();
@@ -23,7 +23,7 @@ fn stage(port: &FakePort, channel: HostChannel, leaf: &str, key: &str) -> (u64, 
     (cg, StagedShell { process: pc, stage: ShellStage::Hosted(hosted) }, ticket)
 }
 
-fn finish(port: &FakePort, leaf: &str, cg: u64, shell: &StagedShell) {
+pub(super) fn finish(port: &FakePort, leaf: &str, cg: u64, shell: &StagedShell) {
     assert!(matches!(port.table().keys().complete_shell(leaf, cg, shell), Completion::Registered));
 }
 fn abort(port: &FakePort, leaf: &str, cg: u64, shell: &StagedShell) {
@@ -31,7 +31,7 @@ fn abort(port: &FakePort, leaf: &str, cg: u64, shell: &StagedShell) {
     port.0.host_terminals.remove(&shell.process);
     port.0.terminals.remove(&shell.process);
 }
-async fn fence(port: &FakePort, client: &PtyHostClient, channel: HostChannel) -> SessionListing {
+pub(super) async fn fence(port: &FakePort, client: &PtyHostClient, channel: HostChannel) -> SessionListing {
     let listing = client.list_sessions_numbered().await.unwrap();
     port.apply_listing(channel, client, Some(&listing));
     listing

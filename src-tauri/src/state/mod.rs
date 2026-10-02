@@ -38,6 +38,8 @@ mod owner_wiring_tests;
 #[cfg(test)]
 mod mutator_wiring_tests;
 #[cfg(test)]
+mod sink_inventory_tests;
+#[cfg(test)]
 pub(crate) use host_adoption::wiring_tests::exercise_generations;
 
 pub use types::*;

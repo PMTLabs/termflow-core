@@ -40,6 +40,7 @@ fn frozen_channel(port: &FakePort, endpoint: &str) -> HostChannel {
 }
 
 fn recovered(port: &FakePort) -> Vec<String> {
+    port.table().keys().flush_deliveries();
     port.0.recovered.lock().unwrap().clone()
 }
 
@@ -117,7 +118,7 @@ async fn a_session_another_host_has_registered_is_not_surfaced_by_this_one() {
     ensure_hosts(&port).await.unwrap();
     tokio::time::sleep(SEC).await;
     // Preserve the bound key; discard only the older host's listing fixture.
-    port.table().keys().forget(HostChannel::Frozen(FrozenId(1)));
+    port.table().keys().remove_listed_fixture(HostChannel::Frozen(FrozenId(1)));
 
     assert!(sweep(&port).await);
     assert!(recovered(&port).is_empty(), "a registration on any channel suppresses the recovery tab");

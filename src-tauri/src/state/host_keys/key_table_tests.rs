@@ -11,6 +11,7 @@ fn listing(request_no: u64, sessions: Vec<SessionMeta>) -> SessionListing {
 #[test]
 fn stale_attach_generation_cannot_publish_complete_or_abort_its_successor() {
     let keys = HostKeys::default();
+    keys.connect_fixture(CHANNEL, 1);
     let meta = SessionMeta { tab_id: "exact".into(), pid: 73, alive: true, head_offset: 0, tail_offset: 0 };
     keys.listing(CHANNEL, &listing(1, vec![meta.clone()]), |_| false);
     let (old, pid) = keys.stage(CHANNEL, "exact", StageMode::Attach).unwrap();
@@ -71,6 +72,7 @@ fn forgetting_one_host_removes_every_kind_without_touching_the_other_host() {
     let keys = HostKeys::default();
     let other = HostChannel::Elevated;
     for channel in [CHANNEL, other] {
+        keys.connect_fixture(channel, 1);
         keys.listing(channel, &listing(1, vec![SessionMeta { tab_id: "listed".into(), pid: 1, alive: true, head_offset: 0, tail_offset: 0 }]), |_| false);
         let (held, _) = keys.stage(channel, "held", StageMode::Spawn).unwrap();
         assert!(keys.publish(&held, "pc-held", 1));

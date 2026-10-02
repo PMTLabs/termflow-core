@@ -470,6 +470,7 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
         // NOT wrapped: `ensure_elevated_host` returns the UAC-cancel sentinel
         // verbatim so the renderer can recognise it and stay silent (AC6).
         state.ensure_elevated_host().await?;
+        let _placement_guard = state.elevated_host.connecting.lock().await;
         let client = match state.elevated_host.client_clone() {
             Some(c) => c,
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
@@ -546,10 +547,7 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
             Some(false) => log::warn!("[HOTSWAP] reattached {session_key} but host reports it not alive"),
             None => log::info!("[HOTSWAP] reattached {session_key} (pid {pid}, legacy attach)"),
         }
-        state.host_table.keys().enqueue_session(&identity, || {
-            client.nudge_repaint(&session_key, cols, rows);
-            true
-        });
+        client.repaint_owned(&identity, cols, rows);
         state.complete_create(&id, cg, &staged);
         return Ok(process_id);
     }
@@ -716,35 +714,36 @@ fn register_host_terminal(
     channel: crate::elevated_host::HostChannel,
 ) {
     let id = ident.process_id.as_str();
-    let leaf = ident.leaf.clone();
-    let owner = ident.owner.clone();
-    state.init_screen(id, rows, cols);
-    state.host_terminals.insert(id.to_string(), channel);
-    state.identity.index(id, leaf.as_deref(), &ident.session_key);
-    state.terminals.insert(
-        id.to_string(),
-        crate::state::Terminal {
-            id: id.to_string(),
-            pid,
-            shell: shell_name.to_string(),
-            name: terminal_display_name(name, shell_name),
-            created_at: chrono::Local::now().to_rfc3339(),
-            cols,
-            rows,
-            backend: crate::tmux_manager::TerminalBackend::PortablePty,
-            renderer_terminal_id: leaf,
-            owning_tab_id: owner,
-            session_key: ident.session_key.clone(),
-            last_input_source: None,
-            last_input_at: None,
-            prompt_hook,
-            display_label: None,
-            title_color: None,
-        },
-    );
-    // After the terminal is observable: whoever asks which host serves it now
-    // gets an answer.
-    state.notify_terminal_generations();
+    let published = state.host_table.keys().publish_shell_projection(id, || {
+        let leaf = ident.leaf.clone();
+        let owner = ident.owner.clone();
+        state.init_screen(id, rows, cols);
+        state.host_terminals.insert(id.to_string(), channel);
+        state.identity.index(id, leaf.as_deref(), &ident.session_key);
+        state.terminals.insert(
+            id.to_string(),
+            crate::state::Terminal {
+                id: id.to_string(),
+                pid,
+                shell: shell_name.to_string(),
+                name: terminal_display_name(name, shell_name),
+                created_at: chrono::Local::now().to_rfc3339(),
+                cols,
+                rows,
+                backend: crate::tmux_manager::TerminalBackend::PortablePty,
+                renderer_terminal_id: leaf,
+                owning_tab_id: owner,
+                session_key: ident.session_key.clone(),
+                last_input_source: None,
+                last_input_at: None,
+                prompt_hook,
+                display_label: None,
+                title_color: None,
+            },
+        );
+    });
+    // Framework notifications run after releasing ownership.
+    if published.is_some() { state.notify_terminal_generations(); }
 }
 
 /// Persisted scrollback for `history_key` rendered as a replay prefix (blob +

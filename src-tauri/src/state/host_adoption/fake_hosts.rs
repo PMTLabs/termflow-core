@@ -784,7 +784,6 @@ impl FakePort {
     pub fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
         host_registry::IntentMaps {
             keys: self.0.table.keys(),
-            terminals: &self.0.terminals,
         }
     }
 
@@ -920,7 +919,7 @@ impl AdoptionPort for FakePort {
         Ok(Opened { client, epoch, build_id: None })
     }
 
-    fn apply_listing(&self, channel: HostChannel, _client: &PtyHostClient, sessions: Option<&SessionListing>) {
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&SessionListing>) {
         self.0.listings.lock().unwrap().push((channel, sessions.map(|s| s.sessions.len())));
         let Some(sessions) = sessions else { return };
         let duplicates = host_registry::apply_answered_listing(
@@ -930,6 +929,7 @@ impl AdoptionPort for FakePort {
                 keys: self.table().keys(),
             },
             channel,
+            client,
             sessions,
             std::time::Instant::now(),
         );
