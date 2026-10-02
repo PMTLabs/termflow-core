@@ -203,6 +203,59 @@ test('a transfer adopt reply held across a real layout load cannot overwrite the
   } finally { attach.mockRestore(); cleanup(h.client); }
 });
 
+test.each(['close', 'restash', 'empty'])('destination prunes a real paired UI to the surviving take population after %s', async ending => {
+  seed('control', 'tm-control');
+  const payload: DetachPayload = { kind: 'tab', tabId: 'tb-pair', tabTitle: 'Pair', paneTree: { id: 'split-pair', type: 'split', children: [
+    { id: 'pn-a', type: 'terminal', terminalId: 'tm-a', sessionKey: 'tm-a~key-a' },
+    { id: 'pn-b', type: 'terminal', terminalId: 'tm-b', sessionKey: 'tm-b~key-b' },
+  ] }, terminals: [{ terminalId: 'tm-a', processId: 'pc-a', shellType: 'default' }, { terminalId: 'tm-b', processId: 'pc-b', shellType: 'default' }] };
+  const records = new Map<string, { panes: any[]; ui: unknown }>();
+  const requests: PaneRequest[] = [];
+  const bridge = (pg: number): PaneBridge => (async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: 7, pg };
+    const request = args.request as PaneRequest; requests.push(request);
+    const op = request.op;
+    if (op.kind === 'stash') {
+      for (const record of records.values()) record.panes = record.panes.filter(member => !op.pairs.some(pair => pair.leaf === member.leaf));
+      records.set(op.tx, { panes: [...op.pairs], ui: op.ui });
+    }
+    if (op.kind === 'close') for (const record of records.values()) record.panes = record.panes.filter(member => member.pi.pg !== op.pi.pg || member.pi.seq !== op.pi.seq);
+    if (op.kind === 'take') return { status: 'Ack', result: { status: 'Taken', payload: records.get(op.tx) } };
+    if (op.kind === 'adopt') {
+      const record = records.get(op.tx)!;
+      if (op.pairs.some(pair => !record.panes.some(member => member.leaf === pair.leaf))) return { status: 'Ack', result: { status: 'Rejected', message: 'not a transfer member' } };
+    }
+    return { status: 'Ack', result: { status: 'Ok' } };
+  }) as PaneBridge;
+  const source = new PaneIncarnations(bridge(70));
+  const destination = new PaneIncarnations(bridge(71));
+  installPaneIncarnations(destination); destination.attachStore(store);
+  (window as any).electronAPI = { adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
+  terminalService.registerExistingTerminal('tm-control', 'pc-control');
+  const attach = jest.spyOn(terminalService, 'attachExistingTerminal');
+  try {
+    const descriptors = payload.paneTree.children!.map(node => ({ paneId: node.id, leaf: node.terminalId!, restore: true, override: node.sessionKey }));
+    const pis = source.prepare(descriptors);
+    await source.stash('pair', descriptors, payload);
+    expect(records.get('pair')!.panes.map(member => member.leaf)).toEqual(['tm-a', 'tm-b']);
+    if (ending === 'restash') await source.stash('separate', [descriptors[0]], payload);
+    else await source.close(pis[0]);
+    if (ending === 'empty') await source.close(pis[1]);
+    expect(records.get('pair')!.panes.map(member => member.leaf)).toEqual(ending === 'empty' ? [] : ['tm-b']);
+    await applyReattachByToken('pair');
+    const adopt = requests.find(request => request.op.kind === 'adopt')!.op;
+    expect(adopt).toMatchObject({ kind: 'adopt', pairs: ending === 'empty' ? [] : [{ leaf: 'tm-b', override: 'tm-b~key-b', restore: true }] });
+    expect(attach.mock.calls.map(call => call.slice(0, 2))).toEqual(ending === 'empty' ? [] : [['tm-b', 'pc-b']]);
+    if (ending !== 'empty') {
+      expect(store.getState().panes.treesByTabId['tb-pair']).toMatchObject({ id: 'pn-b', type: 'terminal', terminalId: 'tm-b', sessionKey: 'tm-b~key-b' });
+      expect(terminalService.getProcessId('tm-b')).toBe('pc-b');
+      expect(requests.filter(request => request.op.kind === 'bind').map(request => request.op)).toEqual([{ kind: 'bind', pi: await destination.capture('tm-b', 'pn-b'), pc: 'pc-b', via: 'transfer' }]);
+    } else expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-control']);
+    expect(terminalService.getProcessId('tm-a')).toBeUndefined();
+    expect(terminalService.getProcessId('tm-control')).toBe('pc-control');
+  } finally { attach.mockRestore(); source.stop(); terminalService.detachTerminal('tm-b'); cleanup(destination); }
+});
+
 test('throwing real UI install departs every adopted copy but keeps the control pane', async () => {
   seed('control', 'tm-control');
   const h = harness(); h.client.attachStore(store);

@@ -21,7 +21,8 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore, EnhancedStore } from '@reduxjs/toolkit';
-import canvasReducer from '../../../store/slices/canvasSlice';
+import canvasReducer, { setNodeGeom } from '../../../store/slices/canvasSlice';
+import { replaceWorkspace } from '../../../services/workspaceReplacement';
 import { useArrange } from '../useArrange';
 import { arrangeTarget, ARRANGE_MS } from '../animateLayout';
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
@@ -178,6 +179,18 @@ describe('useArrange — reduced motion', () => {
 });
 
 describe('useArrange — the animation', () => {
+  it('stops a frozen arrangement before its next frame can write into a replacement workspace', () => {
+    mount(); act(() => arrange()); runToCompletion(clock);
+    expect((store.dispatch as jest.Mock).mock.calls.length).toBeGreaterThan(1);
+    act(() => arrange()); expect(frames.size).toBe(1);
+    const replacement = { x: 9000, y: 8000, w: NODE_W, h: NODE_H };
+    replaceWorkspace(); store.dispatch(setNodeGeom({ id: 'tm-1', rect: replacement }));
+    const count = (store.dispatch as jest.Mock).mock.calls.length;
+    flush(clock + ARRANGE_MS);
+    expect(canvasState().nodes['tm-1']).toEqual(replacement);
+    expect(store.dispatch).toHaveBeenCalledTimes(count);
+    expect(frames.size).toBe(0);
+  });
   it('does not write a node that becomes hidden during the frozen animation', () => {
     mount();
     act(() => arrange());

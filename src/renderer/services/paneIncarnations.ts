@@ -1,5 +1,6 @@
 import type { PaneNode } from '../store/slices/panesSlice';
 import { captureWorkspace, isCurrentWorkspace } from './workspaceReplacement';
+import { retireTerminalInitGuards } from './terminalInitGuards';
 
 // JSON counters are restricted to safe integers here; exhaustion refuses new work rather
 // than rounding two identities to the same number. Rust counters remain checked u64s.
@@ -156,6 +157,7 @@ export class PaneIncarnations {
     this.unsubscribe?.();
     window.removeEventListener('beforeunload', this.onUnload);
     this.drain({ status: 'Rejected', message: 'page ended' });
+    this.slots.forEach(slot => retireTerminalInitGuards(slot.pi));
     this.slots.clear();
     this.observed.clear();
     this.staged.clear();
@@ -237,7 +239,10 @@ export class PaneIncarnations {
     const captures = panes.map(descriptor => {
       const old = this.slots.get(descriptor.paneId);
       if (old && old.descriptor.leaf === descriptor.leaf && !old.suppressed) return old.pi;
-      if (old && !old.suppressed) void this.depart(old.pi);
+      if (old) {
+        retireTerminalInitGuards(old.pi);
+        if (!old.suppressed) void this.depart(old.pi);
+      }
       const pi = this.mint();
       this.slots.set(descriptor.paneId, { descriptor, pi, suppressed: false, installed: this.observed.has(descriptor.paneId) });
       changed = true;
@@ -280,6 +285,7 @@ export class PaneIncarnations {
 
   depart(pi: PaneCapture): Promise<PaneResult> {
     for (const [id, slot] of this.slots) if (slot.pi === pi) this.slots.delete(id);
+    retireTerminalInitGuards(pi);
     this.changed();
     return this.send(async () => ({ kind: 'depart', pi: await pi }));
   }
@@ -321,6 +327,7 @@ export class PaneIncarnations {
       if (current.get(id)?.leaf === slot.descriptor.leaf) { slot.installed = true; continue; }
       if (!slot.installed) continue;
       this.slots.delete(id);
+      retireTerminalInitGuards(slot.pi);
       if (!slot.suppressed) void this.depart(slot.pi);
     }
     this.prepare(panes.filter(pane => !this.slots.has(pane.paneId)));
@@ -371,7 +378,11 @@ export class PaneIncarnations {
       && isPresent(descriptor) && isCurrentWorkspace(workspace) && !this.stopped);
     this.staged.delete(tx);
     this.stagedCaptures.delete(tx);
-    descriptors.forEach(pane => this.slots.delete(pane.paneId));
+    descriptors.forEach(pane => {
+      const slot = this.slots.get(pane.paneId);
+      if (slot) retireTerminalInitGuards(slot.pi);
+      this.slots.delete(pane.paneId);
+    });
     const pis = this.prepare(descriptors);
     for (let i = 0; i < descriptors.length; i++) {
       if (!this.isCurrent(descriptors[i].leaf, descriptors[i].paneId, pis[i])) continue;
@@ -383,24 +394,28 @@ export class PaneIncarnations {
     }
   }
 
-  async installTransfer(tx: string, panes: PaneDescriptor[] | ((ui: unknown) => PaneDescriptor[]), install: (ui?: unknown) => void | Promise<void>): Promise<void> {
+  async installTransfer(tx: string, panes: PaneDescriptor[] | ((ui: unknown, members: PaneDescriptor[]) => PaneDescriptor[]), install: (ui?: unknown) => void | Promise<void>): Promise<void> {
     const workspace = captureWorkspace();
     const taken = await this.send({ kind: 'take', tx });
     if (taken.status !== 'Taken') throw new Error(`transfer take ${taken.status}`);
     const ui = taken.payload.ui;
-    const members = typeof panes === 'function' ? panes(ui) : panes;
-    const descriptors = members.map(pane => {
+    const members = typeof panes === 'function' ? panes(ui, taken.payload.panes) : panes;
+    const descriptors = members.flatMap(pane => {
       const member = taken.payload.panes.find(source => source.leaf === pane.leaf);
-      return { ...pane, restore: member?.restore ?? pane.restore, override: member?.override ?? pane.override };
+      return member ? [{ ...pane, restore: member.restore, override: member.override }] : [];
     });
     const pis = descriptors.map(() => this.mint());
     const adopted = await this.send(async () => ({ kind: 'adopt', tx, pairs: await Promise.all(descriptors.map(async (pane, i) => ({ ...pane, pi: await pis[i] }))) }));
     if (!accepted(adopted)) throw new Error(`transfer adopt ${adopted.status}`);
     try {
       if (!isCurrentWorkspace(workspace) || !this.enabled) throw new Error('transfer workspace replaced');
-      descriptors.forEach((descriptor, i) => this.slots.set(descriptor.paneId, { descriptor, pi: pis[i], suppressed: false, installed: false }));
+      descriptors.forEach((descriptor, i) => {
+        const old = this.slots.get(descriptor.paneId);
+        if (old) retireTerminalInitGuards(old.pi);
+        this.slots.set(descriptor.paneId, { descriptor, pi: pis[i], suppressed: false, installed: false });
+      });
       this.changed();
-      await install(ui);
+      if (descriptors.length) await install(ui);
     }
     catch (error) {
       for (const pi of pis) await this.depart(pi);

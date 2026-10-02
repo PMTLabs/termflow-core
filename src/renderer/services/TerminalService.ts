@@ -39,7 +39,7 @@ export class TerminalServiceClass {
   private hostWaitStates = new Map<string, HostWaitState>();
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
-  private placements = new Map<string, { pi: PaneCapture; work: Promise<string> }>();
+  private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
 
   constructor(
     private readonly paneTrees: () => Record<string, PaneNode | null> =
@@ -82,6 +82,10 @@ export class TerminalServiceClass {
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
+      for (const [leaf, placement] of this.placements) {
+        if (placement.pc !== processId) continue;
+        this.placements.delete(leaf);
+      }
       for (const [terminalId, process] of this.processes) {
         if (process.id === processId) {
           exitedTerminalId = terminalId;
@@ -95,7 +99,7 @@ export class TerminalServiceClass {
           // Also clean up from the global terminal init map (if available)
           // This allows re-creation if the same terminalId is used again
           this.clearInitGuards(terminalId);
-          this.placements.delete(terminalId);
+          if (this.placements.get(terminalId)?.pc === processId) this.placements.delete(terminalId);
           break;
         }
       }
@@ -283,8 +287,15 @@ export class TerminalServiceClass {
           if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
           const bound = await protocol.bind(attemptPi, pc, 'restore');
           if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
-          if (!accepted(bound)) throw new Error('host-session-contended: original placement cannot be rebound');
-          admission = { status: 'Existing', pc };
+          if (bound.status === 'Retry') {
+            // Missing rows are ended shells, not an invitation to attach by leaf.
+            // Resume admission for the still-current copy; contention stays closed.
+            if (this.placements.get(terminalId) === previous) this.placements.delete(terminalId);
+            admission = await protocol.admit(attemptPi, mode);
+          } else {
+            if (!accepted(bound)) throw new Error('host-session-contended: original placement cannot be rebound');
+            admission = { status: 'Existing', pc };
+          }
         } else {
           admission = await protocol.admit(attemptPi, mode);
         }
@@ -297,9 +308,11 @@ export class TerminalServiceClass {
         const work = protocol.create(admission.cg, {
           leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
         });
-        const placement = { pi: attemptPi!, work };
+        const placement: { pi: PaneCapture; work: Promise<string>; pc?: string } = { pi: attemptPi!, work };
         this.placements.set(terminalId, placement);
-        void work.catch(() => { if (this.placements.get(terminalId) === placement) this.placements.delete(terminalId); });
+        void work.then(pc => { placement.pc = pc; }, () => {
+          if (this.placements.get(terminalId) === placement) this.placements.delete(terminalId);
+        });
         const created = await work;
         if (protocol.ended) return '';
         processId = created;

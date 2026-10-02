@@ -111,11 +111,21 @@ export async function cancelDetachTransfer(token: string): Promise<void> {
 
 async function installTransferredPayload(token: string, payload: DetachPayload | undefined, install: (payload: DetachPayload) => void): Promise<void> {
   const workspace = captureWorkspace();
-  await paneIncarnations.installTransfer(token, ui => {
+  await paneIncarnations.installTransfer(token, (ui, members) => {
     // UI data describes the installation, never the authority to own a shell.
     payload = (ui ?? payload) as DetachPayload | undefined;
     if (!payload?.paneTree || !Array.isArray(payload.terminals)) throw new Error('transfer has no UI payload');
-    return describePanes(payload.paneTree);
+    const leaves = new Set(members.map(member => member.leaf));
+    const prune = (node: PaneNode): PaneNode | null => {
+      if (node.type === 'terminal') return node.terminalId && leaves.has(node.terminalId) ? node : null;
+      const children = node.children?.map(prune).filter((child): child is PaneNode => !!child) ?? [];
+      if (children.length === 0) return null;
+      if (children.length === 1) return children[0];
+      return { ...node, children };
+    };
+    const tree = prune(payload.paneTree);
+    payload = { ...payload, paneTree: tree!, terminals: payload.terminals.filter(terminal => leaves.has(terminal.terminalId)) };
+    return describePanes(tree);
   }, async () => {
     install(payload!);
     const members = describePanes(payload!.paneTree).map(pane => ({ pane, pi: paneIncarnations.capture(pane.leaf, pane.paneId) }));

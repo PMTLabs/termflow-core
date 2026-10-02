@@ -210,7 +210,36 @@ pub struct WindowTracker {
     last_write: Mutex<Option<Instant>>,
 }
 
+/// A pre-build binding rolls back only while it still names this reservation.
+/// A failed duplicate-label build must restore the live window's storage id.
+pub(crate) struct WindowIdGuard {
+    tracker: std::sync::Arc<WindowTracker>,
+    label: String,
+    id: String,
+    previous: Option<String>,
+    committed: bool,
+}
+impl WindowIdGuard {
+    pub(crate) fn id(&self) -> &str { &self.id }
+    pub(crate) fn commit(mut self) { self.committed = true; }
+}
+impl Drop for WindowIdGuard {
+    fn drop(&mut self) {
+        if self.committed { return; }
+        if let dashmap::mapref::entry::Entry::Occupied(mut entry) = self.tracker.ids.entry(self.label.clone()) {
+            if entry.get() != &self.id { return; }
+            if let Some(previous) = self.previous.take() { entry.insert(previous); }
+            else { entry.remove(); }
+        }
+    }
+}
+
 impl WindowTracker {
+    pub(crate) fn reserve_id(self: &std::sync::Arc<Self>, label: &str, id: String) -> WindowIdGuard {
+        let previous = self.ids.insert(label.to_string(), id.clone());
+        WindowIdGuard { tracker: self.clone(), label: label.into(), id, previous, committed: false }
+    }
+
     pub fn new(path: PathBuf, registry: Registry) -> Self {
         Self {
             path,

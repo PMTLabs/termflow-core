@@ -238,8 +238,11 @@ pub fn begin_global_pane_drag(
     token: String,
     pg: u64,
 ) -> Result<(), String> {
+    let ended_app = app_handle.clone();
     state.host_table.keys().begin_pane_drag(window.label(), pg, &token, move |notice| {
         let _ = app_handle.emit("pane-drag:active", notice);
+    }, move |token| {
+        let _ = ended_app.emit("pane-drag:ended", token);
     })
 }
 
@@ -254,9 +257,8 @@ pub fn claim_global_pane_drag(
     window: tauri::Window,
     pg: u64,
 ) -> Result<Option<serde_json::Value>, String> {
-    state.host_table.keys().claim_pane_drag(window.label(), pg, &token, move |source, token| {
+    state.host_table.keys().claim_pane_drag(window.label(), pg, &token, move |source, _token| {
         if let Some(notice) = source { let _ = app_handle.emit("pane-drag:claimed", notice); }
-        let _ = app_handle.emit("pane-drag:ended", token);
     })
 }
 
@@ -265,29 +267,23 @@ pub fn claim_global_pane_drag(
 /// active drag (payload is left stashed for create_detached_window to consume).
 #[tauri::command]
 pub fn resolve_orphan_global_drag(
-    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     window: tauri::Window,
     token: String,
     pg: u64,
 ) -> Result<bool, String> {
-    state.host_table.keys().end_pane_drag(window.label(), pg, &token, true, move |token| {
-        let _ = app_handle.emit("pane-drag:ended", token);
-    })
+    state.host_table.keys().end_pane_drag(window.label(), pg, &token, true, |_| {})
 }
 
 /// Cancel an in-flight drag (cursor returned inside the source, or Escape).
 #[tauri::command]
 pub fn cancel_global_pane_drag(
-    app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
     window: tauri::Window,
     pg: u64,
 ) -> Result<(), String> {
-    state.host_table.keys().end_pane_drag(window.label(), pg, &token, false, move |token| {
-        let _ = app_handle.emit("pane-drag:ended", token);
-    })?;
+    state.host_table.keys().end_pane_drag(window.label(), pg, &token, false, |_| {})?;
     Ok(())
 }
 

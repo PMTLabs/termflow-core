@@ -63,6 +63,8 @@ pub(crate) enum PaneResult {
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct TransferPayload {
+    // The surviving backend members are authoritative. UI is opaque and may
+    // still describe removed members; consumers must prune it to this set.
     pub panes: Vec<PaneDescriptor>,
     #[serde(skip_serializing_if = "Option::is_none")] pub ui: Option<serde_json::Value>,
 }
@@ -82,7 +84,16 @@ pub(super) struct PaneTable {
     pub incarnation_high: HashMap<u64, u64>,
     pub holders: HashMap<PaneIdentity, super::restore::Aliases>,
     pub transfers: HashMap<String, Transfer>,
-    pub active_drag: Option<String>,
+    pub active_drag: Option<ActiveDrag>,
+}
+pub(super) struct ActiveDrag {
+    pub token: String,
+    pub delivery: std::sync::mpsc::Sender<super::delivery::Delivery>,
+    pub ended: super::delivery::Delivery,
+}
+impl std::ops::Deref for ActiveDrag {
+    type Target = str;
+    fn deref(&self) -> &str { &self.token }
 }
 #[derive(Clone)]
 pub(super) struct Transfer {
@@ -267,6 +278,9 @@ impl HostKeys {
         let Some(leaf) = leaf else { return (PaneResult::Ok, Vec::new()); };
         if reap && !matches!(inner.owners[&leaf].owner, Owner::Parked { .. } | Owner::Orphaned | Owner::Headless) { return (PaneResult::Contended, Vec::new()); }
         let mut effects = Vec::new();
+        // Retire the carried capability while its source identity is still
+        // discoverable. Restashing, unlike a terminal close, preserves it.
+        Self::settle_pane_restore(&mut inner, &leaf);
         Self::remove_transfer_member(&mut inner, &leaf);
         Self::close_leaf_locked(&mut inner, &leaf, CloseStorage::Delete, &mut effects);
         (PaneResult::Ok, effects)

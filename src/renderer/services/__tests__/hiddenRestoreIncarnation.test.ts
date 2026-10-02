@@ -27,7 +27,7 @@ const candidate = (id: string) => ({ terminalId: `tm-${id}`, processId: `pc-old-
 beforeEach(() => { jest.useFakeTimers(); localStorage.clear(); __resetLayoutUndoForTests(); });
 afterEach(() => { installPaneIncarnations(new PaneIncarnations()); jest.useRealTimers(); delete (window as any).electronAPI; });
 
-test.each(['load', 'revert', 'visible'])('hidden restore requalifies its acknowledged pi before installation across %s', async change => {
+test.each(['load', 'revert', 'visible', 'slot'])('hidden restore requalifies its acknowledged pi before installation across %s', async change => {
   const store = configureStore({ reducer: { tabs, panes, canvas, settings, sessionExit } });
   (window as any).__REDUX_STORE__ = store;
   (window as any).electronAPI = { adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
@@ -58,8 +58,16 @@ test.each(['load', 'revert', 'visible'])('hidden restore requalifies its acknowl
     const hiddenBind = requests.find(request => request.op.kind === 'bind' && request.op.pc === 'pc-hidden')!;
     expect(hiddenBind.op).toMatchObject({ kind: 'bind', pi: { pg: 51, seq: 2 }, pc: 'pc-hidden' });
     const hiddenPi = client.capture('tm-hidden')!;
+    const entered = requests.find(request => request.op.kind === 'enter' && request.op.panes.some(pane => pane.leaf === 'tm-hidden'))!;
+    const hiddenPaneId = entered.op.kind === 'enter' ? entered.op.panes[0].paneId : '';
     let replacing: Promise<boolean> | undefined;
-    if (change === 'visible') {
+    let replacementSlot: ReturnType<typeof client.capture>;
+    if (change === 'slot') {
+      void client.depart(hiddenPi);
+      [replacementSlot] = client.prepare([{ paneId: hiddenPaneId, leaf: 'tm-hidden', restore: true }]);
+      expect(replacementSlot).not.toBe(hiddenPi);
+      expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual([controlTabId]);
+    } else if (change === 'visible') {
       store.dispatch(addTab({ id: 'tb-visible', title: 'Visible' }));
       store.dispatch(addTabTree({ tabId: 'tb-visible', tree: leaf('hidden') }));
       terminalService.registerExistingTerminal('tm-hidden', 'pc-visible');
@@ -84,7 +92,11 @@ test.each(['load', 'revert', 'visible'])('hidden restore requalifies its acknowl
     expect(requests).toEqual(expect.arrayContaining([expect.objectContaining({ op: { kind: 'depart', pi: await hiddenPi } })]));
     expect(attach).toHaveBeenCalledTimes(1);
     const ids = store.getState().tabs.tabs.map(tab => tab.id);
-    if (change === 'visible') {
+    if (change === 'slot') {
+      expect(ids).toEqual([controlTabId]);
+      expect(client.capture('tm-hidden', hiddenPaneId)).toBe(replacementSlot);
+      expect(terminalService.getProcessId('tm-hidden')).toBeUndefined();
+    } else if (change === 'visible') {
       expect(ids).toHaveLength(2);
       expect(ids).toContain('tb-visible');
       expect(terminalService.getProcessId('tm-hidden')).toBe('pc-visible');

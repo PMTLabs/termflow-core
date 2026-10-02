@@ -116,19 +116,33 @@ pub(crate) struct WindowBuildGuard {
     keys: HostKeys,
     label: String,
     wi: u64,
+    stable_id: Option<crate::window_registry::WindowIdGuard>,
 }
 
 impl WindowBuildGuard {
     pub(crate) fn identity(&self) -> (&str, u64) { (&self.label, self.wi) }
     pub(crate) fn keys(&self) -> HostKeys { self.keys.clone() }
 
-    pub(crate) fn commit(self) -> Result<(), String> {
-        self.keys.lock().window_pages.commit(&self.label, self.wi)
+    pub(crate) fn with_stable_id(mut self, tracker: std::sync::Arc<crate::window_registry::WindowTracker>, id: String) -> Self {
+        self.stable_id = Some(tracker.reserve_id(&self.label, id));
+        self
+    }
+    pub(crate) fn stable_id(&self) -> Option<&str> { self.stable_id.as_ref().map(|binding| binding.id()) }
+
+    pub(crate) fn commit(mut self) -> Result<(), String> {
+        self.keys.lock().window_pages.commit(&self.label, self.wi)?;
+        if let Some(binding) = self.stable_id.take() { binding.commit(); }
+        Ok(())
     }
 }
 
 impl Drop for WindowBuildGuard {
-    fn drop(&mut self) { self.keys.lock().window_pages.cancel(&self.label, self.wi); }
+    fn drop(&mut self) {
+        // Restore the prebind before allowing pages to register on the older
+        // committed window again.
+        drop(self.stable_id.take());
+        self.keys.lock().window_pages.cancel(&self.label, self.wi);
+    }
 }
 
 impl HostKeys {
@@ -145,7 +159,7 @@ impl HostKeys {
 
     pub(crate) fn reserve_window(&self, label: &str) -> Result<WindowBuildGuard, String> {
         let wi = self.lock().window_pages.reserve(label)?;
-        Ok(WindowBuildGuard { keys: self.clone(), label: label.to_string(), wi })
+        Ok(WindowBuildGuard { keys: self.clone(), label: label.to_string(), wi, stable_id: None })
     }
 
     pub(crate) fn register_page(&self, label: &str) -> Result<PageRegistration, String> {

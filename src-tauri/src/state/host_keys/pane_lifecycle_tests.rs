@@ -13,7 +13,7 @@ fn last_member_close_or_restash_ends_drag_and_observer_without_losing_carried_ho
         let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
         assert_eq!(source.op(&keys, PaneOp::Stash { tx: "old".into(), pairs: vec![a.clone()], ui: Some(serde_json::json!("old")) }), PaneResult::Ok);
         let observer = keys.watch_transfer(source.label, source.pg, "old").unwrap();
-        keys.begin_pane_drag(source.label, source.pg, "old", |_| {}).unwrap();
+        keys.begin_pane_drag(source.label, source.pg, "old", |_| {}, |_| {}).unwrap();
         assert_eq!(keys.lock().panes.active_drag.as_deref(), Some("old"));
         assert_eq!(*observer.borrow(), None);
         let op = if restash { PaneOp::Stash { tx: "new".into(), pairs: vec![a], ui: Some(serde_json::json!("new")) } }
@@ -27,7 +27,7 @@ fn last_member_close_or_restash_ends_drag_and_observer_without_losing_carried_ho
             assert!(!keys.is_restoring_key("legacy-tm-a", Instant::now()));
             assert_eq!(source.op(&keys, PaneOp::Stash { tx: "new".into(), pairs: vec![b], ui: Some(serde_json::json!("new")) }), PaneResult::Ok);
         }
-        keys.begin_pane_drag(source.label, source.pg, "new", |_| {}).unwrap();
+        keys.begin_pane_drag(source.label, source.pg, "new", |_| {}, |_| {}).unwrap();
         assert_eq!(keys.claim_pane_drag(destination.label, destination.pg, "new", |_, _| {}).unwrap(), Some(serde_json::json!("new")));
         assert_eq!(keys.pane_owner("tm-control"), Some(Owner::Pane(control.pi)));
     }
@@ -43,7 +43,7 @@ fn partial_member_removal_keeps_drag_and_empty_stash_is_rejected() {
     assert!(matches!(source.op(&keys, PaneOp::Stash { tx: "empty".into(), pairs: vec![], ui: None }), PaneResult::Rejected { .. }));
     assert_eq!(source.op(&keys, PaneOp::Stash { tx: "pair".into(), pairs: vec![a.clone(), b.clone()], ui: Some(serde_json::json!("pair")) }), PaneResult::Ok);
     let observer = keys.watch_transfer(source.label, source.pg, "pair").unwrap();
-    keys.begin_pane_drag(source.label, source.pg, "pair", |_| {}).unwrap();
+    keys.begin_pane_drag(source.label, source.pg, "pair", |_| {}, |_| {}).unwrap();
     assert_eq!(source.op(&keys, PaneOp::Close { pi: a.pi }), PaneResult::Ok);
     assert_eq!(keys.lock().panes.transfers["pair"].members.len(), 1);
     assert_eq!(keys.lock().panes.transfers["pair"].members[0].pi, b.pi);
@@ -63,7 +63,10 @@ fn first_use_delivery_initialization_does_not_hold_page_authority() {
         let a = source.enter(&keys, "tm-a");
         assert_eq!(source.op(&keys, PaneOp::Stash { tx: "drag".into(), pairs: vec![a], ui: Some(serde_json::json!("drag")) }), PaneResult::Ok);
         // Claim/end start with a real active transfer but no worker yet.
-        if operation == "claim" || operation == "end" { keys.lock().panes.active_drag = Some("drag".into()); }
+        if operation == "claim" || operation == "end" {
+            let (delivery, _receiver) = mpsc::channel();
+            keys.lock().panes.active_drag = Some(ActiveDrag { token: "drag".into(), delivery, ended: Box::new(|| {}) });
+        }
         let (reached, at_gate) = mpsc::channel();
         let (release, gate) = mpsc::channel();
         let gate = std::sync::Mutex::new(gate);
@@ -73,7 +76,7 @@ fn first_use_delivery_initialization_does_not_hold_page_authority() {
         }));
         let worker = std::thread::spawn({ let keys = keys.clone(); let source_pg = source.pg; let target_pg = target.pg; move || {
             match operation {
-                "begin" => keys.begin_pane_drag("source", source_pg, "drag", |_| {}).unwrap(),
+                "begin" => keys.begin_pane_drag("source", source_pg, "drag", |_| {}, |_| {}).unwrap(),
                 "claim" => assert!(keys.claim_pane_drag("target", target_pg, "drag", |_, _| {}).unwrap().is_some()),
                 "end" => assert!(keys.end_pane_drag("source", source_pg, "drag", false, |_| {}).unwrap()),
                 _ => assert!(keys.route_pane_transfer("source", source_pg, "drag", "target", |_| {}).unwrap()),

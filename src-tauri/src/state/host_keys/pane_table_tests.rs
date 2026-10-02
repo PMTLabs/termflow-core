@@ -9,6 +9,8 @@ mod end_tests;
 mod payload_tests;
 #[path = "pane_lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[path = "pane_drag_ending_tests.rs"]
+mod drag_ending_tests;
 
 struct Page { label: &'static str, wi: u64, pg: u64, seq: u64, incarnation: u64 }
 impl Page {

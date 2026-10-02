@@ -112,6 +112,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   // Cross-window broker (Phase 4, target-claims): the drag THIS window started.
   const globalSourceRef = useRef<GlobalSource | null>(null);
   const incomingTokenRef = useRef<string | null>(null);
+  const claimAttemptRef = useRef<object | null>(null);
 
   const applyDrag = useCallback((next: PaneDragState | null) => {
     dragRef.current = next;
@@ -184,6 +185,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     void setup();
     return () => {
       active = false;
+      claimAttemptRef.current = null;
       unlisteners.forEach((u) => u());
     };
   }, [reset]);
@@ -216,9 +218,22 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const api = window.electronAPI;
       if (!token || !api?.claimGlobalPaneDrag) return;
       const workspace = captureWorkspace();
+      const page = paneIncarnations;
+      const attempt = {};
+      claimAttemptRef.current = attempt;
+      // The broker ends its advertisement before answering a successful claim.
+      // Keep the attempt alive independently until its reply is consumed.
       api.claimGlobalPaneDrag(token).then((payload) => {
-        if (payload && isCurrentWorkspace(workspace) && incomingTokenRef.current === token) return applyCrossWindowPayload(payload, x, y, token);
-      }).catch((err) => console.error('claimGlobalPaneDrag failed', err));
+        if (payload && isCurrentWorkspace(workspace) && page === paneIncarnations && page.enabled
+            && claimAttemptRef.current === attempt) return applyCrossWindowPayload(payload, x, y, token);
+        if (!payload && incomingTokenRef.current === token) {
+          incomingTokenRef.current = null;
+          setIncomingToken(null);
+          setRemoteOverlay(null);
+        }
+      }).catch((err) => console.error('claimGlobalPaneDrag failed', err)).finally(() => {
+        if (claimAttemptRef.current === attempt) claimAttemptRef.current = null;
+      });
     };
     window.addEventListener('pointermove', onTargetMove, true);
     window.addEventListener('pointerup', onTargetUp, true);

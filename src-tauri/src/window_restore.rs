@@ -73,7 +73,7 @@ pub(crate) fn restore_windows(app: &tauri::AppHandle) {
         // action, and a binding published afterwards is a race whose losing side
         // falls back to slot 0 — silently merging this window's tabs into the
         // main window's session, which is the defect being fixed.
-        tracker.bind(&label, &record.id);
+        // The build guard owns the prebind so failure or unwind rolls it back.
         match build_restored_window(app, &label, &record, &monitors) {
             Ok(window) => {
                 crate::context_menu::install(&window);
@@ -167,7 +167,9 @@ fn build_restored_window(
         builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
-    let build = crate::window_lifetime::reserve(app, label)?;
+    let state = app.try_state::<AppState>().ok_or("window state not ready")?;
+    let build = crate::window_lifetime::reserve(app, label)?
+        .with_stable_id(state.windows.clone(), record.id.clone());
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::window_lifetime::commit(build, &window)?;
     crate::webview_recovery::install(&window);

@@ -267,7 +267,7 @@ test('adopt waits for its acknowledgment and a lost acknowledgment installs exac
   const install = jest.fn();
   const installing = h.client.installTransfer('tx-move', [a, b], install);
   await flush(); expect(h.calls()[0].op).toEqual({ kind: 'take', tx: 'tx-move' });
-  h.ack(0, { status: 'Taken', payload: { panes: [] } }); await flush();
+  h.ack(0, { status: 'Taken', payload: { panes: [a, b] } }); await flush();
   expect(h.calls()[1].op).toMatchObject({ kind: 'adopt', tx: 'tx-move', pairs: [{ ...a, pi: { pg: 41, seq: 1 } }, { ...b, pi: { pg: 41, seq: 2 } }] });
   expect(h.applied).toHaveLength(2);
   expect(install).not.toHaveBeenCalled();
@@ -285,7 +285,7 @@ test('an installer that throws after adopt departs every entered copy', async ()
   const h = harness();
   const install = jest.fn(() => { throw new Error('install failed'); });
   const result = h.client.installTransfer('tx-broken', [a, b], install).catch(error => error.message);
-  await flush(); h.ack(0, { status: 'Taken', payload: { panes: [] } }); await flush(); h.ack(1); await flush();
+  await flush(); h.ack(0, { status: 'Taken', payload: { panes: [a, b] } }); await flush(); h.ack(1); await flush();
   expect(install).toHaveBeenCalledTimes(1);
   expect(h.applied).toHaveLength(3);
   expect(h.calls()[2].op).toEqual({ kind: 'depart', pi: { pg: 41, seq: 1 } });

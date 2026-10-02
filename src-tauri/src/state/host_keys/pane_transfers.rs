@@ -89,7 +89,11 @@ impl HostKeys {
         PaneResult::Ok
     }
     pub(super) fn clear_active_drag(inner: &mut Inner, tx: &str) {
-        if inner.panes.active_drag.as_deref() == Some(tx) { inner.panes.active_drag = None; }
+        if inner.panes.active_drag.as_deref() != Some(tx) { return; }
+        let drag = inner.panes.active_drag.take().unwrap();
+        // The callback and token were captured at publication. Enqueueing is
+        // nonblocking; observers execute on the other side of ownership.
+        let _ = drag.delivery.send(drag.ended);
     }
     fn end_transfer_record(inner: &mut Inner, tx: &str) -> Option<Transfer> {
         let transfer = inner.panes.transfers.remove(tx)?;
@@ -125,6 +129,10 @@ impl HostKeys {
         for leaf in leaves {
             if !Self::release_idle_owner(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned; }
         }
+        // A dead source cannot advertise a drag, but its carried members must
+        // remain available to a destination that is still booting.
+        let source_ended: Vec<_> = inner.panes.transfers.iter().filter(|(_, t)| pages.contains(&t.source)).map(|(tx, _)| tx.clone()).collect();
+        for tx in source_ended { Self::clear_active_drag(inner, &tx); }
         let abandoned: Vec<_> = inner.panes.transfers.iter().filter(|(_, t)| t.destination.is_some_and(|pg| pages.contains(&pg))).map(|(tx, _)| tx.clone()).collect();
         for tx in abandoned { Self::finish_transfer(inner, &tx, false); }
         // Staged/Taken source members keep their restore capability until the

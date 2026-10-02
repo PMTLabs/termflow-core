@@ -9,6 +9,8 @@ use termflow_pty_protocol::{Frame, Control};
 
 #[path = "pane_holder_lifecycle_tests.rs"]
 mod lifecycle_tests;
+#[path = "pane_forced_close_tests.rs"]
+mod forced_close_tests;
 
 const HOST: &str = "restore-holder-host";
 const CHANNEL: HostChannel = HostChannel::Primary;

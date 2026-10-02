@@ -1269,30 +1269,9 @@ const App: React.FC = () => {
           (window as any).tabPanes[tabId] = paneTree;
         }
 
-        // Find the newest terminal pane (the one that wasn't in the tree before)
-        let newestTerminalId: string | null = null;
-        let newestPaneId: string | null = null;
-
-        const findNewestTerminal = (node: any) => {
-          if (node.type === 'terminal' && node.terminalId) {
-            if (installed ? node.id === installed.paneId : !existingTerminalIds.has(node.terminalId)) {
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-              return;
-            }
-            if (!newestTerminalId) {
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-            }
-          }
-          if (node.children) {
-            node.children.forEach(findNewestTerminal);
-          }
-        };
-
-        if (paneTree) {
-          findNewestTerminal(paneTree);
-        }
+        // A concurrent split is not the subject of this request.
+        const newestTerminalId = installed?.leaf;
+        const newestPaneId = installed?.paneId;
 
         const terminalService = (window as any).terminalService;
         let processId = newestTerminalId ? terminalService?.getProcessId(newestTerminalId) : null;
@@ -1407,7 +1386,7 @@ const App: React.FC = () => {
             if (!(window as any).tabPanes) (window as any).tabPanes = {};
             (window as any).tabPanes[tabId] = seededTree;
           }
-          const newPaneId = store?.getState()?.panes?.activePaneByTabId?.[tabId] ?? generateId('pn');
+          const newPaneId = installed?.paneId;
 
           console.log('API: Created new terminal in empty tab:', (window as any).tabPanes?.[tabId]);
 
@@ -1621,20 +1600,7 @@ const App: React.FC = () => {
         // Wait for terminal creation with smart polling
         console.log('API: Waiting for terminal to be created...');
 
-        // First, find the new terminal ID from the updated pane tree
-        let expectedTerminalId: string | null = null;
-        const findNewTerminalId = (node: any) => {
-          if (node.type === 'terminal' && node.terminalId && !existingTerminalIds.has(node.terminalId)) {
-            expectedTerminalId = node.terminalId;
-          }
-          if (node.children) {
-            node.children.forEach((child: any) => findNewTerminalId(child));
-          }
-        };
-
-        if (updatedTree) {
-          findNewTerminalId(updatedTree);
-        }
+        const expectedTerminalId = installed?.leaf;
 
         // Poll for the terminal to be created (max 2 seconds)
         const terminalSvc = (window as any).terminalService;
@@ -1666,36 +1632,8 @@ const App: React.FC = () => {
           console.log('API: Terminal service terminals:', Object.keys(terminalServiceState.terminals || {}));
         }
 
-        // Find the newly created terminal
-        let newestTerminalId: string | null = null;
-        let newestPaneId: string | null = null;
-
-        const findNewestTerminal = (node: any) => {
-          console.log('API: Checking node:', node);
-          if (node.type === 'terminal' && node.terminalId) {
-            console.log(`API: Found terminal node with ID: ${node.terminalId}`);
-            if (!existingTerminalIds.has(node.terminalId)) {
-              console.log(`API: Identified new terminal ID: ${node.terminalId}`);
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-              return;
-            }
-            if (!newestTerminalId) {
-              newestTerminalId = node.terminalId;
-              newestPaneId = node.id;
-            }
-          }
-          if (node.children) {
-            node.children.forEach((child: any) => findNewestTerminal(child));
-          }
-        };
-
-        // Use the Redux pane tree to find the newest terminal
-        if (finalPaneTree) {
-          findNewestTerminal(finalPaneTree);
-        } else {
-          console.log('API: WARNING - No pane tree found after split!');
-        }
+        const newestTerminalId = installed?.leaf;
+        const newestPaneId = installed?.paneId;
 
         console.log('API: Found newest terminal:', newestTerminalId, 'in pane:', newestPaneId);
 

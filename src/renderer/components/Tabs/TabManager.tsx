@@ -1,5 +1,6 @@
 import { paneIncarnations, describePanes } from '../../services/paneIncarnations';
 import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
+import { capturePaneEffect } from '../../services/paneEffect';
 import React, { useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { store, RootState, AppDispatch } from '../../store';
@@ -132,6 +133,14 @@ function makeTabGhost(title: string, titleColor?: string): HTMLElement {
  */
 function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
   if (e.button !== 0) return;
+  const workspace = captureWorkspace();
+  const tab = store.getState().tabs.tabs.find(t => t.id === h.tabId);
+  const members = describePanes(store.getState().panes.treesByTabId[h.tabId] ?? null);
+  const predicates = members.map(pane => capturePaneEffect(pane.leaf, pane.paneId));
+  const current = () => isCurrentWorkspace(workspace) && predicates.every(check => check())
+    && store.getState().tabs.tabs.some(t => t.id === h.tabId && t.shellType === tab?.shellType)
+    && members.every(member => describePanes(store.getState().panes.treesByTabId[h.tabId] ?? null)
+      .some(pane => pane.paneId === member.paneId && pane.leaf === member.leaf));
   const startX = e.clientX;
   const startY = e.clientY;
   let dragging = false;
@@ -161,6 +170,7 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
     if (movePending) return;
     movePending = true;
     rafId = window.requestAnimationFrame(() => {
+      if (!current()) { cleanup(); return; }
       // The gate reopens when the call COMPLETES, not when it is dispatched.
       // Each nudge crosses into the backend and waits on the main thread, so
       // clearing the flag first queues one more every frame however far behind
@@ -171,7 +181,19 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
     });
   };
 
+  const cleanup = () => {
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onUp, true);
+    document.removeEventListener('selectstart', preventSelect, true);
+    document.body.classList.remove('tab-dragging');
+    if (rafId) window.cancelAnimationFrame(rafId);
+    if (dragging && useNativePreview) void api?.hideDragPreview?.();
+    ghost?.remove();
+    if (dragging) h.onDragStateChange(false);
+    unsubscribe();
+  };
   const onMove = (ev: PointerEvent) => {
+    if (!current()) { cleanup(); return; }
     lastClientX = ev.clientX;
     lastClientY = ev.clientY;
     if (!dragging) {
@@ -200,15 +222,8 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
   };
 
   const onUp = (ev: PointerEvent) => {
-    window.removeEventListener('pointermove', onMove, true);
-    window.removeEventListener('pointerup', onUp, true);
-    document.removeEventListener('selectstart', preventSelect, true);
-    document.body.classList.remove('tab-dragging');
-    if (rafId) window.cancelAnimationFrame(rafId);
-    if (!dragging) return;
-    if (useNativePreview) void api?.hideDragPreview?.();
-    else ghost?.remove();
-    h.onDragStateChange(false);
+    cleanup();
+    if (!dragging || !current()) return;
     if (pointOutsideViewport(ev.clientX, ev.clientY)) {
       // Released outside this window: reattach into whichever window is under the
       // drop point, or open a new window if none. CLIENT coords are converted to
@@ -233,6 +248,7 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
     }
   };
 
+  const unsubscribe = store.subscribe(() => { if (!current()) cleanup(); });
   window.addEventListener('pointermove', onMove, true);
   window.addEventListener('pointerup', onUp, true);
 }

@@ -77,12 +77,11 @@ pub fn open_settings_in_main_window(
 /// the new window into the main window's session. That is precisely the defect
 /// this feature exists to remove, so the ordering is load-bearing, not a
 /// micro-optimisation.
-pub fn reserve_window_id(app: &tauri::AppHandle, label: &str) -> Option<String> {
+pub(crate) fn reserve_window_id(app: &tauri::AppHandle, build: crate::state::WindowBuildGuard) -> Result<crate::state::WindowBuildGuard, String> {
     use tauri::Manager as _;
-    let state = app.try_state::<AppState>()?;
+    let state = app.try_state::<AppState>().ok_or("window state not ready")?;
     let id = uuid::Uuid::new_v4().simple().to_string();
-    state.windows.bind(label, &id);
-    Some(id)
+    Ok(build.with_stable_id(state.windows.clone(), id))
 }
 
 /// Record a just-built window's real geometry under its reserved id.
@@ -460,7 +459,8 @@ pub async fn create_detached_window(
     // Reserve BEFORE build (see reserve_window_id): a detached window saves its
     // own session from the moment it mounts, so it must know its id by then.
     let build = crate::window_lifetime::reserve(&app_handle, &label)?;
-    let reserved = reserve_window_id(&app_handle, &label);
+    let build = reserve_window_id(&app_handle, build)?;
+    let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
@@ -521,7 +521,8 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
 
     // Reserve BEFORE build: the webview resolves its id as its first action.
     let build = crate::window_lifetime::reserve(app, &label)?;
-    let reserved = reserve_window_id(app, &label);
+    let build = reserve_window_id(app, build)?;
+    let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
     crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);

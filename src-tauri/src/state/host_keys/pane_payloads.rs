@@ -24,13 +24,14 @@ impl HostKeys {
         Self::transfer_source(&inner, label, pg, tx).map(|_| ())
     }
 
-    pub(crate) fn begin_pane_drag(&self, label: &str, pg: u64, tx: &str, deliver: impl FnOnce(serde_json::Value) + Send + 'static) -> Result<(), String> {
+    pub(crate) fn begin_pane_drag(&self, label: &str, pg: u64, tx: &str, deliver: impl FnOnce(serde_json::Value) + Send + 'static, ended: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
         let delivery = self.delivery_sender();
         let mut inner = self.lock();
         Self::expire_transfers_locked(&mut inner, Instant::now());
         let page = Self::transfer_source(&inner, label, pg, tx)?;
         if inner.panes.active_drag.is_some() { return Err("another pane drag is active".into()); }
-        inner.panes.active_drag = Some(tx.into());
+        let token = tx.to_string();
+        inner.panes.active_drag = Some(ActiveDrag { token: token.clone(), delivery: delivery.clone(), ended: Box::new(move || ended(token)) });
         let notice = serde_json::json!({ "token": tx, "target": label, "pg": page.pg, "wi": page.wi });
         delivery.send(Box::new(move || deliver(notice))).map_err(|e| e.to_string())
     }

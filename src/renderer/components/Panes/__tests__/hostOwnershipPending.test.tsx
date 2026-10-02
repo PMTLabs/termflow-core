@@ -20,6 +20,7 @@ jest.mock('../dnd/usePaneDrag', () => ({ usePaneDrag: () => () => {} }));
 jest.mock('../../TerminalContainer', () => ({ clearTabPanes: jest.fn() }));
 
 import { TerminalPane } from '../TerminalPane';
+import { PaneManager } from '../PaneManager';
 import { TerminalServiceClass } from '../../../services/TerminalService';
 import { PaneIncarnations, installPaneIncarnations, type PaneBridge, type PaneRequest } from '../../../services/paneIncarnations';
 import tabs, { addTab, setActiveTab } from '../../../store/slices/tabsSlice';
@@ -302,6 +303,141 @@ test.each(['load', 'revert'])('a %s with the same leaf waits for an old create w
     expect(work).toHaveBeenCalledTimes(1);
     expect(ops.filter(request => request.op.kind === 'admit_create')).toHaveLength(1);
   } finally { global.fetch = oldFetch; client.stop(); installPaneIncarnations(new PaneIncarnations()); }
+});
+
+test.each(['cancel-exit', 'load-exit', 'cancel-retry', 'load-retry', 'cancel-contended'])('a suppressed completed placement respects its shell lifetime across %s', async scenario => {
+  seed(activeStore); seed(activeStore, leaf('tm-control'), 'tb-control');
+  const ops: PaneRequest[] = [];
+  let complete!: (pc: string) => void;
+  const work = jest.fn().mockImplementationOnce(() => new Promise<string>(resolve => { complete = resolve; })).mockResolvedValue('pc-fresh');
+  const client = new PaneIncarnations((async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: 4, pg: 40 };
+    if (command === 'create_admitted_terminal') return work(args.request);
+    const op = args.request.op;
+    ops.push(args.request);
+    const result = op.kind === 'admit_create' ? { status: 'Create', cg: work.mock.calls.length ? 88 : 77 }
+      : op.kind === 'bind' && op.pc === 'pc-original' ? { status: scenario.endsWith('contended') ? 'Contended' : 'Retry' } : { status: 'Ok' };
+    return { status: 'Ack', result };
+  }) as PaneBridge);
+  installPaneIncarnations(client); client.attachStore(activeStore);
+  const api = apiFor(jest.fn()); activeService = useService(activeStore, api);
+  activeService.registerExistingTerminal('tm-control', 'pc-control');
+  const published = jest.spyOn(activeService as any, 'bindProcess');
+  const oldFetch = global.fetch; global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
+  try {
+    act(() => mount('tm-wait')); await flush();
+    expect(work).toHaveBeenCalledTimes(1);
+    await act(async () => { await client.stash('suppressed', [{ paneId: 'tm-wait', leaf: 'tm-wait' }]); });
+    await act(async () => complete('pc-original')); await flush();
+    expect(activeService.getProcessId('tm-wait')).toBeUndefined();
+    expect(container.querySelector('[data-process-id="pc-original"]')).toBeNull();
+    if (scenario.endsWith('exit')) {
+      act(() => api.onTerminalExit.mock.calls[0][0]('pc-original', 0));
+    }
+    if (scenario.startsWith('cancel')) {
+      await act(async () => { await client.cancel('suppressed', [{ paneId: 'tm-wait', leaf: 'tm-wait' }], new Map()); });
+    } else {
+      const tree = leaf('tm-wait');
+      localStorage.setItem('auto-terminal-layouts', JSON.stringify([{ id: 'ended', name: 'Ended', tabs: [{ id: 'tb-wait', title: 'Waiting' }], activeTabId: 'tb-wait', activePaneId: tree.id, paneTree: tree, treesByTabId: { 'tb-wait': tree }, createdAt: Date.now(), updatedAt: Date.now() }]));
+      let loading!: Promise<boolean>;
+      act(() => { root.render(null); loading = StateManager.loadLayout('ended', activeStore.dispatch); });
+      await act(async () => jest.advanceTimersByTimeAsync(100));
+      expect(await loading).toBe(true);
+      act(() => mount('tm-wait', activeStore.getState().panes.treesByTabId['tb-wait'].id));
+    }
+    await flush();
+    if (scenario.endsWith('contended')) {
+      expect(work).toHaveBeenCalledTimes(1);
+      expect(published.mock.calls.filter(([id]) => id === 'tm-wait')).toHaveLength(0);
+    } else {
+      expect(work).toHaveBeenCalledTimes(2);
+      expect(work.mock.calls[1][0]).toMatchObject({ pg: 40, cg: 88, leaf: 'tm-wait' });
+      expect(container.querySelectorAll('[data-process-id="pc-fresh"]')).toHaveLength(1);
+      expect(published.mock.calls.filter(([id, pc]) => id === 'tm-wait' && pc === 'pc-fresh')).toHaveLength(1);
+      expect(ops.filter(request => request.op.kind === 'admit_create')).toHaveLength(2);
+    }
+    expect(published.mock.calls.filter(([, pc]) => pc === 'pc-original')).toHaveLength(0);
+    // Exit retirement must prevent even trying to restore the dead predecessor;
+    // otherwise the Retry branch can mask a retained-placement leak.
+    expect(ops.filter(request => request.op.kind === 'bind' && request.op.pc === 'pc-original'))
+      .toHaveLength(scenario.endsWith('exit') ? 0 : 1);
+    expect(activeService.getProcessId('tm-control')).toBe('pc-control');
+    expect(api.createTerminal).not.toHaveBeenCalled();
+  } finally { published.mockRestore(); global.fetch = oldFetch; client.stop(); installPaneIncarnations(new PaneIncarnations()); }
+});
+
+test.each(['load', 'revert'])('a delayed pane split refuses the repeated durable id after %s while a live split succeeds', async action => {
+  seed(activeStore);
+  const client = new PaneIncarnations((async (command: string) => command === 'register_page'
+    ? { status: 'Registered', wi: 4, pg: 40 } : { status: 'Ack', result: { status: 'Ok' } }) as PaneBridge);
+  installPaneIncarnations(client); client.attachStore(activeStore);
+  let release!: (cwd: string) => void;
+  const cwd = jest.fn().mockResolvedValueOnce('C:/live').mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  activeService = useService(activeStore, { ...apiFor(jest.fn()), getTerminalCwd: cwd } as any);
+  activeService.registerExistingTerminal('tm-wait', 'pc-source');
+  const oldFetch = global.fetch; global.fetch = jest.fn().mockRejectedValue(new Error('offline'));
+  try {
+    activeStore.dispatch(setActiveTabId('tb-wait'));
+    const renderManager = () => root.render(<Provider store={activeStore}><PaneManager tabId="tb-wait" /></Provider>);
+    act(renderManager); await flush();
+    act(() => container.querySelector<HTMLButtonElement>('button[title="Split Vertical"]')!.click()); await flush();
+    expect(cwd).toHaveBeenCalledTimes(1);
+    expect(activeStore.getState().panes.treesByTabId['tb-wait'].children).toHaveLength(2);
+    act(() => root.render(null));
+    act(() => { activeStore.dispatch(removeTabTree('tb-wait')); activeStore.dispatch(addTabTree({ tabId: 'tb-wait', tree: { ...leaf('tm-wait'), id: 'pn-wait' } })); });
+    act(renderManager); await flush();
+    act(() => container.querySelector<HTMLButtonElement>('button[title="Split Horizontal"]')!.click()); await flush();
+    expect(cwd).toHaveBeenCalledTimes(2);
+    const original = client.capture('tm-wait', 'pn-wait');
+    const tree = { ...leaf('tm-wait'), id: 'pn-wait' };
+    restoreTabPanesInPlace({ 'tb-wait': tree });
+    __resetLayoutUndoForTests(); pushUndo(captureWorkspaceSnapshot(activeStore.getState(), 'Before'));
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{ id: 'split-race', name: 'Replacement', tabs: [{ id: 'tb-wait', title: 'Replacement' }], activeTabId: 'tb-wait', activePaneId: tree.id, paneTree: tree, treesByTabId: { 'tb-wait': tree }, createdAt: Date.now(), updatedAt: Date.now() }]));
+    act(() => root.render(null));
+    const replacing = action === 'load' ? StateManager.loadLayout('split-race', activeStore.dispatch) : StateManager.revertWorkspace(activeStore.dispatch);
+    await jest.advanceTimersByTimeAsync(100); expect(await replacing).toBe(true);
+    const replacement = client.capture('tm-wait', 'pn-wait');
+    expect(replacement).not.toBe(original);
+    await act(async () => release('C:/stale')); await flush();
+    expect(activeStore.getState().panes.treesByTabId['tb-wait']).toMatchObject(tree);
+    expect(activeStore.getState().panes.treesByTabId['tb-wait'].children).toBeUndefined();
+    expect(client.capture('tm-wait', 'pn-wait')).toBe(replacement);
+  } finally { global.fetch = oldFetch; client.stop(); installPaneIncarnations(new PaneIncarnations()); }
+});
+
+test('settled native init keys retire with slots but survive ordinary mounted-control unmounts', async () => {
+  seed(activeStore); seed(activeStore, leaf('tm-control'), 'tb-control');
+  const client = new PaneIncarnations((async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: 4, pg: 40 };
+    if (command === 'create_admitted_terminal') return `pc-${args.request.leaf}`;
+    return { status: 'Ack', result: args.request.op.kind === 'admit_create' ? { status: 'Create', cg: 77 } : { status: 'Ok' } };
+  }) as PaneBridge);
+  installPaneIncarnations(client); client.attachStore(activeStore);
+  activeService = useService(activeStore, apiFor(jest.fn()));
+  activeService.attachExistingTerminal('tm-control', 'pc-control');
+  const control = client.capture('tm-control', 'tm-control')!;
+  try {
+    const render = (waiting: boolean) => root.render(<Provider store={activeStore}>
+      {waiting && <TerminalPane key="waiting" paneId="tm-wait" terminalId="tm-wait" isActive onSplit={() => {}} onClose={() => {}} onFocus={() => {}} />}
+      <TerminalPane key="control" paneId="tm-control" terminalId="tm-control" isActive onSplit={() => {}} onClose={() => {}} onFocus={() => {}} />
+    </Provider>);
+    for (let i = 0; i < 5; i++) {
+      act(() => render(true)); await flush();
+      expect(container.querySelector('[data-process-id="pc-control"]')).not.toBeNull();
+      const original = client.capture('tm-wait', 'tm-wait')!;
+      expect((window as any).terminalInitMap.has(original)).toBe(true);
+      act(() => render(false));
+      expect((window as any).terminalInitMap.has(original)).toBe(true);
+      act(() => activeStore.dispatch(removeTabTree('tb-wait'))); await flush();
+      for (const name of ['terminalInitMap', 'terminalInitLock', 'terminalInitPromises']) {
+        expect((window as any)[name].has(original)).toBe(false);
+        expect((window as any)[name].has(control)).toBe(true);
+      }
+      activeService.detachTerminal('tm-wait');
+      act(() => activeStore.dispatch(addTabTree({ tabId: 'tb-wait', tree: leaf('tm-wait') })));
+    }
+    expect((window as any).terminalInitMap.size).toBe(1);
+  } finally { client.stop(); installPaneIncarnations(new PaneIncarnations()); }
 });
 
 test('a moved waiting pane joins the original placement through the stream and mounts its exact process', async () => {

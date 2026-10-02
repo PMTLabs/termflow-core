@@ -64,7 +64,7 @@ fn queued_drag_receipts_keep_original_pages_and_late_source_calls_cannot_route_s
         reached.send(()).unwrap();
         gate.recv_timeout(Duration::from_secs(3)).unwrap();
         sent.send(notice).unwrap();
-    }).unwrap();
+    }, |_| {}).unwrap();
     at_gate.recv_timeout(Duration::from_secs(3)).unwrap();
     let (sent, routed) = mpsc::channel();
     assert!(keys.route_pane_transfer(source.label, source.pg, "drag", target.label, move |notice| { sent.send(notice).unwrap(); }).unwrap());
@@ -83,7 +83,7 @@ fn queued_drag_receipts_keep_original_pages_and_late_source_calls_cannot_route_s
     assert_eq!(keys.pane_owner("tm-successor"), Some(Owner::Pane(replacement.pi)));
     let mut new_source = Page::new(&keys, "source");
     let new_control = register_shell(&keys, &mut new_source, "tm-new-source", "pc-new-source");
-    assert!(keys.begin_pane_drag("source", source.pg, "drag", |_| panic!("old source cannot begin")).is_err());
+    assert!(keys.begin_pane_drag("source", source.pg, "drag", |_| panic!("old source cannot begin"), |_| panic!("old source cannot end")).is_err());
     assert!(keys.end_pane_drag("source", source.pg, "drag", false, |_| panic!("old source cannot cancel")).is_err());
     assert!(keys.route_pane_transfer("source", source.pg, "drag", "target", |_| panic!("old source cannot route")).is_err());
     let (sent, claimed) = mpsc::channel();

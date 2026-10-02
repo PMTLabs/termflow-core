@@ -2,6 +2,9 @@ use super::*;
 use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
+#[path = "window_binding_tests.rs"]
+mod binding_tests;
+
 fn receive<T>(rx: &Receiver<T>) -> T {
     rx.recv_timeout(Duration::from_secs(5)).expect("event deadline expired")
 }
@@ -37,12 +40,16 @@ fn registration_retries_during_gated_builds_and_other_windows_keep_progressing()
         let old = page(&keys, "target", old_wi);
         assert_eq!(keys.lock().window_pages.committed.len(), 2);
         assert_eq!(keys.lock().window_pages.pages.len(), 2);
+        let (tracker, path) = binding_tests::tracker();
+        tracker.bind("target", "old-id");
+        tracker.bind("control", "control-id");
         let (reserved_tx, reserved_rx) = channel();
         let (release_tx, release_rx) = channel();
         let (finished_tx, finished_rx) = channel();
         let building_keys = keys.clone();
+        let building_tracker = tracker.clone();
         let builder = std::thread::spawn(move || {
-            let build = building_keys.reserve_window("target").unwrap();
+            let build = building_keys.reserve_window("target").unwrap().with_stable_id(building_tracker, "new-id".into());
             let wi = build.identity().1;
             reserved_tx.send(wi).unwrap();
             receive(&release_rx);
@@ -55,6 +62,7 @@ fn registration_retries_during_gated_builds_and_other_windows_keep_progressing()
         });
         let reserved = receive(&reserved_rx);
         assert_ne!(reserved, old_wi);
+        assert_eq!(tracker.id_for_label("target").as_deref(), Some("new-id"));
         assert_eq!(keys.lock().window_pages.committed.get("target"), Some(&old_wi));
 
         // This must finish while the builder's gate is still closed, not merely
@@ -78,6 +86,9 @@ fn registration_retries_during_gated_builds_and_other_windows_keep_progressing()
         assert_eq!(receive(&finished_rx), reserved);
         builder.join().unwrap();
         registrar.join().unwrap();
+        assert_eq!(tracker.id_for_label("target").as_deref(), Some(if success { "new-id" } else { "old-id" }));
+        assert_eq!(tracker.id_for_label("control").as_deref(), Some("control-id"));
+        let _ = std::fs::remove_file(path);
         let expected = if success { reserved } else { old_wi };
         let registered = page(&keys, "target", expected);
         assert!(registered.pg > old.pg);
