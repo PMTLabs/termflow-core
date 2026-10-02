@@ -3,7 +3,7 @@ mod incarnation_ids;
 mod host_routes;
 mod host_keys;
 pub(crate) mod ingress;
-pub(crate) use host_keys::SessionIdentity;
+pub(crate) use host_keys::{SessionIdentity, PageIdentity, PageRegistration, WindowBuildGuard};
 mod terminals;
 mod owner_lifecycle;
 pub(crate) use owner_lifecycle::CreateGuard;

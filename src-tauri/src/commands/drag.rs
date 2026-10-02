@@ -105,7 +105,9 @@ pub async fn show_drag_preview(
             builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
         }
 
+        let build = crate::window_lifetime::reserve(&app_handle, PREVIEW_LABEL)?;
         let w = builder.build().map_err(|e| e.to_string())?;
+        crate::window_lifetime::commit(build, &w)?;
         // Click-through so it never steals the in-flight drag's pointer events.
         let _ = w.set_ignore_cursor_events(true);
         w

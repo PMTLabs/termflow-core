@@ -13,6 +13,8 @@ mod owners;
 mod restore;
 mod effects;
 mod delivery;
+mod pages;
+pub(crate) use pages::{PageIdentity, PageRegistration, WindowBuildGuard};
 pub(crate) use effects::SessionIdentity;
 pub use owners::{Admission as CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
 
@@ -56,6 +58,7 @@ struct Inner {
     channels: HashMap<HostChannel, Channel>,
     sequence: u64,
     owners: HashMap<String, owners::Row>,
+    window_pages: pages::WindowPages,
     restore_holders: HashMap<(String, String), restore::Intent>,
     closed_unowned: HashMap<(String, String), restore::Intent>,
     cap: usize,
@@ -82,6 +85,7 @@ impl HostKeys {
     pub fn new(routes: HostRoutes) -> Self {
         Self { inner: Arc::new(Mutex::new(Inner {
             keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
+            window_pages: pages::WindowPages::default(),
             restore_holders: HashMap::new(), closed_unowned: HashMap::new(), cap: ENDING_CAP,
             pending_deliveries: std::collections::HashSet::new(),
         })), routes, deliveries: Arc::default(),

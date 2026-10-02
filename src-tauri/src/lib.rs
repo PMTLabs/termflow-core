@@ -57,6 +57,7 @@ mod history_flush;
 mod tray;
 mod relaunch;
 mod window_restore;
+mod window_lifetime;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
@@ -613,6 +614,11 @@ pub fn run() {
 
         // Manage state in Tauri
         app.manage(state.clone());
+        // Tauri has already built the configured window before calling setup.
+        if let Some(main) = app.get_webview_window("main") {
+            let build = window_lifetime::reserve(app.handle(), "main")?;
+            window_lifetime::commit(build, &main)?;
+        }
 
         // Advertise this instance BEFORE the servers come up: even before endpoints
         // are bound (or if binding fails), this is still a running sibling, and the
@@ -955,6 +961,7 @@ pub fn run() {
         commands::confirm_close_app,
         commands::get_window_session_id,
         commands::list_window_session_ids,
+        commands::register_page,
         commands::flush_session_ack,
         commands::stash_detach_payload,
         commands::take_detach_payload,

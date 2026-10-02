@@ -167,7 +167,9 @@ fn build_restored_window(
         builder = builder.additional_browser_args(crate::gpu_preference::browser_args());
     }
 
+    let build = crate::window_lifetime::reserve(app, label)?;
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::webview_recovery::install(&window);
     if record.maximized {
         let _ = window.maximize();

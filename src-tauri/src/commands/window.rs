@@ -143,6 +143,21 @@ pub fn list_window_session_ids(state: State<'_, AppState>) -> Vec<String> {
     state.windows.snapshot().windows.into_iter().map(|w| w.id).collect()
 }
 
+/// Register the calling renderer without waiting for a native build. The payload
+/// is `{status: "Retry"}` or `{status: "Registered", wi, pg}`. Registration alone
+/// never settles or ends an older page; the ordered page stream does that.
+#[tauri::command]
+pub(crate) fn register_page(
+    app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<crate::state::PageRegistration, String> {
+    use tauri::Manager as _;
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return Ok(crate::state::PageRegistration::Retry);
+    };
+    state.host_table.keys().register_page(window.label())
+}
+
 // ----- Quit: give every window a chance to persist first ---------------------
 //
 // `AppHandle::exit` tears the process down without firing `CloseRequested` for
@@ -465,8 +480,10 @@ pub async fn create_detached_window(
 
     // Reserve BEFORE build (see reserve_window_id): a detached window saves its
     // own session from the moment it mounts, so it must know its id by then.
+    let build = crate::window_lifetime::reserve(&app_handle, &label)?;
     let reserved = reserve_window_id(&app_handle, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
     crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
@@ -523,8 +540,10 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
     }
 
     // Reserve BEFORE build: the webview resolves its id as its first action.
+    let build = crate::window_lifetime::reserve(app, &label)?;
     let reserved = reserve_window_id(app, &label);
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
     crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
