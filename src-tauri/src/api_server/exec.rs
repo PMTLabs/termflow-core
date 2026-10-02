@@ -585,6 +585,16 @@ mod tests {
         state
             .shell_writer_channels
             .insert(id.clone(), Arc::new(Mutex::new(sink)));
+        // The send is only accepted for a registered shell.
+        {
+            let keys = state.host_table.keys();
+            let crate::state::CreateAdmission::Run(cg) = keys.admit_create(&id, crate::state::CreateMode::Mount).unwrap() else { panic!("new admission") };
+            keys.stage_shell(&id, cg, &id, None).unwrap();
+            assert!(matches!(
+                keys.complete_shell(&id, cg, &crate::state::StagedShell { process: id.clone(), stage: crate::state::ShellStage::Local }),
+                crate::state::Completion::Registered
+            ));
+        }
 
         // Task A: a real in-flight send. cli_type "copilot" writes the prompt (fires the
         // signal), then sleeps 500 ms (the focus-in delay) before the end indicator.
