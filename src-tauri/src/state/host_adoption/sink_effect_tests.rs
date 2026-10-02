@@ -52,8 +52,36 @@ async fn delayed_frozen_loss_cannot_overwrite_the_reconnected_barrier() {
     assert!(port.barrier().unresolved().is_empty());
     resume_tx.send(()).unwrap();
     assert!(!delayed.join().unwrap());
+    *port.barrier().shared.lost_hook.lock().unwrap() = None;
     // The successful-result writer is qualified at the same lock-local boundary.
     port.barrier().finish_on(&key, &host.endpoint, HostRole::Frozen, Resolution::Unresolved("stale answer".into()), Some((port.table(), channel, host.epoch)));
+    assert!(port.barrier().unresolved().is_empty());
+    {
+        let entries = port.barrier().lock();
+        let entry = entries.iter().find(|e| e.key == key).unwrap();
+        assert_eq!(entry.resolution, Resolution::Resolved);
+        assert!(!entry.retry_pending);
+    }
+    assert!(!port.barrier().needs_attempt_for(&key));
+    assert!(frozen_connection_lost(port.table(), port.barrier(), current.id, current.epoch, &current.endpoint));
+    let unresolved = vec![UnresolvedHost { endpoint: "old".into(), reason: "connection lost".into() }];
+    assert_eq!(port.barrier().unresolved(), unresolved);
+    {
+        let entries = port.barrier().lock();
+        let entry = entries.iter().find(|e| e.key == key).unwrap();
+        assert_eq!(entry.resolution, Resolution::Unresolved("connection lost".into()));
+        assert!(entry.retry_pending);
+    }
+    port.barrier().finish_on(&key, &host.endpoint, HostRole::Frozen, Resolution::Resolved, Some((port.table(), channel, host.epoch)));
+    assert_eq!(port.barrier().unresolved(), unresolved);
+    {
+        let entries = port.barrier().lock();
+        let entry = entries.iter().find(|e| e.key == key).unwrap();
+        assert_eq!(entry.resolution, Resolution::Unresolved("connection lost".into()));
+        assert!(entry.retry_pending);
+    }
+    assert!(!port.barrier().needs_attempt_for(&key));
+    port.barrier().finish_on(&key, &current.endpoint, HostRole::Frozen, Resolution::Resolved, Some((port.table(), channel, current.epoch)));
     assert!(port.barrier().unresolved().is_empty());
     {
         let entries = port.barrier().lock();
@@ -271,6 +299,66 @@ fn recovery_delivery_can_reenter_and_block_without_holding_shell_authority() {
     keys.recover_listed(CHANNEL, "orphan", || true, { let observed = observed.clone(); move || observed.lock().unwrap().push("retry") });
     keys.flush_deliveries();
     assert_eq!(*observed.lock().unwrap(), vec!["orphan", "next", "retry"]);
+}
+
+#[test]
+fn distinct_same_key_recovery_survives_old_delivery_completion() {
+    for dimension in ["channel", "epoch", "pid", "record"] {
+        let keys = HostKeys::default();
+        keys.connect_fixture(CHANNEL, 1);
+        keys.listing(CHANNEL, &SessionListing { request_no: 1, sessions: vec![meta("orphan", 41)] }, |_| false);
+        let (old_entered_tx, old_entered_rx) = std::sync::mpsc::channel();
+        let (old_resume_tx, old_resume_rx) = std::sync::mpsc::channel();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        keys.recover_listed(CHANNEL, "orphan", || true, { let observed = observed.clone(); move || {
+            old_entered_tx.send((CHANNEL, 1, 41)).unwrap();
+            old_resume_rx.recv_timeout(BOUND).unwrap();
+            observed.lock().unwrap().push(("old", CHANNEL, 1, 41));
+        }});
+        assert_eq!(old_entered_rx.recv_timeout(BOUND).unwrap(), (CHANNEL, 1, 41));
+        assert_eq!(keys.pending_deliveries(), 1);
+        keys.recover_listed(CHANNEL, "orphan", || true, || panic!("identical old recovery must coalesce"));
+        assert_eq!(keys.pending_deliveries(), 1);
+        let successor_channel = if dimension == "channel" { HostChannel::Elevated } else { CHANNEL };
+        let successor_epoch = if dimension == "epoch" { 2 } else { 1 };
+        let successor_pid = if dimension == "pid" { 42 } else { 41 };
+        match dimension {
+            "channel" => {
+                keys.connect_fixture(successor_channel, successor_epoch);
+                keys.listing(successor_channel, &SessionListing { request_no: 1, sessions: vec![meta("orphan", successor_pid)] }, |_| false);
+            },
+            "epoch" => keys.connect_fixture(CHANNEL, successor_epoch),
+            "pid" => keys.listing(CHANNEL, &SessionListing { request_no: 2, sessions: vec![meta("orphan", successor_pid)] }, |_| false),
+            "record" => {
+                keys.listing(CHANNEL, &SessionListing { request_no: 2, sessions: vec![] }, |_| false);
+                assert_eq!(keys.state(CHANNEL, "orphan"), None);
+                keys.listing(CHANNEL, &SessionListing { request_no: 3, sessions: vec![meta("orphan", successor_pid)] }, |_| false);
+            },
+            _ => unreachable!(),
+        }
+        assert_eq!(keys.state(successor_channel, "orphan"), Some(KeyState::Listed));
+        let (successor_entered_tx, successor_entered_rx) = std::sync::mpsc::channel();
+        let (successor_resume_tx, successor_resume_rx) = std::sync::mpsc::channel();
+        keys.recover_listed(successor_channel, "orphan", || true, { let observed = observed.clone(); move || {
+            successor_entered_tx.send((successor_channel, successor_epoch, successor_pid)).unwrap();
+            successor_resume_rx.recv_timeout(BOUND).unwrap();
+            observed.lock().unwrap().push(("successor", successor_channel, successor_epoch, successor_pid));
+        }});
+        assert_eq!(keys.pending_deliveries(), 2, "distinct {dimension} recovery must queue");
+        keys.recover_listed(successor_channel, "orphan", || true, || panic!("identical successor recovery must coalesce"));
+        assert_eq!(keys.pending_deliveries(), 2);
+        assert!(observed.lock().unwrap().is_empty());
+        old_resume_tx.send(()).unwrap();
+        assert_eq!(successor_entered_rx.recv_timeout(BOUND).unwrap(), (successor_channel, successor_epoch, successor_pid));
+        assert_eq!(*observed.lock().unwrap(), vec![("old", CHANNEL, 1, 41)]);
+        assert_eq!(keys.pending_deliveries(), 1, "old completion must preserve successor pending state");
+        keys.recover_listed(successor_channel, "orphan", || true, || panic!("executing successor must remain pending"));
+        assert_eq!(keys.pending_deliveries(), 1);
+        successor_resume_tx.send(()).unwrap();
+        keys.flush_deliveries();
+        assert_eq!(*observed.lock().unwrap(), vec![("old", CHANNEL, 1, 41), ("successor", successor_channel, successor_epoch, successor_pid)]);
+        assert_eq!(keys.pending_deliveries(), 0);
+    }
 }
 
 #[tokio::test]
