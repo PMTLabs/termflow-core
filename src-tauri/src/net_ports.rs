@@ -95,9 +95,34 @@ pub async fn bind_api_listener(
 /// Choose an MCP port. Unlike the API we cannot hold this socket — the sidecar
 /// is a separate process that binds it itself — so this is a probe, and the
 /// identity check in `wait_for_mcp_health` is what actually proves we got it.
-pub async fn pick_mcp_port(start: u16, span: u16, own_id: &str) -> Option<u16> {
+pub async fn pick_mcp_port(
+    start: u16,
+    span: u16,
+    own_id: &str,
+    reserved_ports: &[u16],
+) -> Option<u16> {
+    pick_mcp_port_with(start, span, reserved_ports, |port| {
+        probe_port_owner(port, own_id)
+    })
+    .await
+}
+
+async fn pick_mcp_port_with<F, Fut>(
+    start: u16,
+    span: u16,
+    reserved_ports: &[u16],
+    mut owner_of: F,
+) -> Option<u16>
+where
+    F: FnMut(u16) -> Fut,
+    Fut: std::future::Future<Output = PortOwner>,
+{
     for port in candidates(start, span) {
-        if probe_port_owner(port, own_id).await != PortOwner::OwnedByOther {
+        if reserved_ports.contains(&port) {
+            log::info!("[NET] port {port} is reserved by this instance; trying the next");
+            continue;
+        }
+        if owner_of(port).await != PortOwner::OwnedByOther {
             if port != start {
                 log::warn!(
                     "[NET] configured MCP port {start} was unavailable; using {port} instead \
@@ -107,7 +132,10 @@ pub async fn pick_mcp_port(start: u16, span: u16, own_id: &str) -> Option<u16> {
             return Some(port);
         }
     }
-    log::error!("[NET] no free MCP port in {start}..{}", start.saturating_add(span));
+    log::error!(
+        "[NET] no free MCP port in {start}..{}",
+        start.saturating_add(span)
+    );
     None
 }
 
@@ -543,6 +571,34 @@ mod tests {
     #[test]
     fn an_exhausted_range_reports_failure_rather_than_binding_wildly() {
         assert!(pick_bound_with(42031, 3, |_| None::<()>).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_mcp_picker_skips_its_reserved_api_port() {
+        let selected = pick_mcp_port_with(42035, 3, &[42035], |_| {
+            std::future::ready(PortOwner::OwnedBySelf)
+        })
+        .await;
+
+        assert_eq!(selected, Some(42036));
+    }
+
+    #[tokio::test]
+    async fn the_mcp_picker_keeps_the_first_free_port_when_unreserved() {
+        let selected =
+            pick_mcp_port_with(42035, 3, &[], |_| std::future::ready(PortOwner::Free)).await;
+
+        assert_eq!(selected, Some(42035));
+    }
+
+    #[tokio::test]
+    async fn the_mcp_picker_returns_none_when_every_candidate_is_reserved() {
+        let selected = pick_mcp_port_with(42035, 3, &[42035, 42036, 42037], |_| {
+            std::future::ready(PortOwner::Free)
+        })
+        .await;
+
+        assert_eq!(selected, None);
     }
 
     #[test]
