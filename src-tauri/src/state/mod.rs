@@ -3,7 +3,9 @@ mod incarnation_ids;
 mod host_routes;
 mod host_keys;
 pub(crate) mod ingress;
-pub(crate) use host_keys::SessionIdentity;
+pub(crate) use host_keys::{SessionIdentity, PageRegistration, WindowBuildGuard, PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
+#[cfg(test)]
+pub(crate) use host_keys::PageIdentity;
 mod terminals;
 mod owner_lifecycle;
 pub(crate) use owner_lifecycle::CreateGuard;
@@ -35,6 +37,10 @@ pub(crate) mod source_scan;
 mod wiring_tests;
 #[cfg(test)]
 mod owner_wiring_tests;
+#[cfg(test)]
+mod pane_wiring_tests;
+#[cfg(test)]
+mod transfer_wiring_tests;
 #[cfg(test)]
 mod mutator_wiring_tests;
 #[cfg(test)]

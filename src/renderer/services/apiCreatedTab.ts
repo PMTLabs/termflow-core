@@ -7,6 +7,7 @@
  * isolation (see __tests__/apiCreatedTab.test.ts).
  */
 
+import { paneIncarnations } from './paneIncarnations';
 import { markProvisionalRecovery } from './provisionalRecovery';
 
 export interface ApiCreatedTabOptions {
@@ -253,6 +254,9 @@ export function runApiCreateMode0(
     shellType: profile || deps.defaultProfile || 'default',
     sessionKey: detail.sessionKey,
   };
+  // Prepare before the tab is renderable, including exact-key recovery panes.
+  if (leafId) paneIncarnations.prepare([{ paneId: paneTree.id, leaf: leafId, restore: !!detail.sessionKey, override: detail.sessionKey }]);
+
   // plan 048 — an API/MCP spawn, unless this is `surface_host_orphans` adopting a session whose
   // tab was lost: that is RECOVERY of a terminal of unknown origin, which reads as main.
   if (!detail.sessionKey) paneTree.apiCreated = true;

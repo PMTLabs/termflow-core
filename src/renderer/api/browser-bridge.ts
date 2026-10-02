@@ -1,4 +1,4 @@
-import { ElectronAPI, HostGeneration, SessionHandoffTake, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { ElectronAPI, HostGeneration, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { getStoredApiToken } from '../services/profileScope';
@@ -185,16 +185,7 @@ class BrowserBridge implements ElectronAPI {
     async setTerminalDisplayLabel(_rendererTerminalId: string, _label: string): Promise<void> { }
     async setTerminalTitleColor(_rendererTerminalId: string, _titleColor: string): Promise<void> { }
 
-    async registerRestoringLeaves(_leaves: Array<{ leafId: string; sessionKey?: string | null }>): Promise<void> {
-        // REST creates cannot register host restore intent; do not silently spawn saved leaves.
-        throw new Error('Restoring terminal hosts requires the desktop bridge');
-    }
-
-    async forgetRestoringLeaf(_leafId: string): Promise<void> { }
-
     /// A browser session has no other window to hand a session to or from.
-    async offerSessionHandoff(_leafId: string, _processId: string): Promise<boolean> { return false; }
-    async takeSessionHandoff(_leafId: string): Promise<SessionHandoffTake> { return { status: 'none' }; }
 
     async closeTerminal(id: string): Promise<void> {
         try {

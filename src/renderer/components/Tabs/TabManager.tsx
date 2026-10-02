@@ -1,3 +1,5 @@
+import { paneIncarnations, describePanes } from '../../services/paneIncarnations';
+import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
 import React, { useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { store, RootState, AppDispatch } from '../../store';
@@ -27,7 +29,7 @@ import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
-import { dropTabAcrossWindows, detachTabToNewWindow } from '../Panes/dnd/detach';
+import { dropTabAcrossWindows, detachTabToNewWindow, captureDetachGesture } from '../Panes/dnd/detach';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
 import { titleColorStyle } from '../../store/titleColor';
 import './TabManager.css';
@@ -41,6 +43,8 @@ interface PendingClose {
   anchorTitle: string;
   /** tabId -> title, captured at request time so a later tab change can't blank one. */
   titlesById: Record<string, string>;
+  workspace: object;
+  trees: Record<string, unknown>;
 }
 
 /**
@@ -128,6 +132,8 @@ function makeTabGhost(title: string, titleColor?: string): HTMLElement {
  */
 function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
   if (e.button !== 0) return;
+  const gesture = captureDetachGesture(h.tabId, store.getState().panes.treesByTabId[h.tabId] ?? null);
+  const current = gesture.current;
   const startX = e.clientX;
   const startY = e.clientY;
   let dragging = false;
@@ -157,6 +163,7 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
     if (movePending) return;
     movePending = true;
     rafId = window.requestAnimationFrame(() => {
+      if (!current()) { cleanup(); return; }
       // The gate reopens when the call COMPLETES, not when it is dispatched.
       // Each nudge crosses into the backend and waits on the main thread, so
       // clearing the flag first queues one more every frame however far behind
@@ -167,7 +174,19 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
     });
   };
 
+  const cleanup = () => {
+    window.removeEventListener('pointermove', onMove, true);
+    window.removeEventListener('pointerup', onUp, true);
+    document.removeEventListener('selectstart', preventSelect, true);
+    document.body.classList.remove('tab-dragging');
+    if (rafId) window.cancelAnimationFrame(rafId);
+    if (dragging && useNativePreview) void api?.hideDragPreview?.();
+    ghost?.remove();
+    if (dragging) h.onDragStateChange(false);
+    unsubscribe();
+  };
   const onMove = (ev: PointerEvent) => {
+    if (!current()) { cleanup(); return; }
     lastClientX = ev.clientX;
     lastClientY = ev.clientY;
     if (!dragging) {
@@ -196,15 +215,8 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
   };
 
   const onUp = (ev: PointerEvent) => {
-    window.removeEventListener('pointermove', onMove, true);
-    window.removeEventListener('pointerup', onUp, true);
-    document.removeEventListener('selectstart', preventSelect, true);
-    document.body.classList.remove('tab-dragging');
-    if (rafId) window.cancelAnimationFrame(rafId);
-    if (!dragging) return;
-    if (useNativePreview) void api?.hideDragPreview?.();
-    else ghost?.remove();
-    h.onDragStateChange(false);
+    cleanup();
+    if (!dragging || !current()) return;
     if (pointOutsideViewport(ev.clientX, ev.clientY)) {
       // Released outside this window: reattach into whichever window is under the
       // drop point, or open a new window if none. CLIENT coords are converted to
@@ -214,6 +226,7 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
         tabTitle: h.tabTitle,
         clientX: ev.clientX,
         clientY: ev.clientY,
+        gesture,
       });
     } else if (pointOutsideStrip(stripRect, ev.clientY) && store.getState().tabs.tabs.length > 1) {
       // Pulled out of the tab strip but released inside this same window (e.g.
@@ -225,10 +238,12 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
         tabId: h.tabId,
         tabTitle: h.tabTitle,
         cursor: { x: ev.clientX, y: ev.clientY },
+        gesture,
       });
     }
   };
 
+  const unsubscribe = store.subscribe(() => { if (!current()) cleanup(); });
   window.addEventListener('pointermove', onMove, true);
   window.addEventListener('pointerup', onUp, true);
 }
@@ -579,9 +594,13 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     // every tab rather than only API-created ones (no root leaf is the tab's
     // own id any more). Believed unreachable: the tree is seeded synchronously
     // before a tab is closable, per App.tsx / TerminalContainer.tsx.
-    for (const terminalId of collectTabCloseTerminalIds(paneTree ?? null, id)) {
+    for (const terminalId of new Set(collectTabCloseTerminalIds(paneTree ?? null, id))) {
       console.log(`TabManager: Closing terminal ${terminalId} of tab ${id}`);
-      terminalService.closeTerminal(terminalId).catch((error) => {
+      const panes = describePanes(paneTree ?? null).filter(pane => pane.leaf === terminalId);
+      const captures = panes.map(pane => paneIncarnations.captureClose(terminalId, pane.paneId))
+        .filter((pi): pi is NonNullable<typeof pi> => !!pi);
+      const pi = captures.length > 1 ? captures : captures[0] ?? paneIncarnations.captureClose(terminalId);
+      terminalService.closeTerminal(terminalId, pi).catch((error) => {
         // Non-fatal (process may already be gone) but never silent: a failed
         // backend close with a removed tab = invisible orphaned PTY.
         console.warn(`TabManager: closeTerminal(${terminalId}) failed:`, error);
@@ -685,7 +704,8 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     closeReqSeq.current = seq;
     setProcessInfo(new Map());
     setProcessLoaded(false);
-    setPendingClose({ kind, tabIds, anchorTitle, titlesById });
+    const trees = Object.fromEntries(tabIds.map(id => [id, store.getState().panes.treesByTabId[id]]));
+    setPendingClose({ kind, tabIds, anchorTitle, titlesById, workspace: captureWorkspace(), trees });
     void resolveProcesses(tabIds, seq);
   }, [resolveProcesses, closeOneTab]);
 
@@ -708,7 +728,9 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   }, [handleCloseRequestKind, closeOneTab]);
 
   const handleConfirmClose = useCallback(() => {
-    if (pendingClose) pendingClose.tabIds.forEach((id) => closeOneTab(id));
+    if (pendingClose && isCurrentWorkspace(pendingClose.workspace)) pendingClose.tabIds.forEach(id => {
+      if (store.getState().panes.treesByTabId[id] === pendingClose.trees[id]) closeOneTab(id);
+    });
     setPendingClose(null);
     setProcessInfo(new Map());
     setProcessLoaded(false);

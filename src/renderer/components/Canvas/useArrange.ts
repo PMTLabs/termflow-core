@@ -3,6 +3,8 @@ import { useDispatch } from 'react-redux';
 import { applyArrange } from '../../store/slices/canvasSlice';
 import type { CanvasModel } from './canvasSelectors';
 import type { ArrangeEdge } from './canvasArrange';
+import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
+import { capturePaneEffect } from '../../services/paneEffect';
 import {
   ARRANGE_MS, arrangeTarget, currentLayout, easeOutCubic, interpolateArrange,
 } from './animateLayout';
@@ -71,9 +73,12 @@ export function useArrange(model: CanvasModel, edges: readonly ArrangeEdge[] = [
 
     // Captured AFTER the cancel above, so a second press starts from wherever the first had
     // actually got to rather than from where it began.
+    const workspace = captureWorkspace();
+    const copies = visibleNodes.map(node => capturePaneEffect(node.terminalId, node.paneId));
     const from = currentLayout(latest.current);
     const t0 = performance.now();
     const step = (now: number) => {
+      if (!isCurrentWorkspace(workspace) || !copies.every(current => current())) { raf.current = null; return; }
       const k = Math.min(1, (now - t0) / ARRANGE_MS);
       // The final frame dispatches `to` ITSELF rather than a blend evaluated at 1.
       //

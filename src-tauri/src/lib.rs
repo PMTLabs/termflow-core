@@ -1,6 +1,5 @@
 pub mod sibling_coord;
 pub mod identity_index;
-pub mod session_handoff;
 pub mod state;
 pub mod console_window;
 pub mod context_menu;
@@ -57,6 +56,7 @@ mod history_flush;
 mod tray;
 mod relaunch;
 mod window_restore;
+mod window_lifetime;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
@@ -613,6 +613,11 @@ pub fn run() {
 
         // Manage state in Tauri
         app.manage(state.clone());
+        // Tauri has already built the configured window before calling setup.
+        if let Some(main) = app.get_webview_window("main") {
+            let build = window_lifetime::reserve(app.handle(), "main")?;
+            window_lifetime::commit(build, &main)?;
+        }
 
         // Advertise this instance BEFORE the servers come up: even before endpoints
         // are bound (or if binding fails), this is still a running sibling, and the
@@ -874,11 +879,6 @@ pub fn run() {
     })
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
-        commands::report_host_restore_settled,
-        commands::register_restoring_leaves,
-        commands::forget_restoring_leaf,
-        commands::offer_session_handoff,
-        commands::take_session_handoff,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
@@ -955,9 +955,12 @@ pub fn run() {
         commands::confirm_close_app,
         commands::get_window_session_id,
         commands::list_window_session_ids,
+        commands::register_page,
+        commands::pane_op,
+        commands::wait_transfer_taken,
+        commands::create_admitted_terminal,
+        commands::close_process,
         commands::flush_session_ack,
-        commands::stash_detach_payload,
-        commands::take_detach_payload,
         commands::create_detached_window,
         commands::begin_global_pane_drag,
         commands::claim_global_pane_drag,
@@ -1056,11 +1059,6 @@ pub fn run() {
             // one's "already hidden" and skip its first real put_IsVisible.
             crate::webview_power::forget(window.label());
             if let Some(state) = app.try_state::<AppState>() {
-                let restore_state = (*state).clone();
-                let destroyed_label = window.label().to_string();
-                tauri::async_runtime::spawn(async move {
-                    restore_state.host_restore_window_destroyed(&destroyed_label).await;
-                });
                 state.window_titles.remove(window.label());
                 // Plan 018: a closed window must not be recreated at the next
                 // start. Persisted immediately, not debounced — the process may

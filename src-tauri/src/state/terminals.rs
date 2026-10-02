@@ -253,8 +253,6 @@ impl<R: Runtime> AppState<R> {
             network_op_lock: Arc::new(tokio::sync::Mutex::new(())),
             jwt_secret,
             app_handle,
-            detach_payloads: Arc::new(DashMap::new()),
-            active_global_drag: Arc::new(Mutex::new(None)),
             window_titles: Arc::new(DashMap::new()),
             windows: Arc::new(crate::window_registry::WindowTracker::load_default()),
             flush_acks: Arc::new(DashMap::new()),
@@ -285,8 +283,6 @@ impl<R: Runtime> AppState<R> {
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
             ids: super::IdAllocator::default(),
-            handoff_offers: crate::session_handoff::HandoffOffers::new(),
-            host_restore_pending_windows: Arc::new(DashMap::new()),
             host_restore_released: Arc::new(AtomicBool::new(false)),
             reattach_prompt_hooks: Arc::new(DashMap::new()),
             pty_host_gen: Arc::new(AtomicU64::new(0)),
@@ -826,11 +822,8 @@ impl<R: Runtime> AppState<R> {
     }
 
     pub fn begin_host_restore_sweep(&self, windows: impl IntoIterator<Item = String>) {
-        self.host_restore_pending_windows.clear();
+        self.host_table.keys().begin_restore_participation(windows);
         self.host_restore_released.store(false, Ordering::Release);
-        for label in windows {
-            self.host_restore_pending_windows.insert(label, ());
-        }
         let state = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -846,17 +839,13 @@ impl<R: Runtime> AppState<R> {
         });
     }
 
-    pub async fn report_host_restore_settled(&self, window_label: String) {
-        self.host_restore_pending_windows.remove(&window_label);
-        if !restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) { return; }
-        self.release_host_restore_sweep(false).await;
-    }
-
-    pub async fn host_restore_window_destroyed(&self, window_label: &str) {
-        self.host_restore_pending_windows.remove(window_label);
-        if restore_sweep_may_release(self.host_restore_pending_windows.len(), self.host_restore_released.load(Ordering::Acquire)) {
-            self.release_host_restore_sweep(false).await;
-        }
+    /// The page/window table has already retired the qualified participant.
+    /// Host I/O runs in a separate task, never inside the ordered page stream.
+    pub(crate) fn schedule_host_restore_release(&self) {
+        let state = self.clone();
+        tauri::async_runtime::spawn(async move {
+            state.release_host_restore_sweep(false).await;
+        });
     }
 
     async fn release_host_restore_sweep(&self, forced: bool) {
@@ -866,7 +855,7 @@ impl<R: Runtime> AppState<R> {
         // release would return early until the periodic worker resets the flag
         // and forces another pass. The guard belongs at this choke point, not
         // in each caller.
-        if !forced && !restore_sweep_may_release(self.host_restore_pending_windows.len(), false) { return; }
+        if !forced && !restore_sweep_may_release(self.host_table.keys().restore_pending_count(), false) { return; }
         if self.host_restore_released.swap(true, Ordering::AcqRel) { return; }
         if !sweep_claim_survives(self.run_host_restore_sweep().await) {
             // Hand the one-shot back so the backstop — or a later report — can
@@ -953,23 +942,6 @@ impl<R: Runtime> AppState<R> {
     /// The client of a registered frozen host; `None` once it is retired.
     pub fn frozen_client(&self, id: FrozenId) -> Option<crate::pty_host_client::PtyHostClient> {
         host_registry::frozen_client(&self.frozen_hosts, id)
-    }
-
-    fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
-        host_registry::IntentMaps {
-            keys: self.host_table.keys(),
-        }
-    }
-
-    /// A persisted pane is about to mount: its session key (`session_key` if it
-    /// has a migrated one, else its leaf) is a restore from now on.
-    pub fn register_restoring_leaf(&self, label: &str, leaf_id: &str, session_key: Option<&str>) -> bool {
-        host_registry::register_restoring_leaf(&self.intent_maps(), label, leaf_id, session_key, std::time::Instant::now())
-    }
-
-    /// The user closed a restored pane that never found its session.
-    pub fn forget_restoring_leaf(&self, label: &str, leaf_id: &str) {
-        host_registry::forget_restoring_leaf(&self.intent_maps(), label, leaf_id, std::time::Instant::now())
     }
 
     /// Log and announce, once, sessions that two hosts both claim to hold.

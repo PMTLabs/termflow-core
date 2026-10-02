@@ -126,13 +126,6 @@ export interface DirUsageRow {
   lastUsedAt: number;
 }
 
-/** The answer to taking a session another window offered for a leaf. `inFlight`: nothing is on
- *  offer yet, but the create that may offer it is still running, so ask again. */
-export type SessionHandoffTake =
-  | { status: 'taken'; processId: string }
-  | { status: 'inFlight' }
-  | { status: 'none' };
-
 export interface ElectronAPI {
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
@@ -198,14 +191,6 @@ export interface ElectronAPI {
   // Multi-window Settings routing (Tauri bridge only): open/activate Settings in
   // the current main window and focus it. See services/openSettings.ts.
   openSettingsInMainWindow?: (category?: string, detail?: string) => Promise<void>;
-  registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
-  forgetRestoringLeaf: (leafId: string) => Promise<void>;
-  /** Offer the terminal this window's create produced for the leaf to the window that has the
-   *  pane now. False (nothing offered) unless `processId` is the terminal registered for the leaf. */
-  offerSessionHandoff: (leafId: string, processId: string) => Promise<boolean>;
-  /** Take the offered terminal (single use); otherwise say whether the create that may still offer
-   *  it is running. */
-  takeSessionHandoff: (leafId: string) => Promise<SessionHandoffTake>;
   closeTerminal: (id: string) => Promise<void>;
   /** Delete persisted terminal scrollback for every renderer id NOT in keepIds (startup orphan sweep). */
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
@@ -366,11 +351,8 @@ export interface ElectronAPI {
   flushSessionAck?: () => Promise<void>;
   /** Plan 018: every window id the backend registry currently holds. */
   listWindowSessionIds?: () => Promise<string[]>;
-  reportHostRestoreSettled?: (windowLabel: string) => Promise<void>;
 
-  // Detach / cross-window pane handoff (Tauri only)
-  stashDetachPayload?: (token: string, payload: any) => Promise<void>;
-  takeDetachPayload?: (token: string) => Promise<any | null>;
+  // Detach / cross-window pane transfers (Tauri only)
   createDetachedWindow?: (token: string, x?: number, y?: number) => Promise<string>;
   createNewWindow?: () => Promise<string>;
   getWindowLabel?: () => string;
@@ -383,7 +365,7 @@ export interface ElectronAPI {
   // `path` is relative to `/api` (e.g. `/canvas/graph`). Resolves to the parsed JSON body, or
   // null for a 204. Rejects on a non-2xx so a caller can tell "no edges" from "no answer".
   canvasApiRequest?: (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
-  beginGlobalPaneDrag?: (token: string, payload: any) => Promise<void>;
+  beginGlobalPaneDrag?: (token: string) => Promise<void>;
   claimGlobalPaneDrag?: (token: string) => Promise<any | null>;
   resolveOrphanGlobalDrag?: (token: string) => Promise<boolean>;
   cancelGlobalPaneDrag?: (token: string) => Promise<void>;

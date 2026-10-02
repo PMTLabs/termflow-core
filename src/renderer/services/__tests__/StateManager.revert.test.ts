@@ -23,9 +23,10 @@ import tabsReducer from '../../store/slices/tabsSlice';
 import panesReducer from '../../store/slices/panesSlice';
 import canvasReducer from '../../store/slices/canvasSlice';
 import { StateManager } from '../StateManager';
+import { installRestoreStream } from '../../__testFixtures__/paneRestoreBridge';
 
 beforeEach(() => {
-  (window as any).electronAPI = { registerRestoringLeaves: jest.fn().mockResolvedValue(undefined) };
+  installRestoreStream();
 });
 import { peekUndo, __resetLayoutUndoForTests } from '../layoutUndo';
 import { layoutUndoKey, sessionStateKey } from '../windowScope';

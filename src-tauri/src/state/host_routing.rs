@@ -162,9 +162,6 @@ pub(super) async fn place_owned<P: RoutingPort>(port: &P, leaf: &str, override_k
     let keyed = override_key.is_some()
         || port.table().keys().is_restoring_key(session_key, Instant::now())
         || port.table().keys().candidate(leaf, override_key).is_some();
-    if keyed {
-        port.table().keys().refresh_restoring_key(session_key, Instant::now());
-    }
 
     if let Err(e) = ensure_hosts(port).await {
         if e.starts_with(LIFECYCLE_BUSY) {
@@ -223,7 +220,7 @@ pub(super) async fn place_owned<P: RoutingPort>(port: &P, leaf: &str, override_k
             ticket.guard_key(stage);
             surface_ambiguity(port, leaf);
             #[cfg(test)]
-            if owner.is_none() { port.table().keys().settle_restoring_leaf(leaf, Some(&key)); }
+            if owner.is_none() { port.table().keys().settle_restore_markers_for_leaf(leaf, Some(&key)); }
             log::info!("[GEN] spawning {key} on {channel:?}");
             return Ok(Placement::Spawn { channel, client, ticket, session_key: key });
         };
@@ -231,7 +228,7 @@ pub(super) async fn place_owned<P: RoutingPort>(port: &P, leaf: &str, override_k
         let (stage, pid) = stage_key(port, leaf, owner, channel, &selected, StageMode::Attach)?;
         ticket.guard_key(stage);
         #[cfg(test)]
-        if owner.is_none() { port.table().keys().settle_restoring_leaf(leaf, Some(&selected)); }
+        if owner.is_none() { port.table().keys().settle_restore_markers_for_leaf(leaf, Some(&selected)); }
         log::info!("[GEN] attaching {selected} on {channel:?} (pid {pid})");
         return Ok(Placement::Attach { channel, client, pid, ticket, session_key: selected });
     }
@@ -289,7 +286,6 @@ pub(super) fn place_elevated_process<P: RoutingPort>(port: &P, leaf: &str, overr
     let PreparedElevatedProcess(process) = prepared;
     let channel = HostChannel::Elevated;
     let mut ticket = begin_ticket(port, channel).map_err(|e| e.to_string())?;
-    port.table().keys().refresh_restoring_key(override_key.unwrap_or(leaf), Instant::now());
     if let Some((owner, key)) = port.table().keys().candidate(leaf, override_key) {
         if owner != channel { return Err(pending("session belongs to a different terminal host")); }
         let (stage, pid) = stage_key(port, leaf, Some((cg, &process)), channel, &key, StageMode::Attach)?;

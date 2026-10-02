@@ -35,6 +35,21 @@ if (isTauri) {
 
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
+  const { PaneIncarnations, installPaneIncarnations } = require('./services/paneIncarnations');
+  const incarnations = new PaneIncarnations(invoke, () => {
+    (window as any).__REDUX_STORE__?.dispatch({ type: 'ui/addToast', payload: {
+      type: 'warning', message: 'Terminal ownership updates are not reaching the backend. Retry without closing your shells.',
+    } });
+  });
+  installPaneIncarnations(incarnations);
+  // Put predecessor retirement at the FIFO head, before restore or mounts can
+  // enqueue ownership work. Do not block UI bootstrap on an unavailable backend:
+  // the stream retries its head and can still show the ownership warning.
+  void incarnations.replacePage().catch((error: unknown) => {
+    if (!incarnations.ended) console.warn('Could not replace renderer page:', error);
+  });
+  window.addEventListener('beforeunload', () => incarnations.stop(), { once: true });
+  window.addEventListener('pane:resync', () => incarnations.resync());
 
   // Plan 045: resolve once whether this window can offer "Open admin Tab" at
   // all (Windows, not already elevated, sidecar enabled, not killed). Cached

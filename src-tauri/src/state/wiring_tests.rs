@@ -138,19 +138,7 @@ fn every_frozen_channel_expression_is_classified() {
 
 #[test]
 fn restoring_intent_producers_and_consumers_are_classified() {
-    census(".register_restoring_leaf(", &[
-        ("commands/terminal.rs", "register_restoring_leaves"),
-        ("state/host_registry.rs", "register_restoring_leaf"),
-    ]);
-    census(".forget_restoring_leaf(", &[
-        ("commands/terminal.rs", "forget_restoring_leaf"),
-        ("state/host_registry.rs", "forget_restoring_leaf"),
-    ]);
     census(".is_restoring_key(", &[("state/host_routing.rs", "place_owned")]);
-    census(".refresh_restoring_key(", &[
-        ("state/host_routing.rs", "place_owned"),
-        ("state/host_routing.rs", "place_elevated_process"),
-    ]);
     census(".recover_listed(", &[
         ("state/host_adoption/panes.rs", "surface_orphans"),
         ("state/host_routing.rs", "surface_ambiguity"),
@@ -178,8 +166,6 @@ fn host_entry_points_have_generation_traces() {
         ("state/host_generation.rs", "fn notify_terminal_generations("),
         ("state/update_full.rs", "async fn run_full<"),
         ("state/update_full.rs", "fn availability<"),
-        ("commands/terminal.rs", "fn register_restoring_leaves("),
-        ("commands/terminal.rs", "fn forget_restoring_leaf("),
     ] {
         let text = production(&std::fs::read_to_string(root.join(file)).unwrap());
         assert!(fn_body(&text, signature).contains("[GEN]"), "{file}: {signature} needs a generation trace");

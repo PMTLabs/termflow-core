@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { capturePaneEffect } from '../../services/paneEffect';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setNodeGeom, setGroupGeom, moveGroupGeom } from '../../store/slices/canvasSlice';
@@ -26,6 +27,7 @@ import { planRegroup, moveGroupBy, worldDelta, dropTargetTabId } from './canvasM
  */
 
 interface NodeDrag {
+  current: () => boolean;
   terminalId: string;
   tabId: string;
   /** Screen coords at pointerdown, so the delta is measured from the press, not the last frame —
@@ -39,6 +41,7 @@ interface NodeDrag {
 }
 
 interface GroupDrag {
+  current: () => boolean;
   tabId: string;
   startX: number;
   startY: number;
@@ -92,6 +95,7 @@ export function useCanvasDrag(
       e.stopPropagation();
       nodeDrag.current = {
         terminalId, tabId, startX: e.clientX, startY: e.clientY, origin: rect, moved: false,
+        current: capturePaneEffect(terminalId),
       };
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     },
@@ -105,7 +109,9 @@ export function useCanvasDrag(
       const { model: m } = latest.current;
       const group = m.groups.find((g) => g.tabId === tabId);
       if (!group) return;
+      const members = group.nodeIds.map(id => capturePaneEffect(id));
       groupDrag.current = {
+        current: () => members.every(current => current()),
         tabId,
         startX: e.clientX,
         startY: e.clientY,
@@ -125,6 +131,7 @@ export function useCanvasDrag(
 
       const nd = nodeDrag.current;
       if (nd) {
+        if (!nd.current()) return;
         const { dx, dy } = worldDelta(e.clientX - nd.startX, e.clientY - nd.startY, z);
         if (!nd.moved && Math.hypot(e.clientX - nd.startX, e.clientY - nd.startY) < DRAG_SLOP) return;
         if (!nd.moved) {
@@ -145,6 +152,7 @@ export function useCanvasDrag(
 
       const gd = groupDrag.current;
       if (gd) {
+        if (!gd.current()) return;
         if (!gd.moved && Math.hypot(e.clientX - gd.startX, e.clientY - gd.startY) < DRAG_SLOP) return;
         if (!gd.moved) {
           gd.moved = true;
@@ -178,6 +186,7 @@ export function useCanvasDrag(
       setDropTabId(null);
 
       if (gd?.moved) {
+        if (!gd.current()) return;
         // Shrink-wrap the frame around wherever its terminals ended up.
         const { model: m } = latest.current;
         const rects = m.nodes.filter((n) => gd.ids.includes(n.terminalId)).map((n) => n.rect);
@@ -186,7 +195,7 @@ export function useCanvasDrag(
         return;
       }
 
-      if (!nd?.moved || !target || target === nd.tabId) return;
+      if (!nd?.moved || !nd.current() || !target || target === nd.tabId) return;
       applyRegroup(nd.terminalId, nd.tabId, target);
     };
 

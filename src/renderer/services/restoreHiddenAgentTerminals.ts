@@ -22,6 +22,8 @@ import { Dispatch } from '@reduxjs/toolkit';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { addTabTree, setActiveTabId, focusPane } from '../store/slices/panesSlice';
 import { generateId } from '../utils/id';
+import { paneIncarnations, accepted } from './paneIncarnations';
+import { captureWorkspace, isCurrentWorkspace } from './workspaceReplacement';
 import { terminalService } from './TerminalService';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import {
@@ -93,6 +95,8 @@ export async function restoreHiddenAgentTerminals(
   // would be bound to a dead process and reported as a successful restore.
   // This read also supplies the CURRENT processId, which is what makes the
   // restore correct across a respawn that reused the leaf id.
+  const workspace = captureWorkspace();
+  const protocol = paneIncarnations;
   let live: Map<string, string>;
   try {
     live = liveAgentProcessIds(await fetchLiveTerminalRows());
@@ -115,6 +119,7 @@ export async function restoreHiddenAgentTerminals(
   let firstPaneId: string | null = null;
 
   for (const candidate of candidates) {
+    if (!isCurrentWorkspace(workspace) || protocol.ended) { skipped.push(candidate); continue; }
     if (visible.has(candidate.terminalId)) {
       skipped.push(candidate);
       continue;
@@ -123,6 +128,18 @@ export async function restoreHiddenAgentTerminals(
     const liveProcessId = live.get(candidate.terminalId);
     if (!liveProcessId) {
       stale.push(candidate);
+      continue;
+    }
+
+    const tabId = generateId('tb');
+    const paneId = generateId('pn');
+    const [pi] = protocol.prepare([{ paneId, leaf: candidate.terminalId, restore: true }]);
+    const bound = !protocol.enabled || accepted(await protocol.bind(pi, liveProcessId, 'restore'));
+    const nowVisible = visibleTerminalIds(store?.getState()?.panes?.treesByTabId ?? {});
+    if (!bound || !isCurrentWorkspace(workspace) || protocol.ended
+        || protocol.capture(candidate.terminalId, paneId) !== pi || nowVisible.has(candidate.terminalId)) {
+      await protocol.depart(pi);
+      skipped.push(candidate);
       continue;
     }
 
@@ -142,9 +159,6 @@ export async function restoreHiddenAgentTerminals(
     // The PTY predates this pane, so Win32-Input-Mode has to be re-seeded — the
     // same reason `reconcileExistingTerminals` calls this on every reattach.
     terminalService.markReattachedSession(candidate.terminalId);
-
-    const tabId = generateId('tb');
-    const paneId = generateId('pn');
 
     // `addTab` and `addTabTree` in ONE synchronous block, never split across an
     // await: a tab that is renderable without its tree makes TerminalContainer's
@@ -171,7 +185,8 @@ export async function restoreHiddenAgentTerminals(
   // Activate the first restored tab — recovering a stranded agent and leaving it
   // off screen would only half-answer the request. Done once, after the loop, so
   // restoring five terminals does not walk the user through five activations.
-  if (firstTabId) {
+  if (firstTabId && isCurrentWorkspace(workspace)
+      && (!store?.getState()?.tabs || store.getState().tabs.tabs.some((tab: { id: string }) => tab.id === firstTabId))) {
     dispatch(setActiveTab(firstTabId));
     dispatch(setActiveTabId(firstTabId));
     if (firstPaneId) dispatch(focusPane(firstPaneId));

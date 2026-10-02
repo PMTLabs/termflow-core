@@ -121,7 +121,10 @@ describe('creating a terminal from the canvas', () => {
     expect(edge).toBeGreaterThan(spawnBody.indexOf('if (source) {'));
     // Server-minted row only, exactly as the drag path does — an optimistic client id is never
     // replaced, so a later delete would name a row that does not exist.
-    expect(spawnBody).toContain('if (edge) dispatch(addEdge(edge));');
+    expect(spawnBody).toContain('const sourceCurrent = capturePaneEffect(source.terminalId);');
+    expect(spawnBody).toContain('const destinationCurrent = capturePaneEffect(plan.leafId);');
+    expect(spawnBody).toContain('abandoned: () => !current(),');
+    expect(spawnBody).toContain('if (edge && current()) dispatch(addEdge(edge));');
   });
 
   /**

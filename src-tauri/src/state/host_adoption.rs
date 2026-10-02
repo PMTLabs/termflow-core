@@ -951,6 +951,8 @@ mod key_lifecycle_tests;
 #[cfg(test)]
 mod owner_tests;
 #[cfg(test)]
+mod pane_owner_tests;
+#[cfg(test)]
 mod deferred_effect_tests;
 #[cfg(test)]
 mod sink_effect_tests;

@@ -1,3 +1,5 @@
+import { paneIncarnations, describePanes, accepted } from './paneIncarnations';
+import { replaceWorkspace } from './workspaceReplacement';
 import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs, updateTabMeta } from '../store/slices/tabsSlice';
@@ -393,7 +395,9 @@ class StateManagerClass {
       // the OLD key and restores nothing. Failures are logged and swallowed —
       // losing one pane's scrollback is bad, but aborting restore over it would
       // leave the session unopened, which is worse.
+      const beforeMigration = this.loadGeneration;
       await this.migrateHistoryForRenamedLeaves(leafRenames);
+      if (beforeMigration !== this.loadGeneration) return false;
       console.log(`Restoring state from ${new Date(appState.timestamp).toLocaleString()}`);
       
       // Check if state is not too old (24 hours)
@@ -429,7 +433,7 @@ class StateManagerClass {
       // spawning. Best-effort: any failure falls through to the normal spawn path.
       // Reads appState directly (not the global tabPanes map), so it doesn't need
       // restoreTabPanesInPlace to have run yet.
-      await this.reconcileExistingTerminals(appState);
+      await this.reconcileExistingTerminals(appState, () => generation === this.loadGeneration);
       if (generation !== this.loadGeneration) return false;
 
       // Orphan sweep: drop persisted scrollback for any terminal no longer in a
@@ -595,7 +599,9 @@ class StateManagerClass {
   // already gets) and a `WorkspaceSnapshot` has no `shellProfiles` /
   // `defaultProfile` / `timestamp` to offer. The body below only ever reads
   // `.tabs` and `.tabPanes`.
-  private async reconcileExistingTerminals(appState: Pick<AppState, 'tabs' | 'tabPanes'>): Promise<void> {
+  private async reconcileExistingTerminals(appState: Pick<AppState, 'tabs' | 'tabPanes'>, isCurrent: () => boolean = () => true): Promise<void> {
+    const prepared = Object.values(appState.tabPanes || {}).flatMap(tree => describePanes(tree, true));
+    const pis = paneIncarnations.prepare(prepared);
     try {
       // Every terminalId the restore will otherwise spawn: each tab id plus
       // every terminal node in the saved pane trees. Leaf ids come in two FORMS
@@ -635,6 +641,7 @@ class StateManagerClass {
       if (!res.ok) return;
 
       const data = await res.json();
+      if (!isCurrent()) return;
 
       // Owner check. Reattaching to — or worse, REAPING — another instance's
       // PTYs would kill live shells in someone else's window. The configured
@@ -668,6 +675,15 @@ class StateManagerClass {
       const orphansToClose: string[] = [];
       for (const [rendererId, candidates] of byRenderer) {
         const [keep, ...stale] = candidates;
+        if (paneIncarnations.enabled) {
+          if (!isCurrent()) return;
+          const index = prepared.findIndex(p => p.leaf === rendererId);
+          const pi = pis[index];
+          if (!pi) continue;
+          const bound = await paneIncarnations.bind(pi, keep.processId, 'reconcile');
+          if (!isCurrent()) return;
+          if (!accepted(bound) || !paneIncarnations.isCurrent(rendererId, prepared[index].paneId, pi)) continue;
+        }
         // Registers id→process AND seeds the init guards so the mount effect
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
         // seed re-arms command-suggest suppression the in-memory cache lost on
@@ -692,9 +708,9 @@ class StateManagerClass {
 
       for (const processId of orphansToClose) {
         try {
-          // electronAPI.closeTerminal takes the backend processId directly — the
-          // orphans were never in this renderer's terminalId→process map.
-          await window.electronAPI?.closeTerminal?.(processId);
+          await paneIncarnations.reap(processId, async () => {
+            await window.electronAPI?.closeTerminal?.(processId);
+          });
         } catch (e) {
           console.warn(`StateManager: failed to reap orphaned PTY ${processId}:`, e);
         }
@@ -706,6 +722,8 @@ class StateManagerClass {
       );
     } catch (e) {
       console.warn('StateManager: terminal reconciliation skipped (spawning fresh):', e);
+    } finally {
+      if (!isCurrent()) paneIncarnations.discardPrepared(pis);
     }
   }
 
@@ -1073,37 +1091,18 @@ class StateManagerClass {
     data: { paneTree?: any; tabPanes?: Record<string, any>; treesByTabId?: Record<string, any> },
     isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
-    const leaves = new Map<string, { leafId: string; sessionKey?: string | null }>();
-    const walk = (node: any): void => {
-      if (!node) return;
-      if (node.type === 'terminal' && node.terminalId) {
-        leaves.set(node.terminalId, { leafId: node.terminalId, sessionKey: node.sessionKey });
-      }
-      if (Array.isArray(node.children)) node.children.forEach(walk);
-    };
-    walk(data.paneTree);
-    Object.values(data.tabPanes ?? {}).forEach(walk);
-    Object.values(data.treesByTabId ?? {}).forEach(walk);
-    if (!leaves.size) return isCurrent();
-
-    const deadline = Date.now() + 90_000;
-    let delay = 1000;
-    while (isCurrent()) {
-      try {
-        await window.electronAPI.registerRestoringLeaves([...leaves.values()]);
-        return isCurrent();
-      } catch (error) {
-        if (!isCurrent()) return false;
-        if (Date.now() >= deadline) {
-          throw new RestoreRegistrationError('Waiting for terminal host: could not register restored panes, so none of them were loaded.');
-        }
-        console.warn('StateManager: restored panes remain unmounted until host registration succeeds:', error);
-        await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
-        if (!isCurrent()) return false;
-        delay = Math.min(delay * 2, 8000);
-      }
+    const trees = [data.paneTree, ...Object.values(data.tabPanes ?? {}), ...Object.values(data.treesByTabId ?? {})];
+    const panes = [...new Map(trees.flatMap(tree => describePanes(tree, true)).map(pane => [pane.paneId, pane])).values()];
+    if (!panes.length || !isCurrent()) return isCurrent();
+    if (!paneIncarnations.enabled) {
+      throw new RestoreRegistrationError('Restoring terminal hosts requires the desktop pane stream.');
     }
-    return false;
+    const pis = paneIncarnations.prepare(panes);
+    // This FIFO barrier follows every restoring enter, before either mirror mounts.
+    const ready = await paneIncarnations.send({ kind: 'enter', panes: [] });
+    const current = () => isCurrent() && panes.every((pane, i) => paneIncarnations.isCurrent(pane.leaf, pane.paneId, pis[i]));
+    if (!current() || !accepted(ready)) paneIncarnations.discardPrepared(pis);
+    return current() && accepted(ready);
   }
 
   /**
@@ -1336,7 +1335,7 @@ class StateManagerClass {
       // `TerminalService`'s map is already warm (nothing reloaded), and the
       // only way a persisted undo snapshot's ids point at anything live again
       // after one.
-      await this.reconcileExistingTerminals({ tabs: snapshot.tabs, tabPanes: snapshot.tabPanes });
+      await this.reconcileExistingTerminals({ tabs: snapshot.tabs, tabPanes: snapshot.tabPanes }, () => generation === this.loadGeneration);
 
       // The token must be re-checked after EVERY await, not just the yield.
       // This one is not a formality: `reconcileExistingTerminals` awaits
@@ -1524,7 +1523,9 @@ class StateManagerClass {
           : sanitizedLayout.paneTree ?? undefined;
       const tree = savedTree === undefined ? undefined : remintCollisions(savedTree);
       const generation = this.loadGeneration;
-      const isCurrent = () => generation === this.loadGeneration && !this.replacementInFlight;
+      const isCurrent = () => generation === this.loadGeneration && !this.replacementInFlight
+        && store.getState().panes.treesByTabId === state.panes.treesByTabId
+        && store.getState().tabs.tabs === state.tabs.tabs;
       if (!await this.registerRestoringTrees({ paneTree: tree }, isCurrent)) return false;
       if (!isCurrent()) return false;
 
@@ -1718,6 +1719,8 @@ class StateManagerClass {
    * Clear current state (used before loading a layout)
    */
   private clearCurrentState(dispatch: Dispatch): void {
+    replaceWorkspace();
+    paneIncarnations.discardPrepared();
     // Clear the local tab panes mapping
     clearTabPanes();
     // Clear all tabs first

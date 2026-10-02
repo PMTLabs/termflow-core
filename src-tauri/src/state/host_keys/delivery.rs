@@ -10,6 +10,8 @@ pub(super) type RecoveryIdentity = (HostChannel, String, Option<u64>, u32, std::
 impl HostKeys {
     pub(super) fn delivery_sender(&self) -> &Sender<Delivery> {
         self.deliveries.get_or_init(|| {
+            #[cfg(test)]
+            if let Some(hook) = self.delivery_init_hook.lock().unwrap().clone() { hook(); }
             let (sender, receiver) = channel::<Delivery>();
             std::thread::spawn(move || {
                 while let Ok(deliver) = receiver.recv() {

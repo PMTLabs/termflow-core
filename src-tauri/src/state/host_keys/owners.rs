@@ -8,7 +8,7 @@ use std::time::Duration;
 pub const JOIN_DEADLINE: Duration = Duration::from_secs(12);
 fn retry() -> String { "host-ownership-pending: terminal placement changed; retry".into() }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 pub enum CreateMode { Mount, Restart }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseStorage { Delete, Preserve }
@@ -20,6 +20,7 @@ pub enum ShellStage { Hosted(KeyStage), Local }
 pub struct StagedShell { pub process: String, pub stage: ShellStage }
 #[derive(Clone, Debug)]
 pub enum OwnerState {
+    Held,
     Placing { stage: Option<StagedShell>, staged_exited: bool, cancel: Option<CloseStorage> },
     Registered(StagedShell),
     Closing(StagedShell),
@@ -27,7 +28,10 @@ pub enum OwnerState {
 pub(super) struct Row {
     pub(super) cg: u64,
     pub(super) state: OwnerState,
-    outcome: watch::Sender<Option<Result<String, String>>>,
+    pub(super) owner: super::panes::Owner,
+    pub(super) admitted_pg: Option<u64>,
+    pub(super) started: bool,
+    pub(super) outcome: watch::Sender<Option<Result<String, String>>>,
 }
 pub enum Admission {
     Run(u64),
@@ -52,6 +56,7 @@ pub struct Ended { pub leaf: String, pub shell: StagedShell }
 
 pub(super) fn shell_of(state: &OwnerState) -> Option<&StagedShell> {
     match state {
+        OwnerState::Held => None,
         OwnerState::Placing { stage, .. } => stage.as_ref(),
         OwnerState::Registered(s) | OwnerState::Closing(s) => Some(s),
     }
@@ -62,6 +67,7 @@ impl HostKeys {
         let mut inner = self.lock();
         if let Some(row) = inner.owners.get(leaf) {
             return match &row.state {
+                OwnerState::Held => Err(retry()),
                 OwnerState::Placing { .. } => Ok(Admission::Join(row.outcome.subscribe())),
                 OwnerState::Registered(shell) if mode == CreateMode::Mount => Ok(Admission::Existing(shell.process.clone())),
                 OwnerState::Registered(_) => Err("host-session-contended: terminal already registered".into()),
@@ -73,7 +79,7 @@ impl HostKeys {
         let (outcome, _) = watch::channel(None);
         inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Placing {
             stage: None, staged_exited: false, cancel: None,
-        }, outcome });
+        }, owner: super::panes::Owner::Headless, admitted_pg: None, started: true, outcome });
         Ok(Admission::Run(cg))
     }
 
@@ -111,7 +117,7 @@ impl HostKeys {
             *target = Some(StagedShell { process: process.into(), stage: stage.clone().map_or(ShellStage::Local, ShellStage::Hosted) });
             *staged_exited = false;
         }
-        Self::settle_restore(&mut inner, leaf, hosted.map(|(_, key, _)| key));
+        Self::settle_restore_markers(&mut inner, leaf, hosted.map(|(_, key, _)| key));
         Ok((stage, pid, old))
     }
 
@@ -147,7 +153,8 @@ impl HostKeys {
                 if record.state == KeyState::Held(cg) { record.state = KeyState::Bound(shell.process.clone()); }
             }
         }
-        Self::settle_restore(&mut inner, leaf, match &shell.stage {
+        Self::settle_pane_restore(&mut inner, leaf);
+        Self::settle_restore_markers(&mut inner, leaf, match &shell.stage {
             ShellStage::Hosted(stage) => Some(&stage.key), ShellStage::Local => None,
         });
         if let Some(policy) = cancel { Completion::Cancel(policy) } else {
@@ -192,6 +199,16 @@ impl HostKeys {
             inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == reference)).map(|(l, _)| l.clone())
         };
         let Some(leaf) = leaf else { return CloseAction::Missing };
+        Self::explicit_close_locked(&mut inner, leaf, policy)
+    }
+
+    fn explicit_close_locked(inner: &mut Inner, leaf: String, policy: CloseStorage) -> CloseAction {
+        if !inner.owners.contains_key(&leaf) { return CloseAction::Missing; }
+        // Retire carried restore intent before removing its source membership.
+        // Restash and natural exit deliberately do not end this capability.
+        Self::settle_pane_restore(inner, &leaf);
+        Self::remove_transfer_member(inner, &leaf);
+        if Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf) { return CloseAction::Cancelled; }
         let Some(row) = inner.owners.get_mut(&leaf) else { return CloseAction::Missing };
         match &mut row.state {
             OwnerState::Placing { cancel, .. } => {
@@ -204,8 +221,34 @@ impl HostKeys {
                 row.state = OwnerState::Closing(shell.clone());
                 CloseAction::End { leaf, process: shell.process }
             }
-            OwnerState::Closing(_) => CloseAction::Missing,
+            OwnerState::Held | OwnerState::Closing(_) => CloseAction::Missing,
         }
+    }
+
+    pub(super) fn close_leaf_locked(inner: &mut Inner, leaf: &str, policy: CloseStorage, effects: &mut Vec<String>) {
+        if let CloseAction::End { process, .. } = Self::explicit_close_locked(inner, leaf.into(), policy) { effects.push(process); }
+    }
+
+    /// No worker has claimed this promise, so ending its owner cannot leave
+    /// anyone responsible for completing it. Staged/in-flight work is retained.
+    pub(super) fn release_unstarted(inner: &mut Inner, leaf: &str) -> bool {
+        if !inner.owners.get(leaf).is_some_and(|r| !r.started && matches!(r.state,
+            OwnerState::Placing { stage: None, .. })) { return false; }
+        let row = inner.owners.remove(leaf).unwrap();
+        row.outcome.send_replace(Some(Err(retry())));
+        true
+    }
+
+    pub(super) fn release_idle_owner(inner: &mut Inner, leaf: &str) -> bool {
+        Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf)
+    }
+
+    /// Held rows have no shell, key or storage to end. Registered and Closing
+    /// rows must instead pass through the stripe-protected process ending.
+    pub(super) fn remove_held(inner: &mut Inner, leaf: &str) -> bool {
+        if !inner.owners.get(leaf).is_some_and(|r| matches!(r.state, OwnerState::Held)) { return false; }
+        inner.owners.remove(leaf);
+        true
     }
 
     /// A placement can exit before its Spawn/Attach reply is delivered.
@@ -220,7 +263,7 @@ impl HostKeys {
                 self.end_staged_exit(&mut inner, &shell);
                 false
             }
-            OwnerState::Placing { stage: None, .. } => false,
+            OwnerState::Held | OwnerState::Placing { stage: None, .. } => false,
             OwnerState::Closing(_) => false,
         }
     }

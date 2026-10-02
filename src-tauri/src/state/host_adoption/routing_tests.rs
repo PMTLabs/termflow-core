@@ -186,7 +186,9 @@ async fn a_waiting_pane_attaches_when_its_host_resolves() {
     assert_eq!(did, Did::Attached(HostChannel::Frozen(FrozenId(1)), 41));
     assert_eq!(world.count_everywhere("Spawn"), 0);
     assert_eq!(world.count(CURRENT, "Attach"), 0, "the attach went to the holder, not the current host");
-    assert!(!port.table().keys().is_restoring_key("tm-wait", StdInstant::now()), "bound: nothing waits for the key any more");
+    assert!(port.table().keys().is_restoring_key("tm-wait", StdInstant::now()), "wire Attach alone is not pane registration");
+    port.table().keys().depart_test_restore("main", "tm-wait", StdInstant::now());
+    assert!(!port.table().keys().is_restoring_key("tm-wait", StdInstant::now()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -201,6 +203,8 @@ async fn a_keyed_create_claimed_by_a_frozen_host_attaches_there_and_spawns_nowhe
     assert_eq!(world.count("h2", "Attach"), 0);
     assert_eq!(world.count(CURRENT, "Attach"), 0);
     assert_eq!(world.count_everywhere("Spawn"), 0, "zero Spawn frames");
+    assert!(port.table().keys().is_restoring_key("k1", StdInstant::now()));
+    port.table().keys().depart_test_restore("main", "k1", StdInstant::now());
     assert!(!port.table().keys().is_restoring_key("k1", StdInstant::now()));
 }
 
@@ -212,28 +216,24 @@ async fn an_unclaimed_restore_spawns_once_every_host_answered_and_the_intent_is_
     assert_eq!(create(&port, "tm-brand-new", false).await, Did::Spawned(HostChannel::Primary));
     assert_spawn_key(&world, CURRENT, "tm-brand-new");
     assert_eq!(world.count("h1", "Spawn"), 0);
-    assert!(!port.table().keys().is_restoring_key("tm-brand-new", StdInstant::now()), "a later create is not held by a spent intent");
+    assert!(port.table().keys().is_restoring_key("tm-brand-new", StdInstant::now()));
+    port.table().keys().depart_test_restore("main", "tm-brand-new", StdInstant::now());
+    assert!(!port.table().keys().is_restoring_key("tm-brand-new", StdInstant::now()));
 }
 
 #[tokio::test(start_paused = true)]
-async fn restoring_key_ttl_refreshed_on_each_keyed_create() {
-    let (_world, port) = machine(&[("h1", never(&[]))]);
-    let before = StdInstant::now() - secs(1);
+async fn restoring_key_survives_clock_advance_without_keyed_create_refresh() {
+    let (world, port) = machine(&[("h1", never(&[]))]);
+    let before = StdInstant::now() - secs(16 * 60);
     assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", "tm-idle", None, before));
-    let stamp = |port: &FakePort| port.table().keys().holder_stamp("main", "tm-idle").unwrap();
-
-    let registered = stamp(&port);
+    assert!(port.table().keys().has_test_holder("main", "tm-idle"));
     assert!(is_pending(&refusal(&port, "tm-idle", false).await));
-    let first = stamp(&port);
-    assert!(first > registered, "the first keyed create refreshed the intent");
-
-    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", "tm-idle", None, before));
+    assert!(port.table().keys().is_restoring_key("tm-idle", StdInstant::now()));
     assert!(is_pending(&refusal(&port, "tm-idle", false).await));
-    assert!(stamp(&port) >= first, "and so did the second");
-
-    // A fresh leaf neither creates an intent nor is held.
     assert_eq!(create(&port, "tm-fresh", false).await, Did::Spawned(HostChannel::Primary));
+    assert_eq!(world.count(CURRENT, "Spawn"), 1);
     assert!(!port.table().keys().is_restoring_key("tm-fresh", StdInstant::now()));
+    assert!(port.table().keys().has_test_holder("main", "tm-idle"));
 }
 
 #[tokio::test(start_paused = true)]

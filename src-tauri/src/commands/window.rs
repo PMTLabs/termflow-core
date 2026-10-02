@@ -77,12 +77,11 @@ pub fn open_settings_in_main_window(
 /// the new window into the main window's session. That is precisely the defect
 /// this feature exists to remove, so the ordering is load-bearing, not a
 /// micro-optimisation.
-pub fn reserve_window_id(app: &tauri::AppHandle, label: &str) -> Option<String> {
+pub(crate) fn reserve_window_id(app: &tauri::AppHandle, build: crate::state::WindowBuildGuard) -> Result<crate::state::WindowBuildGuard, String> {
     use tauri::Manager as _;
-    let state = app.try_state::<AppState>()?;
+    let state = app.try_state::<AppState>().ok_or("window state not ready")?;
     let id = uuid::Uuid::new_v4().simple().to_string();
-    state.windows.bind(label, &id);
-    Some(id)
+    Ok(build.with_stable_id(state.windows.clone(), id))
 }
 
 /// Record a just-built window's real geometry under its reserved id.
@@ -101,7 +100,7 @@ pub fn record_new_window(
     let Some(state) = app.try_state::<AppState>() else { return };
     let pos = window.outer_position().ok();
     let size = window.inner_size().ok();
-    state.windows.register(crate::window_registry::WindowRecord {
+    state.windows.publish_reserved(crate::window_registry::WindowRecord {
         id,
         label: window.label().to_string(),
         x: pos.map(|p| p.x).unwrap_or(0),
@@ -141,6 +140,21 @@ pub fn get_window_session_id(
 #[tauri::command]
 pub fn list_window_session_ids(state: State<'_, AppState>) -> Vec<String> {
     state.windows.snapshot().windows.into_iter().map(|w| w.id).collect()
+}
+
+/// Register the calling renderer without waiting for a native build. The payload
+/// is `{status: "Retry"}` or `{status: "Registered", wi, pg}`. Registration alone
+/// never settles or ends an older page; the ordered page stream does that.
+#[tauri::command]
+pub(crate) fn register_page(
+    app_handle: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<crate::state::PageRegistration, String> {
+    use tauri::Manager as _;
+    let Some(state) = app_handle.try_state::<AppState>() else {
+        return Ok(crate::state::PageRegistration::Retry);
+    };
+    state.host_table.keys().register_page(window.label())
 }
 
 // ----- Quit: give every window a chance to persist first ---------------------
@@ -366,34 +380,9 @@ pub fn flush_session_ack(state: State<'_, AppState>, window: tauri::WebviewWindo
     state.flush_acks.insert(window.label().to_string(), ());
 }
 
-// ----- Detach / cross-window pane handoff -----------------------------------
-//
-// The PTY processes live in this shared backend (AppState), so moving a pane to
-// a new window does NOT restart the shell. The source window serializes the
-// moving unit into a single-use payload stashed here under a token; the new
-// window fetches it and reattaches to the same live processes by id.
-
-#[tauri::command]
-pub fn stash_detach_payload(
-    state: State<'_, AppState>,
-    token: String,
-    payload: serde_json::Value,
-) -> Result<(), String> {
-    state.detach_payloads.insert(token, payload);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn take_detach_payload(
-    state: State<'_, AppState>,
-    token: String,
-) -> Result<Option<serde_json::Value>, String> {
-    Ok(state.detach_payloads.remove(&token).map(|(_, v)| v))
-}
-
 /// Open a new app window that will reconstruct the detached tab/pane. The token
-/// is carried in the window label (`detach-<token>`) so the new window can read
-/// it from its own label and call `take_detach_payload` on boot.
+/// is carried in the window label (`detach-<token>`) so the new window can take
+/// and adopt the transfer through its page stream on boot.
 #[tauri::command]
 pub async fn create_detached_window(
     app_handle: tauri::AppHandle,
@@ -401,7 +390,11 @@ pub async fn create_detached_window(
     token: String,
     x: Option<f64>,
     y: Option<f64>,
+    pg: u64,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
+    state.host_table.keys().verify_transfer_source(window.label(), pg, &token)?;
+    let taken = state.host_table.keys().watch_transfer(window.label(), pg, &token)?;
     let label = format!("detach-{}", token);
     // Match the main window (tauri.conf): empty/hidden title + Overlay title bar
     // so the custom in-app tab bar is the only header (no native "TermFlow"
@@ -465,14 +458,18 @@ pub async fn create_detached_window(
 
     // Reserve BEFORE build (see reserve_window_id): a detached window saves its
     // own session from the moment it mounts, so it must know its id by then.
-    let reserved = reserve_window_id(&app_handle, &label);
+    let build = crate::window_lifetime::reserve(&app_handle, &label)?;
+    let build = reserve_window_id(&app_handle, build)?;
+    let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
     crate::webview_recovery::install(&window);
     if let Some(id) = reserved {
         record_new_window(&app_handle, &window, id, (900, 600));
     }
     refresh_menu(&app_handle);
+    if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
     Ok(label)
 }
 
@@ -523,8 +520,11 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
     }
 
     // Reserve BEFORE build: the webview resolves its id as its first action.
-    let reserved = reserve_window_id(app, &label);
+    let build = crate::window_lifetime::reserve(app, &label)?;
+    let build = reserve_window_id(app, build)?;
+    let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
+    crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
     crate::webview_recovery::install(&window);
     if let Some(id) = reserved {

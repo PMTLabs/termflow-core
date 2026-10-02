@@ -8,6 +8,7 @@ import zoomReducer from './slices/zoomSlice';
 import peersReducer from './slices/peersSlice';
 import canvasReducer from './slices/canvasSlice';
 import sessionExitReducer from './slices/sessionExitSlice';
+import { paneIncarnations } from '../services/paneIncarnations';
 import { attachPaneOwnershipSync } from '../services/paneOwnership';
 import { attachTerminalLabelSync } from '../services/terminalLabelSync';
 import { attachTerminalTitleColorSync } from '../services/terminalTitleColorSync';
@@ -66,6 +67,7 @@ if (typeof window !== 'undefined') {
   // pane tree rather than off the individual move/attach dispatch sites, so no
   // reparent path can be added later that forgets to report itself — see
   // services/paneOwnership.ts.
+  paneIncarnations.attachStore(store);
   attachPaneOwnershipSync(store);
 
   // And what the tab strip CALLS each terminal (plan 028 §4.2). Driven off the same two pieces of

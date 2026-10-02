@@ -11,6 +11,7 @@ import { restoreTabPanesInPlace } from '../tabPanesStore';
 import { pushUndo, __resetLayoutUndoForTests } from '../layoutUndo';
 import { captureWorkspaceSnapshot } from '../workspaceSnapshot';
 import { TerminalServiceClass } from '../TerminalService';
+import { PaneIncarnations, installPaneIncarnations, type PaneBridge } from '../paneIncarnations';
 import fs from 'fs';
 import path from 'path';
 import ts from 'typescript';
@@ -24,6 +25,7 @@ const savedLayout = (id = 'saved') => ({
   createdAt: Date.now(), updatedAt: Date.now(),
 });
 let register: jest.Mock;
+let barrier: jest.Mock;
 let store: ReturnType<typeof makeStore>;
 
 beforeEach(() => {
@@ -33,11 +35,22 @@ beforeEach(() => {
   (window as any).__TAB_PANES__ = {};
   (window as any).tabPanes = (window as any).__TAB_PANES__;
   register = jest.fn().mockResolvedValue(undefined);
-  (window as any).electronAPI = { registerRestoringLeaves: register };
+  barrier = jest.fn().mockResolvedValue(undefined);
+  delete (window as any).electronAPI;
+  const bridge = (async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: 1, pg: 1 };
+    const op = args.request.op;
+    if (op.kind === 'enter' && op.panes.length) {
+      await register(op.panes.map((pane: any) => ({ leafId: pane.leaf, sessionKey: pane.override })));
+    }
+    if (op.kind === 'enter' && !op.panes.length) await barrier();
+    return { status: 'Ack', result: { status: 'Ok' } };
+  }) as PaneBridge;
+  installPaneIncarnations(new PaneIncarnations(bridge));
   store = makeStore();
   (window as any).__REDUX_STORE__ = store;
 });
-afterEach(() => { jest.useRealTimers(); });
+afterEach(() => { installPaneIncarnations(new PaneIncarnations()); jest.useRealTimers(); });
 
 test('loadLayout_and_loadTabScopedLayout_with_saved_tm_leaf_ids_are_registered', async () => {
   const layout = savedLayout();
@@ -55,12 +68,12 @@ test('loadLayout_and_loadTabScopedLayout_with_saved_tm_leaf_ids_are_registered',
 
   const scoped = { ...savedLayout('scoped'), scope: 'tab', scopedTabId: 'tb-saved' };
   localStorage.setItem('auto-terminal-layouts', JSON.stringify([scoped]));
-  register.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  barrier.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
   const before = store.getState().panes.treesByTabId;
   const scopedLoading = StateManager.loadTabScopedLayout('scoped', store.dispatch);
   await flush();
-  expect(register).toHaveBeenCalledTimes(2);
-  expect(register.mock.calls[1][0]).toEqual([{ leafId: 'tm-saved', sessionKey: undefined }]);
+  expect(register).toHaveBeenCalledTimes(1); // Reuses the still-present incarnation, not a renewed holder.
+  expect(barrier).toHaveBeenCalledTimes(2);
   expect(store.getState().panes.treesByTabId).toBe(before);
   release();
   expect(await scopedLoading).toBe(true);
@@ -85,7 +98,7 @@ test.each(['workspace', 'tab'])('saved tm leaves from a %s layout wait without s
   }) };
   // Listener wiring uses the webview bridge; the test's create transport is injected separately.
   delete (window as any).electronAPI;
-  const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any);
+  const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any, () => new PaneIncarnations());
   const create = service.createTerminal('tm-saved');
   await flush();
   expect(frames).toEqual([]);
@@ -104,13 +117,12 @@ test('restoreState registers modern and migrated keys before the window mirror m
   register.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
   const restoring = StateManager.restoreState(store.dispatch);
   await flush();
-  expect(register.mock.calls[0][0]).toEqual([
-    { leafId: 'tm-modern', sessionKey: undefined }, { leafId: 'tm-migrated', sessionKey: 'tb-legacy' },
-  ]);
+  expect(register.mock.calls[0][0]).toEqual([{ leafId: 'tm-modern', sessionKey: undefined }]);
   expect((window as any).__TAB_PANES__).toEqual({});
   expect(store.getState().tabs.tabs).toHaveLength(0);
   release();
   expect(await restoring).toBe(true);
+  expect(register.mock.calls[1][0]).toEqual([{ leafId: 'tm-migrated', sessionKey: 'tb-legacy' }]);
   expect((window as any).__TAB_PANES__['tb-saved'].children[0].terminalId).toBe('tm-modern');
 });
 
@@ -136,23 +148,57 @@ test('failed registration fails closed and automatically retries before mount', 
   await jest.advanceTimersByTimeAsync(100);
   expect(store.getState().panes.treesByTabId).toEqual({});
   expect(store.getState().tabs.tabs).toHaveLength(0);
-  await jest.advanceTimersByTimeAsync(999);
   expect(register).toHaveBeenCalledTimes(1);
-  await jest.advanceTimersByTimeAsync(1);
+  await jest.advanceTimersByTimeAsync(50);
   expect(await loading).toBe(true);
   expect(register).toHaveBeenCalledTimes(2);
 });
 
-test('failed restore registration preserves saved state for Retry without mounting leaves', async () => {
-  localStorage.setItem(sessionStateKey(), JSON.stringify({ ...savedLayout(), timestamp: Date.now(), tabPanes: { 'tb-saved': leaf('tm-saved') } }));
-  register.mockRejectedValue(new Error('transport down'));
-  const restoring = StateManager.restoreState(store.dispatch);
+test('aged scheduled retries retain the same restore head and eventually install the exact saved pane', async () => {
+  const saved = JSON.stringify({ ...savedLayout(), timestamp: Date.now(), tabPanes: { 'tb-saved': leaf('tm-saved') } });
+  localStorage.setItem(sessionStateKey(), saved);
+  const requests: any[] = [];
+  let refuse = true;
+  const bridge = (async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: 1, pg: 11 };
+    requests.push(args.request);
+    if (refuse) throw new Error('transport down');
+    return { status: 'Ack', result: { status: 'Ok' } };
+  }) as PaneBridge;
+  installPaneIncarnations(new PaneIncarnations(bridge));
+  let completed = false;
+  const restoring = StateManager.restoreState(store.dispatch).then(result => { completed = true; return result; });
   await flush();
-  await jest.advanceTimersByTimeAsync(90_000);
-  expect(await restoring).toBe(false);
-  expect(localStorage.getItem(sessionStateKey())).not.toBeNull();
+  expect(requests).toHaveLength(1);
+  const head = requests[0];
+  expect(head.op).toMatchObject({ kind: 'enter', panes: [{ leaf: 'tm-saved', pi: { pg: 11, seq: 1 } }] });
+  await jest.advanceTimersByTimeAsync(50);
+  expect(requests).toHaveLength(2);
+  jest.setSystemTime(Date.now() + 89_999);
+  await jest.advanceTimersByTimeAsync(50);
+  expect(requests).toHaveLength(3);
+  expect(completed).toBe(false);
+  jest.setSystemTime(Date.now() + 16 * 60_000);
+  const beforeAged = requests.length;
+  await jest.advanceTimersByTimeAsync(50);
+  expect(requests).toHaveLength(beforeAged + 1);
+  expect(requests.every(request => JSON.stringify(request) === JSON.stringify(head))).toBe(true);
+  expect(completed).toBe(false);
   expect(store.getState().tabs.tabs).toHaveLength(0);
   expect((window as any).__TAB_PANES__).toEqual({});
+  expect(jest.getTimerCount()).toBe(1);
+  await StateManager.saveState();
+  expect(localStorage.getItem(sessionStateKey())).toBe(saved);
+  refuse = false;
+  await jest.advanceTimersByTimeAsync(50);
+  expect(await restoring).toBe(true);
+  expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-saved']);
+  expect(store.getState().panes.treesByTabId['tb-saved']).toEqual(leaf('tm-saved'));
+  expect((window as any).__TAB_PANES__['tb-saved']).toEqual(leaf('tm-saved'));
+  expect(requests[requests.length - 1].op).toEqual({ kind: 'enter', panes: [] });
+  expect(jest.getTimerCount()).toBe(0);
+  window.dispatchEvent(new Event('beforeunload'));
+  expect(jest.getTimerCount()).toBe(0);
 });
 
 test('a newer replacement supersedes a load waiting at the registration await', async () => {
@@ -165,8 +211,10 @@ test('a newer replacement supersedes a load waiting at the registration await', 
   await jest.advanceTimersByTimeAsync(100);
   const second = StateManager.loadLayout('B', store.dispatch);
   await jest.advanceTimersByTimeAsync(100);
-  expect(await second).toBe(true);
+  expect(store.getState().tabs.tabs).toHaveLength(0);
   release();
+  await flush();
+  expect(await second).toBe(true);
   expect(await first).toBe(false);
   expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-B']);
   expect(store.getState().panes.treesByTabId).toEqual({ 'tb-B': expect.objectContaining({ terminalId: 'tm-B' }) });
@@ -185,7 +233,7 @@ test('superseding a failed registration during backoff stops its retries and pre
   expect(await second).toBe(true);
   await jest.advanceTimersByTimeAsync(900);
   expect(await first).toBe(false);
-  expect(register).toHaveBeenCalledTimes(2);
+  expect(register).toHaveBeenCalledTimes(3); // The old head is retried before the new restore.
   expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-B']);
 });
 
@@ -197,9 +245,11 @@ test('a tab-scoped registration await cannot mount on top of a newer workspace r
   await flush();
   const workspace = StateManager.loadLayout('workspace', store.dispatch);
   await jest.advanceTimersByTimeAsync(100);
+  expect(store.getState().tabs.tabs).toHaveLength(0);
+  release();
+  await flush();
   expect(await workspace).toBe(true);
   const before = store.getState();
-  release();
   expect(await scoped).toBe(false);
   expect(store.getState()).toBe(before);
 });
@@ -211,7 +261,7 @@ test('user-created, API-created and split-created fresh leaves do not register',
   } }));
   delete (window as any).electronAPI;
   const api = { createTerminal: jest.fn().mockResolvedValue('pc-fresh') };
-  const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any);
+  const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any, () => new PaneIncarnations());
   await Promise.all(['tm-user', 'tm-api', 'tm-split'].map(id => service.createTerminal(id)));
   expect(api.createTerminal).toHaveBeenCalledTimes(3);
   expect(register).not.toHaveBeenCalled();
@@ -225,7 +275,7 @@ test('clearCurrentState cancels a waiting leaf by absence without forgetting its
     forgetRestoringLeaf: jest.fn().mockResolvedValue(undefined),
   };
   delete (window as any).electronAPI;
-  const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any);
+  const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any, () => new PaneIncarnations());
   const creating = service.createTerminal('tm-wait');
   await flush();
   (StateManager as any).clearCurrentState(store.dispatch);
@@ -336,4 +386,27 @@ test('persisted tree installer census requires registration before every install
     'components/TerminalContainer.tsx': 2, // mirror adoption / fresh tree seeding
     'components/Panes/dnd/detach.ts': 1, // cross-window handoff, not a close or a layout load
   });
+});
+
+test('renderer production census rejects label-keyed holder calls and bridge members', () => {
+  const obsolete = /registerRestoringLeaves|forgetRestoringLeaf|register_restoring_leaves|forget_restoring_leaf/;
+  expect(obsolete.test('api.registerRestoringLeaves(leaves)')).toBe(true);
+  expect(obsolete.test('forgetRestoringLeaf: (leaf: string) => Promise<void>')).toBe(true);
+  expect(obsolete.test("invoke('register_restoring_leaves')")).toBe(true);
+  expect(obsolete.test('paneIncarnations.prepare(descriptors)')).toBe(false);
+  const scanned: string[] = [];
+  const renderer = path.join(__dirname, '..', '..');
+  const visit = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const filename = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (!['__tests__', '__testFixtures__'].includes(entry.name)) visit(filename);
+      } else if (/\.tsx?$/.test(filename)) {
+        scanned.push(path.relative(renderer, filename).replace(/\\/g, '/'));
+        expect({ filename, obsolete: obsolete.test(fs.readFileSync(filename, 'utf8')) }).toEqual({ filename, obsolete: false });
+      }
+    }
+  };
+  visit(renderer);
+  expect(scanned).toEqual(expect.arrayContaining(['services/StateManager.ts', 'services/TerminalService.ts', 'api/tauri-bridge.ts', 'api/browser-bridge.ts', 'types/electron.d.ts']));
 });
