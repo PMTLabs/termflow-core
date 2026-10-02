@@ -417,6 +417,41 @@ test('staging a waiting pane suppresses depart and cancel reenters a fresh sourc
   expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'stash', 'cancel', 'enter']);
 });
 
+test('a restored pane whose restore completed is staged with the descriptor it entered with', async () => {
+  const h = harness();
+  const override = 'tb-key-a';
+  const [pi] = h.client.prepare([{ ...a, restore: true, override }]);
+  h.client.observe([a]);
+  await flush(); h.ack(0); await flush();
+  const bound = h.client.bind(pi, 'pc-a', 'restore');
+  await flush(); h.ack(1); await flush();
+  expect(await bound).toEqual({ status: 'Ok' });
+  expect(h.client.restoreKey(pi)).toBeUndefined();
+
+  const staging = h.client.stash('tx-done', [a]); await flush(); h.ack(2); await staging;
+  expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'bind', 'stash']);
+  const entered = (h.applied[0].op as { panes: unknown[] }).panes;
+  expect((h.applied[2].op as { pairs: unknown[] }).pairs).toEqual(entered);
+});
+
+test('a replacement for a leaf whose restore completed does not inherit the restore, one still waiting does', async () => {
+  const h = harness();
+  const original = [{ ...a, restore: true, override: 'tb-key-a' }, { paneId: 'pn-c', leaf: 'tm-c', restore: true, override: 'tb-key-c' }];
+  const [done] = h.client.prepare(original);
+  h.client.observe(original);
+  await flush(); h.ack(0); await flush(); h.ack(1); await flush();
+  const bound = h.client.bind(done, 'pc-a', 'restore');
+  await flush(); h.ack(2); await flush();
+  expect(await bound).toEqual({ status: 'Ok' });
+
+  const [afterDone, afterWaiting] = h.client.prepare([b, { paneId: 'pn-d', leaf: 'tm-c' }]);
+  await flush(); h.ack(3); await flush(); h.ack(4); await flush();
+  expect(h.applied[3].op).toEqual({ kind: 'enter', panes: [{ ...b, pi: await afterDone }] });
+  expect(h.applied[4].op).toEqual({ kind: 'enter', panes: [{ paneId: 'pn-d', leaf: 'tm-c', restore: true, override: 'tb-key-c', pi: await afterWaiting }] });
+  expect(h.client.restoreKey(afterDone)).toBeUndefined();
+  expect(h.client.restoreKey(afterWaiting)).toBe('tb-key-c');
+});
+
 test('a business pending admission advances the stream and retries admission without a hold-free spawn', async () => {
   const h = harness();
   const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };

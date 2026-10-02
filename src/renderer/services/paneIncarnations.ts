@@ -44,7 +44,9 @@ export type PaneBridge = <K extends keyof PaneCommands>(
 ) => Promise<PaneCommands[K]['result']>;
 
 export type PaneCapture = Promise<PaneIncarnation>;
-type Slot = { descriptor: PaneDescriptor; pi: PaneCapture; suppressed: boolean; installed: boolean };
+/** `descriptor` is what the backend was told when the pane entered and never changes: a stash must
+ *  present exactly that. `resolved` is the local half: the restore it asked for has completed. */
+type Slot = { descriptor: PaneDescriptor; pi: PaneCapture; suppressed: boolean; installed: boolean; resolved?: boolean };
 type Queued = { seq: number; op: () => Promise<PaneOp>; resolve: (result: PaneResult) => void };
 const inert: PaneResult = { status: 'Inert' };
 const increment = (value: number): number => {
@@ -245,7 +247,7 @@ export class PaneIncarnations {
   /** Call before installing a normal pane. Transfer entries are made only by adopt. */
   prepare(panes: PaneDescriptor[]): PaneCapture[] {
     let changed = false;
-    const restoring = [...this.slots.values()].filter(slot => !slot.suppressed && slot.descriptor.restore);
+    const restoring = [...this.slots.values()].filter(slot => !slot.suppressed && slot.descriptor.restore && !slot.resolved);
     const descriptors = panes.map(descriptor => {
       const predecessor = restoring.find(slot => slot.descriptor.leaf === descriptor.leaf);
       return !descriptor.restore && predecessor
@@ -288,12 +290,12 @@ export class PaneIncarnations {
   }
 
   restoreKey(pi: PaneCapture): string | undefined {
-    return [...this.slots.values()].find(slot => slot.pi === pi && !slot.suppressed && slot.descriptor.restore)?.descriptor.override;
+    return [...this.slots.values()].find(slot => slot.pi === pi && !slot.suppressed && slot.descriptor.restore && !slot.resolved)?.descriptor.override;
   }
 
   setRestoreResolved(pi: PaneCapture): void {
     for (const slot of this.slots.values()) {
-      if (slot.pi === pi && !slot.suppressed) slot.descriptor = { ...slot.descriptor, restore: false };
+      if (slot.pi === pi && !slot.suppressed) slot.resolved = true;
     }
   }
 
