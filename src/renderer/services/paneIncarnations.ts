@@ -52,6 +52,9 @@ const increment = (value: number): number => {
   return value + 1;
 };
 
+/** The backend refused a transfer take, so no pane was adopted and nothing was installed. */
+export class TransferNotTaken extends Error {}
+
 /** A page owns one FIFO. Transport failures never spend the head sequence number. */
 export class PaneIncarnations {
   private registration?: Promise<{ wi: number; pg: number }>;
@@ -403,7 +406,7 @@ export class PaneIncarnations {
   async installTransfer(tx: string, panes: PaneDescriptor[] | ((ui: unknown, members: PaneDescriptor[]) => PaneDescriptor[]), install: (ui?: unknown) => void | Promise<void>): Promise<void> {
     const workspace = captureWorkspace();
     const taken = await this.send({ kind: 'take', tx });
-    if (taken.status !== 'Taken') throw new Error(`transfer take ${taken.status}`);
+    if (taken.status !== 'Taken') throw new TransferNotTaken(`transfer take ${taken.status}`);
     const ui = taken.payload.ui;
     const members = typeof panes === 'function' ? panes(ui, taken.payload.panes) : panes;
     const descriptors = members.flatMap(pane => {

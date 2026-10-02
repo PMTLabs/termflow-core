@@ -29,7 +29,7 @@ impl HostKeys {
             // or abandonment; merely taking a transfer cannot expire it.
         }
         let (taken, _) = tokio::sync::watch::channel(None);
-        inner.panes.transfers.insert(tx.into(), Transfer { source: page.pg, destination: None, stamp: now, members: pairs, ui, taken });
+        inner.panes.transfers.insert(tx.into(), Transfer { source: page.pg, destination: None, stamp: now, members: pairs, ui, taken, observed: false });
         PaneResult::Ok
     }
     pub(super) fn take_panes(inner: &mut Inner, pg: u64, tx: &str, now: Instant) -> PaneResult {
@@ -101,9 +101,12 @@ impl HostKeys {
         let transfer = inner.panes.transfers.remove(tx)?;
         Self::clear_active_drag(inner, tx);
         if transfer.taken.borrow().is_none() { transfer.taken.send_replace(Some(false)); }
-        // Async source commands may not have acquired their receiver before
-        // adoption retires the transfer. Keep one receipt for that late caller.
-        if transfer.taken.receiver_count() == 0 && inner.window_pages.window_of(transfer.source).is_some() {
+        // Async source commands may not have acquired their receiver before the
+        // transfer ends. Keep one receipt for a source that never subscribed. Like
+        // the live receiver, it reports whether the destination took the panes
+        // (true) or the transfer ended untaken (false); a destination that fails
+        // after the take leaves the panes orphaned, the same on both paths.
+        if !transfer.observed && inner.window_pages.window_of(transfer.source).is_some() {
             let outcome = transfer.taken.borrow().unwrap();
             inner.panes.transfer_outcomes.insert(tx.into(), (transfer.source, outcome));
             inner.panes.transfer_outcome_order.push_back(tx.into());

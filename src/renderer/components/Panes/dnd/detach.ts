@@ -1,4 +1,4 @@
-import { paneIncarnations, describePanes, accepted, type PaneCapture, type PaneDescriptor } from '../../../services/paneIncarnations';
+import { paneIncarnations, describePanes, accepted, TransferNotTaken, type PaneCapture, type PaneDescriptor } from '../../../services/paneIncarnations';
 import { captureWorkspace, isCurrentWorkspace } from '../../../services/workspaceReplacement';
 import { store } from '../../../store';
 import { addTab, setActiveTab, removeTab } from '../../../store/slices/tabsSlice';
@@ -574,6 +574,13 @@ export async function reconstructDetachedWindow(): Promise<boolean> {
   const label = api.getWindowLabel();
   if (!label.startsWith(DETACH_PREFIX)) return false;
   const token = label.slice(DETACH_PREFIX.length);
-  await installTransferredPayload(token, undefined, applyDetachPayload);
+  try {
+    await installTransferredPayload(token, undefined, applyDetachPayload);
+  } catch (error) {
+    // A spent or unknown token (the window was reloaded) adopted nothing: fall back to
+    // this window's own session restore, as a missing payload always did.
+    if (error instanceof TransferNotTaken) { console.warn('Detach: no transfer to take', error.message); return false; }
+    throw error;
+  }
   return true;
 }

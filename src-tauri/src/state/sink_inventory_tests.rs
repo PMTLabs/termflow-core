@@ -207,7 +207,7 @@ const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
     ("state/host_keys/pane_transfers.rs", "adopt_panes", &["release_idle_owner", "end_transfer_record"]),
     ("state/host_keys/pane_transfers.rs", "cancel_panes", &["finish_transfer"]),
     ("state/host_keys/pane_transfers.rs", "clear_active_drag", &["active_drag.as_deref", "active_drag.take", "drag.delivery.send(drag.ended)"]),
-    ("state/host_keys/pane_transfers.rs", "end_transfer_record", &["clear_active_drag", "taken.send_replace", "receiver_count", "transfer_outcomes.insert", "transfer_outcome_order.pop_front", "transfer_outcomes.remove"]),
+    ("state/host_keys/pane_transfers.rs", "end_transfer_record", &["clear_active_drag", "taken.send_replace", "observed", "transfer_outcomes.insert", "transfer_outcome_order.pop_front", "transfer_outcomes.remove"]),
     ("state/host_keys/pane_transfers.rs", "finish_transfer", &["end_transfer_record", "release_idle_owner"]),
     ("state/host_keys/pane_transfers.rs", "expire_transfers_locked", &["finish_transfer"]),
     ("state/host_keys/pane_transfers.rs", "expire_transfers", &["expire_transfers_locked"]),

@@ -106,6 +106,9 @@ pub(super) struct Transfer {
     pub members: Vec<PaneEntry>,
     pub ui: Option<serde_json::Value>,
     pub taken: tokio::sync::watch::Sender<Option<bool>>,
+    /// True once the source subscribed to `taken` while the record was live: that
+    /// source has its own receiver and needs no retained outcome afterwards.
+    pub observed: bool,
 }
 pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -236,6 +239,14 @@ impl HostKeys {
                 let pc = shell_of(&row.state).unwrap().process.clone();
                 inner.panes.holders.remove(&pi);
                 return PaneResult::Existing { pc };
+            } else if matches!(row.state, OwnerState::Placing { .. }) && row.started && row.owner == Owner::Orphaned {
+                // The page that started this create ended while it was in flight: a
+                // successor pane joins that work instead of contending or spawning again.
+                let row = inner.owners.get_mut(leaf).unwrap();
+                row.owner = Owner::Pane(pi);
+                let cg = row.cg;
+                inner.panes.holders.remove(&pi);
+                return PaneResult::Join { cg };
             } else { return PaneResult::Contended; }
         }
         let Some(cg) = inner.sequence.checked_add(1) else { return PaneResult::Retry; };

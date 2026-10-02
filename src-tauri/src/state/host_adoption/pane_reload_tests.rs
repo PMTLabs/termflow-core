@@ -101,3 +101,35 @@ async fn destroyed_window_preserves_orphaned_shells_and_other_window_ownership()
     assert_eq!(keys.pane_owner("tm-owned"), Some(Owner::Pane(restored.pi)));
     assert_eq!(world.count_everywhere("Spawn"), 3);
 }
+
+#[tokio::test]
+async fn reload_during_a_started_create_joins_the_same_work() {
+    let gate = Arc::new(EventGate::default());
+    let (world, port) = machine(HostSpec { reply_gates: HashMap::from([("Spawn", gate.clone())]), ..HostSpec::default() });
+    let mut page = Page::new(&port, "owner");
+    let entry = page.enter(&port, "tm-waiting");
+    let cg = page.admit(&port, &entry);
+    let first = tokio::spawn({ let port = port.clone(); let pg = page.pg; async move { run(&port, "owner", pg, "tm-waiting", cg).await } });
+    gate.wait_reached(1).await;
+    let mut other = Page::new(&port, "other");
+    let control = other.enter(&port, "tm-control");
+    other.admit(&port, &control);
+    page = reload(&port, &page);
+    let op: PaneOp = serde_json::from_value(serde_json::json!({ "kind": "replace_page" })).unwrap();
+    assert_eq!(page.send(&port, op).0, PaneResult::Ok);
+    assert_eq!(port.table().keys().pane_owner("tm-waiting"), Some(Owner::Orphaned));
+    let successor = page.enter(&port, "tm-waiting");
+    assert_eq!(page.send(&port, PaneOp::AdmitCreate { pi: successor.pi, mode: CreateMode::Mount }).0, PaneResult::Join { cg });
+    assert_eq!(port.table().keys().pane_owner("tm-waiting"), Some(Owner::Pane(successor.pi)));
+    assert_eq!(port.table().keys().pane_owner("tm-control"), Some(Owner::Pane(control.pi)));
+    let joined = tokio::spawn({ let port = port.clone(); let pg = page.pg; async move { run(&port, "owner", pg, "tm-waiting", cg).await } });
+    gate.release();
+    let pc = first.await.unwrap().unwrap();
+    assert_eq!(joined.await.unwrap().unwrap(), pc);
+    assert!(matches!(port.table().keys().owner_state("tm-waiting"), Some((_, OwnerState::Registered(s))) if s.process == pc));
+    assert_eq!(port.table().keys().pane_owner("tm-waiting"), Some(Owner::Pane(successor.pi)));
+    assert_eq!(page.send(&port, PaneOp::AdmitCreate { pi: successor.pi, mode: CreateMode::Mount }).0, PaneResult::AlreadyBound { pc: pc.clone() });
+    port.current_client().unwrap().list_sessions_numbered().await.unwrap();
+    assert_eq!(world.count_everywhere("Spawn"), 1);
+    assert_eq!(world.count_everywhere("Close"), 0);
+}

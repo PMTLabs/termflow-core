@@ -124,3 +124,22 @@ fn retained_receipts_evict_oldest_and_block_token_reuse_until_consumed() {
     assert_eq!(keys.pane_owner("tm-control"), Some(Owner::Pane(control.pi)));
     assert_eq!(keys.resolve_process("tm-control", false).as_deref(), Some("pc-control"));
 }
+
+#[test]
+fn a_source_that_subscribed_live_keeps_no_retained_outcome() {
+    let keys = std::sync::Arc::new(HostKeys::default());
+    let mut source = Page::new(&keys, "source");
+    let mut destination = Page::new(&keys, "destination");
+    let entry = register_shell(&keys, &mut source, "tm-live", "pc-live");
+    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "seen".into(), pairs: vec![entry], ui: None }), PaneResult::Ok);
+    // The waiter subscribes while the record is live, is told at take, and drops its
+    // receiver before adoption retires the record: nothing may be retained for it.
+    let receiver = keys.watch_transfer("source", source.pg, "seen").unwrap();
+    assert!(matches!(destination.op(&keys, PaneOp::Take { tx: "seen".into() }), PaneResult::Taken { .. }));
+    assert_eq!(*receiver.borrow(), Some(true));
+    drop(receiver);
+    let adopted = destination.entry("tm-live", false);
+    assert_eq!(destination.op(&keys, PaneOp::Adopt { tx: "seen".into(), pairs: vec![adopted] }), PaneResult::Ok);
+    assert!(keys.lock().panes.transfer_outcomes.is_empty());
+    assert!(keys.watch_transfer("source", source.pg, "seen").is_err());
+}

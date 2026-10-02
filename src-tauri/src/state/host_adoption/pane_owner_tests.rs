@@ -161,11 +161,13 @@ async fn page_end_during_gated_spawn_orphans_completion_without_closing_shell() 
     assert_eq!(port.table().keys().pane_owner("tm-control"), Some(Owner::Pane(control.pi)));
     assert_eq!(world.count_everywhere("Spawn"), 1);
     let new = other.enter(&port, "tm-waiting");
-    assert_eq!(other.send(&port, PaneOp::AdmitCreate { pi: new.pi, mode: CreateMode::Mount }).0, PaneResult::Contended);
+    // A pane of another window that enters the orphaned leaf joins the started work: no second Spawn.
+    assert_eq!(other.send(&port, PaneOp::AdmitCreate { pi: new.pi, mode: CreateMode::Mount }).0, PaneResult::Join { cg });
+    assert_eq!(port.table().keys().pane_owner("tm-waiting"), Some(Owner::Pane(new.pi)));
     gate.release();
     let pc = task.await.unwrap().unwrap();
     assert!(matches!(port.table().keys().owner_state("tm-waiting"), Some((_, OwnerState::Registered(s))) if s.process == pc));
-    assert_eq!(port.table().keys().pane_owner("tm-waiting"), Some(Owner::Orphaned));
+    assert_eq!(port.table().keys().pane_owner("tm-waiting"), Some(Owner::Pane(new.pi)));
     assert_eq!(other.send(&port, PaneOp::Bind { pi: new.pi, pc: pc.clone(), via: BindVia::Named("reconcile".into()) }).0, PaneResult::Ok);
     port.current_client().unwrap().list_sessions_numbered().await.unwrap();
     assert_eq!(world.count_everywhere("Spawn"), 1);
