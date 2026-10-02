@@ -246,24 +246,45 @@ test('an installer that throws after adopt departs every entered copy', async ()
   expect(h.applied).toHaveLength(4);
 });
 
-test('unknown backend commands drain the queue and keep real terminal creation and close on the legacy bridge', async () => {
+test('unknown op errors retain the head sequence and never enable hold-free creation', async () => {
   const h = harness();
   const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };
-  const api = { createTerminal: jest.fn().mockResolvedValue('pc-legacy'), closeTerminal: jest.fn().mockResolvedValue(undefined), forgetRestoringLeaf: jest.fn() };
+  const api = { createTerminal: jest.fn(), closeTerminal: jest.fn() };
   const service = new TerminalServiceClass(() => trees, () => api as any, () => h.client);
   const creating = service.createTerminal(a.leaf);
-  await flush(); expect(h.applied).toHaveLength(1);
-  expect(api.createTerminal).not.toHaveBeenCalled();
+  await flush(); expect(h.calls()).toHaveLength(1);
+  const head = h.calls()[0];
   h.gates.fail('pane_op', 0, 'unknown command pane_op');
-  expect(await creating).toBe('pc-legacy');
+  await flush();
+  expect(h.client.enabled).toBe(true);
+  const control = h.client.send({ kind: 'settle' });
+  await jest.advanceTimersByTimeAsync(50);
+  expect(h.calls()[1]).toEqual(head);
+  h.ack(1); await flush(); h.ack(2, { status: 'Create', cg: 8 }); await flush();
+  expect(h.calls()[3].op).toEqual({ kind: 'settle' });
+  h.ack(3); expect(await control).toEqual({ status: 'Ok' });
+  expect(h.gates.calls('create_admitted_terminal')).toHaveLength(1);
+  h.gates.release('create_admitted_terminal', 0, 'pc-owned');
+  expect(await creating).toBe('pc-owned');
+  expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'admit_create', 'settle']);
+  expect(api.createTerminal).not.toHaveBeenCalled();
+  expect(api.closeTerminal).not.toHaveBeenCalled();
+});
+
+test('bridge-free browser clients can create and close through their single-window API', async () => {
+  const client = new PaneIncarnations(); clients.push(client);
+  const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };
+  const api = { createTerminal: jest.fn().mockResolvedValue('pc-browser'), closeTerminal: jest.fn().mockResolvedValue(undefined) };
+  const service = new TerminalServiceClass(() => trees, () => api as any, () => client);
+  expect(await service.createTerminal(a.leaf)).toBe('pc-browser');
   expect(api.createTerminal).toHaveBeenCalledTimes(1);
-  expect(h.client.enabled).toBe(false);
+  expect(service.getProcessId(a.leaf)).toBe('pc-browser');
   await service.closeTerminal(a.leaf);
-  expect(api.closeTerminal.mock.calls).toEqual([['pc-legacy']]);
+  expect(api.closeTerminal.mock.calls).toEqual([['pc-browser']]);
+  expect(service.getProcessId(a.leaf)).toBeUndefined();
   const install = jest.fn();
-  await h.client.installTransfer('tx-legacy', [b], install);
-  expect(install).toHaveBeenCalledTimes(1);
-  expect(h.calls()).toHaveLength(1);
+  await expect(client.installTransfer('tx-browser', [b], install)).rejects.toThrow('transfer take Inert');
+  expect(install).not.toHaveBeenCalled();
 });
 
 test('mount and restart use captured incarnations and never perform a hold-free spawn on contention', async () => {
@@ -353,25 +374,44 @@ test('abandoned prepared copies depart by captured identity without departing an
   expect(h.client.capture(b.leaf, b.paneId)).toBe(replacement);
 });
 
-test('missing registration is inert and a missing host-work command falls back without poisoning creation', async () => {
-  const missing = new PaneIncarnations((async () => { throw 'Command register_page not found'; }) as PaneBridge);
-  clients.push(missing);
+test('missing registration retries without degrading and missing host work propagates without hold-free creation', async () => {
+  const register = jest.fn().mockRejectedValueOnce('Command register_page not found').mockResolvedValue({ status: 'Registered', wi: 9, pg: 99 });
+  const bridge = (async (command: string) => command === 'register_page' ? register() : { status: 'Ack', result: { status: 'Ok' } }) as PaneBridge;
+  const missing = new PaneIncarnations(bridge); clients.push(missing);
   const entering = missing.send({ kind: 'enter', panes: [] });
-  expect(await entering).toEqual({ status: 'Inert' });
-  expect(missing.enabled).toBe(false);
-  expect(await missing.send({ kind: 'settle' })).toEqual({ status: 'Inert' });
+  await flush(); expect(register).toHaveBeenCalledTimes(1);
+  expect(missing.enabled).toBe(true);
+  await jest.advanceTimersByTimeAsync(50);
+  expect(await entering).toEqual({ status: 'Ok' });
+  expect(register).toHaveBeenCalledTimes(2);
+  expect(await missing.pageIdentity()).toMatchObject({ wi: 9, pg: 99 });
   const h = harness();
   const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };
-  const api = { createTerminal: jest.fn().mockResolvedValue('pc-compatible') };
+  const api = { createTerminal: jest.fn() };
   const service = new TerminalServiceClass(() => trees, () => api as any, () => h.client);
-  const creating = service.createTerminal(a.leaf);
+  const creating = service.createTerminal(a.leaf).catch(error => error);
   await flush(); h.ack(0); await flush(); h.ack(1, { status: 'Create', cg: 17 }); await flush();
   expect(h.applied).toHaveLength(2);
   expect(h.gates.calls('create_admitted_terminal')).toHaveLength(1);
   h.gates.fail('create_admitted_terminal', 0, 'Command create_admitted_terminal not found');
-  expect(await creating).toBe('pc-compatible');
-  expect(api.createTerminal).toHaveBeenCalledTimes(1);
-  expect(h.client.enabled).toBe(false);
+  expect(await creating).toBe('Command create_admitted_terminal not found');
+  expect(h.client.enabled).toBe(true);
+  expect(api.createTerminal).not.toHaveBeenCalled();
+  const control = h.client.send({ kind: 'settle' }); await flush(); h.ack(2);
+  expect(await control).toEqual({ status: 'Ok' });
+});
+
+test('missing qualified reap never invokes the hold-free close fallback', async () => {
+  const h = harness();
+  const control = h.client.send({ kind: 'settle' }); await flush(); h.ack(0); await control;
+  const fallback = jest.fn();
+  const reap = h.client.reap('pc-old', fallback).catch(error => error);
+  await flush();
+  expect(h.gates.calls('close_process')[0][0]).toEqual({ pc: 'pc-old', reap: true });
+  h.gates.fail('close_process', 0, 'Command close_process not found');
+  expect(await reap).toBe('Command close_process not found');
+  expect(h.client.enabled).toBe(true);
+  expect(fallback).not.toHaveBeenCalled();
 });
 
 test('a late creation cannot bind a different pane copy now displaying the same leaf', async () => {

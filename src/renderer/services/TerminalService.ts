@@ -3,22 +3,11 @@ import { termDiag } from '../utils/diag';
 import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
-import { isHostSessionContended } from './hostSessionContention';
 import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
 import { reassertTitleColorAfterSpawn } from './terminalTitleColorSync';
 import type { KeyboardProtocolStateData, PromptGate } from '@termflow/terminal-core';
-
-// The destination's create is refused as soon as the other window holds the session, but that
-// window offers it only once its own create returns, which can take as long as the host
-// request (bounded at 10 s). While the backend says a create for the leaf is still running the
-// destination keeps asking, for longer than that bound; when nothing is running it asks only a
-// few times, enough to cover the offer's own round trip.
-const HANDOFF_IN_FLIGHT_POLL_MS = 250;
-const HANDOFF_IN_FLIGHT_BUDGET_MS = 15_000;
-const HANDOFF_IDLE_ATTEMPTS = 3;
-const HANDOFF_IDLE_DELAY_MS = 200;
 
 export type HostWaitState = 'waiting' | 'retry' | undefined;
 
@@ -44,15 +33,9 @@ export class TerminalServiceClass {
   // as `initialKeyboardProtocol`, same lifecycle as promptGateHandoff.
   private keyboardProtocolHandoff: Map<string, KeyboardProtocolStateData> = new Map();
   // Double Restart clicks share a promise, but a different pane copy must still
-  // ask for its own admission. Older backends retain the leaf-keyed guard.
+  // ask for its own admission. Browser/test clients use a leaf-keyed guard.
   // Cleared in finally so a failed create never poisons the next attempt.
   private inFlightCreates = new Map<string | PaneCapture, { terminalId: string; promise: Promise<string> }>();
-  // Leaves closed (not moved) in THIS window while their create was in flight. A create
-  // that comes back for a leaf this window no longer has closes the new shell instead of
-  // offering it to another window when the user closed the pane here. A close in any
-  // other window is not seen by this one.
-  private closedWhileCreating: Set<string> = new Set();
-
   private hostWaitStates = new Map<string, HostWaitState>();
 
   constructor(
@@ -168,8 +151,6 @@ export class TerminalServiceClass {
       console.log(`TerminalService: Create already in flight for ${terminalId}, reusing pending promise`);
       return pending.promise;
     }
-    // A close recorded for an earlier create of this leaf says nothing about this one.
-    this.closedWhileCreating.delete(terminalId);
     // Keep the ordinary path explicit at the renderer/bridge boundary.  Leaving
     // this as `undefined` relies on JSON serialization to omit the field and
     // makes an old bridge/backend pair indistinguishable from an admin request
@@ -188,7 +169,6 @@ export class TerminalServiceClass {
       // starting a new one so this is effectively always true).
       if (this.inFlightCreates.get(createKey)?.promise === createPromise) {
         this.inFlightCreates.delete(createKey);
-        this.closedWhileCreating.delete(terminalId);
       }
     }
   }
@@ -240,16 +220,6 @@ export class TerminalServiceClass {
           this.setHostWaitState(terminalId, undefined);
           return '';
         }
-        // The other side of that move: the window the pane left won the session
-        // while this window's own create was refused, and offers it to whichever
-        // window has the pane now. Only a contention can mean that.
-        if (isHostSessionContended(error) && !this.incarnations().enabled) {
-          const adopted = await this.takeOfferedSession(terminalId);
-          if (adopted !== undefined) {
-            this.setHostWaitState(terminalId, undefined);
-            return adopted;
-          }
-        }
         if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
           this.setHostWaitState(terminalId, undefined);
           throw error;
@@ -268,79 +238,6 @@ export class TerminalServiceClass {
         if (hostPending) hostDelay = Math.min(hostDelay * 2, 8000);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
-    }
-  }
-
-  /**
-   * Bind to the session another window offered for this leaf. The offer may still
-   * be on its way: while the backend reports the other window's create as running
-   * this keeps asking (up to the in-flight budget); once nothing is running it asks
-   * a few more times, counted from the last answer that said something was. `undefined`
-   * when no offer shows up (a recovery pane that lost to another pane, or a shell
-   * another window is showing, keeps its refusal); `''` when the leaf left this window
-   * meanwhile.
-   */
-  private async takeOfferedSession(terminalId: string): Promise<string | undefined> {
-    const deadline = Date.now() + HANDOFF_IN_FLIGHT_BUDGET_MS;
-    let idleAnswers = 0;
-    let delay = 0;
-    while (true) {
-      if (delay > 0) {
-        await new Promise(resolve => setTimeout(resolve, delay));
-        if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) return '';
-      }
-      let answer: Awaited<ReturnType<typeof window.electronAPI.takeSessionHandoff>> | undefined;
-      try {
-        answer = await this.api().takeSessionHandoff?.(terminalId);
-      } catch (error) {
-        console.warn(`TerminalService: could not take the offered session of ${terminalId}:`, error);
-        return undefined;
-      }
-      if (answer?.status === 'taken') {
-        const processId = answer.processId;
-        if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
-          // The offer is spent; whoever has the pane now needs it again.
-          await this.releaseAbsentCreate(terminalId, processId);
-          return '';
-        }
-        console.log(`TerminalService: ${terminalId} took over the session ${processId} offered for it`);
-        this.bindCreated(terminalId, processId, undefined);
-        return processId;
-      }
-      if (answer?.status === 'inFlight') {
-        if (Date.now() >= deadline) return undefined;
-        idleAnswers = 0;
-        delay = HANDOFF_IN_FLIGHT_POLL_MS;
-        continue;
-      }
-      if (++idleAnswers >= HANDOFF_IDLE_ATTEMPTS) return undefined;
-      delay = HANDOFF_IDLE_DELAY_MS;
-    }
-  }
-
-  /**
-   * A create produced `processId` for a leaf this window no longer has. A pane the
-   * user closed in this window gets its new shell closed; a pane that moved has the
-   * shell offered to the window that has it now. Binding it here would leave two
-   * windows holding one shell.
-   */
-  private async releaseAbsentCreate(terminalId: string, processId: string): Promise<void> {
-    // Ownership follows the pane/transfer in the backend, even if placement finishes later.
-    if (this.incarnations().enabled || this.incarnations().ended) return;
-    if (this.closedWhileCreating.has(terminalId)) {
-      console.log(`TerminalService: ${terminalId} was closed during its create; closing process ${processId}`);
-      try {
-        await this.api().closeTerminal(processId);
-      } catch (error) {
-        console.error(`TerminalService: could not close the shell ${processId} of the closed pane ${terminalId}:`, error);
-      }
-      return;
-    }
-    console.log(`TerminalService: ${terminalId} left this window during its create; offering process ${processId} to its new window`);
-    try {
-      await this.api().offerSessionHandoff?.(terminalId, processId);
-    } catch (error) {
-      console.warn(`TerminalService: could not offer the session of ${terminalId}:`, error);
     }
   }
 
@@ -391,7 +288,7 @@ export class TerminalServiceClass {
           leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
         });
         if (protocol.ended) return '';
-        processId = created ?? await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+        processId = created;
       } else if (admission.status === 'Retry' || admission.status === 'Pending') {
         throw new Error('LIFECYCLE_BUSY: placement is pending');
       } else {
@@ -403,8 +300,7 @@ export class TerminalServiceClass {
       if (protocol.ended) return '';
       if (!findTabIdByTerminalId(this.paneTrees(), terminalId)
           || (protocol.enabled && (protocol.capture(terminalId, paneId) !== attemptPi || (attemptPi && protocol.isSuppressed(attemptPi))))) {
-        await this.releaseAbsentCreate(terminalId, processId);
-        return '';
+        return ''; // Backend ownership follows the pane even after placement finishes.
       }
 
       this.bindCreated(terminalId, processId, owningTabId);
@@ -530,7 +426,6 @@ export class TerminalServiceClass {
     if (ownedClose && !results.some(accepted)) return;
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
-      if (!ownedClose && [...this.inFlightCreates.values()].some(entry => entry.terminalId === terminalId)) this.closedWhileCreating.add(terminalId);
       this.setHostWaitState(terminalId, undefined);
       return; // A waiting restored pane has no process, but still has restore intent.
     }

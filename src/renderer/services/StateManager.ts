@@ -1097,10 +1097,7 @@ class StateManagerClass {
     const pis = paneIncarnations.prepare(panes);
     // This FIFO barrier follows every restoring enter, before either mirror mounts.
     const ready = await paneIncarnations.send({ kind: 'enter', panes: [] });
-    if (!isCurrent() || !accepted(ready) || ready.status === 'Inert') paneIncarnations.discardPrepared(pis);
-    if (ready.status === 'Inert') {
-      throw new RestoreRegistrationError('Restoring terminal hosts requires the desktop pane stream.');
-    }
+    if (!isCurrent() || !accepted(ready)) paneIncarnations.discardPrepared(pis);
     return isCurrent() && accepted(ready);
   }
 

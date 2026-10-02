@@ -546,8 +546,7 @@ const App: React.FC = () => {
     // StateManager has finished restoring this window's complete persisted pane
     // tree. Report completion so Rust can release this window from the sweep.
     try {
-      const settled = await paneIncarnations.send({ kind: 'settle' });
-      if (settled.status === 'Inert') await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label);
+      await paneIncarnations.send({ kind: 'settle' });
     } catch (error) {
       console.warn('Failed to report host restore completion:', error);
     }

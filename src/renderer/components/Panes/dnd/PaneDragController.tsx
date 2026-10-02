@@ -20,7 +20,7 @@ import {
   cancelDetachTransfer,
   waitDetachTransfer,
 } from './detach';
-import { acceptsTransferNotice, paneIncarnations } from '../../../services/paneIncarnations';
+import { acceptsTransferNotice } from '../../../services/paneIncarnations';
 import './dnd.css';
 
 const THRESHOLD = 5; // px the pointer must travel before a press becomes a drag
@@ -137,7 +137,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       try {
         const u1 = await listen('pane-drag:active', (ev: any) => {
           const notice = ev?.payload;
-          const token = typeof notice === 'string' ? notice : notice?.token;
+          const token = notice?.token;
           if (typeof token !== 'string') return;
           // Ignore our own drag — we're the source, not a drop target for it.
           if (globalSourceRef.current?.token === token) return;
@@ -146,10 +146,10 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         });
         const u2 = await listen('pane-drag:claimed', (ev: any) => {
           const notice = ev?.payload;
-          const token = typeof notice === 'string' ? notice : notice?.token;
+          const token = notice?.token;
           const src = globalSourceRef.current;
           if (src && src.token === token) {
-            void acceptsTransferNotice(typeof notice === 'object' ? notice : {}).then(async matches => {
+            void acceptsTransferNotice(notice).then(async matches => {
               if (matches && await waitDetachTransfer(token)) removeSourcePane(src.sourceTabId, src.sourcePaneId, [src.terminalId]);
             }).catch(error => console.error('Pane transfer failed', error));
           }
@@ -157,7 +157,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const u3 = await listen('pane-drag:ended', (ev: any) => {
           const token = ev?.payload;
           if (typeof token === 'string' && token !== incomingTokenRef.current && token !== globalSourceRef.current?.token) return;
-          if (typeof token !== 'string' && paneIncarnations.enabled) return;
+          if (typeof token !== 'string') return;
           incomingTokenRef.current = null;
           setIncomingToken(null);
           setRemoteOverlay(null);
@@ -290,7 +290,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         // by only one of them would depend on how the pane happened to leave the window.
         const payload = buildPaneDetachPayload(leaf, { x: e.clientX, y: e.clientY }, s.sourceTabId);
         source.ready = stageDetachPayload(token, payload).then(async () => {
-          await api.beginGlobalPaneDrag!(token, payload);
+          await api.beginGlobalPaneDrag!(token);
           return true;
         }).catch(async error => {
           await cancelDetachTransfer(token);

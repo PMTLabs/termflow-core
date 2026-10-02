@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
-import type { HostGeneration, TerminalSnapshot, SessionHandoffTake, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
+import type { HostGeneration, TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -12,10 +12,11 @@ import { getStoredApiToken, setStoredApiToken } from '../services/profileScope';
 import { apiBase, invalidateApiBase } from './apiBase';
 import { paneIncarnations } from '../services/paneIncarnations';
 
-async function transferPageArgs(): Promise<{ pg?: number }> {
+async function transferPageArgs(): Promise<{ pg: number }> {
   if (paneIncarnations.ended) throw new Error('transfer page ended');
   const page = await paneIncarnations.pageIdentity();
-  return page ? { pg: page.pg } : {};
+  if (!page) throw new Error('transfer requires a desktop page');
+  return { pg: page.pg };
 }
 
 export interface NetworkConfig {
@@ -127,12 +128,6 @@ interface ElectronAPI {
   /// (broadcasts `settings:open`; see services/openSettings.ts) and focus it,
   /// regardless of which window this was invoked from.
   openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
-  /// Offer the terminal this window's create produced for the leaf to the window that has the
-  /// pane now. False (nothing offered) unless `processId` is the terminal registered for the leaf.
-  offerSessionHandoff: (leafId: string, processId: string) => Promise<boolean>;
-  /// Take the offered terminal (single use); otherwise say whether the create that may still offer
-  /// it is running.
-  takeSessionHandoff: (leafId: string) => Promise<SessionHandoffTake>;
   closeTerminal: (id: string) => Promise<void>;
   pruneTerminalHistory: (keepIds: string[]) => Promise<void>;
   writeToTerminal: (id: string, data: string) => Promise<void>;
@@ -243,16 +238,14 @@ interface ElectronAPI {
   /** Plan 018: every window id the backend registry currently holds. */
   listWindowSessionIds: () => Promise<string[]>;
   reportHostRestoreSettled: (windowLabel: string) => Promise<void>;
-  // Detach / cross-window pane handoff
-  stashDetachPayload: (token: string, payload: any) => Promise<void>;
-  takeDetachPayload: (token: string) => Promise<any | null>;
+  // Detach / cross-window pane transfers
   createDetachedWindow: (token: string, x?: number, y?: number) => Promise<string>;
   createNewWindow: () => Promise<string>;
   getWindowLabel: () => string;
   // Canvas connection graph (plan/013 Task 18) — see the note in `types/electron.d.ts`.
   canvasApiRequest: (path: string, init?: { method?: string; body?: unknown }) => Promise<unknown>;
   // Cross-window drag broker (Phase 4)
-  beginGlobalPaneDrag: (token: string, payload: any) => Promise<void>;
+  beginGlobalPaneDrag: (token: string) => Promise<void>;
   claimGlobalPaneDrag: (token: string) => Promise<any | null>;
   resolveOrphanGlobalDrag: (token: string) => Promise<boolean>;
   cancelGlobalPaneDrag: (token: string) => Promise<void>;
@@ -484,8 +477,6 @@ const tauriBridge: ElectronAPI = {
     await invoke('set_terminal_title_color', { rendererTerminalId, titleColor });
   },
 
-  offerSessionHandoff: async (leafId, processId) => invoke<boolean>('offer_session_handoff', { leafId, processId }),
-  takeSessionHandoff: async (leafId) => invoke<SessionHandoffTake>('take_session_handoff', { leafId }),
   closeTerminal: async (id) => {
     return invoke('close_terminal', { id });
   },
@@ -859,13 +850,7 @@ const tauriBridge: ElectronAPI = {
     await invoke('report_host_restore_settled', { windowLabel });
   },
 
-  // Detach / cross-window pane handoff
-  stashDetachPayload: async (token, payload) => {
-    await invoke('stash_detach_payload', { token, payload });
-  },
-  takeDetachPayload: async (token) => {
-    return invoke('take_detach_payload', { token });
-  },
+  // Detach / cross-window pane transfers
   createDetachedWindow: async (token, x, y) => {
     return invoke('create_detached_window', { token, x, y, ...await transferPageArgs() });
   },
@@ -896,8 +881,8 @@ const tauriBridge: ElectronAPI = {
     // DELETE answers 204 with no body; `.json()` on that throws.
     return response.status === 204 ? null : response.json();
   },
-  beginGlobalPaneDrag: async (token, payload) => {
-    await invoke('begin_global_pane_drag', { token, payload, ...await transferPageArgs() });
+  beginGlobalPaneDrag: async (token) => {
+    await invoke('begin_global_pane_drag', { token, ...await transferPageArgs() });
   },
   claimGlobalPaneDrag: async (token) => {
     return invoke('claim_global_pane_drag', { token, ...await transferPageArgs() });

@@ -21,7 +21,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("automation_store/sql/methods.rs", &["append", "bump_and_trim", "clear_completed", "delete_rule", "duplicate_automation", "mark_completed", "set_enabled_checked", "touch_target", "write_rule"], "DB mutex/transaction; out of scope durable rules and historical logs"),
     ("canvas_store.rs", &["delete_edge", "delete_edges_for", "insert_edge", "schema", "update_label"], "DB mutex; shell writers retain leaf stripes/current owner; user edits are durable intent"),
     ("commands/config_history.rs", &["merge_config"], "out of scope user command/directory history merge"),
-    ("commands/drag.rs", &["begin_global_pane_drag", "cancel_global_pane_drag", "claim_global_pane_drag", "resolve_orphan_global_drag", "resolve_tab_drop", "show_drag_preview"], "native notifications queued by ownership-qualified pg/wi/tx sinks with immutable page receipts; inert compatibility drag mutex/token; preview geometry is UI intent"),
+    ("commands/drag.rs", &["begin_global_pane_drag", "cancel_global_pane_drag", "claim_global_pane_drag", "resolve_orphan_global_drag", "resolve_tab_drop", "show_drag_preview"], "native notifications queued by ownership-qualified pg/wi/tx sinks with immutable page receipts; preview geometry is UI intent"),
     ("commands/terminal.rs", &["create_terminal", "host_fallback", "stage_scrollback"], "new unique/full pc replay and prompt-hook projections; original owner completion"),
     ("commands/terminal.rs", &["register_host_terminal"], "Placing original pc under ownership mutex through index/projection inserts"),
     ("commands/terminal.rs", &["run_create"], "original cg/pc/key and client epoch at publication/enqueue; admission ticket"),

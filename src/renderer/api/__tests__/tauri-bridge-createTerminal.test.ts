@@ -52,23 +52,6 @@ describe('tauriBridge restore intent contract', () => {
     expect(typeof tauriBridge.createTerminal).toBe('function');
   });
 
-  it('offers a session by the leaf identity and the process it created, with camelCase argument keys', async () => {
-    invokeMock.mockResolvedValueOnce(true);
-    await expect(tauriBridge.offerSessionHandoff('tm-moved', 'pc-created')).resolves.toBe(true);
-    expect(invokeMock).toHaveBeenCalledWith('offer_session_handoff', { leafId: 'tm-moved', processId: 'pc-created' });
-  });
-
-  it('takes an offered session by the leaf identity, with a camelCase argument key', async () => {
-    invokeMock.mockResolvedValueOnce({ status: 'taken', processId: 'pc-offered' });
-    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual({ status: 'taken', processId: 'pc-offered' });
-    expect(invokeMock).toHaveBeenCalledWith('take_session_handoff', { leafId: 'tm-moved' });
-  });
-
-  it.each([{ status: 'inFlight' }, { status: 'none' }])('passes the take answer %j through unchanged', async answer => {
-    invokeMock.mockResolvedValueOnce(answer);
-    await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual(answer);
-  });
-
   it('never adds a per-mount restoring flag to a create request', async () => {
     await tauriBridge.createTerminal('default', 'Restored', undefined, 'tm-modern');
     const args = invokeMock.mock.calls.find(([cmd]) => cmd === 'create_terminal')![1];

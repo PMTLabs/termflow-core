@@ -45,9 +45,9 @@ test.each([false, true])('failed build rollback reenters exactly once and binds 
   seed('move', 'tm-move'); seed('control', 'tm-control');
   const h = harness();
   const build = h.gates.command('build');
-  const close = jest.fn(); const offer = jest.fn(); const take = jest.fn();
-  (window as any).electronAPI = { createDetachedWindow: jest.fn(build), stashDetachPayload: jest.fn(), closeTerminal: close,
-    offerSessionHandoff: offer, takeSessionHandoff: take, adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
+  const close = jest.fn();
+  (window as any).electronAPI = { createDetachedWindow: jest.fn(build), closeTerminal: close,
+    adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
   terminalService.registerExistingTerminal('tm-move', 'pc-original');
   terminalService.registerExistingTerminal('tm-control', 'pc-control');
   h.client.attachStore(store);
@@ -62,7 +62,6 @@ test.each([false, true])('failed build rollback reenters exactly once and binds 
     expect(h.gates.calls('build')).toHaveLength(1);
     expect(h.gates.calls('wait_transfer_taken')).toHaveLength(1);
     expect(h.client.isSuppressed(h.client.capture('tm-move', 'pn-move')!)).toBe(true);
-    expect((window as any).electronAPI.stashDetachPayload).not.toHaveBeenCalled();
     if (expired) {
       await jest.advanceTimersByTimeAsync(60_000);
       h.gates.release('wait_transfer_taken', 0, false); await flush();
@@ -80,14 +79,14 @@ test.each([false, true])('failed build rollback reenters exactly once and binds 
     expect(await h.client.capture('tm-move', 'pn-move')!).not.toEqual(original);
     expect(terminalService.getProcessId('tm-move')).toBe('pc-original');
     expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-move', 'tb-control']);
-    expect(close).not.toHaveBeenCalled(); expect(offer).not.toHaveBeenCalled(); expect(take).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
   } finally { cleanup(h.client); }
 });
 
 test('untaken expiry and build failure cannot reenter a source copy already removed from the live store', async () => {
   seed('move', 'tm-move'); seed('control', 'tm-control');
   const h = harness(); h.client.attachStore(store);
-  (window as any).electronAPI = { createDetachedWindow: jest.fn(h.gates.command('build')), stashDetachPayload: jest.fn() };
+  (window as any).electronAPI = { createDetachedWindow: jest.fn(h.gates.command('build')) };
   try {
     await flush(); h.ack(0); await flush(); h.ack(1); await flush();
     const control = await h.client.capture('tm-control', 'pn-control')!;
@@ -110,8 +109,7 @@ test('throwing real UI install departs every adopted copy but keeps the control 
   const payload: DetachPayload = { kind: 'tab', tabId: 'tb-new', tabTitle: 'Moved', paneTree: { id: 'split', type: 'split', children: [
     { id: 'pn-a', type: 'terminal', terminalId: 'tm-a' }, { id: 'pn-b', type: 'terminal', terminalId: 'tm-b' },
   ] }, terminals: [{ terminalId: 'tm-a', processId: 'pc-a', shellType: 'default' }, { terminalId: 'tm-b', processId: 'pc-b', shellType: 'default' }] };
-  const oldMetadata = jest.fn();
-  (window as any).electronAPI = { takeDetachPayload: oldMetadata };
+  (window as any).electronAPI = {};
   const attach = jest.spyOn(terminalService, 'attachExistingTerminal').mockImplementation(leaf => { if (leaf === 'tm-b') throw new Error('install failed'); });
   try {
     await flush(); h.ack(0); await flush();
@@ -128,15 +126,15 @@ test('throwing real UI install departs every adopted copy but keeps the control 
     h.ack(4); expect(await result).toBe('install failed');
     expect(h.client.capture('tm-a')).toBeUndefined(); expect(h.client.capture('tm-b')).toBeUndefined();
     expect(await h.client.capture('tm-control', 'pn-control')!).toEqual(control);
-    expect(h.requests).toHaveLength(5); expect(oldMetadata).not.toHaveBeenCalled();
+    expect(h.requests).toHaveLength(5);
   } finally { attach.mockRestore(); cleanup(h.client); }
 });
 
-test('a waiting pane installs once after lost adopt reply then joins the original placement instead of legacy handoff', async () => {
+test('a waiting pane installs once after lost adopt reply then joins the original placement', async () => {
   seed('control', 'tm-control');
   const h = harness(); h.client.attachStore(store);
   const payload: DetachPayload = { kind: 'pane', tabId: 'tb-wait', tabTitle: 'Waiting', paneTree: { id: 'pn-wait', type: 'terminal', terminalId: 'tm-wait' }, terminals: [] };
-  const api = { createTerminal: jest.fn(), closeTerminal: jest.fn(), offerSessionHandoff: jest.fn(), takeSessionHandoff: jest.fn(),
+  const api = { createTerminal: jest.fn(), closeTerminal: jest.fn(),
     onTerminalData: jest.fn(), onTerminalExit: jest.fn() };
   (window as any).electronAPI = api;
   const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any, () => h.client);
@@ -160,15 +158,14 @@ test('a waiting pane installs once after lost adopt reply then joins the origina
     expect(service.getProcessId('tm-wait')).toBe('pc-original');
     expect(await h.client.capture('tm-control', 'pn-control')!).toEqual(control);
     expect(api.createTerminal).not.toHaveBeenCalled(); expect(api.closeTerminal).not.toHaveBeenCalled();
-    expect(api.offerSessionHandoff).not.toHaveBeenCalled(); expect(api.takeSessionHandoff).not.toHaveBeenCalled();
     expect(h.requests).toHaveLength(5);
   } finally { installCount.mockRestore(); cleanup(h.client); }
 });
 
-test('source placement completing while staged neither binds locally nor offers the shell, but its close capture retains the original identity', async () => {
+test('source placement completing while staged does not bind locally, but its close capture retains the original identity', async () => {
   seed('move', 'tm-move'); seed('control', 'tm-control');
   const h = harness(); h.client.attachStore(store);
-  const api = { createTerminal: jest.fn(), closeTerminal: jest.fn(), offerSessionHandoff: jest.fn(), takeSessionHandoff: jest.fn(),
+  const api = { createTerminal: jest.fn(), closeTerminal: jest.fn(),
     onTerminalData: jest.fn(), onTerminalExit: jest.fn() };
   (window as any).electronAPI = api;
   const service = new TerminalServiceClass(() => store.getState().panes.treesByTabId, () => api as any, () => h.client);
@@ -187,7 +184,6 @@ test('source placement completing while staged neither binds locally nor offers 
     expect(service.getProcessId('tm-move')).toBeUndefined();
     expect(h.client.captureClose('tm-move', 'pn-move')).toBe(original);
     expect(await h.client.capture('tm-control', 'pn-control')!).toEqual(control);
-    expect(api.offerSessionHandoff).not.toHaveBeenCalled(); expect(api.takeSessionHandoff).not.toHaveBeenCalled();
     expect(api.createTerminal).not.toHaveBeenCalled(); expect(api.closeTerminal).not.toHaveBeenCalled();
     expect(h.requests).toHaveLength(4);
   } finally { cleanup(h.client); }

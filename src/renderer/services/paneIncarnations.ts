@@ -45,7 +45,6 @@ export type PaneCapture = Promise<PaneIncarnation>;
 type Slot = { descriptor: PaneDescriptor; pi: PaneCapture; suppressed: boolean; installed: boolean };
 type Queued = { seq: number; op: () => Promise<PaneOp>; resolve: (result: PaneResult) => void };
 const inert: PaneResult = { status: 'Inert' };
-const missingCommand = (error: unknown): boolean => /(?:unknown|not found|not registered|does not exist).*command|command.*(?:unknown|not found|not registered|does not exist)/i.test(String(error));
 const increment = (value: number): number => {
   if (!Number.isSafeInteger(value) || value >= Number.MAX_SAFE_INTEGER) throw new Error('pane sequence exhausted');
   return value + 1;
@@ -65,16 +64,13 @@ export class PaneIncarnations {
   private attempt = 0;
   private sending = false;
   private stopped = false;
-  private degraded: boolean;
   private failures = 0;
   private unsubscribe?: () => void;
   private readonly onUnload = (): void => this.stop();
 
-  constructor(private readonly bridge?: PaneBridge, private readonly warn: () => void = () => {}) {
-    this.degraded = !bridge;
-  }
+  constructor(private readonly bridge?: PaneBridge, private readonly warn: () => void = () => {}) {}
 
-  get enabled(): boolean { return !this.degraded && !this.stopped; }
+  get enabled(): boolean { return !!this.bridge && !this.stopped; }
   get ended(): boolean { return this.stopped; }
 
   async pageIdentity(): Promise<{ wi: number; pg: number } | undefined> {
@@ -87,23 +83,22 @@ export class PaneIncarnations {
   start(): void {
     if (this.registration || this.stopped) return;
     this.registration = new Promise(resolve => { this.releaseRegistration = resolve; });
-    if (this.degraded) { this.releaseRegistration!({ wi: 0, pg: 0 }); return; }
+    if (!this.bridge) { this.releaseRegistration!({ wi: 0, pg: 0 }); return; }
     window.addEventListener('beforeunload', this.onUnload, { once: true });
     let delay = 50;
     const register = async (): Promise<void> => {
       try {
         const answer = await this.bridge!('register_page', undefined);
-        if (this.stopped || this.degraded) return;
+        if (this.stopped) return;
         if (answer.status === 'Registered') {
           if (!Number.isSafeInteger(answer.pg) || !Number.isSafeInteger(answer.wi)) throw new Error('page identity exhausted');
           this.releaseRegistration!(answer);
           return;
         }
-      } catch (error) {
-        if (missingCommand(error)) { this.degrade(); return; }
+      } catch {
         this.failure();
       }
-      if (this.stopped || this.degraded) return;
+      if (this.stopped) return;
       this.timer = setTimeout(() => { this.timer = undefined; void register(); }, delay);
       delay = Math.min(delay * 2, 1000);
     };
@@ -112,8 +107,7 @@ export class PaneIncarnations {
 
   private failure(): void { if (++this.failures === 3) this.warn(); }
 
-  private degrade(result: PaneResult = inert): void {
-    this.degraded = true;
+  private drain(result: PaneResult): void {
     this.attempt++;
     this.sending = false;
     if (this.timer !== undefined) clearTimeout(this.timer);
@@ -126,7 +120,7 @@ export class PaneIncarnations {
     this.stopped = true;
     this.unsubscribe?.();
     window.removeEventListener('beforeunload', this.onUnload);
-    this.degrade({ status: 'Rejected', message: 'page ended' });
+    this.drain({ status: 'Rejected', message: 'page ended' });
     this.slots.clear();
     this.observed.clear();
     this.staged.clear();
@@ -178,9 +172,8 @@ export class PaneIncarnations {
         this.queue.shift();
         head.resolve(reply.result);
       }
-    } catch (error) {
+    } catch {
       if (attempt !== this.attempt) return;
-      if (missingCommand(error)) { this.degrade(); return; }
       if (this.timer !== undefined) clearTimeout(this.timer);
       this.timer = undefined;
       this.failure();
@@ -254,14 +247,9 @@ export class PaneIncarnations {
     return this.send(async () => ({ kind: 'admit_create', pi: await pi, mode }));
   }
 
-  async create(cg: number, request: Omit<AdmittedCreateRequest, 'pg' | 'cg'>): Promise<string | undefined> {
+  async create(cg: number, request: Omit<AdmittedCreateRequest, 'pg' | 'cg'>): Promise<string> {
     const { pg } = await this.registration!;
-    try { return await this.bridge!('create_admitted_terminal', { request: { ...request, pg, cg } }); }
-    catch (error) {
-      if (!missingCommand(error)) throw error;
-      this.degrade();
-      return undefined;
-    }
+    return this.bridge!('create_admitted_terminal', { request: { ...request, pg, cg } });
   }
 
   async waitTransfer(tx: string): Promise<boolean> {
@@ -272,12 +260,7 @@ export class PaneIncarnations {
 
   async reap(pc: string, fallback: () => Promise<void>): Promise<void> {
     if (!this.enabled) { await fallback(); return; }
-    try { await this.bridge!('close_process', { pc, reap: true }); }
-    catch (error) {
-      if (!missingCommand(error)) throw error;
-      this.degrade();
-      await fallback();
-    }
+    await this.bridge!('close_process', { pc, reap: true });
   }
 
   observe(panes: PaneDescriptor[]): void {
@@ -343,11 +326,11 @@ export class PaneIncarnations {
 
   async installTransfer(tx: string, panes: PaneDescriptor[] | ((ui: unknown) => PaneDescriptor[]), install: (ui?: unknown) => void | Promise<void>): Promise<void> {
     const taken = await this.send({ kind: 'take', tx });
-    if (taken.status !== 'Taken' && taken.status !== 'Inert') throw new Error(`transfer take ${taken.status}`);
-    const ui = taken.status === 'Taken' ? taken.payload.ui : undefined;
+    if (taken.status !== 'Taken') throw new Error(`transfer take ${taken.status}`);
+    const ui = taken.payload.ui;
     const members = typeof panes === 'function' ? panes(ui) : panes;
     const descriptors = members.map(pane => {
-      const member = taken.status === 'Taken' ? taken.payload.panes.find(source => source.leaf === pane.leaf) : undefined;
+      const member = taken.payload.panes.find(source => source.leaf === pane.leaf);
       return { ...pane, restore: member?.restore ?? pane.restore, override: member?.override ?? pane.override };
     });
     const pis = descriptors.map(() => this.mint());
@@ -367,7 +350,7 @@ export const accepted = (result: PaneResult): boolean => ['Ok', 'Inert', 'Existi
 export async function acceptsTransferNotice(notice: { wi?: number; pg?: number }): Promise<boolean> {
   if (paneIncarnations.ended) return false;
   const page = await paneIncarnations.pageIdentity();
-  return page ? page.wi === notice.wi && page.pg === notice.pg : true;
+  return !!page && page.wi === notice.wi && page.pg === notice.pg;
 }
 export function describePanes(tree: PaneNode | null, restore = false): PaneDescriptor[] {
   if (!tree) return [];
@@ -375,7 +358,7 @@ export function describePanes(tree: PaneNode | null, restore = false): PaneDescr
   return tree.children?.flatMap(child => describePanes(child, restore)) ?? [];
 }
 
-// Browser/older backends keep the original terminal path. Native bootstrap replaces this
+// Browser and bridge-free tests keep the single-window terminal path. Native bootstrap replaces this
 // instance before installing the store differ; tests can install their own deferred bridge.
 export let paneIncarnations = new PaneIncarnations();
 export function installPaneIncarnations(client: PaneIncarnations): void { paneIncarnations.stop(); paneIncarnations = client; }

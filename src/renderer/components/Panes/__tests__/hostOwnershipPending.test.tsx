@@ -21,6 +21,7 @@ jest.mock('../../TerminalContainer', () => ({ clearTabPanes: jest.fn() }));
 
 import { TerminalPane } from '../TerminalPane';
 import { TerminalServiceClass } from '../../../services/TerminalService';
+import { PaneIncarnations, installPaneIncarnations, type PaneBridge, type PaneRequest } from '../../../services/paneIncarnations';
 import tabs, { addTab, setActiveTab } from '../../../store/slices/tabsSlice';
 import panes, { addTabTree, removeTabTree, setActiveTabId } from '../../../store/slices/panesSlice';
 import settings from '../../../store/slices/settingsSlice';
@@ -148,18 +149,15 @@ test('user-created tab, UI split and API-created leaf never register restore int
 test('host-session-contended is a startup failure, not a host ownership wait', async () => {
   seed(activeStore);
   const create = jest.fn().mockRejectedValue(new Error('host-session-contended: already bound'));
-  const takeSessionHandoff = jest.fn().mockResolvedValue({ status: 'none' });
-  activeService = useService(activeStore, { ...apiFor(create), takeSessionHandoff });
+  activeService = useService(activeStore, apiFor(create));
   act(() => mount('tm-wait'));
   await flush();
-  // The few short asks for an offered session are not a host ownership wait.
   expect(container.textContent).not.toContain('Waiting for terminal host');
   await act(async () => { await jest.advanceTimersByTimeAsync(400); });
   expect(container.textContent).toContain('Failed to start shell');
   expect(container.textContent).not.toContain('Waiting for terminal host');
   await act(async () => { await jest.advanceTimersByTimeAsync(8000); });
   expect(create).toHaveBeenCalledTimes(1);
-  expect(takeSessionHandoff).toHaveBeenCalledTimes(3);
 });
 
 test('handleRestart surfaces a host-ownership-pending toast and never registers restart intent', async () => {
@@ -204,115 +202,63 @@ test('handleRestart surfaces lifecycle busy after its short retry budget', async
   expect(activeStore.getState().sessionExit.byTerminalId['tm-wait']).toBeDefined();
 });
 
-// A host whose keyed creates park in flight (as the backend does at its barrier) until the
-// test lets them claim the session. The first claim wins it and that create then keeps running
-// (the host's attach or spawn request) until the test completes it; a later claim is refused as
-// contended at once. Hand-offs behave like the backend's: an offer must name the terminal
-// registered for the leaf, a take is single use, and with nothing on offer it says whether the
-// winner's create is still running.
-function makeGatedHost() {
-  const parked = new Map<string, () => void>();
-  const finishing = new Map<string, () => void>();
-  const frames: Array<{ webview: string; frame: string; leaf: string }> = [];
-  let holder: string | undefined;
-  let creating = false;
-  let offered: string | undefined;
-  return {
-    frames,
-    createFor: (webview: string) => jest.fn((_p, _n, _c, id) => new Promise<string>((resolve, reject) => {
-      parked.set(webview, () => {
-        if (holder) {
-          reject(new Error(`host-session-contended: host session ${id} is already registered`));
-          return;
-        }
-        holder = 'pc-old-host';
-        creating = true;
-        frames.push({ webview, frame: 'Attach:old-host', leaf: id });
-        finishing.set(webview, () => {
-          creating = false;
-          resolve(holder!);
-        });
-      });
-    })),
-    isParked: (webview: string) => parked.has(webview),
-    claim: (webview: string) => parked.get(webview)!(),
-    complete: (webview: string) => finishing.get(webview)!(),
-    pendingOffer: () => offered,
-    offerSessionHandoff: jest.fn(async (_leaf: string, processId: string) => {
-      if (!holder || processId !== holder) return false;
-      offered = holder;
-      return true;
-    }),
-    takeSessionHandoff: jest.fn(async (_leaf: string) => {
-      if (offered && offered === holder) {
-        const processId = offered;
-        offered = undefined;
-        return { status: 'taken' as const, processId };
-      }
-      return creating ? { status: 'inFlight' as const } : { status: 'none' as const };
-    }),
-  };
-}
-
-// The winner's host request outlasts the loser's short grace: the pane must keep waiting for the
-// offer instead of showing a startup failure, and bind when the offer comes.
-test.each([
-  ['the window the pane left claims first; a 700 ms host request', 'source', 'destination', 700],
-  ['the window the pane moved to claims first; a 700 ms host request', 'destination', 'source', 700],
-  ['the window the pane left claims first; a 9 s host request', 'source', 'destination', 9_000],
-] as const)('move_a_waiting_pane_to_another_window_while_its_create_is_in_flight: %s', async (_label, first, second, hostRequestMs) => {
+test('a moved waiting pane joins the original placement through the stream and mounts its exact process', async () => {
   const sourceStore = activeStore;
-  const destinationStore = makeStore();
-  const tree = { id: 'pn-split', type: 'split' as const, direction: 'horizontal' as const, children: [leaf('tm-live'), leaf('tm-wait')] };
-  seed(sourceStore, tree, 'tb-source');
-  const host = makeGatedHost();
-  const handoff = { offerSessionHandoff: host.offerSessionHandoff, takeSessionHandoff: host.takeSessionHandoff };
-  const sourceApi = { ...apiFor(host.createFor('source')), ...handoff };
-  const destinationApi = { ...apiFor(host.createFor('destination')), ...handoff };
-  const sourceService = useService(sourceStore, sourceApi);
-  const destinationService = useService(destinationStore, destinationApi);
-  sourceService.registerExistingTerminal('tm-live', 'pc-live');
-  activeService = sourceService;
-  act(() => mount('tm-wait'));
-  await flush();
-  expect(host.isParked('source')).toBe(true); // in the backend's barrier, not in a backoff sleep
-  act(() => root.render(null));
-  act(() => sourceStore.dispatch(removeTabTree('tb-source')));
-  sourceService.detachTerminal('tm-wait');
-  sourceService.detachTerminal('tm-live');
-  seed(destinationStore, tree, 'tb-destination');
-  destinationService.attachExistingTerminal('tm-live', 'pc-live');
-  activeStore = destinationStore;
-  activeService = destinationService;
-  (window as any).__REDUX_STORE__ = destinationStore;
-  (window as any).electronAPI = destinationApi;
-  act(() => mount('tm-wait'));
-  await flush();
-  expect(host.isParked('destination')).toBe(true);
-  expect(container.textContent).not.toContain('Failed to start shell');
-
-  host.claim(first);
-  await flush();
-  host.claim(second);
-  await flush();
-  await act(async () => { await jest.advanceTimersByTimeAsync(hostRequestMs); });
-  // The winner's host request is still running: the pane is not failed and not yet bound.
-  expect(container.textContent).not.toContain('Failed to start shell');
-  expect(container.querySelector('[data-process-id="pc-old-host"]')).toBeNull();
-
-  host.complete(first);
-  await flush();
-  await act(async () => { await jest.advanceTimersByTimeAsync(1000); });
-
-  expect(container.querySelector('[data-process-id="pc-old-host"]')).not.toBeNull();
-  expect(container.textContent).not.toContain('Failed to start shell');
-  expect(destinationService.getProcessId('tm-wait')).toBe('pc-old-host');
-  expect(sourceService.getProcessId('tm-wait')).toBeUndefined();
-  expect(host.frames).toEqual([{ webview: first, frame: 'Attach:old-host', leaf: 'tm-wait' }]);
-  expect(host.offerSessionHandoff.mock.calls).toEqual(first === 'source' ? [['tm-wait', 'pc-old-host']] : []);
-  expect(host.pendingOffer()).toBeUndefined();
-  expect(sourceApi.createTerminal).toHaveBeenCalledTimes(1);
-  expect(destinationApi.createTerminal).toHaveBeenCalledTimes(1);
-  expect(sourceApi.forgetRestoringLeaf).not.toHaveBeenCalled();
-  expect(destinationApi.forgetRestoringLeaf).not.toHaveBeenCalled();
+  seed(sourceStore);
+  const ops: PaneRequest[] = [];
+  const work: Array<{ pg: number; cg: number; leaf: string }> = [];
+  const completions: Array<(pc: string) => void> = [];
+  const descriptor = { paneId: 'tm-wait', leaf: 'tm-wait' };
+  const bridge = (pg: number): PaneBridge => (async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: pg, pg };
+    if (command === 'create_admitted_terminal') {
+      work.push(args.request);
+      return new Promise<string>(resolve => completions.push(resolve));
+    }
+    if (command !== 'pane_op') throw new Error(`unexpected ${command}`);
+    const request = args.request as PaneRequest;
+    ops.push(request);
+    const result = request.op.kind === 'take' ? { status: 'Taken', payload: { panes: [descriptor] } }
+      : request.op.kind === 'admit_create' ? { status: pg === 40 ? 'Create' : 'Join', cg: 77 }
+      : { status: 'Ok' };
+    return { status: 'Ack', result };
+  }) as PaneBridge;
+  const source = new PaneIncarnations(bridge(40));
+  const destination = new PaneIncarnations(bridge(41));
+  const api = apiFor(jest.fn());
+  const sourceService = new TerminalServiceClass(() => sourceStore.getState().panes.treesByTabId, () => api as any, () => source);
+  sourceService.registerExistingTerminal('tm-control', 'pc-control');
+  try {
+    const pending = sourceService.createTerminal('tm-wait', 'default', undefined, undefined, undefined, undefined, 'tb-wait', undefined, false, 'Mount', 'tm-wait');
+    await flush();
+    expect(work).toHaveLength(1);
+    await source.stash('tx-wait', [descriptor]);
+    act(() => sourceStore.dispatch(removeTabTree('tb-wait')));
+    const destinationStore = makeStore();
+    activeStore = destinationStore;
+    (window as any).__REDUX_STORE__ = destinationStore;
+    (window as any).electronAPI = api;
+    installPaneIncarnations(destination);
+    activeService = new TerminalServiceClass(() => destinationStore.getState().panes.treesByTabId, () => api as any, () => destination);
+    await destination.installTransfer('tx-wait', [descriptor], () => { seed(destinationStore); });
+    act(() => mount('tm-wait'));
+    await flush();
+    expect(work.map(({ pg, cg, leaf }) => ({ pg, cg, leaf }))).toEqual([
+      { pg: 40, cg: 77, leaf: 'tm-wait' }, { pg: 41, cg: 77, leaf: 'tm-wait' },
+    ]);
+    expect(container.textContent).not.toContain('Failed to start shell');
+    expect(container.querySelector('[data-process-id="pc-old-host"]')).toBeNull();
+    await act(async () => { completions.forEach(resolve => resolve('pc-old-host')); });
+    await flush();
+    expect(await pending).toBe('');
+    expect(container.querySelector('[data-process-id="pc-old-host"]')).not.toBeNull();
+    expect(activeService.getProcessId('tm-wait')).toBe('pc-old-host');
+    expect(sourceService.getProcessId('tm-wait')).toBeUndefined();
+    expect(sourceService.getProcessId('tm-control')).toBe('pc-control');
+    expect(ops.map(({ op }) => op.kind)).toEqual(['enter', 'admit_create', 'stash', 'take', 'adopt', 'admit_create']);
+    expect(api.createTerminal).not.toHaveBeenCalled();
+  } finally {
+    source.stop();
+    installPaneIncarnations(new PaneIncarnations());
+  }
 });

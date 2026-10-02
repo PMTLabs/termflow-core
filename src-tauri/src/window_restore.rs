@@ -12,7 +12,7 @@ use tauri::Manager;
 ///
 /// Labels are NOT reused from the registry. A saved `detach-*` label would make
 /// the restored window take the detach boot path, look for a payload that no
-/// process still holds (`detach_payloads` is in-memory and empty every launch)
+/// process still holds (page transfers are in-memory and empty every launch)
 /// and refuse to restore. The stable `windowId` carries the session, so the
 /// label is free to be normalised.
 pub(crate) fn restore_windows(app: &tauri::AppHandle) {

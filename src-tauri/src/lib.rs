@@ -1,6 +1,5 @@
 pub mod sibling_coord;
 pub mod identity_index;
-pub mod session_handoff;
 pub mod state;
 pub mod console_window;
 pub mod context_menu;
@@ -881,8 +880,6 @@ pub fn run() {
     .invoke_handler(tauri::generate_handler![
         commands::create_terminal,
         commands::report_host_restore_settled,
-        commands::offer_session_handoff,
-        commands::take_session_handoff,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
         commands::set_terminal_display_label,
@@ -965,8 +962,6 @@ pub fn run() {
         commands::create_admitted_terminal,
         commands::close_process,
         commands::flush_session_ack,
-        commands::stash_detach_payload,
-        commands::take_detach_payload,
         commands::create_detached_window,
         commands::begin_global_pane_drag,
         commands::claim_global_pane_drag,

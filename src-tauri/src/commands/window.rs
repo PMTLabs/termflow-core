@@ -381,34 +381,9 @@ pub fn flush_session_ack(state: State<'_, AppState>, window: tauri::WebviewWindo
     state.flush_acks.insert(window.label().to_string(), ());
 }
 
-// ----- Detach / cross-window pane handoff -----------------------------------
-//
-// The PTY processes live in this shared backend (AppState), so moving a pane to
-// a new window does NOT restart the shell. The source window serializes the
-// moving unit into a single-use payload stashed here under a token; the new
-// window fetches it and reattaches to the same live processes by id.
-
-#[tauri::command]
-pub fn stash_detach_payload(
-    state: State<'_, AppState>,
-    token: String,
-    payload: serde_json::Value,
-) -> Result<(), String> {
-    state.detach_payloads.insert(token, payload);
-    Ok(())
-}
-
-#[tauri::command]
-pub fn take_detach_payload(
-    state: State<'_, AppState>,
-    token: String,
-) -> Result<Option<serde_json::Value>, String> {
-    Ok(state.detach_payloads.remove(&token).map(|(_, v)| v))
-}
-
 /// Open a new app window that will reconstruct the detached tab/pane. The token
-/// is carried in the window label (`detach-<token>`) so the new window can read
-/// it from its own label and call `take_detach_payload` on boot.
+/// is carried in the window label (`detach-<token>`) so the new window can take
+/// and adopt the transfer through its page stream on boot.
 #[tauri::command]
 pub async fn create_detached_window(
     app_handle: tauri::AppHandle,
@@ -416,13 +391,11 @@ pub async fn create_detached_window(
     token: String,
     x: Option<f64>,
     y: Option<f64>,
-    pg: Option<u64>,
+    pg: u64,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let taken = if let Some(pg) = pg {
-        state.host_table.keys().verify_transfer_source(window.label(), pg, &token)?;
-        Some(state.host_table.keys().watch_transfer(window.label(), pg, &token)?)
-    } else { None };
+    state.host_table.keys().verify_transfer_source(window.label(), pg, &token)?;
+    let taken = state.host_table.keys().watch_transfer(window.label(), pg, &token)?;
     let label = format!("detach-{}", token);
     // Match the main window (tauri.conf): empty/hidden title + Overlay title bar
     // so the custom in-app tab bar is the only header (no native "TermFlow"
@@ -496,9 +469,7 @@ pub async fn create_detached_window(
         record_new_window(&app_handle, &window, id, (900, 600));
     }
     refresh_menu(&app_handle);
-    if let Some(taken) = taken {
-        if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
-    }
+    if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
     Ok(label)
 }
 

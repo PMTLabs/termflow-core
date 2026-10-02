@@ -29,7 +29,7 @@ test('the real detach installer waits for a retried adopt acknowledgment and att
   installPaneIncarnations(client); client.attachStore(store);
   const attach = jest.spyOn(terminalService, 'attachExistingTerminal');
   const create = jest.spyOn(terminalService, 'createTerminal');
-  (window as any).electronAPI = { takeDetachPayload: jest.fn().mockResolvedValue(payload), adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
+  (window as any).electronAPI = { adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
   try {
     const installing = applyReattachByToken('tx-exact'); await flush();
     expect(requests[0].op).toEqual({ kind: 'take', tx: 'tx-exact' });
