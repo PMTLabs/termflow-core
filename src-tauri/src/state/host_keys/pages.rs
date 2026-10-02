@@ -73,7 +73,15 @@ impl WindowPages {
         self.end_matching(wi, None)
     }
 
-    fn settle(&mut self, page: PageIdentity) -> Result<Vec<PageIdentity>, String> {
+    pub(super) fn window_of(&self, pg: u64) -> Option<u64> { self.pages.get(&pg).copied() }
+
+    pub(super) fn sender(&self, label: &str, pg: u64) -> Result<PageIdentity, String> {
+        let wi = self.window_of(pg).ok_or("page is no longer live")?;
+        if self.committed.get(label) != Some(&wi) { return Err("page does not belong to calling window".into()); }
+        Ok(PageIdentity { wi, pg })
+    }
+
+    pub(super) fn settle(&mut self, page: PageIdentity) -> Result<Vec<PageIdentity>, String> {
         if self.pages.get(&page.pg) != Some(&page.wi) { return Err("page is no longer live".into()); }
         Ok(self.end_matching(page.wi, Some(page.pg)))
     }
@@ -105,7 +113,12 @@ impl HostKeys {
     }
 
     pub(crate) fn register_page(&self, label: &str) -> Result<PageRegistration, String> {
-        self.lock().window_pages.register(label)
+        let mut inner = self.lock();
+        let result = inner.window_pages.register(label)?;
+        if let PageRegistration::Registered { pg, .. } = result {
+            inner.panes.streams.insert(pg, super::panes::Stream { next: 1, last: None });
+        }
+        Ok(result)
     }
 
     pub(crate) fn destroy_window(&self, label: &str, wi: u64) -> Vec<PageIdentity> {
@@ -116,7 +129,7 @@ impl HostKeys {
     }
 
     /// Called by the ordered page stream after the new page has settled.
-    #[allow(dead_code)] // The page stream is installed separately from window construction.
+    #[cfg(test)]
     pub(crate) fn settle_page(&self, page: crate::state::PageIdentity) -> Result<Vec<PageIdentity>, String> {
         let mut inner = self.lock();
         let ended = inner.window_pages.settle(page)?;
@@ -126,7 +139,9 @@ impl HostKeys {
 
     /// Page-end seam: pane owners, restore holders and taken transfers must be
     /// released here, while the same ownership mutex is still held.
-    fn end_pages_locked(_inner: &mut Inner, _ended: &[PageIdentity]) {}
+    pub(super) fn end_pages_locked(inner: &mut Inner, ended: &[PageIdentity]) {
+        Self::end_pane_pages(inner, ended);
+    }
 }
 
 #[cfg(test)]

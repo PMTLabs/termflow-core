@@ -66,8 +66,11 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_keys/delivery.rs", &["delivery_sender"], "immutable FIFO recovery capability; framework callback outside ownership mutex"),
     ("state/host_keys/effects.rs", &["close_original", "publish_route_on", "recover_listed"], "original session or Listed/holder qualification under ownership mutex through route/Close/delivery enqueue"),
     ("state/host_keys/owners.rs", &["write"], "sorted leaf stripes/current Registered pc qualification retained through storage callback"),
-    ("state/host_keys/owners.rs", &["abort_create", "admit_create", "close_process", "complete_shell", "end_process", "release_stage", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
-    ("state/host_keys/restore.rs", &["forget_restoring_leaf", "reap_expired_restore_intents", "register_restoring_leaf", "settle_restore"], "owner/holder/alias/marker facts in one ownership mutex"),
+    ("state/host_keys/owners.rs", &["abort_create", "admit_create", "close_row_locked", "complete_shell", "end_process", "release_stage", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
+    ("state/host_keys/pages.rs", &["register_page"], "committed window and checked page identity under ownership mutex through stream installation"),
+    ("state/host_keys/panes.rs", &["admit_pane", "admitted_work", "apply_pane_op", "bind_pane", "depart_pane", "insert_panes", "pane_op_at"], "sender window/page, exact pi/cg/pc and next-seq qualification under ownership mutex; immutable close pc dispatched to stripe-qualified end_process"),
+    ("state/host_keys/pane_transfers.rs", &["adopt_panes", "end_pane_pages", "finish_transfer", "remove_transfer_member", "stash_panes", "take_panes"], "original page/tx/member/owner qualification at atomic mutation under ownership mutex; deadlines release ownership only; shell endings remain stripe-qualified"),
+    ("state/host_keys/restore.rs", &["forget_pane_holder", "register_pane_holder", "settle_pane_restore", "forget_restoring_leaf", "reap_expired_restore_intents", "register_restoring_leaf", "settle_restore"], "owner/holder/alias/marker facts in one ownership mutex"),
     ("state/host_lifecycle.rs", &["sibling_arm"], "hold slot mutex; unique checked arm token and exact original clients/quiesce"),
     ("state/host_lifecycle.rs", &["release_host"], "retained exit/quiesce authority and exact client transport"),
     ("state/host_port.rs", &["forget_host"], "unique frozen identity and retired admission; authoritative key/route forget"),
@@ -158,6 +161,7 @@ fn hits(source: &str) -> BTreeSet<String> {
         r"\*self\.(?:client|proc)\s*\.|\*slot\s*=|\b(?:slot|client|proc)\s*\.\s*take\s*\(|self\.current\s*(?:=|\.\s*(?:take|replace)\s*\()|",
         r"\.\s*(?:persist_snapshot|persist_terminal_history|persist_history_snapshot|insert_edge|delete_edges_for|write_shells)\s*\(|",
         r"\.\s*(?:emit|emit_to|execute|execute_batch|close_transport|shutdown_idle|shutdown|clear_client_on|clear_client|install_if_current|clear_if_current|take_if_current)\s*\(|",
+        r"\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
         r"\b(?:terminals|host_terminals|stream_offsets|host_stream_offsets|writers|masters|screens|screen_history|identity_index|identity|leaf_to_process|shell_writer_channels|ptys|terminal_history|terminal_screens|terminal_focus_reporting|tmux_sessions|terminal_cwds|history_dirty|replay_prefix|host_restore_pending_windows|reattach_prompt_hooks|routes|local_processes|restore_holders|closed_unowned|owners|keys|entries)(?:\(\))?\s*(?:\.\s*(?:lock\(\)|unwrap\(\)|keys\(\)|routes\(\)))?\s*\.\s*(?:insert|remove|remove_key|remove_process|remove_channel|remove_epoch|retain|clear|entry|get_mut|register|index|unindex|connect|disconnect)\s*\("
     )).unwrap();
     let spans = fn_spans(&text);

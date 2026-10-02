@@ -14,7 +14,11 @@ mod restore;
 mod effects;
 mod delivery;
 mod pages;
-pub(crate) use pages::{PageIdentity, PageRegistration, WindowBuildGuard};
+pub(super) mod panes;
+pub(crate) use panes::{PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
+pub(crate) use pages::{PageRegistration, WindowBuildGuard};
+#[cfg(test)]
+pub(crate) use pages::PageIdentity;
 pub(crate) use effects::SessionIdentity;
 pub use owners::{Admission as CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
 
@@ -59,6 +63,7 @@ struct Inner {
     sequence: u64,
     owners: HashMap<String, owners::Row>,
     window_pages: pages::WindowPages,
+    panes: panes::PaneTable,
     restore_holders: HashMap<(String, String), restore::Intent>,
     closed_unowned: HashMap<(String, String), restore::Intent>,
     cap: usize,
@@ -85,7 +90,7 @@ impl HostKeys {
     pub fn new(routes: HostRoutes) -> Self {
         Self { inner: Arc::new(Mutex::new(Inner {
             keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
-            window_pages: pages::WindowPages::default(),
+            window_pages: pages::WindowPages::default(), panes: panes::PaneTable::default(),
             restore_holders: HashMap::new(), closed_unowned: HashMap::new(), cap: ENDING_CAP,
             pending_deliveries: std::collections::HashSet::new(),
         })), routes, deliveries: Arc::default(),
@@ -279,7 +284,7 @@ impl HostKeys {
                     self.end_staged_exit(inner, &shell);
                     return;
                 }
-                OwnerState::Placing { stage: None, .. } => return,
+                OwnerState::Held | OwnerState::Placing { stage: None, .. } => return,
             }
         }
         if let Some(KeyState::Held(_) | KeyState::Bound(_) | KeyState::Ending { close: CloseState::None, .. }) = inner.keys.get(&address).map(|r| &r.state) {

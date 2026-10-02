@@ -9,6 +9,7 @@ mod menu;
 mod snippets;
 mod system;
 mod terminal;
+mod panes;
 mod update;
 mod window;
 
@@ -18,5 +19,6 @@ pub use menu::*;
 pub use snippets::*;
 pub use system::*;
 pub use terminal::*;
+pub(crate) use panes::*;
 pub use update::*;
 pub use window::*;

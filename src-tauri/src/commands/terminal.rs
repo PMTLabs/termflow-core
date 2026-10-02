@@ -69,30 +69,7 @@ pub async fn create_terminal(
     // parameter is optional only so that build still invokes cleanly.
     elevated: Option<bool>,
 ) -> Result<String, String> {
-    let profiles = pty_manager::get_available_shells();
-    let mut shell_name = "default".to_string();
-
-    // Resolve the requested profile by id/name. The UI sends "default" as a
-    // placeholder when no profile is chosen, which matches no real profile — so
-    // when the id is missing OR unknown we fall back to the `is_default` profile
-    // (e.g. zsh on macOS) rather than to a bare system shell (which on macOS is
-    // the old /bin/bash, producing the "default interactive shell is now zsh" note).
-    let chosen = match profile_id.as_deref() {
-        Some(id) => profiles
-            .iter()
-            .find(|p| p.id == id || p.name.eq_ignore_ascii_case(id)),
-        None => None,
-    }
-    .or_else(|| profiles.iter().find(|p| p.is_default));
-
-    let (shell_path, shell_args, shell_cwd) = if let Some(profile) = chosen {
-        shell_name = profile.id.clone();
-        let effective_cwd = if cwd.is_some() { cwd } else { profile.cwd.clone() };
-        (Some(profile.path.clone()), Some(profile.args.clone()), effective_cwd)
-    } else {
-        // No profiles at all — let spawn_terminal pick a system fallback.
-        (None, None, cwd)
-    };
+    let (shell_name, shell_path, shell_args, shell_cwd) = resolve_profile(profile_id.as_deref(), cwd);
     
     let terminal_name = format!("Terminal-{}", shell_name);
 
@@ -194,6 +171,34 @@ pub async fn create_terminal(
     }
 
     Ok(id)
+}
+
+pub(super) fn resolve_profile(profile_id: Option<&str>, cwd: Option<String>) -> (String, Option<String>, Option<Vec<String>>, Option<String>) {
+    let profiles = pty_manager::get_available_shells();
+    let mut shell_name = "default".to_string();
+
+    // Resolve the requested profile by id/name. The UI sends "default" as a
+    // placeholder when no profile is chosen, which matches no real profile — so
+    // when the id is missing OR unknown we fall back to the `is_default` profile
+    // (e.g. zsh on macOS) rather than to a bare system shell (which on macOS is
+    // the old /bin/bash, producing the "default interactive shell is now zsh" note).
+    let chosen = match profile_id {
+        Some(id) => profiles
+            .iter()
+            .find(|p| p.id == id || p.name.eq_ignore_ascii_case(id)),
+        None => None,
+    }
+    .or_else(|| profiles.iter().find(|p| p.is_default));
+
+    let (shell_path, shell_args, shell_cwd) = if let Some(profile) = chosen {
+        shell_name = profile.id.clone();
+        let effective_cwd = if cwd.is_some() { cwd } else { profile.cwd.clone() };
+        (Some(profile.path.clone()), Some(profile.args.clone()), effective_cwd)
+    } else {
+        // No profiles at all — let spawn_terminal pick a system fallback.
+        (None, None, cwd)
+    };
+    (shell_name, shell_path, shell_args, shell_cwd)
 }
 
 #[tauri::command]
@@ -441,7 +446,7 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     result
 }
 
-async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<String, String> {
+pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<String, String> {
     let SpawnRequest {
         leaf_id: id,
         session_key,

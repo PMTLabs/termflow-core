@@ -39,7 +39,9 @@ fn only_the_shared_ending_can_remove_a_registered_or_closing_owner() {
         let hits = removals(text);
         count += hits.len();
         if path == "state/host_keys/owners.rs" {
-            assert_eq!(hits, vec!["abort_create", "complete_shell", "end_process"]);
+            assert_eq!(hits, vec!["abort_create", "complete_shell", "end_process", "remove_held"]);
+            let held = fn_body(text, "fn remove_held(");
+            assert!(held.find("matches!(r.state, OwnerState::Held)").unwrap() < held.find(".owners.remove(").unwrap());
             let complete = fn_body(text, "fn complete_shell(");
             assert!(complete.contains("OwnerState::Placing { stage: Some(s), .. } if s.process == shell.process"));
             assert!(complete.find("if staged_exited && cancel.is_none()").unwrap() < complete.find(".owners.remove(").unwrap());
@@ -52,7 +54,7 @@ fn only_the_shared_ending_can_remove_a_registered_or_closing_owner() {
             assert!(end.find(".owners.remove(").unwrap() < end.find("Self::mark_end(").unwrap());
         } else { assert!(hits.is_empty(), "parallel owner remover in {path}: {hits:?}"); }
     }
-    assert_eq!(count, 3);
+    assert_eq!(count, 4);
 }
 
 #[test]

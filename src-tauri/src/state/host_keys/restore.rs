@@ -10,14 +10,14 @@ use super::super::host_registry::OrphanVerdict;
 #[derive(Clone, Debug)]
 pub(super) struct Aliases { pub leaf: String, pub override_key: Option<String> }
 impl Aliases {
-    fn new(leaf: &str, override_key: Option<&str>) -> Self {
+    pub(super) fn new(leaf: &str, override_key: Option<&str>) -> Self {
         Self { leaf: leaf.into(), override_key: override_key.map(str::to_string) }
     }
-    fn contains(&self, key: &str) -> bool {
+    pub(super) fn contains(&self, key: &str) -> bool {
         key == self.leaf || self.override_key.as_deref() == Some(key)
             || parse_session_key(key) == SessionKeyKind::V2 { owner_leaf: &self.leaf }
     }
-    fn intersects(&self, other: &Self) -> bool {
+    pub(super) fn intersects(&self, other: &Self) -> bool {
         self.contains(&other.leaf) || other.contains(&self.leaf)
             || other.override_key.as_deref().is_some_and(|k| self.contains(k))
             || self.override_key.as_deref().is_some_and(|k| other.contains(k))
@@ -59,6 +59,7 @@ impl HostKeys {
 
     pub(super) fn protected(inner: &Inner, key: &str, now: Instant) -> bool {
         inner.restore_holders.values().any(|h| h.live(now) && h.aliases.contains(key))
+            || inner.panes.holders.values().any(|h| h.contains(key))
     }
 
     pub(super) fn unowned_due(inner: &Inner, key: &str, now: Instant) -> bool {
@@ -81,6 +82,29 @@ impl HostKeys {
         inner.restore_holders.retain(|(_, l), _| l != leaf);
         let aliases = Aliases::new(leaf, key);
         inner.closed_unowned.retain(|_, m| !m.aliases.intersects(&aliases));
+    }
+
+    pub(super) fn register_pane_holder(inner: &mut Inner, pi: super::panes::PaneIdentity, descriptor: &super::panes::PaneDescriptor) {
+        let aliases = Aliases::new(&descriptor.leaf, descriptor.override_key.as_deref());
+        inner.closed_unowned.retain(|_, marker| !marker.aliases.intersects(&aliases));
+        inner.panes.holders.insert(pi, aliases);
+    }
+
+    pub(super) fn forget_pane_holder(inner: &mut Inner, pi: super::panes::PaneIdentity, now: Instant) {
+        if let Some(aliases) = inner.panes.holders.remove(&pi) {
+            inner.closed_unowned.insert((format!("page-{}-{}", pi.pg, pi.seq), aliases.leaf.clone()), Intent { aliases, stamp: now });
+        }
+    }
+
+    pub(super) fn settle_pane_restore(inner: &mut Inner, leaf: &str) {
+        let Some(row) = inner.owners.get(leaf) else { return; };
+        let identities: Vec<_> = match &row.owner {
+            super::panes::Owner::Pane(pi) | super::panes::Owner::Parked { by: pi, .. } => vec![*pi],
+            super::panes::Owner::Transfer { tx, .. } => inner.panes.transfers.get(tx).into_iter()
+                .flat_map(|t| t.members.iter().filter(|m| m.descriptor.leaf == leaf).map(|m| m.pi)).collect(),
+            _ => Vec::new(),
+        };
+        for pi in identities { inner.panes.holders.remove(&pi); }
     }
 
     pub(crate) fn reap_expired_restore_intents(&self, now: Instant) {
