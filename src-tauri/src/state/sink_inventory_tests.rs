@@ -68,7 +68,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_keys/delivery.rs", &["delivery_sender"], "immutable FIFO recovery capability; framework callback outside ownership mutex"),
     ("state/host_keys/effects.rs", &["close_original", "publish_route_on", "recover_listed"], "original session or Listed/holder qualification under ownership mutex through route/Close/delivery enqueue"),
     ("state/host_keys/owners.rs", &["write"], "sorted leaf stripes/current Registered pc qualification retained through storage callback"),
-    ("state/host_keys/owners.rs", &["abort_create", "admit_create", "close_row_locked", "complete_shell", "end_process", "release_stage", "release_unstarted", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
+    ("state/host_keys/owners.rs", &["abort_create", "admit_create", "explicit_close_locked", "complete_shell", "end_process", "release_stage", "release_unstarted", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
     ("state/host_keys/pages.rs", &["begin_restore_participation", "cancel", "commit", "destroy", "end_matching", "register", "register_page", "reserve", "retire_restore_participant", "with_stable_id"], "committed wi/page and startup participation in ownership mutex; shared page-end cleanup and compare-retirement"),
     ("state/host_keys/panes.rs", &["admit_pane", "admitted_work", "apply_pane_op", "bind_pane", "depart_pane", "insert_panes", "pane_op_at"], "sender window/page, exact pi/cg/pc and next-seq qualification under ownership mutex; immutable close pc dispatched to stripe-qualified end_process"),
     ("state/host_keys/pane_payloads.rs", &["begin_pane_drag", "claim_pane_drag", "end_pane_drag", "route_pane_transfer"], "original sender pg/wi/tx and target committed page rechecked under ownership through nonblocking delivery enqueue; immutable page receipts rejected by successor renderers"),
@@ -86,7 +86,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_routes.rs", &["register", "remove_channel", "remove_epoch", "remove_key", "remove_process"], "caller retains ownership mutex through route mutation, or exact non-reused pc/epoch removal"),
     ("state/owner_lifecycle.rs", &["complete_create", "end_shell"], "original owner cg/pc; leaf stripes and ownership retained through storage/removal"),
     ("state/terminals.rs", &["begin_host_restore_sweep"], "startup participants captured as committed wi under ownership; sweep I/O outside ownership"),
-    ("window_registry.rs", &["bind", "reserve_id", "drop", "forget", "register"], "live stable-id binding; build guard compare-restores/removes prebind, committed registry updated separately"),
+    ("window_registry.rs", &["bind", "reserve_id", "drop", "forget", "register", "publish_reserved"], "tracker registry mutex serializes binding retirement and compare-qualified post-build upsert; explicit main binding stays distinct; disk snapshot/write serialized outside registry"),
     ("window_restore.rs", &["restore_windows", "build_restored_window"], "already-built main binding; secondary prebind owned by native build guard"),
     ("window_lifetime.rs", &["commit"], "captured-wi destroy retires participation before scheduling out-of-stream sweep"),
     ("state/terminals.rs", &["init_screen", "feed_screen"], "retained non-reused pc parser; initial publication inside Placing authority"),
@@ -167,7 +167,7 @@ fn hits(source: &str) -> BTreeSet<String> {
         r"\*self\.(?:client|proc)\s*\.|\*slot\s*=|\b(?:slot|client|proc)\s*\.\s*take\s*\(|self\.current\s*(?:=|\.\s*(?:take|replace)\s*\()|",
         r"\.\s*(?:persist_snapshot|persist_terminal_history|persist_history_snapshot|insert_edge|delete_edges_for|write_shells)\s*\(|",
         r"\.\s*(?:emit|emit_to|execute|execute_batch|close_transport|shutdown_idle|shutdown|clear_client_on|clear_client|install_if_current|clear_if_current|take_if_current)\s*\(|",
-        r"\bself\s*\.\s*bind\s*\(|\.\s*with_stable_id\s*\(|\breserve_window_id\s*\(|\b(?:tracker|windows)\s*\.\s*(?:bind|register|forget|reserve_id)\s*\(|\bids\s*\.\s*(?:insert|remove|entry)\s*\(|",
+        r"\bregistry\s*\.\s*upsert\s*\(|\bself\s*\.\s*bind\s*\(|\.\s*with_stable_id\s*\(|\breserve_window_id\s*\(|\b(?:tracker|windows)\s*\.\s*(?:bind|register|publish_reserved|forget|reserve_id)\s*\(|\bids\s*\.\s*(?:insert|remove|entry)\s*\(|",
         r"\.\s*(?:begin_restore_participation|schedule_host_restore_release)\s*\(|\bself\s*\.\s*(?:building|committed|pages)\s*\.\s*(?:insert|remove|retain|clear)\s*\(|\binner\s*\.\s*panes\s*\.\s*active_drag\s*=|\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
         r"\b(?:terminals|host_terminals|stream_offsets|host_stream_offsets|writers|masters|screens|screen_history|identity_index|identity|leaf_to_process|shell_writer_channels|ptys|terminal_history|terminal_screens|terminal_focus_reporting|tmux_sessions|terminal_cwds|history_dirty|replay_prefix|host_restore_pending_windows|reattach_prompt_hooks|routes|local_processes|restore_holders|closed_unowned|owners|keys|entries)(?:\(\))?\s*(?:\.\s*(?:lock\(\)|unwrap\(\)|keys\(\)|routes\(\)))?\s*\.\s*(?:insert|remove|remove_key|remove_process|remove_channel|remove_epoch|retain|clear|entry|get_mut|register|index|unindex|connect|disconnect)\s*\("
     )).unwrap();
@@ -186,15 +186,15 @@ const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
     ("state/host_keys/owners.rs", "remove_held", &["OwnerState::Held"]),
     ("state/host_keys/owners.rs", "release_unstarted", &["!r.started", "outcome.send_replace"]),
     ("state/host_keys/owners.rs", "release_idle_owner", &["remove_held", "release_unstarted"]),
-    ("state/host_keys/owners.rs", "close_row_locked", &["release_unstarted"]),
-    ("state/host_keys/owners.rs", "close_leaf_locked", &["remove_held", "close_row_locked"]),
-    ("state/host_keys/owners.rs", "close_process", &["close_row_locked"]),
-    ("state/host_keys/panes.rs", "apply_pane_op", &["forget_pane_holder", "remove_transfer_member", "end_pages_locked", "settle_restore_participant"]),
+    ("state/host_keys/owners.rs", "explicit_close_locked", &["settle_pane_restore", "remove_transfer_member", "remove_held", "release_unstarted"]),
+    ("state/host_keys/owners.rs", "close_leaf_locked", &["explicit_close_locked(inner, leaf.into(), policy)"]),
+    ("state/host_keys/owners.rs", "close_process", &["explicit_close_locked(&mut inner, leaf, policy)"]),
+    ("state/host_keys/panes.rs", "apply_pane_op", &["forget_pane_holder", "close_leaf_locked", "end_pages_locked", "settle_restore_participant"]),
     ("state/host_keys/panes.rs", "admit_pane", &["shell_of", "holders.remove"]),
     ("state/host_keys/panes.rs", "bind_pane", &["bindable", "holders.remove"]),
     ("state/host_keys/panes.rs", "depart_pane", &["release_idle_owner"]),
     ("state/host_keys/panes.rs", "admitted_work", &["window_pages.sender", "Owner::Pane"]),
-    ("state/host_keys/panes.rs", "close_process_reap", &["settle_pane_restore", "remove_transfer_member", "close_leaf_locked"]),
+    ("state/host_keys/panes.rs", "close_process_reap", &["if reap", "close_leaf_locked"]),
     ("state/host_keys/panes.rs", "pane_op_at", &["apply_pane_op", "expire_transfers_locked"]),
     ("state/host_keys/pane_payloads.rs", "begin_pane_drag", &["delivery_sender", "expire_transfers_locked", "ActiveDrag", "ended(token)"]),
     ("state/host_keys/pane_payloads.rs", "route_pane_transfer", &["delivery_sender", "expire_transfers_locked"]),
@@ -228,10 +228,14 @@ const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
     ("state/host_keys/pages.rs", "begin_restore_participation", &["committed.get"]),
     ("state/host_keys/pages.rs", "destroy_window", &["end_pages_locked"]),
     ("state/host_keys/pages.rs", "end_pages_locked", &["end_pane_pages"]),
-    ("window_registry.rs", "bind", &["ids.insert"]),
-    ("window_registry.rs", "reserve_id", &["ids.insert", "WindowIdGuard"]),
-    ("window_registry.rs", "drop", &["self.committed", "entry.get() != &self.id", "self.previous.take", "entry.insert", "entry.remove"]),
-    ("window_registry.rs", "forget", &["ids.remove", "registry.lock().remove"]),
+    ("window_registry.rs", "bind", &["registry.lock()", "ids.insert"]),
+    ("window_registry.rs", "reserve_id", &["registry.lock()", "ids.insert", "WindowIdGuard"]),
+    ("window_registry.rs", "drop", &["registry.lock()", "self.committed", "entry.get() != &self.id", "self.previous.take", "entry.insert", "entry.remove"]),
+    ("window_registry.rs", "forget", &["registry.lock()", "ids.remove", "registry.remove"]),
+    ("window_registry.rs", "register", &["registry.lock()", "ids.insert", "registry.upsert"]),
+    ("window_registry.rs", "publish_reserved", &["registry.lock()", "id_for_label(&record.label).as_deref() != Some(&record.id)", "registry.upsert"]),
+    ("commands/window.rs", "record_new_window", &["windows.publish_reserved"]),
+    ("window_restore.rs", "restore_windows", &["tracker.publish_reserved(record)", "tracker.register(slot0)"]),
 ];
 
 fn lifecycle_removers(source: &str) -> BTreeSet<String> {
@@ -239,8 +243,9 @@ fn lifecycle_removers(source: &str) -> BTreeSet<String> {
     let pattern = Regex::new(concat!(
         r"\b(?:transfers|members|holders|present|streams|incarnation_high|closed_unowned|owners|building|committed|pages|host_restore_pending_windows)\s*\.\s*(?:remove|retain|clear)\s*\(|",
         r"\bstable_id\s*\.\s*take\s*\(|\bids\s*\.\s*(?:insert|remove|entry)\s*\(|\bactive_drag\s*\.\s*take\s*\(|",
+        r"\b(?:tracker|windows)\s*\.\s*(?:register|publish_reserved)\s*\(|\bregistry\s*\.\s*upsert\s*\(|",
         r"\bcommitted\s*\.\s*insert\s*\(|\brow\s*\.\s*(?:owner|state|started|admitted_pg)\s*=|\bactive_drag\s*=\s*None\b|",
-        r"\b(?:remove_held|release_unstarted|release_idle_owner|end_transfer_record|clear_active_drag|finish_transfer|end_pages_locked|end_matching|retire_restore_participant|close_leaf_locked|close_row_locked|remove_transfer_member|forget_pane_holder|depart_pane|settle_pane_restore|end_pane_pages|apply_pane_op|expire_transfers_locked)\s*\("
+        r"\b(?:remove_held|release_unstarted|release_idle_owner|end_transfer_record|clear_active_drag|finish_transfer|end_pages_locked|end_matching|retire_restore_participant|close_leaf_locked|explicit_close_locked|remove_transfer_member|forget_pane_holder|depart_pane|settle_pane_restore|end_pane_pages|apply_pane_op|expire_transfers_locked)\s*\("
     )).unwrap();
     let spans = fn_spans(&text);
     pattern.find_iter(&text).filter_map(|hit| spans.iter()
@@ -265,7 +270,7 @@ fn entity_removers_are_listed_with_their_auxiliary_teardown() {
     sources(&root, &root, &mut corpus);
     // These entities live in this table; unrelated maps called `pages` are not
     // ownership pages. A new sibling table file is included automatically.
-    let corpus: Vec<_> = corpus.into_iter().filter(|(file, _)| file.starts_with("state/host_keys/") || file == "window_registry.rs").collect();
+    let corpus: Vec<_> = corpus.into_iter().filter(|(file, _)| file.starts_with("state/host_keys/") || ["window_registry.rs", "commands/window.rs", "window_restore.rs"].contains(&file.as_str())).collect();
     for required in ["pages.rs", "panes.rs", "pane_transfers.rs", "owners.rs", "restore.rs", "pane_payloads.rs"] {
         assert!(corpus.iter().any(|(file, _)| file.ends_with(required)), "missing {required}");
     }
@@ -292,6 +297,14 @@ fn planted_entity_remover_and_missing_shared_teardown_are_rejected() {
     assert_eq!(lifecycle_violations("state/host_keys/pane_transfers.rs", missing_notice), vec!["clear_active_drag"]);
     let missing_binding_rollback = "fn drop() { self.tracker.ids.entry(self.label.clone()); }";
     assert_eq!(lifecycle_violations("window_registry.rs", missing_binding_rollback), vec!["drop"]);
+    let missing_close_obligations = "fn explicit_close_locked() { Self::release_unstarted(inner, leaf); row.state = OwnerState::Closing(shell); }";
+    assert_eq!(lifecycle_violations("state/host_keys/owners.rs", missing_close_obligations), vec!["explicit_close_locked"]);
+    let missing_publication_compare = "fn publish_reserved() { let mut registry = self.registry.lock(); registry.upsert(record); }";
+    assert_eq!(lifecycle_violations("window_registry.rs", missing_publication_compare), vec!["publish_reserved"]);
+    let fresh_bind_after_build = "fn record_new_window() { state.windows.register(record); }";
+    assert_eq!(lifecycle_violations("commands/window.rs", fresh_bind_after_build), vec!["record_new_window"]);
+    let restored_fresh_bind = "fn restore_windows() { tracker.register(slot0); tracker.register(record); }";
+    assert_eq!(lifecycle_violations("window_restore.rs", restored_fresh_bind), vec!["restore_windows"]);
     assert!(lifecycle_removers("#[cfg(test)] mod tests { fn fixture() { inner.owners.clear(); } }").is_empty());
 }
 
@@ -361,6 +374,7 @@ fn planted_wire_projection_store_route_emit_and_lifecycle_sinks_are_detected() {
         ("new_binding_remover", "self.ids.remove(label);"),
         ("new_binding_reservation", "tracker.reserve_id(label, id);"),
         ("new_token_ended_notice", "drag.delivery.send(drag.ended);"),
+        ("new_guarded_publication", "tracker.publish_reserved(record);"),
     ] {
         let planted = format!("async fn {name}() {{ {body} }}");
         assert_eq!(unlisted("new_sink.rs", &planted), vec![name]);

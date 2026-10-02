@@ -142,7 +142,7 @@ impl HostKeys {
         inner.panes.present.retain(|pi, _| !pages.contains(&pi.pg));
         for pg in pages { inner.panes.streams.remove(&pg); inner.panes.incarnation_high.remove(&pg); }
     }
-    pub(super) fn remove_transfer_member(inner: &mut Inner, leaf: &str) {
+    pub(in crate::state::host_keys) fn remove_transfer_member(inner: &mut Inner, leaf: &str) {
         let tx = inner.owners.get(leaf).and_then(|r| match &r.owner { Owner::Transfer { tx, .. } => Some(tx.clone()), _ => None });
         if let Some(tx) = tx {
             if let Some(transfer) = inner.panes.transfers.get_mut(&tx) {

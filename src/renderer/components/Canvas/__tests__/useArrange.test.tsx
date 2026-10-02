@@ -21,7 +21,11 @@ import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 import { configureStore, EnhancedStore } from '@reduxjs/toolkit';
-import canvasReducer, { setNodeGeom } from '../../../store/slices/canvasSlice';
+import canvasReducer, { setNodeGeom, setGroupGeom } from '../../../store/slices/canvasSlice';
+import tabsReducer, { addTab } from '../../../store/slices/tabsSlice';
+import panesReducer, { addTabTree, removeTabTree } from '../../../store/slices/panesSlice';
+import { PaneIncarnations, installPaneIncarnations, type PaneBridge, type PaneRequest } from '../../../services/paneIncarnations';
+import { captureWorkspace } from '../../../services/workspaceReplacement';
 import { replaceWorkspace } from '../../../services/workspaceReplacement';
 import { useArrange } from '../useArrange';
 import { arrangeTarget, ARRANGE_MS } from '../animateLayout';
@@ -179,6 +183,54 @@ describe('useArrange — reduced motion', () => {
 });
 
 describe('useArrange — the animation', () => {
+  it('stops node and group writes when only a captured native slot is replaced between frames', async () => {
+    store = configureStore({ reducer: { canvas: canvasReducer, tabs: tabsReducer, panes: panesReducer } });
+    const dispatch = jest.spyOn(store, 'dispatch');
+    const requests: PaneRequest[] = [];
+    const client = new PaneIncarnations((async (command: string, args: any) => {
+      if (command === 'register_page') return { status: 'Registered', wi: 3, pg: 30 };
+      requests.push(args.request); return { status: 'Ack', result: { status: 'Ok' } };
+    }) as PaneBridge);
+    installPaneIncarnations(client); client.attachStore(store as any);
+    const flushOps = async () => { for (let i = 0; i < 50; i++) await Promise.resolve(); };
+    for (const g of model.groups) {
+      store.dispatch(addTab({ id: g.tabId, title: g.title }));
+      const children = model.nodes.filter(n => n.tabId === g.tabId).map(n => ({ id: n.paneId, type: 'terminal' as const, terminalId: n.terminalId }));
+      store.dispatch(addTabTree({ tabId: g.tabId, tree: children.length === 1 ? children[0] : { id: `split-${g.tabId}`, type: 'split', children } }));
+    }
+    try {
+      await flushOps();
+      const workspace = captureWorkspace();
+      const original = client.capture('tm-3', 'pn-tm-3');
+      const control = client.capture('tm-1', 'pn-tm-1');
+      expect(requests.filter(request => request.op.kind === 'enter')).toHaveLength(3);
+      mount(); act(() => arrange());
+      flush(clock + ARRANGE_MS * 0.2);
+      expect(dispatch.mock.calls.filter(([action]) => action.type === 'canvas/applyArrange')).toHaveLength(1);
+      expect(canvasState().nodes['tm-3']).toBeDefined();
+      expect(canvasState().groups['tb-b']).toBeDefined();
+      expect(frames.size).toBe(1);
+      const replacement = { x: 9010, y: 8020, w: NODE_W, h: NODE_H };
+      const replacementGroup = { x: 9000, y: 8000, w: 700, h: 600 };
+      act(() => {
+        store.dispatch(removeTabTree('tb-b'));
+        store.dispatch(addTabTree({ tabId: 'tb-b', tree: { id: 'pn-tm-3', type: 'terminal', terminalId: 'tm-3' } }));
+        store.dispatch(setNodeGeom({ id: 'tm-3', rect: replacement }));
+        store.dispatch(setGroupGeom({ id: 'tb-b', rect: replacementGroup }));
+      });
+      await flushOps();
+      expect(captureWorkspace()).toBe(workspace);
+      expect(client.capture('tm-3', 'pn-tm-3')).not.toBe(original);
+      expect(client.capture('tm-1', 'pn-tm-1')).toBe(control);
+      const before = canvasState(); const count = dispatch.mock.calls.length;
+      flush(clock + ARRANGE_MS * 0.4);
+      expect(dispatch).toHaveBeenCalledTimes(count);
+      expect(canvasState()).toEqual(before);
+      expect(canvasState().nodes['tm-3']).toEqual(replacement);
+      expect(canvasState().groups['tb-b']).toEqual(replacementGroup);
+      expect(frames.size).toBe(0);
+    } finally { client.stop(); installPaneIncarnations(new PaneIncarnations()); }
+  });
   it('stops a frozen arrangement before its next frame can write into a replacement workspace', () => {
     mount(); act(() => arrange()); runToCompletion(clock);
     expect((store.dispatch as jest.Mock).mock.calls.length).toBeGreaterThan(1);

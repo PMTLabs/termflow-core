@@ -1,6 +1,5 @@
 import { paneIncarnations, describePanes } from '../../services/paneIncarnations';
 import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
-import { capturePaneEffect } from '../../services/paneEffect';
 import React, { useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { store, RootState, AppDispatch } from '../../store';
@@ -30,7 +29,7 @@ import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
-import { dropTabAcrossWindows, detachTabToNewWindow } from '../Panes/dnd/detach';
+import { dropTabAcrossWindows, detachTabToNewWindow, captureDetachGesture } from '../Panes/dnd/detach';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
 import { titleColorStyle } from '../../store/titleColor';
 import './TabManager.css';
@@ -133,14 +132,8 @@ function makeTabGhost(title: string, titleColor?: string): HTMLElement {
  */
 function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
   if (e.button !== 0) return;
-  const workspace = captureWorkspace();
-  const tab = store.getState().tabs.tabs.find(t => t.id === h.tabId);
-  const members = describePanes(store.getState().panes.treesByTabId[h.tabId] ?? null);
-  const predicates = members.map(pane => capturePaneEffect(pane.leaf, pane.paneId));
-  const current = () => isCurrentWorkspace(workspace) && predicates.every(check => check())
-    && store.getState().tabs.tabs.some(t => t.id === h.tabId && t.shellType === tab?.shellType)
-    && members.every(member => describePanes(store.getState().panes.treesByTabId[h.tabId] ?? null)
-      .some(pane => pane.paneId === member.paneId && pane.leaf === member.leaf));
+  const gesture = captureDetachGesture(h.tabId, store.getState().panes.treesByTabId[h.tabId] ?? null);
+  const current = gesture.current;
   const startX = e.clientX;
   const startY = e.clientY;
   let dragging = false;
@@ -233,6 +226,7 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
         tabTitle: h.tabTitle,
         clientX: ev.clientX,
         clientY: ev.clientY,
+        gesture,
       });
     } else if (pointOutsideStrip(stripRect, ev.clientY) && store.getState().tabs.tabs.length > 1) {
       // Pulled out of the tab strip but released inside this same window (e.g.
@@ -244,6 +238,7 @@ function beginTabDrag(e: React.PointerEvent, h: TabDragHandlers): void {
         tabId: h.tabId,
         tabTitle: h.tabTitle,
         cursor: { x: ev.clientX, y: ev.clientY },
+        gesture,
       });
     }
   };

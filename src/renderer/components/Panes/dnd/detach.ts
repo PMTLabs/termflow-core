@@ -21,10 +21,22 @@ import { clearSessionClosed } from '../../../store/slices/sessionExitSlice';
 import { DetachPayload, DetachTerminal } from './types';
 
 const DETACH_PREFIX = 'detach-';
-const stagedPayloads = new Map<string, DetachPayload>();
-const stagedOutcomes = new Map<string, Promise<boolean>>();
+const sourceReceipts = new Map<string, SourceTransferReceipt>();
 const rollbacks = new Map<string, Promise<void>>();
-const stagedSources = new Map<string, SourceRemoval>();
+export interface SourceTransferReceipt {
+  token: string;
+  payload: DetachPayload;
+  source: SourceRemoval;
+  tabId: string;
+  client: typeof paneIncarnations;
+  completion: Promise<boolean>;
+}
+export interface DetachGesture {
+  tabId: string;
+  source: SourceRemoval;
+  client: typeof paneIncarnations;
+  current: () => boolean;
+}
 export interface SourceRemoval {
   workspace: object;
   members: { pane: PaneDescriptor; pi?: PaneCapture; pc?: string }[];
@@ -33,6 +45,20 @@ export function captureSourceRemoval(tree: PaneNode): SourceRemoval {
   return { workspace: captureWorkspace(), members: describePanes(tree).map(pane => ({
     pane, pi: paneIncarnations.capture(pane.leaf, pane.paneId), pc: terminalService.getProcessId(pane.leaf),
   })) };
+}
+
+/** Capture once at pointerdown; payload collection and stash use the same subject. */
+export function captureDetachGesture(tabId: string, tree: PaneNode | null): DetachGesture {
+  const source = tree ? captureSourceRemoval(tree) : { workspace: captureWorkspace(), members: [] };
+  const client = paneIncarnations;
+  const tab = store.getState().tabs.tabs.find(tab => tab.id === tabId);
+  const current = () => client === paneIncarnations && !client.ended && isCurrentWorkspace(source.workspace)
+    && store.getState().tabs.tabs.some(copy => copy.id === tabId && copy.shellType === tab?.shellType)
+    && source.members.every(member => sourceMemberCurrent(source, member.pane, member.pi)
+      && terminalService.getProcessId(member.pane.leaf) === member.pc
+      && describePanes(store.getState().panes.treesByTabId[tabId] ?? null)
+        .some(copy => copy.paneId === member.pane.paneId && copy.leaf === member.pane.leaf));
+  return { tabId, source, client, current };
 }
 
 function sourceMemberCurrent(source: SourceRemoval, pane: PaneDescriptor, pi?: PaneCapture): boolean {
@@ -65,41 +91,54 @@ function removeQualifiedSource(tabId: string, source: SourceRemoval): void {
 
 
 export async function waitDetachTransfer(token: string): Promise<boolean> {
-  return stagedOutcomes.get(token) ?? false;
+  return sourceReceipts.get(token)?.completion ?? false;
 }
 
-export async function stageDetachPayload(token: string, payload: DetachPayload): Promise<void> {
+export async function stageDetachPayload(token: string, payload: DetachPayload, gesture?: DetachGesture): Promise<SourceTransferReceipt> {
   if (!paneIncarnations.enabled) throw new Error('transfer requires a desktop page');
   const panes = describePanes(payload.paneTree);
-  const source = captureSourceRemoval(payload.paneTree);
-  const result = await paneIncarnations.stash(token, panes, payload);
+  const tabId = gesture?.tabId ?? store.getState().tabs.tabs.find(tab =>
+    describePanes(store.getState().panes.treesByTabId[tab.id] ?? null)
+      .some(copy => copy.paneId === panes[0]?.paneId && copy.leaf === panes[0]?.leaf))?.id;
+  gesture ??= captureDetachGesture(tabId ?? '', payload.paneTree);
+  if (!gesture.current() || panes.length !== gesture.source.members.length
+      || !panes.every(pane => gesture.source.members.some(member => member.pane.paneId === pane.paneId && member.pane.leaf === pane.leaf))) {
+    throw new Error('transfer gesture replaced');
+  }
+  const { source, client } = gesture;
+  const result = await client.stash(token, panes, payload);
   if (!accepted(result)) throw new Error(`transfer stash ${result.status}`);
-  if (paneIncarnations.ended) throw new Error('transfer page ended');
-  stagedPayloads.set(token, payload);
-  stagedSources.set(token, source);
-  const outcome = paneIncarnations.waitTransfer(token);
-  stagedOutcomes.set(token, outcome);
-  void outcome.then(taken => {
-    if (!taken && !paneIncarnations.ended) return cancelDetachTransfer(token);
-    return undefined;
-  }).catch(error => console.warn('Could not observe transfer outcome', error));
+  const receipt: SourceTransferReceipt = { token, payload, source, client, tabId: gesture.tabId, completion: Promise.resolve(false) };
+  sourceReceipts.set(token, receipt);
+  // The successful stash owns a receipt independently of the drag advertisement.
+  // Observing the take also covers releases delivered only to another window.
+  receipt.completion = client.waitTransfer(token).then(async taken => {
+    if (sourceReceipts.get(token) !== receipt) return false;
+    if (!taken) { await cancelDetachTransfer(token); return false; }
+    sourceReceipts.delete(token);
+    if (client === paneIncarnations) removeSourcePane(receipt.tabId, panes[0]?.paneId ?? '', [], source);
+    return true;
+  }).catch(async error => {
+    await cancelDetachTransfer(token);
+    throw error;
+  });
+  void receipt.completion.catch(error => console.warn('Could not observe transfer outcome', error));
+  return receipt;
 }
 
 export async function cancelDetachTransfer(token: string): Promise<void> {
   const pending = rollbacks.get(token);
   if (pending) return pending;
-  const payload = stagedPayloads.get(token);
-  if (!payload) return;
+  const receipt = sourceReceipts.get(token);
+  if (!receipt) return;
+  const { payload, source, client } = receipt;
   // A build refusal and the expiry notification can race; roll back only once.
-  stagedPayloads.delete(token);
-  stagedOutcomes.delete(token);
+  sourceReceipts.delete(token);
   const state = store.getState();
   const present = state.tabs.tabs.flatMap(tab => describePanes(state.panes.treesByTabId[tab.id] ?? null));
-  const source = stagedSources.get(token);
-  stagedSources.delete(token);
   const remaining = describePanes(payload.paneTree).filter(pane => present.some(copy => copy.paneId === pane.paneId && copy.leaf === pane.leaf)
-    && !!source?.members.some(member => member.pane.paneId === pane.paneId && sourceMemberCurrent(source, pane, member.pi)));
-  const rollback = paneIncarnations.cancel(token, remaining, new Map(payload.terminals.map(t => [t.terminalId, t.processId])), pane => {
+    && source.members.some(member => member.pane.paneId === pane.paneId && sourceMemberCurrent(source, pane, member.pi)));
+  const rollback = client.cancel(token, client === paneIncarnations ? remaining : [], new Map(source.members.flatMap(member => member.pc ? [[member.pane.leaf, member.pc] as const] : [])), pane => {
     const current = store.getState();
     return current.tabs.tabs.some(tab => describePanes(current.panes.treesByTabId[tab.id] ?? null)
       .some(copy => copy.paneId === pane.paneId && copy.leaf === pane.leaf));
@@ -194,7 +233,7 @@ function collectTerminals(node: PaneNode, acc: DetachTerminal[]): void {
   node.children?.forEach((c) => collectTerminals(c, acc));
 }
 
-async function openWindowWithPayload(payload: DetachPayload): Promise<boolean> {
+async function openWindowWithPayload(payload: DetachPayload, gesture: DetachGesture): Promise<boolean> {
   const api = window.electronAPI;
   if (!api?.createDetachedWindow || !paneIncarnations.enabled) {
     console.warn('Detach: bridge unavailable (not running under Tauri?)');
@@ -202,11 +241,9 @@ async function openWindowWithPayload(payload: DetachPayload): Promise<boolean> {
   }
   const token = makeToken();
   try {
-    await stageDetachPayload(token, payload);
+    const receipt = await stageDetachPayload(token, payload, gesture);
     await api.createDetachedWindow(token, payload.cursor?.x, payload.cursor?.y);
-    stagedPayloads.delete(token);
-    stagedOutcomes.delete(token);
-    return true;
+    return await receipt.completion;
   } catch (error) {
     await cancelDetachTransfer(token);
     throw error;
@@ -255,21 +292,11 @@ export function newDetachToken(): string {
 
 /** Remove a just-moved pane from its source tab, closing the tab if it empties. */
 export function removeSourcePane(sourceTabId: string, sourcePaneId: string, terminalIds: string[] = [], source?: SourceRemoval): void {
-  source ??= [...stagedSources.values()].find(staged => staged.members.some(member => member.pane.paneId === sourcePaneId));
   if (source) {
     removeQualifiedSource(sourceTabId, source);
-    for (const [token, staged] of stagedSources) if (staged.members.some(member => source!.members.some(original => original.pi === member.pi))) {
-      stagedSources.delete(token); stagedPayloads.delete(token); stagedOutcomes.delete(token);
-    }
     return;
   }
   if (paneIncarnations.enabled) return;
-  for (const [token, payload] of stagedPayloads) {
-    if (describePanes(payload.paneTree).some(pane => pane.paneId === sourcePaneId)) {
-      stagedPayloads.delete(token);
-      stagedOutcomes.delete(token);
-    }
-  }
   store.dispatch(removePaneFromTab({ tabId: sourceTabId, paneId: sourcePaneId }));
   // Detaching the last pane hands the terminal to another WINDOW, so there is nothing left
   // here to keep the tab open for. `tabHasNoPanes` owns the "is it empty" rule — an emptied
@@ -292,13 +319,12 @@ export async function detachPaneToNewWindow(opts: {
   sourceTabId: string;
   paneNode: PaneNode;
   cursor?: { x: number; y: number };
+  gesture?: DetachGesture;
 }): Promise<void> {
+  const gesture = opts.gesture ?? captureDetachGesture(opts.sourceTabId, opts.paneNode);
+  if (!gesture.current()) return;
   const payload = buildPaneDetachPayload(opts.paneNode, opts.cursor, opts.sourceTabId);
-  const source = captureSourceRemoval(payload.paneTree);
-  const ok = await openWindowWithPayload(payload);
-  if (!ok) return;
-  // The PTY keeps running in the shared backend; just drop the pane from here.
-  removeSourcePane(opts.sourceTabId, opts.paneNode.id, payload.terminals.map((t) => t.terminalId), source);
+  await openWindowWithPayload(payload, gesture);
 }
 
 /** Build a whole-tab detach payload from a tab's pane tree, or null if missing. */
@@ -335,16 +361,9 @@ export function buildTabDetachPayload(
 export function removeSourceTab(tabId: string, terminalIds: string[], source?: SourceRemoval): void {
   if (source) {
     removeQualifiedSource(tabId, source);
-    for (const [token, staged] of stagedSources) if (staged.members.some(member => source.members.some(original => original.pi === member.pi))) {
-      stagedSources.delete(token); stagedPayloads.delete(token); stagedOutcomes.delete(token);
-    }
     return;
   }
   if (paneIncarnations.enabled) return;
-  for (const [token, payload] of stagedPayloads) if (payload.tabId === tabId) {
-    stagedPayloads.delete(token);
-    stagedOutcomes.delete(token);
-  }
   // Every terminal that LEAVES this window loses its session-exit record here (`plan/024` Req 4).
   //
   // Detach reaches neither `closePaneNonBlocking` nor `TabManager.closeOneTab`, the two paths
@@ -375,13 +394,13 @@ export async function detachTabToNewWindow(opts: {
   tabId: string;
   tabTitle: string;
   cursor?: { x: number; y: number };
+  gesture?: DetachGesture;
 }): Promise<void> {
+  const gesture = opts.gesture ?? captureDetachGesture(opts.tabId, store.getState().panes.treesByTabId[opts.tabId] ?? null);
+  if (!gesture.current()) return;
   const payload = buildTabDetachPayload(opts.tabId, opts.tabTitle, opts.cursor);
   if (!payload) return;
-  const source = captureSourceRemoval(payload.paneTree);
-  const ok = await openWindowWithPayload(payload);
-  if (!ok) return;
-  removeSourceTab(opts.tabId, payload.terminals.map((t) => t.terminalId), source);
+  await openWindowWithPayload(payload, gesture);
 }
 
 /**
@@ -395,20 +414,21 @@ export async function dropTabAcrossWindows(opts: {
   tabTitle: string;
   clientX: number;
   clientY: number;
+  gesture?: DetachGesture;
 }): Promise<void> {
   const api = window.electronAPI;
   if (!api?.createDetachedWindow || !paneIncarnations.enabled) {
     console.warn('Tab drop: bridge unavailable (not running under Tauri?)');
     return;
   }
+  const gesture = opts.gesture ?? captureDetachGesture(opts.tabId, store.getState().panes.treesByTabId[opts.tabId] ?? null);
+  if (!gesture.current()) return;
   const payload = buildTabDetachPayload(opts.tabId, opts.tabTitle, { x: opts.clientX, y: opts.clientY });
   if (!payload) return;
-  const source = captureSourceRemoval(payload.paneTree);
-  const terminalIds = payload.terminals.map((t) => t.terminalId);
   const isLastTab = store.getState().tabs.tabs.length <= 1;
 
   const token = newDetachToken();
-  await stageDetachPayload(token, payload);
+  const receipt = await stageDetachPayload(token, payload, gesture);
 
   let reattached = false;
   if (api.resolveTabDrop) {
@@ -431,9 +451,7 @@ export async function dropTabAcrossWindows(opts: {
     catch (error) { await cancelDetachTransfer(token); throw error; }
   }
 
-  stagedPayloads.delete(token);
-  stagedOutcomes.delete(token);
-  removeSourceTab(opts.tabId, terminalIds, source);
+  if (!await receipt.completion) return;
   // If that was the last tab, this window is now empty — close it.
   await closeWindowIfEmpty();
 }

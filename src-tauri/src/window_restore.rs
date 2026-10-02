@@ -77,7 +77,7 @@ pub(crate) fn restore_windows(app: &tauri::AppHandle) {
         match build_restored_window(app, &label, &record, &monitors) {
             Ok(window) => {
                 crate::context_menu::install(&window);
-                tracker.register(record);
+                tracker.publish_reserved(record);
             }
             Err(e) => {
                 // Drop the record rather than keeping a window we cannot build:

@@ -14,13 +14,13 @@ import {
   detachPaneToNewWindow,
   buildPaneDetachPayload,
   newDetachToken,
-  removeSourcePane,
   applyCrossWindowPayload,
   stageDetachPayload,
   cancelDetachTransfer,
   waitDetachTransfer,
-  captureSourceRemoval,
-  type SourceRemoval,
+  captureDetachGesture,
+  type DetachGesture,
+  type SourceTransferReceipt,
 } from './detach';
 import { captureWorkspace, isCurrentWorkspace } from '../../../services/workspaceReplacement';
 import { acceptsTransferNotice, paneIncarnations, type PaneCapture } from '../../../services/paneIncarnations';
@@ -74,6 +74,7 @@ export const usePaneDragContext = (): PaneDragContextValue => {
 
 interface PressState {
   pi?: PaneCapture;
+  gesture: DetachGesture;
   source: PaneDragSource;
   startX: number;
   startY: number;
@@ -86,7 +87,6 @@ interface GlobalSource {
   sourcePaneId: string;
   terminalId: string;
   ready: Promise<boolean>;
-  removal: SourceRemoval;
 }
 
 async function cancelSourceDrag(source: GlobalSource): Promise<PaneCapture | undefined> {
@@ -111,6 +111,8 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const dwellRef = useRef<{ tabId: string; timer: ReturnType<typeof setTimeout> } | null>(null);
   // Cross-window broker (Phase 4, target-claims): the drag THIS window started.
   const globalSourceRef = useRef<GlobalSource | null>(null);
+  // A staged receipt survives ended/claimed notices and source pointer cleanup.
+  const sourceReceiptsRef = useRef(new Map<string, SourceTransferReceipt>());
   const incomingTokenRef = useRef<string | null>(null);
   const claimAttemptRef = useRef<object | null>(null);
 
@@ -147,17 +149,22 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           const token = notice?.token;
           if (!active || typeof token !== 'string') return;
           // Ignore our own drag — we're the source, not a drop target for it.
-          if (globalSourceRef.current?.token === token) return;
+          if (globalSourceRef.current?.token === token || sourceReceiptsRef.current.has(token)) return;
           incomingTokenRef.current = token;
           setIncomingToken(token);
         });
         const u2 = await listen('pane-drag:claimed', (ev: any) => {
           const notice = ev?.payload;
           const token = notice?.token;
-          const src = globalSourceRef.current;
-          if (src && src.token === token) {
+          const receipt = sourceReceiptsRef.current.get(token);
+          if (receipt) {
             void acceptsTransferNotice(notice).then(async matches => {
-              if (matches && await waitDetachTransfer(token)) removeSourcePane(src.sourceTabId, src.sourcePaneId, [src.terminalId], src.removal);
+              if (!matches) return;
+              if (globalSourceRef.current?.token === token) {
+                globalSourceRef.current = null;
+                reset();
+              }
+              await waitDetachTransfer(token);
             }).catch(error => console.error('Pane transfer failed', error));
           }
         });
@@ -244,14 +251,17 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   }, [incomingToken]);
 
   const beginPress = useCallback((e: React.PointerEvent, source: PaneDragSource) => {
-    pressRef.current = { source, pi: paneIncarnations.capture(source.terminalId, source.sourcePaneId), startX: e.clientX, startY: e.clientY, dragging: false };
+    const leaf = findLeaf(store.getState().panes.treesByTabId[source.sourceTabId] ?? null, source.sourcePaneId);
+    const gesture = captureDetachGesture(source.sourceTabId, leaf);
+    if (!leaf || leaf.terminalId !== source.terminalId || !gesture.current()) return;
+    pressRef.current = { source, gesture, pi: paneIncarnations.capture(source.terminalId, source.sourcePaneId), startX: e.clientX, startY: e.clientY, dragging: false };
     setPressing(true);
   }, []);
 
   // Source-side pointer tracking.
   useEffect(() => {
     if (!pressing) return;
-    const workspace = captureWorkspace();
+    const workspace = pressRef.current!.gesture.source.workspace;
 
     const resolveTarget = (x: number, y: number): PaneDropTarget | null => {
       const el = document.elementFromPoint(x, y) as HTMLElement | null;
@@ -287,6 +297,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const onMove = (e: PointerEvent) => {
       const press = pressRef.current;
       if (!press) return;
+      if (!press.gesture.current()) { reset(); return; }
       const x = e.clientX;
       const y = e.clientY;
       if (!press.dragging) {
@@ -305,15 +316,19 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         const token = newDetachToken();
         const source: GlobalSource = {
           token, sourceTabId: s.sourceTabId, sourcePaneId: s.sourcePaneId, terminalId: s.terminalId,
-          ready: Promise.resolve(false), removal: captureSourceRemoval(leaf),
+          ready: Promise.resolve(false),
         };
         globalSourceRef.current = source;
         // `s.sourceTabId` so a pane dropped into another WINDOW keeps its group colour, exactly
         // as `detachPaneToNewWindow` does. Both callers build the same payload; a colour passed
         // by only one of them would depend on how the pane happened to leave the window.
         const payload = buildPaneDetachPayload(leaf, { x: e.clientX, y: e.clientY }, s.sourceTabId);
-        source.ready = stageDetachPayload(token, payload).then(async () => {
-          if (!isCurrentWorkspace(workspace) || globalSourceRef.current !== source) {
+        source.ready = stageDetachPayload(token, payload, press.gesture).then(async receipt => {
+          sourceReceiptsRef.current.set(token, receipt);
+          void receipt.completion.finally(() => {
+            if (sourceReceiptsRef.current.get(token) === receipt) sourceReceiptsRef.current.delete(token);
+          }).catch(error => console.error('Pane transfer failed', error));
+          if (!press.gesture.current() || globalSourceRef.current !== source) {
             await cancelDetachTransfer(token);
             return false;
           }
@@ -361,7 +376,9 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     };
 
     const onUp = (e: PointerEvent) => {
-      const wasDragging = pressRef.current?.dragging;
+      const press = pressRef.current;
+      if (press && !press.gesture.current()) { reset(); return; }
+      const wasDragging = press?.dragging;
       const d = dragRef.current;
       const sourcePi = pressRef.current?.pi;
       const target = d?.target ? findLeaf(store.getState().panes.treesByTabId[d.target.tabId] ?? null, d.target.paneId) : null;
@@ -377,17 +394,13 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         if (gs && api?.resolveOrphanGlobalDrag) {
           // Released outside this window. Give a destination window a moment to
           // claim it; if none does, it's an orphan -> open a new window.
-          const { token, sourceTabId, sourcePaneId, terminalId } = gs;
+          const { token } = gs;
           setTimeout(() => {
-            // If a window already claimed it, globalSourceRef was cleared by the
-            // pane-drag:claimed/ended listeners — nothing to do.
-            if (globalSourceRef.current?.token !== token) return;
-            gs.ready.then(ready => ready ? api.resolveOrphanGlobalDrag!(token) : false).then(async (orphan) => {
-              if (orphan) {
-                await api.createDetachedWindow?.(token, sx, sy);
-                removeSourcePane(sourceTabId, sourcePaneId, [terminalId], gs.removal);
-                if (globalSourceRef.current === gs) globalSourceRef.current = null;
-              }
+            // The advertisement may have ended while its take receipt is pending.
+            gs.ready.then(ready => ready && sourceReceiptsRef.current.has(token) ? api.resolveOrphanGlobalDrag!(token) : false).then(async (orphan) => {
+              if (orphan) await api.createDetachedWindow?.(token, sx, sy);
+              await waitDetachTransfer(token);
+              if (globalSourceRef.current === gs) globalSourceRef.current = null;
             }).catch(async (err) => {
               await cancelDetachTransfer(token);
               console.error('resolveOrphanGlobalDrag failed', err);
@@ -400,6 +413,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             sourceTabId: s.sourceTabId,
             paneNode: leafForDrag(s),
             cursor: { x: sx, y: sy },
+            gesture: press?.gesture,
           });
         }
       } else if (wasDragging) {
@@ -419,6 +433,15 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       }
     };
 
+    const unsubscribe = store.subscribe(() => {
+      const press = pressRef.current;
+      if (press && !press.gesture.current()) {
+        const gs = globalSourceRef.current;
+        if (gs) void cancelSourceDrag(gs).catch(error => console.error('Pane drag rollback failed', error));
+        globalSourceRef.current = null;
+        reset();
+      }
+    });
     window.addEventListener('pointermove', onMove, true);
     window.addEventListener('pointerup', onUp, true);
     window.addEventListener('pointercancel', onUp, true);
@@ -428,6 +451,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       window.removeEventListener('pointerup', onUp, true);
       window.removeEventListener('pointercancel', onUp, true);
       window.removeEventListener('keydown', onKey, true);
+      unsubscribe();
     };
   }, [pressing, dispatch, applyDrag, clearDwell, reset]);
 

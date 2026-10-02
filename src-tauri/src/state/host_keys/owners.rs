@@ -199,11 +199,16 @@ impl HostKeys {
             inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == reference)).map(|(l, _)| l.clone())
         };
         let Some(leaf) = leaf else { return CloseAction::Missing };
-        Self::close_row_locked(&mut inner, leaf, policy)
+        Self::explicit_close_locked(&mut inner, leaf, policy)
     }
 
-    fn close_row_locked(inner: &mut Inner, leaf: String, policy: CloseStorage) -> CloseAction {
-        if Self::release_unstarted(inner, &leaf) { return CloseAction::Cancelled; }
+    fn explicit_close_locked(inner: &mut Inner, leaf: String, policy: CloseStorage) -> CloseAction {
+        if !inner.owners.contains_key(&leaf) { return CloseAction::Missing; }
+        // Retire carried restore intent before removing its source membership.
+        // Restash and natural exit deliberately do not end this capability.
+        Self::settle_pane_restore(inner, &leaf);
+        Self::remove_transfer_member(inner, &leaf);
+        if Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf) { return CloseAction::Cancelled; }
         let Some(row) = inner.owners.get_mut(&leaf) else { return CloseAction::Missing };
         match &mut row.state {
             OwnerState::Placing { cancel, .. } => {
@@ -221,8 +226,7 @@ impl HostKeys {
     }
 
     pub(super) fn close_leaf_locked(inner: &mut Inner, leaf: &str, policy: CloseStorage, effects: &mut Vec<String>) {
-        if Self::remove_held(inner, leaf) { return; }
-        if let CloseAction::End { process, .. } = Self::close_row_locked(inner, leaf.into(), policy) { effects.push(process); }
+        if let CloseAction::End { process, .. } = Self::explicit_close_locked(inner, leaf.into(), policy) { effects.push(process); }
     }
 
     /// No worker has claimed this promise, so ending its owner cannot leave

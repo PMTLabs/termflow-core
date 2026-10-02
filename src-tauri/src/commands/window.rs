@@ -100,7 +100,7 @@ pub fn record_new_window(
     let Some(state) = app.try_state::<AppState>() else { return };
     let pos = window.outer_position().ok();
     let size = window.inner_size().ok();
-    state.windows.register(crate::window_registry::WindowRecord {
+    state.windows.publish_reserved(crate::window_registry::WindowRecord {
         id,
         label: window.label().to_string(),
         x: pos.map(|p| p.x).unwrap_or(0),

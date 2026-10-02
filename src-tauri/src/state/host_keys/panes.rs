@@ -157,7 +157,6 @@ impl HostKeys {
                 Self::forget_pane_holder(inner, pi, leaf.is_some(), now);
                 inner.panes.present.remove(&pi);
                 let Some(leaf) = leaf else { return PaneResult::Contended; };
-                Self::remove_transfer_member(inner, &leaf);
                 Self::close_leaf_locked(inner, &leaf, CloseStorage::Delete, &mut effects.closes);
                 PaneResult::Ok
             }
@@ -278,10 +277,6 @@ impl HostKeys {
         let Some(leaf) = leaf else { return (PaneResult::Ok, Vec::new()); };
         if reap && !matches!(inner.owners[&leaf].owner, Owner::Parked { .. } | Owner::Orphaned | Owner::Headless) { return (PaneResult::Contended, Vec::new()); }
         let mut effects = Vec::new();
-        // Retire the carried capability while its source identity is still
-        // discoverable. Restashing, unlike a terminal close, preserves it.
-        Self::settle_pane_restore(&mut inner, &leaf);
-        Self::remove_transfer_member(&mut inner, &leaf);
         Self::close_leaf_locked(&mut inner, &leaf, CloseStorage::Delete, &mut effects);
         (PaneResult::Ok, effects)
     }

@@ -55,7 +55,7 @@ fn window_commit_keeps_binding_destroy_removes_it_and_stale_rollback_preserves_r
     let wi = build.identity().1;
     assert_eq!(tracker.id_for_label("target").as_deref(), Some("committed-id"));
     build.commit().unwrap();
-    tracker.register(record("target", "committed-id"));
+    assert!(tracker.publish_reserved(record("target", "committed-id")));
     let target = page(&keys, "target", wi);
     assert_eq!(keys.destroy_window("target", wi), vec![target]);
     tracker.forget("target");
@@ -78,6 +78,63 @@ fn window_commit_keeps_binding_destroy_removes_it_and_stale_rollback_preserves_r
 }
 
 #[test]
+fn late_post_build_publication_cannot_revive_destroyed_or_rebound_window() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    for kind in ["new", "detached", "restored"] {
+        for replacement in [false, true] {
+            let keys = HostKeys::default();
+            let (mut tracker, path) = tracker();
+            let id = format!("{kind}-reserved");
+            if kind == "restored" {
+                // Restore starts from a durable record without a live binding.
+                let saved = crate::window_registry::Registry { windows: vec![record("saved-label", &id)], ..Default::default() };
+                tracker = Arc::new(WindowTracker::new(path.clone(), saved));
+            }
+            tracker.register(record("control", "control-id"));
+            let control_wi = live_window(&keys, "control");
+            let control = page(&keys, "control", control_wi);
+            let build = keys.reserve_window("target").unwrap().with_stable_id(tracker.clone(), id.clone());
+            let wi = build.identity().1;
+            assert_eq!(tracker.id_for_label("target"), Some(id.clone()));
+            build.commit().unwrap();
+            let target = page(&keys, "target", wi);
+            let (reached, wait) = mpsc::channel();
+            let (release, gate) = mpsc::channel();
+            let publish = std::thread::spawn({ let tracker = tracker.clone(); let id = id.clone(); move || {
+                // Gate after successful native build, before final record update.
+                reached.send(()).unwrap();
+                gate.recv_timeout(Duration::from_secs(3)).unwrap();
+                tracker.publish_reserved(record("target", &id))
+            }});
+            wait.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert_eq!(keys.destroy_window("target", wi), vec![target]);
+            tracker.forget("target"); // The global Destroyed consumer's real ender.
+            assert_eq!(tracker.id_for_label("target"), None);
+            assert!(tracker.snapshot().windows.iter().all(|w| w.id != id));
+            if replacement {
+                let next = keys.reserve_window("target").unwrap().with_stable_id(tracker.clone(), "replacement-id".into());
+                next.commit().unwrap();
+                assert!(tracker.publish_reserved(record("target", "replacement-id")));
+            }
+            release.send(()).unwrap();
+            assert!(!publish.join().unwrap());
+            assert_eq!(tracker.id_for_label("target"), replacement.then(|| "replacement-id".into()));
+            assert!(tracker.snapshot().windows.iter().all(|w| w.id != id));
+            assert!(crate::window_registry::load(&path).windows.iter().all(|w| w.id != id));
+            assert_eq!(tracker.id_for_label("control").as_deref(), Some("control-id"));
+            assert!(is_live(&keys, control));
+            assert!(tracker.snapshot().windows.iter().any(|w| w.id == "control-id" && w.label == "control"));
+            let live = keys.reserve_window("positive").unwrap().with_stable_id(tracker.clone(), "positive-id".into());
+            live.commit().unwrap();
+            assert!(tracker.publish_reserved(record("positive", "positive-id")));
+            assert!(crate::window_registry::load(&path).windows.iter().any(|w| w.id == "positive-id" && w.label == "positive"));
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[test]
 fn native_session_builders_couple_prebind_to_commit_instead_of_binding_independently() {
     use crate::state::source_scan::{production, fn_body};
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -95,6 +152,11 @@ fn native_session_builders_couple_prebind_to_commit_instead_of_binding_independe
     let body = fn_body(&restore, "fn build_restored_window(");
     assert!(body.find(".with_stable_id(state.windows.clone(), record.id.clone())").unwrap() < body.find("builder.build()").unwrap());
     assert!(!fn_body(&restore, "pub(crate) fn restore_windows(").contains("tracker.bind(&label"));
+    assert!(fn_body(&commands, "pub fn record_new_window(").contains("state.windows.publish_reserved("));
+    let restore_windows = fn_body(&restore, "pub(crate) fn restore_windows(");
+    assert!(restore_windows.contains("tracker.publish_reserved(record)"));
+    assert!(!restore_windows.contains("tracker.register(record)"));
+    assert!(restore_windows.contains("tracker.register(slot0)"));
     let pages = production(&std::fs::read_to_string(root.join("state/host_keys/pages.rs")).unwrap());
     let rollback = fn_body(&pages, "fn drop(");
     assert!(rollback.find("drop(self.stable_id.take())").unwrap() < rollback.find("window_pages.cancel").unwrap());

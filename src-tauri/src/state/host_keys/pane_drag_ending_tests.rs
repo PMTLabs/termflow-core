@@ -19,7 +19,7 @@ fn publish(keys: &HostKeys, page: &Page, tx: &str, notices: &Notices) {
 
 #[test]
 fn terminal_drag_paths_publish_exact_ended_notice_and_preserve_unrelated_active_token() {
-    for ending in ["claim", "end", "close", "forced_close", "restash", "adopt", "cancel", "self_take", "staged_expiry", "taken_expiry", "destination_end", "source_end", "taken_source_end", "source_settle", "destination_settle"] {
+    for ending in ["claim", "end", "close", "forced_close", "api_process", "api_leaf", "fleet", "shared_delete", "restash", "adopt", "cancel", "self_take", "staged_expiry", "taken_expiry", "destination_end", "source_end", "taken_source_end", "source_settle", "destination_settle"] {
         for unrelated_active in [false, true] {
             let keys = HostKeys::default();
             let mut source = Page::new(&keys, "source");
@@ -48,6 +48,16 @@ fn terminal_drag_paths_publish_exact_ended_notice_and_preserve_unrelated_active_
                 "end" => assert_eq!(keys.end_pane_drag(source.label, source.pg, "a", false, |_| {}).unwrap(), !unrelated_active),
                 "close" => assert_eq!(source.op(&keys, PaneOp::Close { pi: a.pi }), PaneResult::Ok),
                 "forced_close" => assert_eq!(keys.close_process_reap("pc-a", false), (PaneResult::Ok, vec!["pc-a".into()])),
+                "api_process" | "api_leaf" | "fleet" | "shared_delete" => {
+                    let policy = if ending == "shared_delete" { CloseStorage::Delete } else { CloseStorage::Preserve };
+                    let reference = if ending == "api_leaf" { "tm-a" } else { "pc-a" };
+                    let target = crate::state::ingress::close_target(&keys, reference).unwrap();
+                    assert_eq!(target, "pc-a");
+                    assert!(crate::state::ingress::close(&keys, &target, policy, |pc| {
+                        assert_eq!(pc, "pc-a");
+                        assert!(keys.end_process(pc, EndKind::Close(policy), |leaf| assert_eq!(leaf, "tm-a")).is_some());
+                    }));
+                }
                 "restash" => assert_eq!(source.op(&keys, PaneOp::Stash { tx: "restashed".into(), pairs: vec![a], ui: None }), PaneResult::Ok),
                 "adopt" => {
                     let entered = destination.entry("tm-a", false);
