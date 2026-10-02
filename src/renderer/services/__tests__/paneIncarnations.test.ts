@@ -71,6 +71,50 @@ test('restoring enter carries its exact aliases and a replay registers only that
   expect(h.client.capture('tm-control')).toBe(control);
 });
 
+test('a leaf swap enters the restoring batch before either predecessor departs', async () => {
+  const h = harness();
+  const original = [{ ...a, restore: true, override: 'tb-key-a' }, { paneId: b.paneId, leaf: 'tm-b', restore: true, override: 'tb-key-b' }];
+  const sources = h.client.prepare(original);
+  h.client.observe(original);
+  await flush(); h.ack(0); await flush(); h.ack(1); await flush();
+  h.client.observe([{ paneId: a.paneId, leaf: 'tm-b' }, b]);
+  for (let index = 2; index < 6; index++) { await flush(); h.ack(index); }
+  await flush();
+  const nextA = h.client.capture('tm-a', b.paneId)!;
+  const nextB = h.client.capture('tm-b', a.paneId)!;
+  expect(h.applied.slice(2).map(request => request.op)).toEqual([
+    { kind: 'enter', panes: [{ paneId: a.paneId, leaf: 'tm-b', restore: true, override: 'tb-key-b', pi: await nextB }] },
+    { kind: 'enter', panes: [{ ...b, restore: true, override: 'tb-key-a', pi: await nextA }] },
+    { kind: 'depart', pi: await sources[0] },
+    { kind: 'depart', pi: await sources[1] },
+  ]);
+  h.client.setRestoreResolved(sources[0]);
+  expect(h.client.restoreKey(nextA)).toBe('tb-key-a');
+  expect(h.client.restoreKey(nextB)).toBe('tb-key-b');
+});
+
+test('restore hand-over excludes suppressed sources and resolution only clears the captured copy', async () => {
+  const h = harness();
+  const override = 'tb-legacy';
+  const [source] = h.client.prepare([{ ...a, restore: true, override }]);
+  h.client.observe([a]);
+  await flush(); h.ack(0); await flush();
+  const [replacement] = h.client.prepare([b]);
+  await flush(); h.ack(1); await flush();
+  expect(h.applied[1].op).toEqual({ kind: 'enter', panes: [{ ...b, restore: true, override, pi: await replacement }] });
+  const lateBind = h.client.bind(source, 'pc-old', 'restore');
+  await flush();
+  h.client.captureClose(a.leaf, a.paneId);
+  h.ack(2);
+  expect(await lateBind).toEqual({ status: 'Ok' });
+  expect(h.client.restoreKey(replacement)).toBe(override);
+  h.client.captureClose(b.leaf, b.paneId);
+  const [fresh] = h.client.prepare([{ paneId: 'pn-fresh', leaf: a.leaf }]);
+  await flush(); h.ack(3); await flush();
+  expect(h.applied[3].op).toEqual({ kind: 'enter', panes: [{ paneId: 'pn-fresh', leaf: a.leaf, pi: await fresh }] });
+  expect(h.client.restoreKey(fresh)).toBeUndefined();
+});
+
 test('a lost reply retries the same head sequence and applies it once before later ops', async () => {
   const h = harness();
   const first = h.client.send({ kind: 'enter', panes: [] });
@@ -373,6 +417,41 @@ test('staging a waiting pane suppresses depart and cancel reenters a fresh sourc
   expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'stash', 'cancel', 'enter']);
 });
 
+test('a restored pane whose restore completed is staged with the descriptor it entered with', async () => {
+  const h = harness();
+  const override = 'tb-key-a';
+  const [pi] = h.client.prepare([{ ...a, restore: true, override }]);
+  h.client.observe([a]);
+  await flush(); h.ack(0); await flush();
+  const bound = h.client.bind(pi, 'pc-a', 'restore');
+  await flush(); h.ack(1); await flush();
+  expect(await bound).toEqual({ status: 'Ok' });
+  expect(h.client.restoreKey(pi)).toBeUndefined();
+
+  const staging = h.client.stash('tx-done', [a]); await flush(); h.ack(2); await staging;
+  expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'bind', 'stash']);
+  const entered = (h.applied[0].op as { panes: unknown[] }).panes;
+  expect((h.applied[2].op as { pairs: unknown[] }).pairs).toEqual(entered);
+});
+
+test('a replacement for a leaf whose restore completed does not inherit the restore, one still waiting does', async () => {
+  const h = harness();
+  const original = [{ ...a, restore: true, override: 'tb-key-a' }, { paneId: 'pn-c', leaf: 'tm-c', restore: true, override: 'tb-key-c' }];
+  const [done] = h.client.prepare(original);
+  h.client.observe(original);
+  await flush(); h.ack(0); await flush(); h.ack(1); await flush();
+  const bound = h.client.bind(done, 'pc-a', 'restore');
+  await flush(); h.ack(2); await flush();
+  expect(await bound).toEqual({ status: 'Ok' });
+
+  const [afterDone, afterWaiting] = h.client.prepare([b, { paneId: 'pn-d', leaf: 'tm-c' }]);
+  await flush(); h.ack(3); await flush(); h.ack(4); await flush();
+  expect(h.applied[3].op).toEqual({ kind: 'enter', panes: [{ ...b, pi: await afterDone }] });
+  expect(h.applied[4].op).toEqual({ kind: 'enter', panes: [{ paneId: 'pn-d', leaf: 'tm-c', restore: true, override: 'tb-key-c', pi: await afterWaiting }] });
+  expect(h.client.restoreKey(afterDone)).toBeUndefined();
+  expect(h.client.restoreKey(afterWaiting)).toBe('tb-key-c');
+});
+
 test('a business pending admission advances the stream and retries admission without a hold-free spawn', async () => {
   const h = harness();
   const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };
@@ -474,7 +553,7 @@ test('a late creation cannot bind a different pane copy now displaying the same 
   expect(h.gates.calls('create_admitted_terminal')).toHaveLength(1);
   tree = { id: b.paneId, type: 'terminal', terminalId: b.leaf };
   h.client.observe([b]); await flush(); h.ack(2); await flush(); h.ack(3); await flush();
-  expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'admit_create', 'depart', 'enter']);
+  expect(h.applied.map(call => call.op.kind)).toEqual(['enter', 'admit_create', 'enter', 'depart']);
   h.gates.release('create_admitted_terminal', 0, 'pc-old-copy');
   expect(await creating).toBe('');
   expect(service.getProcessId(a.leaf)).toBeUndefined();
