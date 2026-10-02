@@ -27,6 +27,25 @@ fn native_broker_build_and_wait_wrappers_require_page_qualification_outside_the_
     let window = production(include_str!("../commands/window.rs"));
     let build = fn_body(&window, "fn create_detached_window(");
     assert!(build.find("verify_transfer_source(window.label(), pg, &token)").unwrap() < build.find("builder.build()").unwrap());
+    let native_probe = build
+        .find(".is_visible()")
+        .expect("verify the async native build result");
+    let build_call = build.find("builder.build()").unwrap();
+    let commit = build.find("window_lifetime::commit(build, &window)").unwrap();
+    assert!(build_call < native_probe && native_probe < commit);
+    // The probe must ask the window `build()` just returned, not another handle
+    // (a clone of the source window would answer for a destination that failed).
+    let receiver = build[..native_probe].trim_end();
+    assert!(
+        receiver.ends_with("window")
+            && receiver[..receiver.len() - "window".len()].ends_with(char::is_whitespace),
+        "the native probe must be called on `window` itself"
+    );
+    assert!(
+        build[native_probe..commit].contains(
+            ".map_err(|e| format!(\"detached window webview failed to initialize: {e}\"))?;"
+        )
+    );
     assert!(build.contains("watch_transfer(window.label(), pg, &token)"));
     assert!(build.contains("transfer_taken(taken).await"));
     assert!(!build.contains("if let Some(pg)"));
