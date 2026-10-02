@@ -462,6 +462,12 @@ pub async fn create_detached_window(
     let build = reserve_window_id(&app_handle, build)?;
     let reserved = build.stable_id().map(str::to_string);
     let window = builder.build().map_err(|e| e.to_string())?;
+    // Wry's native CreateWindow result is asynchronous: `build()` can return a
+    // handle even when the event loop later logs and drops the webview. Verify
+    // before waiting for the pane transfer so the renderer can roll it back.
+    window
+        .is_visible()
+        .map_err(|e| format!("detached window webview failed to initialize: {e}"))?;
     crate::window_lifetime::commit(build, &window)?;
     crate::context_menu::install(&window);
     crate::webview_recovery::install(&window);

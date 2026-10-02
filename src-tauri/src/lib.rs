@@ -57,6 +57,7 @@ mod tray;
 mod relaunch;
 mod window_restore;
 mod window_lifetime;
+mod startup_failure;
 
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
@@ -76,6 +77,40 @@ pub(crate) use output_pipeline::{spawn_output_consumer, spawn_pipeline_watchdog}
 pub(crate) use history_flush::{flush_all_history, history_db_path, spawn_history_flush_task};
 pub(crate) use tray::build_tray;
 pub(crate) use window_restore::{restore_windows, show_or_focus_main_window};
+
+fn exit_after_main_window_creation_failure(app: &tauri::AppHandle, error: impl std::fmt::Display) {
+    let startup_failure::MainWindowFailureAction::ExitPreservingPtyHosts { exit_code } =
+        startup_failure::main_window_failure_action();
+    log::error!(
+        "Main window webview creation failed: {error}. Exiting with status {exit_code}; existing PTY hosts and shells will be preserved."
+    );
+    startup_failure::request_exit_code(exit_code);
+    app.exit(exit_code);
+}
+
+/// Check the native creation result after the configured window request has been
+/// processed by Wry. The Tauri wrapper exists before that asynchronous request
+/// succeeds; a runtime window query is the first operation that can distinguish
+/// a successful native window from Wry's logged-and-dropped creation failure.
+fn schedule_main_window_creation_probe(app: &tauri::AppHandle, headless: bool) {
+    if headless {
+        return;
+    }
+
+    let Some(main) = app.get_webview_window("main") else {
+        exit_after_main_window_creation_failure(
+            app,
+            "Tauri did not register the configured main window",
+        );
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = main.is_visible() {
+            exit_after_main_window_creation_failure(&app, error);
+        }
+    });
+}
 
 /// Gracefully shutdown the MCP server process
 /// Whether an MCP sidecar/legacy process is currently held.
@@ -876,6 +911,10 @@ pub fn run() {
         // Terminal Automations (plan 028 §2.1): the tap, the evaluator and the targeting tick.
         automation_engine::spawn(state.clone());
 
+        // Runtime-level webview build errors are logged by Wry but do not abort the run loop.
+        // Probe after setup so a missing main window releases the instance lock and record.
+        schedule_main_window_creation_probe(app.handle(), is_headless);
+
         Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -1214,6 +1253,15 @@ pub fn run() {
             // which is why readers treat a dead pid as stale rather than trusting
             // the file's existence.
             crate::net_ports::retract(&crate::profile::current().key());
+            // The runtime exits with status 0 whatever `exit(code)` was given, so a
+            // startup failure that asked for a non-zero status applies it here, after
+            // the cleanup above has run.
+            if let Some(code) = startup_failure::requested_exit_code() {
+                // Tauri runs this itself once the callback returns; do it here so
+                // the tray icon and window resources are released before the exit.
+                app_handle.cleanup_before_exit();
+                std::process::exit(code);
+            }
         }
     });
 }
