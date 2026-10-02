@@ -751,6 +751,7 @@ pub fn run() {
                         api_net.mcp_port,
                         crate::net_ports::DEFAULT_SPAN,
                         &api_state.instance_id,
+                        &[api_port],
                     )
                     .await;
 
