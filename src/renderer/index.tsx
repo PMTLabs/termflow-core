@@ -35,6 +35,16 @@ if (isTauri) {
 
   console.log('Running in Tauri mode - loading Tauri Bridge...');
   require('./api/tauri-bridge');
+  const { PaneIncarnations, installPaneIncarnations } = require('./services/paneIncarnations');
+  const incarnations = new PaneIncarnations(invoke, () => {
+    (window as any).__REDUX_STORE__?.dispatch({ type: 'ui/addToast', payload: {
+      type: 'warning', message: 'Terminal ownership updates are not reaching the backend. Retry without closing your shells.',
+    } });
+  });
+  installPaneIncarnations(incarnations);
+  incarnations.start();
+  window.addEventListener('beforeunload', () => incarnations.stop(), { once: true });
+  window.addEventListener('pane:resync', () => incarnations.resync());
 
   // Plan 045: resolve once whether this window can offer "Open admin Tab" at
   // all (Windows, not already elevated, sidecar enabled, not killed). Cached

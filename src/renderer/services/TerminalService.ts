@@ -1,3 +1,4 @@
+import { paneIncarnations, accepted, describePanes, type PaneCapture, type CreateMode, type PaneIncarnations } from './paneIncarnations';
 import { termDiag } from '../utils/diag';
 import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
 import type { PaneNode } from '../store/slices/panesSlice';
@@ -42,13 +43,10 @@ export class TerminalServiceClass {
   // object stayed in the source window's heap). Consumed once by TerminalDisplay
   // as `initialKeyboardProtocol`, same lifecycle as promptGateHandoff.
   private keyboardProtocolHandoff: Map<string, KeyboardProtocolStateData> = new Map();
-  // Single-flight guard keyed by leaf (terminalId): a re-entrant restart/create
-  // for the same leaf (e.g. a double Restart click or Ctrl+R key-repeat while
-  // `closedInfo` is still set — review 109 H1) must not reach the backend twice,
-  // since two spawns for one leaf register two `Terminal` rows under the same
-  // `renderer_terminal_id`, breaking the PRIMARY KEY invariant. Cleared in a
-  // `finally` so a failed create does not permanently poison the leaf.
-  private inFlightCreates: Map<string, Promise<string>> = new Map();
+  // Double Restart clicks share a promise, but a different pane copy must still
+  // ask for its own admission. Older backends retain the leaf-keyed guard.
+  // Cleared in finally so a failed create never poisons the next attempt.
+  private inFlightCreates = new Map<string | PaneCapture, { terminalId: string; promise: Promise<string> }>();
   // Leaves closed (not moved) in THIS window while their create was in flight. A create
   // that comes back for a leaf this window no longer has closes the new shell instead of
   // offering it to another window when the user closed the pane here. A close in any
@@ -61,6 +59,7 @@ export class TerminalServiceClass {
     private readonly paneTrees: () => Record<string, PaneNode | null> =
       () => (window as any).__REDUX_STORE__?.getState().panes.treesByTabId ?? {},
     private readonly api: () => typeof window.electronAPI = () => window.electronAPI,
+    private readonly incarnations: () => PaneIncarnations = () => paneIncarnations,
   ) {
     // Initialize listeners immediately and synchronously
     this.initializeListeners();
@@ -157,13 +156,17 @@ export class TerminalServiceClass {
     /** Plan 045: spawn this pane against the UAC-elevated sidecar instead of
      *  the primary one. Undefined/false for every ordinary pane. */
     elevated?: boolean,
+    mode: CreateMode = 'Mount',
+    paneId?: string,
   ): Promise<string> {
-    // Re-entrant call for the same leaf while a create is already pending:
-    // return the SAME in-flight promise instead of starting a second spawn.
-    const pending = this.inFlightCreates.get(terminalId);
+    // Re-entrant calls for this copy share the pending placement, not another copy's authority.
+    const protocol = this.incarnations();
+    const createKey = protocol.enabled ? this.capturePane(terminalId, paneId) ?? terminalId : terminalId;
+    const pending = this.inFlightCreates.get(createKey)
+      ?? (!protocol.enabled ? [...this.inFlightCreates.values()].find(entry => entry.terminalId === terminalId) : undefined);
     if (pending) {
       console.log(`TerminalService: Create already in flight for ${terminalId}, reusing pending promise`);
-      return pending;
+      return pending.promise;
     }
     // A close recorded for an earlier create of this leaf says nothing about this one.
     this.closedWhileCreating.delete(terminalId);
@@ -174,17 +177,17 @@ export class TerminalServiceClass {
     // routed as `false`; only the pane-tree marker can opt into elevation.
     const createPromise = this.createTerminalWithRetry(
       terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey,
-      elevated === true,
+      elevated === true, mode, paneId, typeof createKey === 'string' ? undefined : createKey,
     );
-    this.inFlightCreates.set(terminalId, createPromise);
+    this.inFlightCreates.set(createKey, { terminalId, promise: createPromise });
     try {
       return await createPromise;
     } finally {
       // Only clear if we're still the current entry (guards against a later
       // caller having already replaced it, though callers always await before
       // starting a new one so this is effectively always true).
-      if (this.inFlightCreates.get(terminalId) === createPromise) {
-        this.inFlightCreates.delete(terminalId);
+      if (this.inFlightCreates.get(createKey)?.promise === createPromise) {
+        this.inFlightCreates.delete(createKey);
         this.closedWhileCreating.delete(terminalId);
       }
     }
@@ -204,6 +207,7 @@ export class TerminalServiceClass {
   private async createTerminalWithRetry(
     terminalId: string, shellType: string, name?: string, cwd?: string,
     cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean,
+    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture,
   ): Promise<string> {
     let hostDeadline: number | undefined;
     let lifecycleDeadline: number | undefined;
@@ -211,6 +215,8 @@ export class TerminalServiceClass {
     let firstAttempt = true;
     this.setHostWaitState(terminalId, undefined);
     while (true) {
+      if (this.incarnations().ended
+          || (this.incarnations().enabled && this.incarnations().capture(terminalId, paneId) !== pi)) return '';
       // A move is not a close. Only this webview's trees may authorize its next attempt.
       const owner = findTabIdByTerminalId(this.paneTrees(), terminalId);
       if (!owner) {
@@ -221,11 +227,13 @@ export class TerminalServiceClass {
       firstAttempt = false;
       try {
         const pid = await this.createTerminalInner(
-          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated,
+          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi,
         );
         this.setHostWaitState(terminalId, undefined);
         return pid;
       } catch (error) {
+        if (this.incarnations().ended
+            || (this.incarnations().enabled && this.incarnations().capture(terminalId, paneId) !== pi)) return '';
         // An attempt can be in flight when the pane moves away. Whatever it
         // reports, this window no longer has a pane to report it to.
         if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
@@ -235,7 +243,7 @@ export class TerminalServiceClass {
         // The other side of that move: the window the pane left won the session
         // while this window's own create was refused, and offers it to whichever
         // window has the pane now. Only a contention can mean that.
-        if (isHostSessionContended(error)) {
+        if (isHostSessionContended(error) && !this.incarnations().enabled) {
           const adopted = await this.takeOfferedSession(terminalId);
           if (adopted !== undefined) {
             this.setHostWaitState(terminalId, undefined);
@@ -317,6 +325,8 @@ export class TerminalServiceClass {
    * windows holding one shell.
    */
   private async releaseAbsentCreate(terminalId: string, processId: string): Promise<void> {
+    // Ownership follows the pane/transfer in the backend, even if placement finishes later.
+    if (this.incarnations().enabled || this.incarnations().ended) return;
     if (this.closedWhileCreating.has(terminalId)) {
       console.log(`TerminalService: ${terminalId} was closed during its create; closing process ${processId}`);
       try {
@@ -344,6 +354,7 @@ export class TerminalServiceClass {
     owningTabId?: string,
     sessionKey?: string,
     elevated: boolean = false,
+    mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture,
   ): Promise<string> {
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
@@ -364,11 +375,34 @@ export class TerminalServiceClass {
 
       // Call IPC to create actual PTY process
       console.log(`TerminalService: Calling electronAPI.createTerminal with profileId: "${shellType}", cwd: "${cwd}", tabId: "${terminalId}"`);
-      const processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+      let processId: string;
+      const protocol = this.incarnations();
+      let admission: Awaited<ReturnType<PaneIncarnations['admit']>> = { status: 'Inert' };
+      if (protocol.enabled) {
+        if (!attemptPi) throw new Error('host-session-contended: pane copy is not present');
+        admission = await protocol.admit(attemptPi, mode);
+      }
+      if (admission.status === 'Inert') {
+        processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+      } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
+        processId = admission.pc;
+      } else if (admission.status === 'Create' || admission.status === 'Join') {
+        const created = await protocol.create(admission.cg, {
+          leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
+        });
+        if (protocol.ended) return '';
+        processId = created ?? await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+      } else if (admission.status === 'Retry' || admission.status === 'Pending') {
+        throw new Error('LIFECYCLE_BUSY: placement is pending');
+      } else {
+        throw new Error('host-session-contended: pane copy does not own this shell');
+      }
       console.log(`TerminalService: Got process ID ${processId} for terminal ${terminalId} with shell type "${shellType}"`);
 
       // The pane may have left this window while this create was in flight.
-      if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
+      if (protocol.ended) return '';
+      if (!findTabIdByTerminalId(this.paneTrees(), terminalId)
+          || (protocol.enabled && protocol.capture(terminalId, paneId) !== attemptPi)) {
         await this.releaseAbsentCreate(terminalId, processId);
         return '';
       }
@@ -466,14 +500,39 @@ export class TerminalServiceClass {
     }
   }
 
-  async closeTerminal(terminalId: string): Promise<void> {
+  capturePane(terminalId: string, paneId?: string): PaneCapture | undefined {
+    const protocol = this.incarnations();
+    const captured = protocol.capture(terminalId, paneId);
+    if (captured) return captured;
+    const panes = Object.values(this.paneTrees()).flatMap(tree => describePanes(tree));
+    const pane = panes.find(p => p.leaf === terminalId && (!paneId || p.paneId === paneId));
+    return pane ? protocol.prepare([pane])[0] : undefined;
+  }
+
+  async authorizeExisting(terminalId: string, processId: string, paneId?: string): Promise<boolean> {
+    const protocol = this.incarnations();
+    if (!protocol.enabled) return true;
+    const pi = this.capturePane(terminalId, paneId);
+    return !!pi && accepted(await protocol.bind(pi, processId, 'restore'));
+  }
+
+  async closeTerminal(terminalId: string, captured?: PaneCapture | PaneCapture[]): Promise<void> {
     console.log(`TerminalService: closeTerminal called for ${terminalId}`);
+    const protocol = this.incarnations();
+    if (protocol.ended) return;
+    const pi = captured ?? protocol.captureClose(terminalId);
+    const pis = Array.isArray(pi) ? pi : pi ? [pi] : [];
+    // Queue every copy before any await: a tab can hold several copies of one leaf.
+    const closing = Promise.all(pis.map(copy => protocol.close(copy)));
     const process = this.processes.get(terminalId);
+    const results = protocol.enabled ? await closing : [{ status: 'Inert' } as const];
+    const ownedClose = results.every(result => result.status !== 'Inert');
+    if (ownedClose && !results.some(accepted)) return;
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
-      if (this.inFlightCreates.has(terminalId)) this.closedWhileCreating.add(terminalId);
+      if (!ownedClose && [...this.inFlightCreates.values()].some(entry => entry.terminalId === terminalId)) this.closedWhileCreating.add(terminalId);
       try {
-        await this.api().forgetRestoringLeaf(terminalId);
+        if (!ownedClose) await this.api().forgetRestoringLeaf(terminalId);
       } catch (error) {
         // The pane is closing either way; a failed notification must not keep it
         // in its wait state or turn a close that used to be a no-op into a rejection.
@@ -485,7 +544,8 @@ export class TerminalServiceClass {
 
     console.log(`TerminalService: Found process ${process.id} for terminal ${terminalId}, calling electronAPI.closeTerminal`);
     try {
-      await window.electronAPI.closeTerminal(process.id);
+      if (!ownedClose) await this.api().closeTerminal(process.id);
+      if (this.processes.get(terminalId) !== process) return;
       this.processes.delete(terminalId);
       // Forget this terminal's per-pane zoom so closed terminals don't pile up in
       // the zoom slice. Moves use detachTerminal (which keeps the entry so zoom

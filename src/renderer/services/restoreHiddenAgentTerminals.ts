@@ -22,6 +22,7 @@ import { Dispatch } from '@reduxjs/toolkit';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { addTabTree, setActiveTabId, focusPane } from '../store/slices/panesSlice';
 import { generateId } from '../utils/id';
+import { paneIncarnations, accepted } from './paneIncarnations';
 import { terminalService } from './TerminalService';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import {
@@ -126,6 +127,15 @@ export async function restoreHiddenAgentTerminals(
       continue;
     }
 
+    const tabId = generateId('tb');
+    const paneId = generateId('pn');
+    const [pi] = paneIncarnations.prepare([{ paneId, leaf: candidate.terminalId, restore: true }]);
+    if (paneIncarnations.enabled && !accepted(await paneIncarnations.bind(pi, liveProcessId, 'restore'))) {
+      await paneIncarnations.depart(pi);
+      skipped.push(candidate);
+      continue;
+    }
+
     // Bind BEFORE the pane exists. `attachExistingTerminal` seeds the init
     // guards that `TerminalPane`'s mount effect reads to decide whether to
     // reuse a live PTY or create one; dispatching the tab first would let that
@@ -142,9 +152,6 @@ export async function restoreHiddenAgentTerminals(
     // The PTY predates this pane, so Win32-Input-Mode has to be re-seeded — the
     // same reason `reconcileExistingTerminals` calls this on every reattach.
     terminalService.markReattachedSession(candidate.terminalId);
-
-    const tabId = generateId('tb');
-    const paneId = generateId('pn');
 
     // `addTab` and `addTabTree` in ONE synchronous block, never split across an
     // await: a tab that is renderable without its tree makes TerminalContainer's

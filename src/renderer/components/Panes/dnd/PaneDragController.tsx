@@ -16,6 +16,8 @@ import {
   newDetachToken,
   removeSourcePane,
   applyCrossWindowPayload,
+  stageDetachPayload,
+  cancelDetachTransfer,
 } from './detach';
 import './dnd.css';
 
@@ -192,7 +194,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const api = window.electronAPI;
       if (!token || !api?.claimGlobalPaneDrag) return;
       api.claimGlobalPaneDrag(token).then((payload) => {
-        if (payload) applyCrossWindowPayload(payload, x, y);
+        if (payload) return applyCrossWindowPayload(payload, x, y, token);
       }).catch((err) => console.error('claimGlobalPaneDrag failed', err));
     };
     window.addEventListener('pointermove', onTargetMove, true);
@@ -268,10 +270,11 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         // `s.sourceTabId` so a pane dropped into another WINDOW keeps its group colour, exactly
         // as `detachPaneToNewWindow` does. Both callers build the same payload; a colour passed
         // by only one of them would depend on how the pane happened to leave the window.
-        void api.beginGlobalPaneDrag(
-          token,
-          buildPaneDetachPayload(leaf, { x: e.clientX, y: e.clientY }, s.sourceTabId),
-        );
+        const payload = buildPaneDetachPayload(leaf, { x: e.clientX, y: e.clientY }, s.sourceTabId);
+        void stageDetachPayload(token, payload).then(() => api.beginGlobalPaneDrag!(token, payload)).catch(async error => {
+          await cancelDetachTransfer(token);
+          console.error('Could not stage pane drag', error);
+        });
       }
 
       const target = outsideWindow ? null : resolveTarget(x, y);
@@ -321,13 +324,16 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             // If a window already claimed it, globalSourceRef was cleared by the
             // pane-drag:claimed/ended listeners — nothing to do.
             if (globalSourceRef.current?.token !== token) return;
-            api.resolveOrphanGlobalDrag!(token).then((orphan) => {
+            api.resolveOrphanGlobalDrag!(token).then(async (orphan) => {
               if (orphan) {
-                void api.createDetachedWindow?.(token, sx, sy);
+                await api.createDetachedWindow?.(token, sx, sy);
                 removeSourcePane(sourceTabId, sourcePaneId, [terminalId]);
                 globalSourceRef.current = null;
               }
-            }).catch((err) => console.error('resolveOrphanGlobalDrag failed', err));
+            }).catch(async (err) => {
+              await cancelDetachTransfer(token);
+              console.error('resolveOrphanGlobalDrag failed', err);
+            });
           }, ORPHAN_DELAY_MS);
         } else if (!gs) {
           // No broker (not under Tauri): best-effort direct detach to a new window.
@@ -340,7 +346,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         }
       } else if (wasDragging) {
         commitDrop();
-        if (gs) void window.electronAPI?.cancelGlobalPaneDrag?.(gs.token);
+        if (gs) void cancelDetachTransfer(gs.token).then(() => window.electronAPI?.cancelGlobalPaneDrag?.(gs.token));
         globalSourceRef.current = null;
       }
       reset();
@@ -349,7 +355,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         const gs = globalSourceRef.current;
-        if (gs) void window.electronAPI?.cancelGlobalPaneDrag?.(gs.token);
+        if (gs) void cancelDetachTransfer(gs.token).then(() => window.electronAPI?.cancelGlobalPaneDrag?.(gs.token));
         globalSourceRef.current = null;
         reset();
       }

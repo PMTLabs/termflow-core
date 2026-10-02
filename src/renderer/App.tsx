@@ -1,3 +1,4 @@
+import { paneIncarnations } from './services/paneIncarnations';
 import React, { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
@@ -542,7 +543,8 @@ const App: React.FC = () => {
     // StateManager has finished restoring this window's complete persisted pane
     // tree. Report completion so Rust can release this window from the sweep.
     try {
-      await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label);
+      const settled = await paneIncarnations.send({ kind: 'settle' });
+      if (settled.status === 'Inert') await window.electronAPI?.reportHostRestoreSettled?.(getCurrentWindow().label);
     } catch (error) {
       console.warn('Failed to report host restore completion:', error);
     }

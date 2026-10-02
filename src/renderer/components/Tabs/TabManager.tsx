@@ -1,3 +1,4 @@
+import { paneIncarnations, describePanes } from '../../services/paneIncarnations';
 import React, { useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { store, RootState, AppDispatch } from '../../store';
@@ -579,9 +580,13 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     // every tab rather than only API-created ones (no root leaf is the tab's
     // own id any more). Believed unreachable: the tree is seeded synchronously
     // before a tab is closable, per App.tsx / TerminalContainer.tsx.
-    for (const terminalId of collectTabCloseTerminalIds(paneTree ?? null, id)) {
+    for (const terminalId of new Set(collectTabCloseTerminalIds(paneTree ?? null, id))) {
       console.log(`TabManager: Closing terminal ${terminalId} of tab ${id}`);
-      terminalService.closeTerminal(terminalId).catch((error) => {
+      const panes = describePanes(paneTree ?? null).filter(pane => pane.leaf === terminalId);
+      const captures = panes.map(pane => paneIncarnations.captureClose(terminalId, pane.paneId))
+        .filter((pi): pi is NonNullable<typeof pi> => !!pi);
+      const pi = captures.length > 1 ? captures : captures[0] ?? paneIncarnations.captureClose(terminalId);
+      terminalService.closeTerminal(terminalId, pi).catch((error) => {
         // Non-fatal (process may already be gone) but never silent: a failed
         // backend close with a removed tab = invisible orphaned PTY.
         console.warn(`TabManager: closeTerminal(${terminalId}) failed:`, error);

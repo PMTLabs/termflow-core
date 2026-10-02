@@ -9,7 +9,10 @@
  * __tests__/paneClose.test.ts).
  */
 
+import { paneIncarnations, type PaneCapture } from './paneIncarnations';
+
 export interface ClosePaneDeps {
+  paneId?: string;
   /** The pane's terminal id, already resolved from the pane tree — or null if
    *  the pane has no terminal (defensive; should not normally happen). */
   terminalId: string | null;
@@ -17,7 +20,7 @@ export interface ClosePaneDeps {
    *  that makes the pane disappear immediately. */
   removeFromUi: () => void;
   /** Backend PTY teardown. Never awaited by this helper — fire-and-forget. */
-  closeTerminal: (terminalId: string) => Promise<void>;
+  closeTerminal: (terminalId: string, pi?: PaneCapture) => Promise<void>;
   /** Drops the terminal's cwd snapshot. Called synchronously, matching the
    *  existing comment in TerminalPane.tsx's pty:exit handler: performClose
    *  clears the snapshot synchronously so a late write from the (now
@@ -66,6 +69,8 @@ export function closePaneNonBlocking(deps: ClosePaneDeps): void {
     terminalId, removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface, clearSessionExit,
   } = deps;
 
+  // The differ must see a close, not a disappearance. Capture while this copy still exists.
+  const pi = terminalId ? paneIncarnations.captureClose(terminalId, deps.paneId) : undefined;
   // Remove the pane from the UI immediately — do not wait on the backend.
   removeFromUi();
 
@@ -90,7 +95,7 @@ export function closePaneNonBlocking(deps: ClosePaneDeps): void {
   // Fire-and-forget: the backend PTY kill can take multiple seconds and must
   // never block the pane's disappearance. Errors are logged, not thrown —
   // there is no UI left waiting on this by the time it settles.
-  closeTerminal(terminalId).catch((error) => {
+  (pi ? closeTerminal(terminalId, pi) : closeTerminal(terminalId)).catch((error) => {
     console.error(`Failed to close terminal for pane (terminalId=${terminalId}):`, error);
   });
 }

@@ -1,3 +1,4 @@
+import { paneIncarnations } from '../../services/paneIncarnations';
 import React, { useRef, useEffect, useState, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { TerminalDisplay } from '../Terminal/TerminalDisplay';
@@ -207,31 +208,36 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // id, so it still falls through and creates its own process below.
     const existingProcessId = terminalService.getProcessId(terminalId);
     if (existingProcessId) {
-      console.log(`TerminalPane: Terminal ${terminalId} already has process ${existingProcessId}, reusing`);
-      // Design 006 (review 008 M-1): a reconcile-reattached hooked shell got the
-      // safe DISARMED baseline at fetch time; sample the bare-prompt answer NOW,
-      // immediately before the engine mounts, and refresh the gate handoff — a
-      // child that appeared since the reconcile fetch stays disarmed. Marker is
-      // single-use, so ordinary same-session remounts skip the probe entirely.
-      if (takeArmProbePending(terminalId)) {
-        void (async () => {
-          try {
-            const seed = await window.electronAPI.probeReattachPromptGate?.(existingProcessId);
-            if (seed) {
-              terminalService.stashPromptGate(
-                terminalId,
-                reattachPromptGate(seed.promptHook, seed.atPrompt),
-              );
+      const reuse = () => {
+        console.log(`TerminalPane: Terminal ${terminalId} already has process ${existingProcessId}, reusing`);
+        // A fetch-time prompt answer can be stale by engine mount; sample the live shell
+        // again so an agent that started meanwhile does not leak into command history.
+        if (takeArmProbePending(terminalId)) {
+          void (async () => {
+            try {
+              const seed = await window.electronAPI.probeReattachPromptGate?.(existingProcessId);
+              if (seed) {
+                terminalService.stashPromptGate(
+                  terminalId,
+                  reattachPromptGate(seed.promptHook, seed.atPrompt),
+                );
+              }
+            } catch (e) {
+              console.warn('TerminalPane: pre-mount arm probe skipped (baseline stays disarmed):', e);
+            } finally {
+              setProcessId(existingProcessId);
             }
-          } catch (e) {
-            console.warn('TerminalPane: pre-mount arm probe skipped (baseline stays disarmed):', e);
-          } finally {
-            setProcessId(existingProcessId);
-          }
-        })();
-      } else {
-        setProcessId(existingProcessId);
-      }
+          })();
+        } else {
+          setProcessId(existingProcessId);
+        }
+      };
+      if (paneIncarnations.enabled) {
+        void terminalService.authorizeExisting(terminalId, existingProcessId, paneId).then(allowed => {
+          if (allowed) reuse();
+          else setStartupFailed(true);
+        }).catch(() => setStartupFailed(true));
+      } else reuse();
       return;
     }
 
@@ -251,9 +257,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         const existingPromise = terminalInitPromises.get(terminalId);
         if (existingPromise) {
           console.log(`TerminalPane: Found initialization promise for ${terminalId}, waiting...`);
-          existingPromise.then(pid => {
+          existingPromise.then(async pid => {
             console.log(`TerminalPane: Reusing process ${pid} from existing promise`);
-            if (pid) setProcessId(pid);
+            if (!pid) return;
+            if (!paneIncarnations.enabled || await terminalService.authorizeExisting(terminalId, pid, paneId)) setProcessId(pid);
+            else setStartupFailed(true);
           }).catch(error => {
             if (isHostOwnershipPending(error)) setWaitingForHost('retry');
             else setStartupFailed(true);
@@ -310,7 +318,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const elevated = findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId);
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
-      sessionKey, elevated,
+      sessionKey, elevated, 'Mount', paneId,
     );
     terminalInitPromises.set(terminalId, initPromise);
     terminalInitMap.set(terminalId, true);
@@ -601,6 +609,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // Administrator-badged tab to a medium shell — the plan's flagged
         // "single most likely silent defect".
         findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId),
+        'Restart', paneId,
       );
       if (!newPid) return;
       // The engine re-attaches to the new process when processId changes below.

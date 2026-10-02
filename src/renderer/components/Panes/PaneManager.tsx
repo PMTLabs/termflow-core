@@ -93,6 +93,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
 
     closePaneNonBlocking({
       terminalId,
+      paneId,
       // Remove the pane from the tab that OWNS it, not from whichever tab is active.
       //
       // `closePane` mutates `state.paneTree` — the active tab's tree — but this component
@@ -106,7 +107,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       removeFromUi: () => dispatch(
         tabId ? removePaneFromTab({ tabId, paneId }) : closePane(paneId),
       ),
-      closeTerminal: (id) => terminalService.closeTerminal(id),
+      closeTerminal: (id, pi) => terminalService.closeTerminal(id, pi),
       clearCwdSnapshot,
       releaseSurface: cleanupTerminalCache,
       clearSessionExit: (id) => dispatch(clearSessionClosed({ terminalId: id })),
