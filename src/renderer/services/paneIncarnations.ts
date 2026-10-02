@@ -245,18 +245,29 @@ export class PaneIncarnations {
   /** Call before installing a normal pane. Transfer entries are made only by adopt. */
   prepare(panes: PaneDescriptor[]): PaneCapture[] {
     let changed = false;
-    const captures = panes.map(descriptor => {
+    const restoring = [...this.slots.values()].filter(slot => !slot.suppressed && slot.descriptor.restore);
+    const descriptors = panes.map(descriptor => {
+      const predecessor = restoring.find(slot => slot.descriptor.leaf === descriptor.leaf);
+      return !descriptor.restore && predecessor
+        ? { ...descriptor, restore: true, override: predecessor.descriptor.override ?? descriptor.override }
+        : descriptor;
+    });
+    const retired: Slot[] = [];
+    const captures = descriptors.map(descriptor => {
       const old = this.slots.get(descriptor.paneId);
       if (old && old.descriptor.leaf === descriptor.leaf && !old.suppressed) return old.pi;
-      if (old) {
-        retireTerminalInitGuards(old.pi);
-        if (!old.suppressed) void this.depart(old.pi);
-      }
       const pi = this.mint();
       this.slots.set(descriptor.paneId, { descriptor, pi, suppressed: false, installed: this.observed.has(descriptor.paneId) });
       changed = true;
       void this.send(async () => ({ kind: 'enter', panes: [{ ...descriptor, pi: await pi }] }));
+      if (old) retired.push(old);
       return pi;
+    });
+    // A swap can replace several node ids: enter the whole batch before any old
+    // copy leaves, so each leaf's successor already has its own holder.
+    retired.forEach(old => {
+      retireTerminalInitGuards(old.pi);
+      if (!old.suppressed) void this.depart(old.pi);
     });
     if (changed) this.changed();
     return captures;
@@ -274,6 +285,16 @@ export class PaneIncarnations {
       return slot?.descriptor.leaf === leaf ? slot.pi : undefined;
     }
     return [...this.slots.values()].find(slot => slot.descriptor.leaf === leaf && !slot.suppressed)?.pi;
+  }
+
+  restoreKey(pi: PaneCapture): string | undefined {
+    return [...this.slots.values()].find(slot => slot.pi === pi && !slot.suppressed && slot.descriptor.restore)?.descriptor.override;
+  }
+
+  setRestoreResolved(pi: PaneCapture): void {
+    for (const slot of this.slots.values()) {
+      if (slot.pi === pi && !slot.suppressed) slot.descriptor = { ...slot.descriptor, restore: false };
+    }
   }
 
   isSuppressed(pi: PaneCapture): boolean {
@@ -299,8 +320,10 @@ export class PaneIncarnations {
     return this.send(async () => ({ kind: 'depart', pi: await pi }));
   }
 
-  bind(pi: PaneCapture, pc: string, via: BindVia): Promise<PaneResult> {
-    return this.send(async () => ({ kind: 'bind', pi: await pi, pc, via }));
+  async bind(pi: PaneCapture, pc: string, via: BindVia): Promise<PaneResult> {
+    const result = await this.send(async () => ({ kind: 'bind', pi: await pi, pc, via }));
+    if (accepted(result)) this.setRestoreResolved(pi);
+    return result;
   }
 
   admit(pi: PaneCapture, mode: CreateMode): Promise<PaneResult> {
@@ -332,6 +355,9 @@ export class PaneIncarnations {
       this.staged.delete(tx);
       this.stagedCaptures.delete(tx);
     }
+    // Prepare from the still-present descriptors, just as transfer adoption carries them.
+    // FIFO Enter precedes Depart, so even an unanswered listing never sees a holder gap.
+    this.prepare(panes.filter(pane => this.slots.get(pane.paneId)?.descriptor.leaf !== pane.leaf));
     for (const [id, slot] of this.slots) {
       if (current.get(id)?.leaf === slot.descriptor.leaf) { slot.installed = true; continue; }
       if (!slot.installed) continue;
@@ -339,7 +365,6 @@ export class PaneIncarnations {
       retireTerminalInitGuards(slot.pi);
       if (!slot.suppressed) void this.depart(slot.pi);
     }
-    this.prepare(panes.filter(pane => !this.slots.has(pane.paneId)));
     this.changed();
   }
 

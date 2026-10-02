@@ -157,7 +157,8 @@ export class TerminalServiceClass {
     // that failed to carry its flag.  Every non-admin pane is deliberately
     // routed as `false`; only the pane-tree marker can opt into elevation.
     const createPromise = this.createTerminalWithRetry(
-      terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey,
+      terminalId, shellType, name, cwd, cols, rows, owningTabId,
+      sessionKey ?? (typeof createKey === 'string' ? undefined : protocol.restoreKey(createKey)),
       elevated === true, mode, paneId, typeof createKey === 'string' ? undefined : createKey,
       protocol.enabled ? [...this.inFlightCreates.entries()].find(([key, entry]) => key !== createKey && entry.terminalId === terminalId
         && typeof key !== 'string' && (!protocol.capturesForLeaf(terminalId).includes(key) || protocol.isSuppressed(key)))?.[1].promise : undefined,
@@ -199,7 +200,9 @@ export class TerminalServiceClass {
     while (true) {
       if (this.incarnations().ended
           || (this.incarnations().enabled && (this.incarnations().capture(terminalId, paneId) !== pi || (pi && this.incarnations().isSuppressed(pi))))) return '';
-      if (firstAttempt) this.setHostWaitState(terminalId, undefined);
+      if (firstAttempt && !(mode === 'Mount' && this.getHostWaitState(terminalId) === 'waiting')) {
+        this.setHostWaitState(terminalId, undefined);
+      }
       // A move is not a close. Only this webview's trees may authorize its next attempt.
       const owner = findTabIdByTerminalId(this.paneTrees(), terminalId);
       if (!owner) {
@@ -330,6 +333,7 @@ export class TerminalServiceClass {
         return ''; // Backend ownership follows the pane even after placement finishes.
       }
 
+      if (attemptPi) protocol.setRestoreResolved(attemptPi);
       this.bindCreated(terminalId, processId, owningTabId);
 
       return processId;

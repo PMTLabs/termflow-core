@@ -1,5 +1,6 @@
 use super::*;
 use crate::state::{CreateAdmission, CreateMode, OwnerState};
+use crate::state::host_keys::panes::Owner;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -136,6 +137,79 @@ async fn restoring_successor_entered_during_attach_keeps_session_after_old_work_
     assert_eq!(world.sessions(HOST, "Attach"), vec![K, K]);
     assert_eq!(keys.state(CHANNEL, K), Some(KeyState::Bound("pc-new".into())));
     assert_eq!(closes(&world), vec!["tm-control"]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_remount_keeps_holder_until_late_listing_attaches_once() {
+    for override_key in [None, Some(K)] {
+        let world = World::new();
+        world.add_host("current", HostSpec::default());
+        let key = override_key.unwrap_or(L1);
+        let leaf = if override_key.is_some() { "tm-a" } else { "tm-leaf" };
+        world.add_host(HOST, HostSpec {
+            sessions: vec![meta(key, 100)],
+            list: ListBehavior::SilentFor(Duration::from_secs(14)),
+            ..HostSpec::default()
+        });
+        let port = FakePort::new(&world, "current");
+        port.set_candidates(vec![candidate(HOST, HostRole::Frozen), candidate("current", HostRole::Current)]);
+        let keys = port.table().keys();
+        let now = Clock::now();
+        let mut page = Page::new(&port, "owner");
+        let first = page.enter(&port, leaf, override_key, now);
+        let PaneResult::Create { cg: first_cg } = page.op(&port, PaneOp::AdmitCreate { pi: first.pi, mode: CreateMode::Mount }, now) else { panic!("first admission"); };
+        assert!(matches!(keys.admitted_work(page.label, page.pg, leaf, first_cg).unwrap(), CreateAdmission::Run(_)));
+        let error = crate::state::host_routing::place_owned(&port, leaf, override_key, Some((first_cg, "pc-first"))).await.err().expect("late listing");
+        assert!(error.starts_with("host-ownership-pending:"), "{error}");
+        keys.abort_create(leaf, first_cg);
+        assert_eq!(world.count_everywhere("Spawn"), 0);
+        assert_eq!(world.count_everywhere("Attach"), 0);
+        assert!(keys.owner_state(leaf).is_none());
+
+        let successor = page.enter(&port, leaf, override_key, now);
+        assert_eq!(keys.holder_count(), 2);
+        assert_eq!(page.op(&port, PaneOp::Depart { pi: first.pi }, now), PaneResult::Ok);
+        assert_eq!(keys.holder_count(), 1);
+        assert!(keys.is_restoring_key(key, now));
+        assert_eq!(keys.orphan_verdict(key, now), OrphanVerdict::Restoring);
+        let PaneResult::Create { cg } = page.op(&port, PaneOp::AdmitCreate { pi: successor.pi, mode: CreateMode::Mount }, now) else { panic!("successor admission"); };
+        assert!(matches!(keys.admitted_work(page.label, page.pg, leaf, cg).unwrap(), CreateAdmission::Run(_)));
+        let mut refusals = 0;
+        let placement = loop {
+            match crate::state::host_routing::place_owned(&port, leaf, override_key, Some((cg, "pc-successor"))).await {
+                Ok(placement) => break placement,
+                Err(error) => {
+                    refusals += 1;
+                    assert!(refusals < 6, "host listing never resolved");
+                    assert!(error.starts_with("host-ownership-pending:"), "{error}");
+                    assert_eq!(world.count_everywhere("Spawn"), 0);
+                    assert_eq!(world.count_everywhere("Attach"), 0);
+                    assert_eq!(keys.pane_owner(leaf), Some(Owner::Pane(successor.pi)));
+                    assert!(keys.is_restoring_key(key, now));
+                }
+            }
+        };
+        let crate::state::host_routing::Placement::Attach { client, ticket, pid, session_key, .. } = placement else { panic!("restoring copy must attach"); };
+        assert_eq!(pid, 100);
+        assert_eq!(session_key, key);
+        assert!(ticket.publish_key("pc-successor"));
+        let channel = HostChannel::Frozen(FrozenId(1));
+        let identity = keys.session_identity(channel, key, "pc-successor").unwrap();
+        assert_eq!(client.attach_owned(&identity, 0).await.unwrap(), Some(true));
+        assert!(matches!(keys.complete_shell(leaf, cg, &StagedShell { process: "pc-successor".into(), stage: ShellStage::Hosted(ticket.key_stage().unwrap()) }), Completion::Registered));
+        assert_eq!(keys.pane_owner(leaf), Some(Owner::Pane(successor.pi)));
+        assert!(matches!(keys.owner_state(leaf), Some((_, OwnerState::Registered(shell))) if shell.process == "pc-successor"));
+        assert_eq!(keys.holder_count(), 0);
+        assert_eq!(keys.state(channel, key), Some(KeyState::Bound("pc-successor".into())));
+        assert!(sweep(&port).await);
+        keys.flush_deliveries();
+        assert_eq!(world.count_everywhere("Spawn"), 0);
+        assert_eq!(world.count_everywhere("Attach"), 1);
+        assert_eq!(world.sessions(HOST, "Attach"), vec![key]);
+        assert_eq!(world.count_everywhere("Close"), 0);
+        assert!(port.0.recovered.lock().unwrap().is_empty());
+        assert!(port.0.duplicates.lock().unwrap().is_empty());
+    }
 }
 
 #[tokio::test]
