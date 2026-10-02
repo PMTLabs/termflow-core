@@ -429,6 +429,13 @@ impl Hold {
             self.armed = previous;
             return Err(e);
         }
+        // Exit does not wait past its bound for a slow acknowledgement above: when it
+        // has taken the table over meanwhile, the others are not armed at all.
+        if let Err(exiting) = refuse_if_exiting(&self.table) {
+            disarm_hosts(&required).await;
+            self.armed = previous;
+            return Err(exiting);
+        }
         let mut armed = required;
         // Each of the others stands on its own: one that will not arm is released
         // again and left out, and the rest stay armed.

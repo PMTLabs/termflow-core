@@ -713,6 +713,44 @@ async fn an_arm_that_starts_after_exit_began_is_refused_and_sends_nothing() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_relaunch_whose_current_host_answers_after_exit_took_over_arms_no_older_host() {
+    // The current host acknowledges after exit's quiesce bound: exit goes ahead and
+    // closes every host, and the relaunch then finds the table taken from it.
+    let slow_current = HostSpec { arm_delay: EXIT_QUIESCE_BOUND + secs(2), ..HostSpec::default() };
+    let (world, port) = machine_with_current(slow_current, &[("old", HostSpec::default())]);
+    rediscover_hosts(&port).await.unwrap();
+    announce_capability(&port);
+    let hosts = [CURRENT, "old"];
+    let mut hold = begin_relaunch(&port).await.expect("the current host is connected");
+    let arming = tokio::spawn(async move {
+        let armed = hold.arm_detach(600, "tok", Some(ArmDetachPurpose::Local)).await;
+        (armed, hold)
+    });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(world.count(CURRENT, "Arm"), 1, "the arm is out and the current host's acknowledgement is still pending");
+    let before = marks(&world, &hosts);
+
+    exit_hosts(&port).await;
+    tokio::time::sleep(secs(10)).await;
+
+    let (armed, _hold) = arming.await.unwrap();
+    let refusal = armed.expect_err("a relaunch that exit overtook did not happen");
+    assert!(refusal.starts_with(LIFECYCLE_BUSY), "{refusal}");
+    assert_eq!(world.count("old", "Arm"), 0, "the older host was never asked to arm after exit took over");
+    assert_eq!(
+        since(&world, "old", before[1]),
+        ["Disarm", "Shutdown", "Eof"],
+        "the older host only saw exit's disarm and shutdown, so it is not left armed"
+    );
+    assert_eq!(
+        since(&world, CURRENT, before[0]).iter().filter(|kind| **kind == "Arm").count(),
+        0,
+        "the current host's late acknowledgement is not followed by another arm"
+    );
+    assert_eq!(since(&world, CURRENT, before[0]).last(), Some(&"Eof"), "the current host ends shut down, not armed");
+}
+
 // ---- a hold that is dropped ------------------------------------------------------
 
 #[tokio::test(start_paused = true)]

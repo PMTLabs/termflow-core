@@ -1071,6 +1071,12 @@ if (typeof window !== 'undefined') {
     }));
   }
 
+  // Two hosts claiming the same terminal sessions: announced once per run by the
+  // backend, shown by GlobalHostNotices. Global, like the connection edges above.
+  trackUnlisten(listen('pty-host:duplicate-session', (event: any) => {
+    window.dispatchEvent(new CustomEvent('pty-host:duplicate-session', { detail: event.payload }));
+  }));
+
   // Tray "Peers…" menu item (Plan 010): open Settings → Peers. Global (the tray
   // isn't window-scoped), so it's intentionally not filtered by window.
   trackUnlisten(listen('tray:open-peers', () => {
