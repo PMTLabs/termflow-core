@@ -71,7 +71,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_keys/owners.rs", &["abort_create", "admit_create", "explicit_close_locked", "complete_shell", "end_process", "release_stage", "release_unstarted", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
     ("state/host_keys/pages.rs", &["begin_restore_participation", "cancel", "commit", "destroy", "end_matching", "register", "register_page", "reserve", "retire_restore_participant", "with_stable_id"], "committed wi/page and startup participation in ownership mutex; shared page-end cleanup and compare-retirement"),
     ("state/host_keys/panes.rs", &["admit_pane", "admitted_work", "apply_pane_op", "bind_pane", "depart_pane", "insert_panes", "pane_op_at"], "sender window/page, exact pi/cg/pc and next-seq qualification under ownership mutex; immutable close pc dispatched to stripe-qualified end_process"),
-    ("state/host_keys/pane_payloads.rs", &["begin_pane_drag", "claim_pane_drag", "end_pane_drag", "route_pane_transfer"], "original sender pg/wi/tx and target committed page rechecked under ownership through nonblocking delivery enqueue; immutable page receipts rejected by successor renderers"),
+    ("state/host_keys/pane_payloads.rs", &["begin_pane_drag", "claim_pane_drag", "end_pane_drag", "route_pane_transfer", "watch_transfer"], "original sender pg/wi/tx and target committed page rechecked under ownership through nonblocking delivery enqueue; immutable page receipts rejected by successor renderers; late outcomes consumed once by original source pg under ownership"),
     ("state/host_keys/pane_transfers.rs", &["adopt_panes", "clear_active_drag", "end_pane_pages", "end_transfer_record", "finish_transfer", "remove_transfer_member", "stash_panes", "take_panes"], "original page/tx/member/owner qualification at atomic mutation under ownership mutex; deadlines release ownership only; shell endings remain stripe-qualified"),
     ("state/host_keys/restore.rs", &["forget_pane_holder", "register_pane_holder", "settle_pane_restore", "reap_expired_restore_intents", "settle_restore_markers"], "owner/holder/alias/marker facts in one ownership mutex"),
     ("state/host_lifecycle.rs", &["sibling_arm"], "hold slot mutex; unique checked arm token and exact original clients/quiesce"),
@@ -168,7 +168,7 @@ fn hits(source: &str) -> BTreeSet<String> {
         r"\.\s*(?:persist_snapshot|persist_terminal_history|persist_history_snapshot|insert_edge|delete_edges_for|write_shells)\s*\(|",
         r"\.\s*(?:emit|emit_to|execute|execute_batch|close_transport|shutdown_idle|shutdown|clear_client_on|clear_client|install_if_current|clear_if_current|take_if_current)\s*\(|",
         r"\bregistry\s*\.\s*upsert\s*\(|\bself\s*\.\s*bind\s*\(|\.\s*with_stable_id\s*\(|\breserve_window_id\s*\(|\b(?:tracker|windows)\s*\.\s*(?:bind|register|publish_reserved|forget|reserve_id)\s*\(|\bids\s*\.\s*(?:insert|remove|entry)\s*\(|",
-        r"\.\s*(?:begin_restore_participation|schedule_host_restore_release)\s*\(|\bself\s*\.\s*(?:building|committed|pages)\s*\.\s*(?:insert|remove|retain|clear)\s*\(|\binner\s*\.\s*panes\s*\.\s*active_drag\s*=|\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
+        r"\.\s*(?:begin_restore_participation|schedule_host_restore_release)\s*\(|\bself\s*\.\s*(?:building|committed|pages)\s*\.\s*(?:insert|remove|retain|clear)\s*\(|\binner\s*\.\s*panes\s*\.\s*active_drag\s*=|\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers|transfer_outcomes|transfer_outcome_order)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut|push_back|pop_front)\s*\(|",
         r"\b(?:terminals|host_terminals|stream_offsets|host_stream_offsets|writers|masters|screens|screen_history|identity_index|identity|leaf_to_process|shell_writer_channels|ptys|terminal_history|terminal_screens|terminal_focus_reporting|tmux_sessions|terminal_cwds|history_dirty|replay_prefix|host_restore_pending_windows|reattach_prompt_hooks|routes|local_processes|restore_holders|closed_unowned|owners|keys|entries)(?:\(\))?\s*(?:\.\s*(?:lock\(\)|unwrap\(\)|keys\(\)|routes\(\)))?\s*\.\s*(?:insert|remove|remove_key|remove_process|remove_channel|remove_epoch|retain|clear|entry|get_mut|register|index|unindex|connect|disconnect)\s*\("
     )).unwrap();
     let spans = fn_spans(&text);
@@ -199,6 +199,7 @@ const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
     ("state/host_keys/pane_payloads.rs", "begin_pane_drag", &["delivery_sender", "expire_transfers_locked", "ActiveDrag", "ended(token)"]),
     ("state/host_keys/pane_payloads.rs", "route_pane_transfer", &["delivery_sender", "expire_transfers_locked"]),
     ("state/host_keys/pane_payloads.rs", "verify_transfer_source", &["expire_transfers_locked"]),
+    ("state/host_keys/pane_payloads.rs", "watch_transfer", &["window_pages.sender", "transfer_outcomes.get", "transfer_outcomes.remove", "transfer_outcome_order.retain"]),
     ("state/host_keys/pane_payloads.rs", "claim_pane_drag", &["clear_active_drag"]),
     ("state/host_keys/pane_payloads.rs", "end_pane_drag", &["clear_active_drag"]),
     ("state/host_keys/pane_transfers.rs", "stash_panes", &["remove_transfer_member"]),
@@ -206,11 +207,11 @@ const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
     ("state/host_keys/pane_transfers.rs", "adopt_panes", &["release_idle_owner", "end_transfer_record"]),
     ("state/host_keys/pane_transfers.rs", "cancel_panes", &["finish_transfer"]),
     ("state/host_keys/pane_transfers.rs", "clear_active_drag", &["active_drag.as_deref", "active_drag.take", "drag.delivery.send(drag.ended)"]),
-    ("state/host_keys/pane_transfers.rs", "end_transfer_record", &["clear_active_drag", "taken.send_replace"]),
+    ("state/host_keys/pane_transfers.rs", "end_transfer_record", &["clear_active_drag", "taken.send_replace", "receiver_count", "transfer_outcomes.insert", "transfer_outcome_order.pop_front", "transfer_outcomes.remove"]),
     ("state/host_keys/pane_transfers.rs", "finish_transfer", &["end_transfer_record", "release_idle_owner"]),
     ("state/host_keys/pane_transfers.rs", "expire_transfers_locked", &["finish_transfer"]),
     ("state/host_keys/pane_transfers.rs", "expire_transfers", &["expire_transfers_locked"]),
-    ("state/host_keys/pane_transfers.rs", "end_pane_pages", &["release_idle_owner", "finish_transfer", "clear_active_drag"]),
+    ("state/host_keys/pane_transfers.rs", "end_pane_pages", &["release_idle_owner", "finish_transfer", "clear_active_drag", "transfer_outcomes.retain", "transfer_outcome_order.retain"]),
     ("state/host_keys/pane_transfers.rs", "remove_transfer_member", &["end_transfer_record"]),
     ("state/host_keys/restore.rs", "register_pane_holder", &["OwnerState::Registered", "OwnerState::Closing"]),
     ("state/host_keys/restore.rs", "forget_pane_holder", &["transfers.values", "!authorized"]),
@@ -241,7 +242,7 @@ const LIFECYCLE_REMOVERS: &[(&str, &str, &[&str])] = &[
 fn lifecycle_removers(source: &str) -> BTreeSet<String> {
     let text = production(source);
     let pattern = Regex::new(concat!(
-        r"\b(?:transfers|members|holders|present|streams|incarnation_high|closed_unowned|owners|building|committed|pages|host_restore_pending_windows)\s*\.\s*(?:remove|retain|clear)\s*\(|",
+        r"\b(?:transfers|transfer_outcomes|transfer_outcome_order|members|holders|present|streams|incarnation_high|closed_unowned|owners|building|committed|pages|host_restore_pending_windows)\s*\.\s*(?:remove|retain|clear|pop_front)\s*\(|",
         r"\bstable_id\s*\.\s*take\s*\(|\bids\s*\.\s*(?:insert|remove|entry)\s*\(|\bactive_drag\s*\.\s*take\s*\(|",
         r"\b(?:tracker|windows)\s*\.\s*(?:register|publish_reserved)\s*\(|\bregistry\s*\.\s*upsert\s*\(|",
         r"\bcommitted\s*\.\s*insert\s*\(|\brow\s*\.\s*(?:owner|state|started|admitted_pg)\s*=|\bactive_drag\s*=\s*None\b|",
@@ -285,7 +286,7 @@ fn entity_removers_are_listed_with_their_auxiliary_teardown() {
 
 #[test]
 fn planted_entity_remover_and_missing_shared_teardown_are_rejected() {
-    for body in ["inner.panes.transfers.remove(tx);", "inner.panes.active_drag = None;", "inner.panes.holders.remove(pi);",
+    for body in ["inner.panes.transfer_outcomes.remove(tx);", "inner.panes.transfer_outcome_order.pop_front();", "inner.panes.transfers.remove(tx);", "inner.panes.active_drag = None;", "inner.panes.holders.remove(pi);",
         "inner.closed_unowned.clear();", "inner.owners.remove(leaf);", "self.pages.remove(pg);", "self.host_restore_pending_windows.remove(label);",
         "row.owner = Owner::Orphaned;", "row.started = false;", "self.ids.insert(label, id);", "self.ids.remove(label);", "self.ids.entry(label);"] {
         let planted = format!("fn new_remover() {{ {body} }}");
@@ -368,6 +369,10 @@ fn planted_wire_projection_store_route_emit_and_lifecycle_sinks_are_detected() {
         ("new_window_remover", "self.committed.remove(label);"),
         ("new_drag_remover", "inner.panes.active_drag = None;"),
         ("new_transfer_remover", "inner.panes.transfers.remove(tx);"),
+        ("new_receipt_writer", "inner.panes.transfer_outcomes.insert(tx, (pg, true));"),
+        ("new_receipt_remover", "inner.panes.transfer_outcomes.remove(tx);"),
+        ("new_receipt_order_writer", "inner.panes.transfer_outcome_order.push_back(tx);"),
+        ("new_receipt_order_remover", "inner.panes.transfer_outcome_order.pop_front();"),
         ("new_holder_remover", "inner.panes.holders.remove(pi);"),
         ("new_sweep_remover", "self.host_restore_pending_windows.remove(label);"),
         ("new_binding_writer", "self.ids.insert(label, id);"),

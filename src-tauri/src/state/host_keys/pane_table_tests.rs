@@ -7,6 +7,8 @@ mod transfer_tests;
 mod end_tests;
 #[path = "pane_payload_tests.rs"]
 mod payload_tests;
+#[path = "pane_observer_tests.rs"]
+mod observer_tests;
 #[path = "pane_lifecycle_tests.rs"]
 mod lifecycle_tests;
 #[path = "pane_drag_ending_tests.rs"]

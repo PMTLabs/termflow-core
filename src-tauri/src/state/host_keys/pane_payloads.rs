@@ -12,10 +12,17 @@ impl HostKeys {
     }
 
     pub(crate) fn watch_transfer(&self, label: &str, pg: u64, tx: &str) -> Result<tokio::sync::watch::Receiver<Option<bool>>, String> {
-        let inner = self.lock();
+        let mut inner = self.lock();
         inner.window_pages.sender(label, pg)?;
-        let transfer = inner.panes.transfers.get(tx).filter(|t| t.source == pg).ok_or("transfer has ended")?;
-        Ok(transfer.taken.subscribe())
+        if let Some(transfer) = inner.panes.transfers.get(tx) {
+            return if transfer.source == pg { Ok(transfer.taken.subscribe()) } else { Err("transfer has ended".into()) };
+        }
+        let &(source, outcome) = inner.panes.transfer_outcomes.get(tx).filter(|(source, _)| *source == pg).ok_or("transfer has ended")?;
+        debug_assert_eq!(source, pg);
+        inner.panes.transfer_outcomes.remove(tx);
+        inner.panes.transfer_outcome_order.retain(|token| token != tx);
+        let (_, receiver) = tokio::sync::watch::channel(Some(outcome));
+        Ok(receiver)
     }
 
     pub(crate) fn verify_transfer_source(&self, label: &str, pg: u64, tx: &str) -> Result<(), String> {

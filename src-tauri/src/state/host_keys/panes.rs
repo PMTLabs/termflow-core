@@ -48,6 +48,7 @@ pub(crate) enum PaneOp {
     Take { tx: String },
     Adopt { tx: String, pairs: Vec<PaneEntry> },
     Cancel { tx: String },
+    ReplacePage,
     Settle,
 }
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -84,6 +85,8 @@ pub(super) struct PaneTable {
     pub incarnation_high: HashMap<u64, u64>,
     pub holders: HashMap<PaneIdentity, super::restore::Aliases>,
     pub transfers: HashMap<String, Transfer>,
+    pub transfer_outcomes: HashMap<String, (u64, bool)>,
+    pub transfer_outcome_order: std::collections::VecDeque<String>,
     pub active_drag: Option<ActiveDrag>,
 }
 pub(super) struct ActiveDrag {
@@ -164,10 +167,13 @@ impl HostKeys {
             PaneOp::Take { tx } => Self::take_panes(inner, page.pg, &tx, now),
             PaneOp::Adopt { tx, pairs } => Self::adopt_panes(inner, page.pg, &tx, pairs),
             PaneOp::Cancel { tx } => Self::cancel_panes(inner, &tx),
-            PaneOp::Settle => {
+            PaneOp::ReplacePage | PaneOp::Settle => {
+                // Ownership must be released before restore tries to bind the new
+                // copies. Sweep participation lasts until the full tree is installed.
+                let restore_complete = matches!(op, PaneOp::Settle);
                 let ended = inner.window_pages.settle(page).expect("validated sender page");
                 Self::end_pages_locked(inner, &ended);
-                effects.release_restore_sweep = inner.window_pages.settle_restore_participant(page);
+                effects.release_restore_sweep = restore_complete && inner.window_pages.settle_restore_participant(page);
                 PaneResult::Ok
             }
         }

@@ -42,7 +42,12 @@ if (isTauri) {
     } });
   });
   installPaneIncarnations(incarnations);
-  incarnations.start();
+  // Put predecessor retirement at the FIFO head, before restore or mounts can
+  // enqueue ownership work. Do not block UI bootstrap on an unavailable backend:
+  // the stream retries its head and can still show the ownership warning.
+  void incarnations.replacePage().catch((error: unknown) => {
+    if (!incarnations.ended) console.warn('Could not replace renderer page:', error);
+  });
   window.addEventListener('beforeunload', () => incarnations.stop(), { once: true });
   window.addEventListener('pane:resync', () => incarnations.resync());
 

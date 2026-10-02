@@ -19,7 +19,7 @@ export type PaneOp =
   | { kind: 'stash'; tx: string; pairs: PaneEntry[]; ui?: unknown }
   | { kind: 'adopt'; tx: string; pairs: PaneEntry[] }
   | { kind: 'take' | 'cancel'; tx: string }
-  | { kind: 'settle' };
+  | { kind: 'replace_page' | 'settle' };
 export type PaneResult =
   | { status: 'Ok' | 'Inert' | 'Retry' | 'Pending' | 'Contended' }
   | { status: 'Create' | 'Join'; cg: Counter }
@@ -134,6 +134,12 @@ export class PaneIncarnations {
       delay = Math.min(delay * 2, 1000);
     };
     void register();
+  }
+
+  /** Retire predecessor pages before installing panes, without releasing the restore sweep. */
+  async replacePage(): Promise<void> {
+    const result = await this.send({ kind: 'replace_page' });
+    if (!accepted(result)) throw new Error(`page replacement ${result.status}`);
   }
 
   private failure(): void { if (++this.failures === 3) this.warn(); }

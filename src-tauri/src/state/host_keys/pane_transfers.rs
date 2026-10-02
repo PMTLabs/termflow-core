@@ -1,8 +1,10 @@
 use super::*;
 
+pub(super) const TRANSFER_OUTCOME_CAP: usize = 256;
+
 impl HostKeys {
     pub(super) fn stash_panes(inner: &mut Inner, page: PageIdentity, tx: &str, pairs: Vec<PaneEntry>, ui: Option<serde_json::Value>, now: Instant) -> PaneResult {
-        if tx.is_empty() || inner.panes.transfers.contains_key(tx) { return rejected("transfer token already staged or empty"); }
+        if tx.is_empty() || inner.panes.transfers.contains_key(tx) || inner.panes.transfer_outcomes.contains_key(tx) { return rejected("transfer token already staged or empty"); }
         if pairs.is_empty() { return rejected("transfer has no members"); }
         let mut leaves = std::collections::HashSet::new();
         for pair in &pairs {
@@ -99,6 +101,17 @@ impl HostKeys {
         let transfer = inner.panes.transfers.remove(tx)?;
         Self::clear_active_drag(inner, tx);
         if transfer.taken.borrow().is_none() { transfer.taken.send_replace(Some(false)); }
+        // Async source commands may not have acquired their receiver before
+        // adoption retires the transfer. Keep one receipt for that late caller.
+        if transfer.taken.receiver_count() == 0 && inner.window_pages.window_of(transfer.source).is_some() {
+            let outcome = transfer.taken.borrow().unwrap();
+            inner.panes.transfer_outcomes.insert(tx.into(), (transfer.source, outcome));
+            inner.panes.transfer_outcome_order.push_back(tx.into());
+            while inner.panes.transfer_outcome_order.len() > TRANSFER_OUTCOME_CAP {
+                let oldest = inner.panes.transfer_outcome_order.pop_front().unwrap();
+                inner.panes.transfer_outcomes.remove(&oldest);
+            }
+        }
         Some(transfer)
     }
     fn finish_transfer(inner: &mut Inner, tx: &str, cancel: bool) {
@@ -121,6 +134,8 @@ impl HostKeys {
     }
     pub(in crate::state::host_keys) fn end_pane_pages(inner: &mut Inner, ended: &[PageIdentity]) {
         let pages: std::collections::HashSet<_> = ended.iter().map(|p| p.pg).collect();
+        inner.panes.transfer_outcomes.retain(|_, (source, _)| !pages.contains(source));
+        inner.panes.transfer_outcome_order.retain(|tx| inner.panes.transfer_outcomes.contains_key(tx));
         let leaves: Vec<_> = inner.owners.iter().filter(|(_, r)| match r.owner {
             Owner::Pane(pi) => pages.contains(&pi.pg),
             Owner::Parked { pg, .. } => pages.contains(&pg),
