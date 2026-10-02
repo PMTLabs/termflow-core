@@ -43,20 +43,13 @@ describe('tauriBridge restore intent contract', () => {
     await expect(tauriBridge.createTerminal('default', 'Recovered', undefined, 'tm-recovered', 80, 24, 'tb-owner', sessionKey)).resolves.toBe(processId);
     const create = invokeMock.mock.calls.find(([cmd]) => cmd === 'create_terminal');
     expect(create?.[1]).toMatchObject({ tabId: 'tm-recovered', sessionKey, owningTabId: 'tb-owner' });
-    invokeMock.mockClear();
-    await tauriBridge.registerRestoringLeaves([{ leafId: 'tm-recovered', sessionKey }]);
-    expect(invokeMock).toHaveBeenCalledWith('register_restoring_leaves', { leaves: [{ leafId: 'tm-recovered', sessionKey }] });
+    expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
-  it('registers modern and migrated leaves with camelCase argument keys', async () => {
-    const leaves = [{ leafId: 'tm-modern' }, { leafId: 'tm-migrated', sessionKey: 'tb-legacy' }];
-    await tauriBridge.registerRestoringLeaves(leaves);
-    expect(invokeMock).toHaveBeenCalledWith('register_restoring_leaves', { leaves });
-  });
-
-  it('forgets the leaf identity, not its override key', async () => {
-    await tauriBridge.forgetRestoringLeaf('tm-migrated');
-    expect(invokeMock).toHaveBeenCalledWith('forget_restoring_leaf', { leafId: 'tm-migrated' });
+  it('has no hold-free label registration or forget endpoint', () => {
+    expect(tauriBridge).not.toHaveProperty('registerRestoringLeaves');
+    expect(tauriBridge).not.toHaveProperty('forgetRestoringLeaf');
+    expect(typeof tauriBridge.createTerminal).toBe('function');
   });
 
   it('offers a session by the leaf identity and the process it created, with camelCase argument keys', async () => {
@@ -74,11 +67,6 @@ describe('tauriBridge restore intent contract', () => {
   it.each([{ status: 'inFlight' }, { status: 'none' }])('passes the take answer %j through unchanged', async answer => {
     invokeMock.mockResolvedValueOnce(answer);
     await expect(tauriBridge.takeSessionHandoff('tm-moved')).resolves.toEqual(answer);
-  });
-
-  it('surfaces register failure instead of allowing an unkeyed mount', async () => {
-    invokeMock.mockRejectedValueOnce(new Error('transport down'));
-    await expect(tauriBridge.registerRestoringLeaves([{ leafId: 'tm-modern' }])).rejects.toThrow('transport down');
   });
 
   it('never adds a per-mount restoring flag to a create request', async () => {

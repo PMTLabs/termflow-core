@@ -531,13 +531,6 @@ export class TerminalServiceClass {
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
       if (!ownedClose && [...this.inFlightCreates.values()].some(entry => entry.terminalId === terminalId)) this.closedWhileCreating.add(terminalId);
-      try {
-        if (!ownedClose) await this.api().forgetRestoringLeaf(terminalId);
-      } catch (error) {
-        // The pane is closing either way; a failed notification must not keep it
-        // in its wait state or turn a close that used to be a no-op into a rejection.
-        console.error(`TerminalService: could not forget the restore intent of ${terminalId}:`, error);
-      }
       this.setHostWaitState(terminalId, undefined);
       return; // A waiting restored pane has no process, but still has restore intent.
     }

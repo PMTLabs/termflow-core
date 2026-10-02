@@ -181,7 +181,7 @@ async fn an_alias_holder_registers_while_another_leaf_is_attaching_and_survives_
     let attach = tokio::spawn({ let client = client.clone(); let identity = port.table().keys().session_identity(PRIMARY, "shared", &p.process).unwrap(); async move { client.attach_owned(&identity, 0).await } });
     gate.wait_reached(1).await;
     assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "R", "tm-R", Some("shared"), now));
-    assert_eq!(port.table().keys().holder_stamp("R", "tm-R"), Some(now));
+    assert!(port.table().keys().has_test_holder("R", "tm-R"));
     assert!(!host_registry::register_restoring_leaf(&port.intent_maps(), "P-reload", "tm-P", Some("shared"), now));
     host_registry::forget_restoring_leaf(&port.intent_maps(), "C", "tm-C", now);
     abort(&port, "tm-P", cg, &p);
@@ -195,7 +195,7 @@ async fn an_alias_holder_registers_while_another_leaf_is_attaching_and_survives_
     assert_eq!(world.count_everywhere("Close"), 0);
     assert!(listing.sessions.iter().any(|s| s.tab_id == "shared" && s.alive && s.pid == 4242));
     assert_eq!(port.table().keys().state(PRIMARY, "shared"), Some(KeyState::Listed));
-    assert_eq!(port.table().keys().holder_stamp("R", "tm-R"), Some(now));
+    assert!(port.table().keys().has_test_holder("R", "tm-R"));
     // Forgetting the final holder is a positive close control.
     host_registry::forget_restoring_leaf(&port.intent_maps(), "R", "tm-R", now);
     fence(&port, &client, PRIMARY).await;

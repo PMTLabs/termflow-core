@@ -9,10 +9,9 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
-/// Restore retries refresh this lifetime; marker expiry can only reduce closes.
-pub(super) const RESTORE_INTENT_TTL: Duration = Duration::from_secs(15 * 60);
+use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 // ---- session-key maps -----------------------------------------------------
 
@@ -187,28 +186,19 @@ pub fn effective_session_key(leaf_id: &str, session_key: Option<&str>) -> String
     session_key.unwrap_or(leaf_id).to_string()
 }
 
-/// Restore registration consults only the ownership authority.
-pub(super) struct IntentMaps<'a> {
-    pub keys: &'a HostKeys,
+#[cfg(test)]
+mod restore_fixtures {
+    use super::*;
+    pub(in crate::state) struct IntentMaps<'a> { pub keys: &'a HostKeys }
+    pub(in crate::state) fn register_restoring_leaf(maps: &IntentMaps, label: &str, leaf: &str, key: Option<&str>, now: Instant) -> bool {
+        maps.keys.enter_test_restore(label, leaf, key, now)
+    }
+    pub(in crate::state) fn forget_restoring_leaf(maps: &IntentMaps, label: &str, leaf: &str, now: Instant) {
+        maps.keys.close_test_restore(label, leaf, now);
+    }
 }
-
-/// A persisted pane is about to mount. Live terminals bind without a create,
-/// so they do not leave a waiting holder behind on renderer reload.
-pub(super) fn register_restoring_leaf(
-    maps: &IntentMaps,
-    label: &str,
-    leaf_id: &str,
-    session_key: Option<&str>,
-    now: Instant,
-) -> bool {
-    maps.keys.register_restoring_leaf(label, leaf_id, session_key, now)
-}
-
-/// Forget only this window's holder; its alias marker cannot override a holder
-/// belonging to another restoring pane.
-pub(super) fn forget_restoring_leaf(maps: &IntentMaps, label: &str, leaf_id: &str, now: Instant) {
-    maps.keys.forget_restoring_leaf(label, leaf_id, now);
-}
+#[cfg(test)]
+pub(super) use restore_fixtures::*;
 
 // ---- what a host's listing does ---------------------------------------------
 

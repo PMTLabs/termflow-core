@@ -117,7 +117,7 @@ impl HostKeys {
             *target = Some(StagedShell { process: process.into(), stage: stage.clone().map_or(ShellStage::Local, ShellStage::Hosted) });
             *staged_exited = false;
         }
-        Self::settle_restore(&mut inner, leaf, hosted.map(|(_, key, _)| key));
+        Self::settle_restore_markers(&mut inner, leaf, hosted.map(|(_, key, _)| key));
         Ok((stage, pid, old))
     }
 
@@ -154,7 +154,7 @@ impl HostKeys {
             }
         }
         Self::settle_pane_restore(&mut inner, leaf);
-        Self::settle_restore(&mut inner, leaf, match &shell.stage {
+        Self::settle_restore_markers(&mut inner, leaf, match &shell.stage {
             ShellStage::Hosted(stage) => Some(&stage.key), ShellStage::Local => None,
         });
         if let Some(policy) = cancel { Completion::Cancel(policy) } else {

@@ -955,23 +955,6 @@ impl<R: Runtime> AppState<R> {
         host_registry::frozen_client(&self.frozen_hosts, id)
     }
 
-    fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
-        host_registry::IntentMaps {
-            keys: self.host_table.keys(),
-        }
-    }
-
-    /// A persisted pane is about to mount: its session key (`session_key` if it
-    /// has a migrated one, else its leaf) is a restore from now on.
-    pub fn register_restoring_leaf(&self, label: &str, leaf_id: &str, session_key: Option<&str>) -> bool {
-        host_registry::register_restoring_leaf(&self.intent_maps(), label, leaf_id, session_key, std::time::Instant::now())
-    }
-
-    /// The user closed a restored pane that never found its session.
-    pub fn forget_restoring_leaf(&self, label: &str, leaf_id: &str) {
-        host_registry::forget_restoring_leaf(&self.intent_maps(), label, leaf_id, std::time::Instant::now())
-    }
-
     /// Log and announce, once, sessions that two hosts both claim to hold.
     pub(super) fn note_duplicate_sessions(&self, session_keys: &[String]) {
         use tauri::Emitter;

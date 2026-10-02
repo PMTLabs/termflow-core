@@ -124,7 +124,7 @@ async fn same_leaf_restore_holder_survives_aborted_owner_projection_cleanup() {
     assert_eq!(keys.state(CHANNEL, "shared"), Some(KeyState::Listed));
     host_registry::forget_restoring_leaf(&port.intent_maps(), "C", "tm-C", now);
     assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "reload", "tm-P", Some("shared"), now));
-    assert_eq!(keys.holder_stamp("reload", "tm-P"), Some(now));
+    assert!(keys.has_test_holder("reload", "tm-P"));
     resume_tx.send(()).unwrap();
     cleanup.join().unwrap();
     drop(ticket);

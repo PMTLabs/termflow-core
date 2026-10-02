@@ -198,8 +198,6 @@ export interface ElectronAPI {
   // Multi-window Settings routing (Tauri bridge only): open/activate Settings in
   // the current main window and focus it. See services/openSettings.ts.
   openSettingsInMainWindow?: (category?: string, detail?: string) => Promise<void>;
-  registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
-  forgetRestoringLeaf: (leafId: string) => Promise<void>;
   /** Offer the terminal this window's create produced for the leaf to the window that has the
    *  pane now. False (nothing offered) unless `processId` is the terminal registered for the leaf. */
   offerSessionHandoff: (leafId: string, processId: string) => Promise<boolean>;

@@ -64,8 +64,7 @@ struct Inner {
     owners: HashMap<String, owners::Row>,
     window_pages: pages::WindowPages,
     panes: panes::PaneTable,
-    restore_holders: HashMap<(String, String), restore::Intent>,
-    closed_unowned: HashMap<(String, String), restore::Intent>,
+    closed_unowned: HashMap<panes::PaneIdentity, restore::ClosedUnowned>,
     cap: usize,
     pending_deliveries: std::collections::HashSet<delivery::RecoveryIdentity>,
 }
@@ -91,7 +90,7 @@ impl HostKeys {
         Self { inner: Arc::new(Mutex::new(Inner {
             keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
             window_pages: pages::WindowPages::default(), panes: panes::PaneTable::default(),
-            restore_holders: HashMap::new(), closed_unowned: HashMap::new(), cap: ENDING_CAP,
+            closed_unowned: HashMap::new(), cap: ENDING_CAP,
             pending_deliveries: std::collections::HashSet::new(),
         })), routes, deliveries: Arc::default(),
             #[cfg(test)]

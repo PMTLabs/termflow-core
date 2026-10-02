@@ -120,8 +120,6 @@ interface ElectronAPI {
   /// (broadcasts `settings:open`; see services/openSettings.ts) and focus it,
   /// regardless of which window this was invoked from.
   openSettingsInMainWindow: (category?: string, detail?: string) => Promise<void>;
-  registerRestoringLeaves: (leaves: Array<{ leafId: string; sessionKey?: string | null }>) => Promise<void>;
-  forgetRestoringLeaf: (leafId: string) => Promise<void>;
   /// Offer the terminal this window's create produced for the leaf to the window that has the
   /// pane now. False (nothing offered) unless `processId` is the terminal registered for the leaf.
   offerSessionHandoff: (leafId: string, processId: string) => Promise<boolean>;
@@ -479,8 +477,6 @@ const tauriBridge: ElectronAPI = {
     await invoke('set_terminal_title_color', { rendererTerminalId, titleColor });
   },
 
-  registerRestoringLeaves: async (leaves) => invoke<void>('register_restoring_leaves', { leaves }),
-  forgetRestoringLeaf: async (leafId) => invoke<void>('forget_restoring_leaf', { leafId }),
   offerSessionHandoff: async (leafId, processId) => invoke<boolean>('offer_session_handoff', { leafId, processId }),
   takeSessionHandoff: async (leafId) => invoke<SessionHandoffTake>('take_session_handoff', { leafId }),
   closeTerminal: async (id) => {

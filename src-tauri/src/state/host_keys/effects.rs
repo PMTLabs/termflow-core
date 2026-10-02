@@ -48,7 +48,7 @@ impl HostKeys {
             || inner.keys.iter().any(|((_, k), r)| k == key && matches!(r.state, KeyState::Held(_) | KeyState::Bound(_)))
             || !unregistered() { return; }
         let now = std::time::Instant::now();
-        if Self::protected(&inner, key, now) { return; }
+        if Self::protected(&inner, key) { return; }
         if Self::unowned_due(&inner, key, now) { Self::end(&mut inner, channel, key, CloseState::Pending); }
         else {
             let record = inner.keys.get(&(channel, key.into())).unwrap();

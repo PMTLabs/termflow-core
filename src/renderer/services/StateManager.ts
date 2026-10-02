@@ -1088,44 +1088,20 @@ class StateManagerClass {
     data: { paneTree?: any; tabPanes?: Record<string, any>; treesByTabId?: Record<string, any> },
     isCurrent: () => boolean = () => true,
   ): Promise<boolean> {
-    const leaves = new Map<string, { leafId: string; sessionKey?: string | null }>();
-    const walk = (node: any): void => {
-      if (!node) return;
-      if (node.type === 'terminal' && node.terminalId) {
-        leaves.set(node.terminalId, { leafId: node.terminalId, sessionKey: node.sessionKey });
-      }
-      if (Array.isArray(node.children)) node.children.forEach(walk);
-    };
-    walk(data.paneTree);
-    Object.values(data.tabPanes ?? {}).forEach(walk);
-    Object.values(data.treesByTabId ?? {}).forEach(walk);
-    if (!leaves.size) return isCurrent();
-
-    if (paneIncarnations.enabled) {
-      const trees = [data.paneTree, ...Object.values(data.tabPanes ?? {}), ...Object.values(data.treesByTabId ?? {})];
-      const pis = paneIncarnations.prepare(trees.flatMap(tree => describePanes(tree, true)));
-      const ready = await paneIncarnations.send({ kind: 'enter', panes: [] });
-      if (!isCurrent() || !accepted(ready)) paneIncarnations.discardPrepared(pis);
-      if (ready.status !== 'Inert') return isCurrent() && accepted(ready);
+    const trees = [data.paneTree, ...Object.values(data.tabPanes ?? {}), ...Object.values(data.treesByTabId ?? {})];
+    const panes = [...new Map(trees.flatMap(tree => describePanes(tree, true)).map(pane => [pane.paneId, pane])).values()];
+    if (!panes.length || !isCurrent()) return isCurrent();
+    if (!paneIncarnations.enabled) {
+      throw new RestoreRegistrationError('Restoring terminal hosts requires the desktop pane stream.');
     }
-    const deadline = Date.now() + 90_000;
-    let delay = 1000;
-    while (isCurrent()) {
-      try {
-        await window.electronAPI.registerRestoringLeaves([...leaves.values()]);
-        return isCurrent();
-      } catch (error) {
-        if (!isCurrent()) return false;
-        if (Date.now() >= deadline) {
-          throw new RestoreRegistrationError('Waiting for terminal host: could not register restored panes, so none of them were loaded.');
-        }
-        console.warn('StateManager: restored panes remain unmounted until host registration succeeds:', error);
-        await new Promise(resolve => setTimeout(resolve, Math.min(delay, deadline - Date.now())));
-        if (!isCurrent()) return false;
-        delay = Math.min(delay * 2, 8000);
-      }
+    const pis = paneIncarnations.prepare(panes);
+    // This FIFO barrier follows every restoring enter, before either mirror mounts.
+    const ready = await paneIncarnations.send({ kind: 'enter', panes: [] });
+    if (!isCurrent() || !accepted(ready) || ready.status === 'Inert') paneIncarnations.discardPrepared(pis);
+    if (ready.status === 'Inert') {
+      throw new RestoreRegistrationError('Restoring terminal hosts requires the desktop pane stream.');
     }
-    return false;
+    return isCurrent() && accepted(ready);
   }
 
   /**

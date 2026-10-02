@@ -44,6 +44,33 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
+test('restoring enter carries its exact aliases and a replay registers only that incarnation once', async () => {
+  const h = harness();
+  const override = 'tm-original~0123456789ab4cde8fab0123456789ac';
+  const [held] = h.client.prepare([{ ...a, restore: true, override }]);
+  const [control] = h.client.prepare([{ paneId: 'pn-control', leaf: 'tm-control' }]);
+  await flush();
+  expect(h.applied).toHaveLength(1);
+  expect(h.applied[0].op).toEqual({ kind: 'enter', panes: [{ ...a, restore: true, override, pi: await held }] });
+  h.gates.fail('pane_op', 0, 'registration ack lost');
+  await flush();
+  await jest.advanceTimersByTimeAsync(50);
+  expect(h.calls().map(call => call.seq)).toEqual([1, 1]);
+  expect(h.applied).toHaveLength(1);
+  h.ack(1);
+  await flush();
+  expect(h.applied).toHaveLength(2);
+  expect(h.applied[1].op).toEqual({ kind: 'enter', panes: [{ paneId: 'pn-control', leaf: 'tm-control', pi: await control }] });
+  h.ack(2);
+  await flush();
+  const closing = h.client.close(held);
+  await flush();
+  expect(h.applied[2].op).toEqual({ kind: 'close', pi: await held });
+  h.ack(3);
+  expect(await closing).toEqual({ status: 'Ok' });
+  expect(h.client.capture('tm-control')).toBe(control);
+});
+
 test('a lost reply retries the same head sequence and applies it once before later ops', async () => {
   const h = harness();
   const first = h.client.send({ kind: 'enter', panes: [] });

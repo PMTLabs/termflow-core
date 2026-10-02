@@ -70,7 +70,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_keys/pages.rs", &["register_page"], "committed window and checked page identity under ownership mutex through stream installation"),
     ("state/host_keys/panes.rs", &["admit_pane", "admitted_work", "apply_pane_op", "bind_pane", "depart_pane", "insert_panes", "pane_op_at"], "sender window/page, exact pi/cg/pc and next-seq qualification under ownership mutex; immutable close pc dispatched to stripe-qualified end_process"),
     ("state/host_keys/pane_transfers.rs", &["adopt_panes", "end_pane_pages", "finish_transfer", "remove_transfer_member", "stash_panes", "take_panes"], "original page/tx/member/owner qualification at atomic mutation under ownership mutex; deadlines release ownership only; shell endings remain stripe-qualified"),
-    ("state/host_keys/restore.rs", &["forget_pane_holder", "register_pane_holder", "settle_pane_restore", "forget_restoring_leaf", "reap_expired_restore_intents", "register_restoring_leaf", "settle_restore"], "owner/holder/alias/marker facts in one ownership mutex"),
+    ("state/host_keys/restore.rs", &["forget_pane_holder", "register_pane_holder", "settle_pane_restore", "reap_expired_restore_intents", "settle_restore_markers"], "owner/holder/alias/marker facts in one ownership mutex"),
     ("state/host_lifecycle.rs", &["sibling_arm"], "hold slot mutex; unique checked arm token and exact original clients/quiesce"),
     ("state/host_lifecycle.rs", &["release_host"], "retained exit/quiesce authority and exact client transport"),
     ("state/host_port.rs", &["forget_host"], "unique frozen identity and retired admission; authoritative key/route forget"),

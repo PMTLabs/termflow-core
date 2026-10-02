@@ -210,44 +210,6 @@ pub async fn report_host_restore_settled(
     Ok(())
 }
 
-/// One persisted pane about to mount: its leaf, and the session key it still
-/// carries when a migration left it different from the leaf.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoringLeaf {
-    pub leaf_id: String,
-    pub session_key: Option<String>,
-}
-
-/// Record that these persisted panes are about to mount, BEFORE any of them does.
-/// From then on a create for one of their session keys is a restore: it waits for
-/// the terminal hosts to answer instead of starting a second shell under a key a
-/// host may already hold. A key that is already live is skipped; calling this
-/// again for the same panes changes nothing. A failure must keep the affected
-/// panes from mounting — the caller retries.
-#[tauri::command]
-pub fn register_restoring_leaves(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-    leaves: Vec<RestoringLeaf>,
-) -> Result<(), String> {
-    log::info!("[GEN] registering {} restoring leaves", leaves.len());
-    state.reap_expired_restore_intents();
-    for leaf in &leaves {
-        state.register_restoring_leaf(window.label(), &leaf.leaf_id, leaf.session_key.as_deref());
-    }
-    Ok(())
-}
-
-/// A restored pane that never found its session was closed. Its session, if a
-/// host reports it later, is closed rather than adopted or shown as recovered.
-#[tauri::command]
-pub fn forget_restoring_leaf(window: tauri::WebviewWindow, state: State<'_, AppState>, leaf_id: String) -> Result<(), String> {
-    log::info!("[GEN] closing unbound restoring leaf {leaf_id}");
-    state.forget_restoring_leaf(window.label(), &leaf_id);
-    Ok(())
-}
-
 /// A pane moved to another window while its first create was still in flight, and
 /// the window it left won that create. That window binds nothing and offers the
 /// terminal its create produced to whichever window has the pane now.

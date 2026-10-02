@@ -9,6 +9,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 function makeService(store: ReturnType<typeof makeStore>, createTerminal = jest.fn(), extraApi: Record<string, unknown> = {}) {
   const api = {
     createTerminal, forgetRestoringLeaf: jest.fn().mockResolvedValue(undefined),
+    closeTerminal: jest.fn().mockResolvedValue(undefined),
     adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
     ...extraApi,
   };
@@ -509,16 +510,17 @@ test.each(['close', 'clear', 'detach'])('presence cancellation on %s stops silen
   await jest.advanceTimersByTimeAsync(30_000);
   expect(await promise).toBe('');
   expect(create).toHaveBeenCalledTimes(1);
-  expect(api.forgetRestoringLeaf.mock.calls).toEqual(reason === 'close' ? [['tm-wait']] : []);
+  expect(api.forgetRestoringLeaf).not.toHaveBeenCalled();
 });
 
-test('closeTerminal no-process branch forgets restore intent', async () => {
+test('legacy no-process close has no label-keyed holder side channel', async () => {
   const { service, api } = makeService(makeStore());
   await service.closeTerminal('tm-never-bound');
-  expect(api.forgetRestoringLeaf).toHaveBeenCalledWith('tm-never-bound');
+  expect(api.forgetRestoringLeaf).not.toHaveBeenCalled();
+  expect(api.closeTerminal).not.toHaveBeenCalled();
 });
 
-test('closeTerminal still clears the wait state and resolves when forgetting the restore intent fails', async () => {
+test('legacy no-process close clears wait state without invoking a holder side channel', async () => {
   const store = makeStore();
   store.dispatch(addTabTree({ tabId: 'tb-wait', tree: leaf('tm-wait') }));
   const { service, api } = makeService(store, jest.fn().mockRejectedValue('host-ownership-pending: unanswered'));
