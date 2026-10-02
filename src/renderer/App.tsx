@@ -12,6 +12,7 @@ import { GlobalDialog } from './components/UI/GlobalDialog';
 import { ConfirmDialog } from './components/UI/ConfirmDialog';
 import { ToastContainer } from './components/UI/ToastContainer';
 import { GlobalPeerRequests } from './components/GlobalPeerRequests';
+import { GlobalHostNotices } from './components/GlobalHostNotices';
 import { EulaAcceptModal } from './components/EulaAcceptModal';
 import { GlobalAutomationEditor } from './components/Automation/GlobalAutomationEditor';
 import {
@@ -1861,6 +1862,7 @@ const App: React.FC = () => {
       {/* App-level incoming-pairing consent dialog — reachable even when Settings
           is closed (the tray/background scenario peering targets). */}
       <GlobalPeerRequests />
+      <GlobalHostNotices />
 
       {/* First-run EULA acceptance gate (renders only until accepted). */}
       <EulaAcceptModal />
