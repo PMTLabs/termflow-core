@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-/// Naming is opt-in; discovery of surviving hosts is never gated.
+/// Naming is on unless the kill switch (`TERMFLOW_PTY_GENERATIONS=0`, or `false`/`off`) is
+/// set; discovery of surviving hosts is never gated.
 fn generations_enabled(value: Option<&str>) -> bool {
-    value == Some("1")
+    !value.is_some_and(|value| ["0", "false", "off"].iter().any(|off| value.trim().eq_ignore_ascii_case(off)))
 }
 
 pub(super) fn named_generation(generation: Option<&str>, enabled: bool) -> Option<&str> {
@@ -250,13 +251,19 @@ mod tests {
 
     #[test]
     fn the_production_pin_reads_the_gate_from_the_environment() {
-        let on = paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "1")]);
-        assert_eq!(on, paths_for(Some(GEN)));
-        for off in [
+        for on in [
             paths_pinned_from_env(&[]),
-            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "0")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "1")]),
             paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "true")]),
-            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATION", "1")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATION", "0")]),
+        ] {
+            assert_eq!(on, paths_for(Some(GEN)));
+        }
+        for off in [
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "0")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", "false")]),
+            paths_pinned_from_env(&[("TERMFLOW_PTY_GENERATIONS", " OFF ")]),
         ] {
             assert_eq!(off, paths_for(None));
         }
@@ -284,10 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn gate_defaults_off() {
-        for value in [None, Some("0"), Some("true"), Some("")] {
-            assert!(!super::generations_enabled(value));
+    fn gate_defaults_on() {
+        for value in [None, Some("1"), Some("true"), Some(""), Some("2"), Some("no one asked")] {
+            assert!(super::generations_enabled(value), "{value:?}");
         }
-        assert!(super::generations_enabled(Some("1")));
+        for value in [Some("0"), Some("false"), Some("FALSE"), Some("off"), Some(" 0 ")] {
+            assert!(!super::generations_enabled(value), "{value:?}");
+        }
     }
 }
