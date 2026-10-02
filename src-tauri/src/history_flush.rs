@@ -40,7 +40,10 @@ pub(crate) fn spawn_history_flush_task(state: AppState) {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
             ticker.tick().await;
-            flush_dirty_history(&state);
+            let state = state.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || flush_dirty_history(&state)).await {
+                log::warn!("History flush worker failed: {e}");
+            }
         }
     });
 }

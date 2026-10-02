@@ -18,7 +18,7 @@ pub mod pipe_server;
 
 use crate::pty_host_client::PtyHostClient;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Returned verbatim (never wrapped in a longer message) by
 /// `AppState::ensure_elevated_host` when the user denies the UAC prompt, so
@@ -31,7 +31,7 @@ pub const ADMIN_UAC_CANCELLED: &str = "ADMIN_UAC_CANCELLED";
 /// never reused within a run, so a stale reference to a retired host cannot
 /// resolve to a later host that took its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct FrozenId(pub u32);
+pub struct FrozenId(pub u64);
 
 /// Which pty-host sidecar owns a `host_terminals` entry. `Primary` is the
 /// existing, always-on sidecar; `Elevated` is the UAC-elevated one this
@@ -40,7 +40,7 @@ pub struct FrozenId(pub u32);
 /// elevated sidecar's lifetime (plan 045 §4.1) is DERIVED from counting
 /// `Elevated` entries — never hand-maintained — see
 /// `AppState::forget_host_terminal`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostChannel {
     Primary,
     Elevated,
@@ -63,6 +63,7 @@ pub struct ElevatedHost {
     /// generation is still current, mirroring `AppState::pty_host_gen` — a
     /// dying old client can't clobber a freshly reconnected one.
     gen: AtomicU64,
+    shutting_down: AtomicBool,
 }
 
 impl Default for ElevatedHost {
@@ -79,6 +80,7 @@ impl ElevatedHost {
             #[cfg(windows)]
             proc: Mutex::new(None),
             gen: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -97,57 +99,118 @@ impl ElevatedHost {
         self.gen.load(Ordering::Acquire)
     }
 
-    pub fn bump_gen(&self) -> u64 {
-        self.gen.fetch_add(1, Ordering::AcqRel) + 1
+    pub fn bump_gen(&self) -> Result<u64, String> {
+        crate::checked_counter::advance(&self.gen)
     }
 
-    /// Publish a freshly connected client and its launched process, becoming
-    /// the current connection. Mirrors the primary's own "publish, then
-    /// re-check is_alive" step in `ensure_pty_host_inner`.
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Recheck connection setup while holding placement admission against idle
+    /// teardown. The caller's earlier ensure may have lost its connection.
+    pub(crate) async fn ensure_for_placement<F: std::future::Future<Output = Result<(), String>>>(
+        &self, ensure: impl FnOnce() -> F,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let guard = self.connecting.lock().await;
+        if self.is_shutting_down() { return Err("elevated terminal host is shutting down".into()); }
+        if !self.is_connected() { ensure().await?; }
+        if self.is_shutting_down() { return Err("elevated terminal host is shutting down".into()); }
+        Ok(guard)
+    }
+
+    fn publish_client(&self, client: PtyHostClient, install_process: impl FnOnce()) -> Result<(), PtyHostClient> {
+        let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_shutting_down() { return Err(client); }
+        install_process();
+        *slot = Some(client);
+        Ok(())
+    }
+
+    /// Exit and installation share the slot lock. A consent result arriving
+    /// after exit owns cleanup, not permission to publish a new connection.
     #[cfg(windows)]
-    pub fn publish(&self, client: PtyHostClient, proc: launch::LaunchedProcess) {
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
-        *self.proc.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc);
+    pub async fn publish(&self, client: PtyHostClient, proc: launch::LaunchedProcess) -> Result<(), String> {
+        let mut proc = Some(proc);
+        if let Err(client) = self.publish_client(client, || {
+            *self.proc.lock().unwrap_or_else(|e| e.into_inner()) = proc.take();
+        }) {
+            client.close_transport().await;
+            self.wait_owned_process(proc).await;
+            return Err("elevated terminal host is shutting down".into());
+        }
+        Ok(())
     }
 
-    /// Null the client without touching the process handle — used by
-    /// `on_disconnect` (the pipe already dropped; `shutdown` below still owns
-    /// waiting on the process and logging).
-    pub fn clear_client(&self) {
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    pub(crate) fn clear_client_on<T>(&self, epoch: u64, snapshot: impl FnOnce() -> T) -> Option<T> {
+        let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        if !slot.as_ref().is_some_and(|c| c.session_epoch(HostChannel::Elevated) == Some(epoch)) { return None; }
+        let captured = snapshot();
+        slot.take();
+        Some(captured)
     }
 
-    /// Tear the elevated connection down: drop every clone of the client we
-    /// hold (which drops the writer task's pipe handle, EOF-ing the elevated
-    /// sidecar — see `pty-host`'s `transport::dial`), then wait up to 5s for
-    /// the process to exit on its own. Idempotent: safe to call when already
-    /// torn down (e.g. `on_disconnect` already cleared the client).
-    #[cfg(windows)]
+    /// A queued last-owner cleanup must not detach a connection another create
+    /// has acquired. Admission is closed before the owner check and stays closed
+    /// while the exact transport is cancelled; connection setup is serialized too.
+    pub(crate) async fn shutdown_idle(&self, table: &crate::state::HostTable, epoch: u64) -> bool {
+        let _connecting = self.connecting.lock().await;
+        let Ok(_drain) = table.drain_host(HostChannel::Elevated) else { return false; };
+        if table.epoch(HostChannel::Elevated) != Some(epoch) { return false; }
+        let mut client = None;
+        if !table.keys().detach_idle(HostChannel::Elevated, epoch, || {
+            let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+            if !slot.as_ref().is_some_and(|c| c.session_epoch(HostChannel::Elevated) == Some(epoch)) { return false; }
+            client = slot.take();
+            true
+        }) { return false; }
+        #[cfg(windows)]
+        let proc = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(client) = client { client.close_transport().await; }
+        #[cfg(windows)]
+        self.wait_owned_process(proc).await;
+        true
+    }
+
+    /// Global exit owns closed admission. Stop the transport explicitly: the
+    /// key authority retains a sender, so clone-count EOF is not a shutdown signal.
     pub async fn shutdown(&self) {
+        // Consent is external and may never settle. Fence publication first,
+        // then give setup only a short opportunity to leave its critical section.
+        {
+            let _slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+            self.shutting_down.store(true, Ordering::Release);
+        }
+        let _connecting = tokio::time::timeout(std::time::Duration::from_millis(100), self.connecting.lock()).await.ok();
         let client = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
-        // Dropping the last clone closes the outbound channel, which ends the
-        // writer task and drops its pipe handle — the EOF the elevated
-        // sidecar's dial-out mode exits on (plan 045 §4.1).
-        drop(client);
+        #[cfg(windows)]
+        let proc = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(client) = client { client.close_transport().await; }
+        #[cfg(windows)]
+        self.wait_owned_process(proc).await;
+    }
 
-        let Some(proc) = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-            return;
-        };
+    #[cfg(windows)]
+    pub(crate) async fn wait_owned_process(&self, proc: Option<launch::LaunchedProcess>) {
+        let Some(proc) = proc else { return; };
         let pid = proc.pid;
-        let exited = tokio::task::spawn_blocking(move || wait_for_exit(proc, 5_000))
-            .await
-            .unwrap_or(false);
-        if exited {
-            log::info!("[ADMIN] elevated pty-host (pid {pid}) exited after teardown");
-        } else {
-            log::warn!(
-                "[ADMIN] elevated pty-host (pid {pid}) did not exit within 5s of teardown"
-            );
+        let exited = tokio::task::spawn_blocking(move || wait_for_exit(proc, 5_000)).await.unwrap_or(false);
+        if exited { log::info!("[ADMIN] elevated pty-host (pid {pid}) exited after teardown"); }
+        else { log::warn!("[ADMIN] elevated pty-host (pid {pid}) did not exit within 5s of teardown"); }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_client(&self, client: PtyHostClient) {
+        assert!(self.publish_client(client, || {}).is_ok());
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_test_client(&self, client: PtyHostClient) -> bool {
+        match self.publish_client(client, || {}) {
+            Ok(()) => true,
+            Err(client) => { client.close_transport().await; false }
         }
     }
-
-    #[cfg(not(windows))]
-    pub async fn shutdown(&self) {}
 }
 
 #[cfg(windows)]
@@ -179,6 +242,15 @@ fn wait_for_exit(proc: launch::LaunchedProcess, timeout_ms: u32) -> bool {
 /// already-superseded connection can't tear down a freshly opened one.
 #[cfg(test)]
 mod crash_tests {
+    #[test]
+    fn connection_generation_exhaustion_keeps_the_last_identity() {
+        let manager = super::ElevatedHost::new();
+        manager.gen.store(u64::MAX - 1, super::Ordering::Release);
+        assert_eq!(manager.bump_gen().unwrap(), u64::MAX);
+        assert!(manager.bump_gen().is_err());
+        assert_eq!(manager.current_gen(), u64::MAX);
+    }
+
     /// `on_disconnect`'s own closure body, extracted by brace-counting from
     /// its `Arc::new(move || {` opening — not a fixed line window, which
     /// would silently start matching the rest of the function once the

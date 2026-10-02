@@ -7,9 +7,9 @@
 
 use super::{AdoptionPort, PtyHostClient};
 use crate::elevated_host::HostChannel;
-use crate::state::host_registry::{self, OrphanVerdict};
+
 use crate::state::host_routing::RoutingPort;
-use crate::state::terminals::{plan_reconnect, session_needs_surface};
+use crate::state::terminals::plan_reconnect;
 use std::collections::HashMap;
 use termflow_pty_protocol::SessionMeta;
 
@@ -52,43 +52,13 @@ pub(super) fn live_client<P: AdoptionPort>(port: &P, channel: HostChannel) -> Op
 /// user. `channel` is the host whose listing reported `orphans`.
 pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<SessionMeta>, channel: HostChannel) {
     for orphan in orphans {
-        // A terminal can be created between a listing and this UI pass.
-        // The current ownership map, rather than a restore snapshot, is
-        // authoritative at the point recovery would become visible — and it
-        // must see EVERY channel: the registration that raced the listing
-        // may have landed on a different host than the one that listed it.
-        if !session_needs_surface(port.registered_on_any_channel(&orphan.tab_id)) {
-            continue;
-        }
-        // Not registered yet does not mean unwanted. A pane restored from a
-        // saved layout may still be waiting for this very session (its create
-        // is retrying while a host answers), and turning the session into a
-        // recovered tab would put a second owner on it. A session whose pane
-        // the user closed while waiting is closed rather than shown.
-        match host_registry::orphan_verdict(
-            port.restoring_keys(),
-            port.closed_unowned(),
-            &orphan.tab_id,
-            std::time::Instant::now(),
-        ) {
-            OrphanVerdict::Surface => {}
-            OrphanVerdict::Restoring => {
-                log::info!("[HOTSWAP] {} is held for a restored pane that is still waiting; not surfacing it", orphan.tab_id);
-                continue;
-            }
-            OrphanVerdict::CloseUnowned => {
-                log::info!("[HOTSWAP] closing {}: its pane was closed before its host was known", orphan.tab_id);
-                if let Some(client) = live_client(port, channel) {
-                    client.close(&orphan.tab_id);
-                }
-                continue;
-            }
-        }
-        // This emission carries the authoritative PID from the host listing.
-        // Reserve it so a recovery create can never degrade into a fresh spawn
-        // merely because the reservation was absent.
-        host_registry::reserve_session(port.claims(), &orphan.tab_id, orphan.pid, channel);
-        port.announce_recovered(&orphan.tab_id);
+        // Registration can race the UI pass. Decide and enqueue recovery under
+        // the same authority that makes a listed key eligible for attachment.
+        let delivery_port = port.clone();
+        let key = orphan.tab_id.clone();
+        port.table().keys().recover_listed(channel, &orphan.tab_id,
+            || !port.registered_on_any_channel(&orphan.tab_id),
+            move || delivery_port.announce_recovered(&key));
     }
 }
 
@@ -100,16 +70,22 @@ pub(in crate::state) fn surface_orphans<P: PanePort>(port: &P, orphans: Vec<Sess
 /// it has died. Fresh ownership is useful only to suppress orphan recovery.
 /// `still_current` says whether this pass still owns the connection; once it does
 /// not, a newer recovery does, and this one stops before any attach or teardown.
+pub(super) fn reconnect_snapshot<P: PanePort>(port: &P, channel: HostChannel) -> HashMap<String, crate::state::SessionIdentity> {
+    port.panes_on(channel).into_iter().filter_map(|(key, process)| {
+        port.table().keys().session_identity(channel, &key, &process).map(|identity| (key, identity))
+    }).collect()
+}
+
 pub(super) async fn reattach_listed<P: PanePort>(
     port: &P,
     channel: HostChannel,
     client: &PtyHostClient,
-    tabs: &[String],
+    by_session: &HashMap<String, crate::state::SessionIdentity>,
     sessions: &[SessionMeta],
     still_current: &(dyn Fn() -> bool + Sync),
 ) {
-    let by_session = port.panes_on(channel);
-    let plan = plan_reconnect(tabs, sessions, &port.saved_offsets(), by_session.keys().cloned());
+    let tabs: Vec<_> = by_session.keys().cloned().collect();
+    let plan = plan_reconnect(&tabs, sessions, &port.saved_offsets(), port.panes_on(channel).keys().cloned());
     log::info!(
         "[HOTSWAP] in-place reconnect: {} session(s) to reattach, {} lost, {} orphan(s) to recover",
         plan.reattach.len(),
@@ -126,28 +102,34 @@ pub(super) async fn reattach_listed<P: PanePort>(
         // couldn't deliver Close then). Finish the close now instead of
         // reattaching a session nobody owns — else it lingers as a zombie.
         // `a.tab_id` is a SESSION key; ownership lives under the process id.
-        let Some(process_id) = by_session.get(&a.tab_id).cloned().filter(|p| port.pane_is_host_owned(p)) else {
-            log::info!("[HOTSWAP] {} was closed while disconnected; closing its host session", a.tab_id);
-            client.close(&a.tab_id);
+        let Some(identity) = by_session.get(&a.tab_id) else { continue };
+        if !port.pane_is_host_owned(&identity.process) {
+            port.table().keys().close_original(identity);
             continue;
-        };
-        match client.attach_confirmed(&a.tab_id, a.from_offset).await {
-            Some(true) => log::info!(
+        }
+        let Some(epoch) = client.session_epoch(channel) else { continue };
+        if !port.table().keys().publish_route_on(identity, channel, epoch) { continue; }
+        match client.attach_owned(identity, a.from_offset).await {
+            Ok(Some(true)) => log::info!(
                 "[HOTSWAP] reattached {} in place from offset {} (host-confirmed alive)",
                 a.tab_id,
                 a.from_offset
             ),
-            Some(false) => log::warn!("[HOTSWAP] reattached {} but host reports it not alive", a.tab_id),
-            None => log::info!(
+            Ok(Some(false)) => log::warn!("[HOTSWAP] reattached {} but host reports it not alive", a.tab_id),
+            Ok(None) => log::info!(
                 "[HOTSWAP] reattached {} in place from offset {} (legacy attach)",
                 a.tab_id,
                 a.from_offset
             ),
+            Err(reason) => {
+                log::warn!("[HOTSWAP] could not reattach {}: {reason}", a.tab_id);
+                continue;
+            }
         }
         // Dimensions live under the PROCESS id; the nudge goes to the host,
         // so it stays addressed by the session key.
-        let (cols, rows) = port.pane_size(&process_id);
-        client.nudge_repaint(&a.tab_id, cols, rows);
+        let (cols, rows) = port.pane_size(&identity.process);
+        client.repaint_owned(identity, cols, rows);
         // The registered terminal remains the exclusive owner across an
         // in-place reconnect; deleting this claim would let a late create
         // register a second identity for the same live host session.
@@ -159,10 +141,9 @@ pub(super) async fn reattach_listed<P: PanePort>(
         }
         // `t` is a SESSION key; teardown operates on the process id. A pane
         // already closed while disconnected has nothing to tear down.
-        let Some(process_id) = by_session.get(&t).cloned().filter(|p| port.pane_is_host_owned(p)) else {
-            continue;
-        };
+        let Some(identity) = by_session.get(&t).filter(|i| port.pane_is_host_owned(&i.process)) else { continue };
+        // Teardown is process-addressed; a successor has a different process id.
         log::warn!("[HOTSWAP] session {t} not held by the reconnected host; closing its pane");
-        port.teardown_pane(&process_id);
+        port.teardown_pane(&identity.process);
     }
 }

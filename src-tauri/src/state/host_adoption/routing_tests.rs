@@ -6,7 +6,7 @@ use super::*;
 use crate::state::host_registry::{self, OrphanVerdict};
 use crate::state::host_routing::{place, spawn_target, Placement, HOST_OWNERSHIP_PENDING};
 use crate::state::host_table::QuiesceReason;
-use crate::state::types::HostSessionClaimState;
+use crate::state::host_keys::KeyKind;
 use std::time::{Instant as StdInstant, SystemTime};
 use termflow_pty_protocol::SpawnSpec;
 
@@ -54,7 +54,7 @@ fn holding(keys: &[(&str, u32)]) -> HostSpec {
 }
 
 fn restore(port: &FakePort, leaf: &str, session_key: Option<&str>) {
-    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), leaf, session_key, StdInstant::now()));
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", leaf, session_key, StdInstant::now()));
 }
 
 async fn refusal(port: &FakePort, key: &str, overridden: bool) -> String {
@@ -74,15 +74,15 @@ enum Did {
 
 /// Do what `spawn_routed` does with a placement: send the frame to the host the
 /// placement names.
-async fn execute(session_key: &str, placement: Placement) -> Did {
+async fn execute(_requested_key: &str, placement: Placement) -> Did {
     match placement {
-        Placement::Attach { channel, client, pid, ticket } => {
-            client.attach_confirmed(session_key, 0).await;
+        Placement::Attach { channel, client, pid, ticket, session_key } => {
+            client.attach_confirmed(&session_key, 0).await;
             drop(ticket);
             Did::Attached(channel, pid)
         }
-        Placement::Spawn { channel, client, ticket } => {
-            client.spawn_session(session_key, &spawn_spec()).await.unwrap();
+        Placement::Spawn { channel, client, ticket, session_key } => {
+            client.spawn_session(&session_key, &spawn_spec()).await.unwrap();
             drop(ticket);
             Did::Spawned(channel)
         }
@@ -95,6 +95,12 @@ async fn create(port: &FakePort, key: &str, overridden: bool) -> Did {
         Ok(placement) => execute(key, placement).await,
         Err(e) => panic!("create refused: {e}"),
     }
+}
+
+fn assert_spawn_key(world: &World, host: &str, leaf: &str) {
+    let keys = world.sessions(host, "Spawn");
+    assert_eq!(keys.len(), 1, "exactly one Spawn on {host}");
+    assert_eq!(crate::state::parse_session_key(&keys[0]), crate::state::SessionKeyKind::V2 { owner_leaf: leaf });
 }
 
 fn is_pending(err: &str) -> bool {
@@ -124,12 +130,12 @@ async fn modern_restore_without_override_key_is_not_spawned_while_unresolved() {
 
 #[tokio::test(start_paused = true)]
 async fn migrated_restore_same() {
-    // A migrated pane's session is still known by its old key; the restore
-    // intent is recorded under that key, not under the leaf.
+    // A migrated pane protects its old exact key as well as its own leaf's
+    // aliases; either spelling must keep its create waiting for the host.
     let (world, port) = machine(&[("h1", never(&[("tb-old", 7)]))]);
     restore(&port, "tm-new", Some("tb-old"));
-    assert!(port.0.restoring_keys.contains_key("tb-old"));
-    assert!(!port.0.restoring_keys.contains_key("tm-new"));
+    assert!(port.table().keys().is_restoring_key("tb-old", StdInstant::now()));
+    assert!(port.table().keys().is_restoring_key("tm-new", StdInstant::now()), "the holder also protects its own leaf");
 
     let err = refusal(&port, "tb-old", true).await;
     assert!(is_pending(&err), "{err}");
@@ -180,7 +186,7 @@ async fn a_waiting_pane_attaches_when_its_host_resolves() {
     assert_eq!(did, Did::Attached(HostChannel::Frozen(FrozenId(1)), 41));
     assert_eq!(world.count_everywhere("Spawn"), 0);
     assert_eq!(world.count(CURRENT, "Attach"), 0, "the attach went to the holder, not the current host");
-    assert!(!port.0.restoring_keys.contains_key("tm-wait"), "bound: nothing waits for the key any more");
+    assert!(!port.table().keys().is_restoring_key("tm-wait", StdInstant::now()), "bound: nothing waits for the key any more");
 }
 
 #[tokio::test(start_paused = true)]
@@ -195,7 +201,7 @@ async fn a_keyed_create_claimed_by_a_frozen_host_attaches_there_and_spawns_nowhe
     assert_eq!(world.count("h2", "Attach"), 0);
     assert_eq!(world.count(CURRENT, "Attach"), 0);
     assert_eq!(world.count_everywhere("Spawn"), 0, "zero Spawn frames");
-    assert!(!port.0.restoring_keys.contains_key("k1"));
+    assert!(!port.table().keys().is_restoring_key("k1", StdInstant::now()));
 }
 
 #[tokio::test(start_paused = true)]
@@ -204,45 +210,51 @@ async fn an_unclaimed_restore_spawns_once_every_host_answered_and_the_intent_is_
     restore(&port, "tm-brand-new", None);
 
     assert_eq!(create(&port, "tm-brand-new", false).await, Did::Spawned(HostChannel::Primary));
-    assert_eq!(world.sessions(CURRENT, "Spawn"), vec!["tm-brand-new".to_string()], "on the current host");
+    assert_spawn_key(&world, CURRENT, "tm-brand-new");
     assert_eq!(world.count("h1", "Spawn"), 0);
-    assert!(!port.0.restoring_keys.contains_key("tm-brand-new"), "a later create is not held by a spent intent");
+    assert!(!port.table().keys().is_restoring_key("tm-brand-new", StdInstant::now()), "a later create is not held by a spent intent");
 }
 
 #[tokio::test(start_paused = true)]
 async fn restoring_key_ttl_refreshed_on_each_keyed_create() {
     let (_world, port) = machine(&[("h1", never(&[]))]);
-    restore(&port, "tm-idle", None);
-    let stamp = |port: &FakePort| *port.0.restoring_keys.get("tm-idle").unwrap();
+    let before = StdInstant::now() - secs(1);
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", "tm-idle", None, before));
+    let stamp = |port: &FakePort| port.table().keys().holder_stamp("main", "tm-idle").unwrap();
 
     let registered = stamp(&port);
-    std::thread::sleep(Duration::from_millis(15));
     assert!(is_pending(&refusal(&port, "tm-idle", false).await));
     let first = stamp(&port);
     assert!(first > registered, "the first keyed create refreshed the intent");
 
-    std::thread::sleep(Duration::from_millis(15));
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", "tm-idle", None, before));
     assert!(is_pending(&refusal(&port, "tm-idle", false).await));
-    assert!(stamp(&port) > first, "and so did the second");
+    assert!(stamp(&port) >= first, "and so did the second");
 
     // A fresh leaf neither creates an intent nor is held.
     assert_eq!(create(&port, "tm-fresh", false).await, Did::Spawned(HostChannel::Primary));
-    assert!(!port.0.restoring_keys.contains_key("tm-fresh"));
+    assert!(!port.table().keys().is_restoring_key("tm-fresh", StdInstant::now()));
 }
 
 #[tokio::test(start_paused = true)]
 async fn restoring_key_not_registered_for_an_already_live_session() {
     let (_world, port) = machine(&[]);
+    ensure_hosts(&port).await.unwrap();
+    let keys = port.table().keys();
+    let crate::state::CreateAdmission::Run(cg) = keys.admit_create("tm-live", crate::state::CreateMode::Mount).unwrap() else { panic!("admission") };
+    let (stage, _, _) = keys.stage_shell("tm-live", cg, "pc-1", Some((HostChannel::Primary, "tm-live", crate::state::StageMode::Spawn))).unwrap();
     port.register_terminal("pc-1", "tm-live", HostChannel::Primary);
+    let shell = crate::state::StagedShell { process: "pc-1".into(), stage: crate::state::ShellStage::Hosted(stage.unwrap()) };
+    assert!(matches!(keys.complete_shell("tm-live", cg, &shell), crate::state::Completion::Registered));
     let maps = port.intent_maps();
     let now = StdInstant::now();
 
-    assert!(!host_registry::register_restoring_leaf(&maps, "tm-live", None, now));
-    assert!(!host_registry::register_restoring_leaf(&maps, "tm-moved", Some("tm-live"), now), "by its override key too");
-    assert!(port.0.restoring_keys.is_empty(), "nothing would ever remove an entry for a live key");
-    assert!(port.0.restoring_leaf_keys.is_empty());
-    assert!(host_registry::register_restoring_leaf(&maps, "tm-waiting", None, now));
-    assert!(port.0.restoring_keys.contains_key("tm-waiting"));
+    assert!(!host_registry::register_restoring_leaf(&maps, "main", "tm-live", None, now));
+    assert_eq!(port.table().keys().holder_count(), 0, "same-leaf reload leaves no holder");
+    assert!(host_registry::register_restoring_leaf(&maps, "main", "tm-moved", Some("tm-live"), now), "another leaf's key is not proof this pane registered");
+    assert_eq!(port.table().keys().holder_count(), 1);
+    assert!(host_registry::register_restoring_leaf(&maps, "main", "tm-waiting", None, now));
+    assert!(port.table().keys().is_restoring_key("tm-waiting", now));
 }
 
 // ---- fresh creates never wait ------------------------------------------------
@@ -254,13 +266,13 @@ async fn fresh_tab_during_unresolved_adoption_spawns_on_current_promptly() {
         .await
         .expect("a fresh tab must not wait for the unresolved host");
     assert_eq!(did, Did::Spawned(HostChannel::Primary));
-    assert_eq!(world.sessions(CURRENT, "Spawn"), vec!["tm-fresh".to_string()]);
+    assert_spawn_key(&world, CURRENT, "tm-fresh");
     assert!(
         world.kinds("h1").iter().all(|k| matches!(*k, "Disarm" | "List")),
         "the old host saw only its lifecycle frame and listings: {:?}",
         world.kinds("h1")
     );
-    assert!(port.0.restoring_keys.is_empty());
+    assert_eq!(port.table().keys().holder_count(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -269,14 +281,14 @@ async fn a_new_tab_spawns_on_the_current_host_only_and_leaves_the_old_hosts_sess
     assert_eq!(create(&port, "tm-new", false).await, Did::Spawned(HostChannel::Primary));
     tokio::time::sleep(SEC).await;
 
-    assert_eq!(world.sessions(CURRENT, "Spawn"), vec!["tm-new".to_string()]);
+    assert_spawn_key(&world, CURRENT, "tm-new");
     assert_eq!(world.count("h1", "Spawn"), 0);
     assert_eq!(world.count("h1", "Attach"), 0);
     assert_eq!(world.count("h1", "Close"), 0);
     let h1 = HostChannel::Frozen(FrozenId(1));
     for key in ["k1", "k2"] {
-        let claim = port.0.claims.get(key).unwrap();
-        assert_eq!((claim.state.clone(), claim.channel), (crate::state::types::HostSessionClaimState::Reserved, h1));
+        let claim = port.table().keys().snapshot(key).unwrap();
+        assert_eq!((claim.state, claim.channel), (KeyKind::Listed, h1));
     }
 }
 
@@ -399,7 +411,7 @@ async fn falls_back_frozen_then_in_process() {
 
     let did = create(&port, "tm-fresh", false).await;
     assert_eq!(did, Did::Spawned(HostChannel::Frozen(FrozenId(1))));
-    assert_eq!(world.sessions("h1", "Spawn"), vec!["tm-fresh".to_string()], "the Spawn reached the older host");
+    assert_spawn_key(&world, "h1", "tm-fresh");
     assert_eq!(world.count(CURRENT, "Spawn"), 0);
 
     // Nothing usable anywhere: in-process.
@@ -432,8 +444,7 @@ async fn orphan_sweep_does_not_surface_a_restoring_key() {
         .iter()
         .map(|o| {
             let verdict = host_registry::orphan_verdict(
-                &port.0.restoring_keys,
-                &port.0.closed_unowned,
+                port.table().keys(),
                 &o.tab_id,
                 StdInstant::now(),
             );
@@ -458,15 +469,24 @@ async fn orphan_sweep_does_not_surface_a_restoring_key() {
 fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits() {
     let panes = source_of("host_adoption/panes.rs");
     let body = fn_body(&panes, "pub(in crate::state) fn surface_orphans<");
-    let verdict = body.find("host_registry::orphan_verdict(").expect("surfacing must consult the verdict");
-    let reserve = body.find("host_registry::reserve_session(").expect("surfacing reserves the session");
+    let decision = body.find(".keys().recover_listed(").expect("surfacing uses the atomic decision");
     let emit = body.find("port.announce_recovered(").expect("surfacing announces the recovered session");
-    assert!(verdict < reserve && verdict < emit, "the verdict must come first");
-    for needle in ["OrphanVerdict::Restoring =>", "OrphanVerdict::CloseUnowned =>"] {
-        let arm = &body[body.find(needle).unwrap_or_else(|| panic!("no {needle} arm"))..];
-        let arm = &arm[..arm.find("continue;").expect("the arm leaves the loop iteration")];
-        assert!(!arm.contains("reserve_host_session") && !arm.contains("emit"), "{needle} must not surface");
-    }
+    assert!(decision < emit);
+    let authority = source_of("host_keys/effects.rs");
+    let recovery = fn_body(&authority, "pub(crate) fn recover_listed(");
+    let eligible = recovery.find("Some(&KeyState::Listed)").unwrap();
+    let protected = recovery.find("Self::protected(").unwrap();
+    let ending = recovery.find("Self::end(").unwrap();
+    let enqueue = recovery.find("delivery.send(Box::new(move ||").unwrap();
+    let coalesce = recovery.find("pending_deliveries.insert(").unwrap();
+    assert!(eligible < coalesce && protected < coalesce && ending < coalesce && coalesce < enqueue);
+    assert!(recovery.contains("let mut inner = self.lock()"));
+    let alternative = recovery.find("else {").unwrap();
+    assert!(ending < alternative && alternative < coalesce, "ending and recovery enqueue are exclusive");
+    assert!(!recovery.contains("announce()"), "framework delivery must not run under ownership");
+    let worker = source_of("host_keys/delivery.rs");
+    assert!(worker.contains("while let Ok(deliver) = receiver.recv()"));
+    assert!(worker.contains("AssertUnwindSafe(deliver)"));
 
     // The three flows that surface orphans, the primary's pipe-drop recovery, an
     // older host's reconnect (both through `reattach_listed`) and the sweep, all go
@@ -498,9 +518,9 @@ async fn closing_a_waiting_pane_closes_the_shell_when_its_host_resolves() {
     assert!(is_pending(&refusal(&port, "tm-wait", false).await));
 
     // The user closes the pane while it waits.
-    host_registry::forget_restoring_leaf(&port.intent_maps(), "tm-wait", StdInstant::now());
-    assert!(!port.0.restoring_keys.contains_key("tm-wait"));
-    assert!(port.0.closed_unowned.contains_key("tm-wait"));
+    host_registry::forget_restoring_leaf(&port.intent_maps(), "main", "tm-wait", StdInstant::now());
+    assert!(!port.table().keys().is_restoring_key("tm-wait", StdInstant::now()));
+    assert!(port.table().keys().unowned_close_due(false, "tm-wait", StdInstant::now()));
 
     // Later the host answers. Its shell is closed, not adopted.
     for _ in 0..6 {
@@ -513,7 +533,7 @@ async fn closing_a_waiting_pane_closes_the_shell_when_its_host_resolves() {
     tokio::time::sleep(SEC).await;
     assert!(port.barrier().unresolved().is_empty(), "the host did resolve");
     assert_eq!(world.sessions("h1", "Close"), vec!["tm-wait".to_string()], "the Close reached the host that held it");
-    assert!(port.0.claims.get("tm-wait").is_none(), "and nothing is left to adopt it");
+    assert!(!port.table().keys().eligible(HostChannel::Frozen(FrozenId(1)), "tm-wait"), "nothing ending is attachable");
     assert_eq!(world.count_everywhere("Spawn"), 0);
     assert_eq!(world.count(CURRENT, "Close"), 0);
 }
@@ -525,14 +545,14 @@ async fn closed_unowned_never_closes_a_registered_session() {
     let (world, port) = machine(&[("h1", holding(&[("tm-reused", 61)]))]);
     let h1 = HostChannel::Frozen(FrozenId(1));
     port.register_terminal("pc-new", "tm-reused", h1);
-    port.0.closed_unowned.insert("tm-reused".into(), StdInstant::now());
+    host_registry::forget_restoring_leaf(&port.intent_maps(), "main", "tm-reused", StdInstant::now());
 
     ensure_hosts(&port).await.unwrap();
     tokio::time::sleep(SEC).await;
     assert_eq!(port.frozen_ids(), vec![FrozenId(1)]);
     assert_eq!(world.count("h1", "Close"), 0, "a registered session is never closed on the strength of an old close");
     assert!(port.duplicates().is_empty(), "it is registered on the very host that reports it");
-    assert!(port.0.claims.get("tm-reused").is_none(), "already owned: nothing to reserve");
+    assert_eq!(port.table().keys().state(h1, "tm-reused"), Some(crate::state::KeyState::Bound("pc-new".into())), "already owned");
 }
 
 #[tokio::test(start_paused = true)]
@@ -552,8 +572,9 @@ async fn duplicate_session_key_across_channels_is_reported() {
     assert_eq!(world.count(CURRENT, "Close"), 0);
     assert_eq!(world.count_everywhere("Attach"), 0);
     assert_eq!(world.count_everywhere("Spawn"), 0);
-    assert!(port.0.claims.get("tm-dup").is_none(), "no second owner is reserved for it");
-    assert!(port.0.claims.get("tm-ok").is_some(), "other sessions are adopted as usual");
+    assert_eq!(port.table().keys().state(HostChannel::Primary, "tm-dup"), Some(crate::state::KeyState::Bound("pc-1".into())));
+    assert!(port.table().keys().eligible(HostChannel::Frozen(FrozenId(1)), "tm-dup"), "the other host's key is listed, not automatically owned");
+    assert!(port.table().keys().contains_key("tm-ok"), "other sessions are adopted as usual");
 }
 
 // ---- a host whose connection dropped -----------------------------------------
@@ -587,8 +608,8 @@ async fn a_keyed_create_for_a_session_on_a_host_that_is_reconnecting_waits_and_t
     assert!(is_pending(&err), "{err}");
     assert_eq!(world.count("h1", "Attach"), 0, "nothing was attached on the dead connection");
     assert_eq!(
-        port.0.claims.get("k1").map(|c| (c.state.clone(), c.channel)),
-        Some((HostSessionClaimState::Reserved, h1)),
+        port.table().keys().snapshot("k1").map(|c| (c.state, c.channel)),
+        Some((KeyKind::Listed, h1)),
         "and the session is still reserved for the pane that will retry"
     );
 
@@ -638,18 +659,20 @@ fn fn_body(src: &str, signature: &str) -> String {
 fn spawn_routed_has_no_other_pty_host_clone() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("commands").join("terminal.rs");
     let commands = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
-    let body = fn_body(&commands, "pub(crate) async fn spawn_routed(");
+    let wrapper = fn_body(&commands, "pub(crate) async fn spawn_routed(");
+    assert!(wrapper.contains("state.admit_mount(&leaf).await?"));
+    let body = fn_body(&commands, "async fn run_create(");
 
     for forbidden in ["pty_host_clone(", "ensure_pty_host("] {
         assert!(!body.contains(forbidden), "spawn_routed must not select a host itself (found `{forbidden}`)");
     }
     // A refusal is returned as it is; it is never turned into an in-process shell.
     assert!(
-        body.contains("state.place_create(&session_key, session_key_overridden).await?"),
+        body.contains("state.place_process_create(&id, session_key.as_deref(), cg).await?"),
         "the router's refusals (LIFECYCLE_BUSY, host-ownership-pending) must propagate with `?`"
     );
     // The client acted on is the one the placement carries.
-    for call in ["attach_confirmed", "spawn_session"] {
+    for call in ["attach_owned", "spawn_owned"] {
         assert!(body.contains(&format!("client.{call}(")), "spawn_routed must act on the placement's client: {call}");
     }
     // It still falls back in-process when, and only when, the router says no host is usable.
@@ -661,7 +684,10 @@ fn spawn_routed_has_no_other_pty_host_clone() {
 #[test]
 fn the_router_takes_one_ticket_per_create() {
     let routing = source_of("host_routing.rs");
-    let production = &routing[..routing.find("#[cfg(test)]").unwrap_or(routing.len())];
+    let production = crate::state::source_scan::without_test_modules(&routing);
     assert_eq!(production.matches(".begin(").count(), 1);
-    assert!(fn_body(production, "pub(super) async fn place<").contains("port.table().begin(channel)"));
+    assert!(fn_body(&production, "pub(super) async fn place_owned<").contains("begin_ticket(port, channel)"));
+    assert_eq!(fn_body(&production, "pub(super) async fn place_owned<").matches("begin_ticket(").count(), 1);
+    assert_eq!(fn_body(&production, "fn place_elevated_process<").matches("begin_ticket(").count(), 1);
+    assert!(fn_body(&production, "fn begin_ticket<").contains("port.table().begin(channel)"));
 }

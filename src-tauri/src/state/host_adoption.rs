@@ -22,6 +22,8 @@ use crate::pty_host_client::{HostCandidate, HostRole, PtyHostClient};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
+use crate::pty_host_client::SessionListing;
+#[cfg(test)]
 use termflow_pty_protocol::SessionMeta;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -94,6 +96,8 @@ struct Entry {
 struct BarrierShared {
     entries: Mutex<Vec<Entry>>,
     changed: watch::Sender<u64>,
+    #[cfg(test)]
+    lost_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Per-host resolution of the surviving hosts. Cheap to clone.
@@ -111,7 +115,10 @@ impl Default for Barrier {
 impl Barrier {
     pub fn new() -> Self {
         Self {
-            shared: Arc::new(BarrierShared { entries: Mutex::new(Vec::new()), changed: watch::channel(0).0 }),
+            shared: Arc::new(BarrierShared { entries: Mutex::new(Vec::new()), changed: watch::channel(0).0,
+                #[cfg(test)]
+                lost_hook: Mutex::new(None),
+            }),
         }
     }
 
@@ -195,8 +202,15 @@ impl Barrier {
     /// An attempt ended with `resolution`. Records the host if it was not
     /// tracked and the outcome is a real one.
     pub fn finish(&self, key: &str, endpoint: &str, role: HostRole, resolution: Resolution) {
+        self.finish_on(key, endpoint, role, resolution, None);
+    }
+
+    fn finish_on(&self, key: &str, endpoint: &str, role: HostRole, resolution: Resolution, origin: Option<(&HostTable, HostChannel, u64)>) {
         {
             let mut entries = self.lock();
+            // Loss and answered-result writes share this lock. A newer result
+            // cannot be overwritten by a callback that passed an earlier check.
+            if origin.is_some_and(|(table, channel, epoch)| !table.is_current(channel, epoch)) { return; }
             match entries.iter_mut().find(|e| e.key == key) {
                 // A retired host's answer is moot: nothing waits for it.
                 Some(entry) if entry.retired => {}
@@ -271,12 +285,18 @@ impl Barrier {
     /// A rediscovery does not retry it (`retry_pending` stays set): the host's own
     /// reconnect does, and until that settles it the host keeps holding every pane
     /// that waits for the hosts to answer.
-    pub fn mark_lost(&self, key: &str, reason: &str) {
-        if let Some(entry) = self.lock().iter_mut().find(|e| e.key == key) {
-            entry.resolution = Resolution::Unresolved(reason.to_owned());
-            entry.retry_pending = true;
+    fn mark_lost(&self, key: &str, reason: &str, table: &HostTable, channel: HostChannel, epoch: u64) -> bool {
+        {
+            let mut entries = self.lock();
+            if !table.is_current(channel, epoch) { return false; }
+            if let Some(entry) = entries.iter_mut().find(|e| e.key == key) {
+                if entry.retired { return false; }
+                entry.resolution = Resolution::Unresolved(reason.to_owned());
+                entry.retry_pending = true;
+            }
         }
         self.notify();
+        true
     }
 
     /// Claim the right to reconnect `key`. `None` when a reconnect of it is
@@ -378,8 +398,13 @@ pub(super) fn frozen_connection_lost(
     if !table.is_current(channel, epoch) || table.admission(channel) == Some(Admission::Retired) {
         return false;
     }
-    barrier.mark_lost(&barrier_key(endpoint), "connection lost");
-    true
+    #[cfg(test)]
+    {
+        let hook = barrier.shared.lost_hook.lock().unwrap().clone();
+        if let Some(hook) = hook { hook(); }
+    }
+    table.routes().remove_epoch(channel, epoch);
+    barrier.mark_lost(&barrier_key(endpoint), "connection lost", table, channel, epoch)
 }
 
 // ---- the port -------------------------------------------------------------
@@ -420,7 +445,7 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
     fn current_client(&self) -> Option<PtyHostClient>;
     /// Snapshot of the registered frozen hosts.
     fn frozen_hosts(&self) -> Vec<FrozenHost>;
-    fn next_frozen_id(&self) -> FrozenId;
+    fn next_frozen_id(&self) -> Result<FrozenId, String>;
     /// Connect to `candidate`. The current role also starts its host when none is
     /// running; a frozen host is only ever connected to. `frozen` carries the id
     /// and epoch the connection's callbacks must capture.
@@ -432,7 +457,7 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<Opened, ConnectFailure>> + Send;
     /// Reserve what `channel`'s answered listing reports and settle the closes
     /// owed to it. `None` = the host never answered; nothing is changed.
-    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&[SessionMeta]>);
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&SessionListing>);
     /// Publish the current host's client. Refuses one whose connection already
     /// dropped during setup, which nothing would ever clear.
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String>;
@@ -458,13 +483,13 @@ fn connected_keys<P: AdoptionPort>(port: &P) -> Vec<String> {
 /// Ask the host to hold nothing against us, then list what it has. The lifecycle
 /// frame goes first so that a host whose absence clock is about to expire is
 /// revoked before a slow listing is waited on. `None` = never answered.
-async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<Vec<SessionMeta>> {
+async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<SessionListing> {
     let work = async {
         if !client.disarm().await {
             log::warn!("[GEN] host did not acknowledge the disarm");
         }
         for attempt in 0..LIST_ATTEMPTS {
-            if let Some(sessions) = client.list_sessions_within(LIST_ATTEMPT_TIMEOUT).await {
+            if let Some(sessions) = client.list_sessions_numbered_within(LIST_ATTEMPT_TIMEOUT).await {
                 return Some(sessions);
             }
             if !client.is_alive() {
@@ -497,7 +522,7 @@ fn apply_validated_listing<P: AdoptionPort>(
     channel: HostChannel,
     epoch: u64,
     client: &PtyHostClient,
-    listing: Option<&[SessionMeta]>,
+    listing: Option<&SessionListing>,
 ) -> Result<(), Failure> {
     if !listing_is_current(port.table(), channel, epoch, client, Admission::Open) {
         return Err(Failure::Superseded);
@@ -508,7 +533,7 @@ fn apply_validated_listing<P: AdoptionPort>(
 
 const CONNECTION_LOST: &str = "connection lost during setup";
 
-fn resolution_of(listing: &Option<Vec<SessionMeta>>) -> Resolution {
+fn resolution_of(listing: &Option<SessionListing>) -> Resolution {
     match listing {
         Some(_) => Resolution::Resolved,
         None => Resolution::Unresolved("the host did not answer ListSessions".into()),
@@ -557,14 +582,14 @@ async fn adopt<P: AdoptionPort>(
         // Already connected; only its listing is missing.
         let epoch = port.table().epoch(channel).unwrap_or(0);
         let listing = settle(&client, deadline).await;
-        apply_validated_listing(port, channel, epoch, &client, listing.as_deref())?;
+        apply_validated_listing(port, channel, epoch, &client, listing.as_ref())?;
         return Ok(Adopted { resolution: resolution_of(&listing), channel, epoch });
     }
 
-    let frozen = (role == HostRole::Frozen).then(|| {
-        let id = registered.map_or_else(|| port.next_frozen_id(), |h| h.id);
-        (id, port.table().reserve_epoch())
-    });
+    let frozen = if role == HostRole::Frozen {
+        let id = match registered { Some(h) => h.id, None => port.next_frozen_id().map_err(Failure::Other)? };
+        Some((id, port.table().reserve_epoch().map_err(Failure::Other)?))
+    } else { None };
     let opened = tokio::time::timeout_at(deadline, port.connect(candidate, role, frozen))
         .await
         .map_err(|_| Failure::Other("timed out connecting to the terminal host".to_string()))?
@@ -573,6 +598,8 @@ async fn adopt<P: AdoptionPort>(
             false => Failure::Other(failure.reason),
         })?;
     let client = opened.client;
+    let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));
+    client.bind_sessions(port.table().keys(), channel, opened.epoch);
     let listing = settle(&client, deadline).await;
     let (channel, epoch) = match (role, frozen) {
         (HostRole::Frozen, Some((id, epoch))) => {
@@ -600,7 +627,7 @@ async fn adopt<P: AdoptionPort>(
                 frozen_connection_lost(port.table(), port.barrier(), id, epoch, &candidate.endpoint);
                 return Err(Failure::ConnectionLost);
             }
-            apply_validated_listing(port, channel, epoch, &client, listing.as_deref())?;
+            apply_validated_listing(port, channel, epoch, &client, listing.as_ref())?;
             port.frozen_adopted(id);
             (channel, epoch)
         }
@@ -611,8 +638,8 @@ async fn adopt<P: AdoptionPort>(
                 client.close_transport().await;
                 return Err(Failure::Superseded);
             }
-            port.publish_current(&client).map_err(Failure::Other)?;
-            apply_validated_listing(port, HostChannel::Primary, opened.epoch, &client, listing.as_deref())?;
+            port.publish_current(&client).map_err(|reason| Failure::Publication { channel: HostChannel::Primary, epoch: opened.epoch, reason })?;
+            apply_validated_listing(port, HostChannel::Primary, opened.epoch, &client, listing.as_ref())?;
             (HostChannel::Primary, opened.epoch)
         }
     };
@@ -642,6 +669,8 @@ enum Failure {
     Superseded,
     /// Nothing listens on the host's endpoint.
     EndpointGone(String),
+    /// Publication failed after a connection acquired its epoch.
+    Publication { channel: HostChannel, epoch: u64, reason: String },
     Other(String),
 }
 
@@ -650,7 +679,7 @@ impl Failure {
         match self {
             Failure::ConnectionLost => CONNECTION_LOST.to_string(),
             Failure::Superseded => "the terminal host connection or admission changed".to_string(),
-            Failure::EndpointGone(reason) | Failure::Other(reason) => reason,
+            Failure::EndpointGone(reason) | Failure::Other(reason) | Failure::Publication { reason, .. } => reason,
         }
     }
 }
@@ -691,7 +720,10 @@ async fn attempt<P: AdoptionPort>(
         Ok(done) if !port.table().is_current(done.channel, done.epoch) => {
             log::info!("[GEN] discarding a listing of {} from a superseded connection", candidate.endpoint);
         }
-        Ok(done) => port.barrier().finish(&key, &candidate.endpoint, role, done.resolution.clone()),
+        Ok(done) => port.barrier().finish_on(&key, &candidate.endpoint, role, done.resolution.clone(), Some((port.table(), done.channel, done.epoch))),
+        Err(Failure::Publication { channel, epoch, reason }) => port.barrier().finish_on(
+            &key, &candidate.endpoint, role, Resolution::Unresolved(reason.clone()), Some((port.table(), *channel, *epoch)),
+        ),
         // A dropped connection is left as the drop callback recorded it.
         Err(Failure::ConnectionLost) => {}
         // Discovery found this endpoint without any process behind it (an old
@@ -899,6 +931,8 @@ pub(super) use sweep::sweep;
 #[cfg(test)]
 mod fake_hosts;
 #[cfg(test)]
+mod fake_hosts_gate_tests;
+#[cfg(test)]
 pub(crate) mod wiring_tests;
 #[cfg(test)]
 mod adoption_tests;
@@ -910,6 +944,22 @@ mod reconnect_tests;
 mod sweep_tests;
 #[cfg(test)]
 mod routing_tests;
+#[cfg(test)]
+mod incarnation_tests;
+#[cfg(test)]
+mod key_lifecycle_tests;
+#[cfg(test)]
+mod owner_tests;
+#[cfg(test)]
+mod deferred_effect_tests;
+#[cfg(test)]
+mod sink_effect_tests;
+#[cfg(test)]
+mod elevated_adapter_tests;
+#[cfg(test)]
+mod storage_tests;
+#[cfg(test)]
+mod restore_holder_tests;
 #[cfg(test)]
 mod retire_tests;
 #[cfg(test)]

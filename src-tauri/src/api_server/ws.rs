@@ -223,7 +223,9 @@ pub(crate) async fn handle_socket(socket: WebSocket, state: AppState) {
                                 // Host-owned terminals route to the sidecar; else
                                 // write to the local writer (parity with the REST/
                                 // Tauri input paths).
-                                let write_result: Result<(), String> = if state
+                                let write_result: Result<(), String> = if crate::state::ingress::registered_target(state.host_table.keys(), terminal_id).is_none() {
+                                    Err("terminal not found".to_string())
+                                } else if state
                                     .host_write(terminal_id, data.as_bytes())
                                 {
                                     Ok(())

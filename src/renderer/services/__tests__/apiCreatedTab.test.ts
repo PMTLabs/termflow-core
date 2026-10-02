@@ -2,6 +2,7 @@ import { configureStore } from '@reduxjs/toolkit';
 import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
 import panesReducer, { addTabTree, setActiveTabId } from '../../store/slices/panesSlice';
 import { terminalTitleColor } from '../../store/titleColor';
+import { findSessionKeyByTerminalId } from '../../store/slices/paneTreeOps';
 import type { RootState } from '../../store';
 import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from '../apiCreatedTab';
 
@@ -136,6 +137,19 @@ describe('runApiCreateMode0 — an agent-spawned tab inherits its caller tab col
       },
     );
   }
+
+  it('preserves the original opaque session override on a recovered leaf through persistence', () => {
+    const store = makeStore();
+    const processId = 'pc-0123456789ab4cde8fab0123456789ab';
+    const sessionKey = 'tm-original~0123456789ab4cde8fab0123456789ac';
+    const detail = { processId, rendererTerminalId: 'tm-recovered', sessionKey };
+    expect(resolveApiCreateIds(detail)).toMatchObject({ processId, leafId: 'tm-recovered' });
+    const result = run(store, detail, () => undefined);
+    const restoredTrees = JSON.parse(JSON.stringify(store.getState().panes.treesByTabId));
+    expect(result.paneTree.terminalId).toBe('tm-recovered');
+    expect(result.paneTree.sessionKey).toBe(sessionKey);
+    expect(findSessionKeyByTerminalId(restoredTrees, 'tm-recovered')).toBe(sessionKey);
+  });
 
   const spawnedTab = (store: ReturnType<typeof makeStore>, id: string) =>
     store.getState().tabs.tabs.find((t) => t.id === id);

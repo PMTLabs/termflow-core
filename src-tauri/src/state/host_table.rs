@@ -9,10 +9,8 @@
 //! starvation, no recursive-read deadlock and no lock order to get wrong. The
 //! one hazard left is a forgotten `Ticket`, which is RAII for that reason.
 
-use super::host_registry;
-use super::types::HostSessionClaim;
+use super::{HostKeys, KeyStage};
 use crate::elevated_host::HostChannel;
-use dashmap::DashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::sync::{watch, Notify};
@@ -64,6 +62,7 @@ pub enum Busy {
     Host(HostChannel, Admission),
     /// Nothing is published for this channel.
     NoSuchHost(HostChannel),
+    Exhausted,
 }
 
 impl std::fmt::Display for Busy {
@@ -74,6 +73,7 @@ impl std::fmt::Display for Busy {
                 write!(f, "terminal host {channel:?} is not accepting new sessions ({admission:?})")
             }
             Busy::NoSuchHost(channel) => write!(f, "terminal host {channel:?} is not connected"),
+            Busy::Exhausted => write!(f, "{LIFECYCLE_BUSY}: lifecycle identity exhausted"),
         }
     }
 }
@@ -123,6 +123,8 @@ impl Inner {
 
 struct Shared {
     inner: Mutex<Inner>,
+    routes: super::HostRoutes,
+    keys: HostKeys,
     /// Total tickets in flight, level-triggered so a quiesce can never miss the
     /// moment it reaches zero.
     inflight: watch::Sender<u32>,
@@ -152,6 +154,7 @@ impl Default for HostTable {
 
 impl HostTable {
     pub fn new() -> Self {
+        let routes = super::HostRoutes::default();
         Self {
             shared: Arc::new(Shared {
                 inner: Mutex::new(Inner {
@@ -162,16 +165,25 @@ impl HostTable {
                     next_holder: 0,
                 }),
                 inflight: watch::channel(0).0,
+                keys: HostKeys::new(routes.clone()),
+                routes,
             }),
         }
     }
 
+    pub fn keys(&self) -> &HostKeys { &self.shared.keys }
+
+    pub fn routes(&self) -> &super::HostRoutes {
+        &self.shared.routes
+    }
+
     /// An epoch for a connection about to be made. The callbacks wired into it
     /// capture the value; `publish` makes it the host's current one.
-    pub fn reserve_epoch(&self) -> u64 {
+    pub fn reserve_epoch(&self) -> Result<u64, String> {
         let mut inner = self.shared.lock();
-        inner.next_epoch += 1;
-        inner.next_epoch
+        let epoch = inner.next_epoch.checked_add(1).ok_or("terminal host connection identity exhausted")?;
+        inner.next_epoch = epoch;
+        Ok(epoch)
     }
 
     /// Make `epoch` the current connection of `channel` and open it for
@@ -185,8 +197,11 @@ impl HostTable {
     pub fn publish(&self, channel: HostChannel, epoch: u64) -> bool {
         let mut inner = self.shared.lock();
         match inner.slot_mut(channel) {
-            Some(slot) if slot.admission != Admission::Open => false,
+            Some(slot) if slot.admission != Admission::Open || slot.epoch > epoch => false,
             Some(slot) => {
+                if slot.epoch != epoch {
+                    self.routes().remove_epoch(channel, slot.epoch);
+                }
                 slot.epoch = epoch;
                 true
             }
@@ -292,8 +307,8 @@ impl HostTable {
                 (Lifecycle::Open, _) | (Lifecycle::Exiting | Lifecycle::Quiescing { .. }, QuiesceReason::Exit) => {}
                 _ => return Err(Self::check_lifecycle(&inner).expect_err("not open")),
             }
-            inner.next_holder += 1;
-            let holder = inner.next_holder;
+            let holder = inner.next_holder.checked_add(1).ok_or(Busy::Exhausted)?;
+            inner.next_holder = holder;
             inner.lifecycle = match reason {
                 QuiesceReason::Exit => Lifecycle::Exiting,
                 _ => Lifecycle::Quiescing { holder, reason },
@@ -375,19 +390,12 @@ enum TicketTarget {
 pub struct Ticket {
     shared: Arc<Shared>,
     target: TicketTarget,
-    claims: Vec<ClaimUndo>,
-}
-
-struct ClaimUndo {
-    claims: Arc<DashMap<String, HostSessionClaim>>,
-    session_key: String,
-    /// The Reserved claim to put back; `None` when the claim was a fresh one.
-    restore: Option<HostSessionClaim>,
+    stages: Vec<KeyStage>,
 }
 
 impl Ticket {
     fn new(shared: &Arc<Shared>, target: TicketTarget) -> Self {
-        Self { shared: shared.clone(), target, claims: Vec::new() }
+        Self { shared: shared.clone(), target, stages: Vec::new() }
     }
 
     /// The host this ticket was taken on; `None` for an adoption.
@@ -398,26 +406,25 @@ impl Ticket {
         }
     }
 
-    /// Hand the ticket the claim transition this operation just made with
-    /// `claim_registration`: `claimed` is what it returned (`Some` when it took
-    /// over a Reserved entry). Unless the operation reaches `Registered`, dropping
-    /// the ticket puts the claim back as it was.
-    pub fn guard_claim(
-        &mut self,
-        claims: &Arc<DashMap<String, HostSessionClaim>>,
-        session_key: &str,
-        claimed: Option<(u32, HostChannel)>,
-    ) {
-        self.claims.push(ClaimUndo {
-            claims: claims.clone(),
-            session_key: session_key.to_string(),
-            restore: claimed.map(|(pid, channel)| HostSessionClaim {
-                state: super::types::HostSessionClaimState::Reserved,
-                pid,
-                process_id: None,
-                channel,
-            }),
-        });
+    /// Dropping unfinished work releases an Attach without owning its session,
+    /// but retires an unknown-result Spawn with an exact-key Close.
+    pub fn guard_key(&mut self, stage: KeyStage) { self.stages.push(stage); }
+
+    pub fn publish_key(&self, process: &str) -> bool {
+        self.stages.last().is_some_and(|s| {
+            let epoch = self.shared.lock().hosts.iter().find(|h| h.channel == s.channel).map_or(0, |h| h.epoch);
+            self.shared.keys.publish(s, process, epoch)
+        })
+    }
+
+    pub(crate) fn key_stage(&self) -> Option<KeyStage> { self.stages.last().cloned() }
+
+    pub fn complete_key(&self, process: &str) -> bool {
+        self.stages.last().is_some_and(|s| self.shared.keys.complete(s, process))
+    }
+
+    pub fn abort_key(&self) {
+        for stage in &self.stages { self.shared.keys.abort(stage); }
     }
 }
 
@@ -435,8 +442,8 @@ impl Drop for Ticket {
             }
             self.shared.publish_inflight(&inner);
         }
-        for undo in self.claims.drain(..) {
-            host_registry::release_unfinished_claim(&undo.claims, &undo.session_key, undo.restore);
+        for stage in self.stages.drain(..) {
+            self.shared.keys.abort(&stage);
         }
     }
 }
@@ -552,3 +559,5 @@ impl Drop for DrainGuard {
 
 #[cfg(test)]
 mod table_tests;
+#[cfg(test)]
+mod counter_tests;

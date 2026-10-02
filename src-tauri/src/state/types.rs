@@ -27,27 +27,6 @@ pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
 /// 2J-cleared frames never enter scrollback, so this stays TUI-safe.
 pub const SCROLLBACK_LINES: usize = 5000;
 
-/// Exclusive recovery/registration ownership for one pty-host session.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HostSessionClaimState {
-    Reserved,
-    RegistrationInProgress,
-    Registered,
-}
-
-#[derive(Clone, Debug)]
-pub struct HostSessionClaim {
-    pub state: HostSessionClaimState,
-    pub pid: u32,
-    /// Process identity currently registered under this session, if any. This
-    /// stops a stale exit callback from retiring a replacement's claim.
-    pub process_id: Option<String>,
-    /// The host the session lives on. A Reserved claim comes from one host's
-    /// listing, so attaching must go to that same host; a fresh claim records
-    /// where the spawn is headed.
-    pub channel: crate::elevated_host::HostChannel,
-}
-
 /// One surviving host of an older generation. It keeps serving the shells it
 /// already holds; new terminals are never routed to it while a current host is
 /// usable.
@@ -137,9 +116,8 @@ pub struct Terminal {
     /// has no rename verb, so a renamed leaf would orphan a live session
     /// (design 014 §A2).
     ///
-    /// `== renderer_terminal_id` for anything created on this build. It differs
-    /// ONLY for a terminal migrated from a pre-014 build, where it keeps the old
-    /// `tb-` key so an already-armed session still reattaches after the upgrade.
+    /// New hosted shells use `<leaf>~<32 hex>`. Restored shells keep their
+    /// exact key, including legacy keys and keys recovered under a new leaf.
     ///
     /// Empty when deserialising a pre-014 payload; callers treat empty as
     /// "fall back to the leaf".
@@ -200,16 +178,6 @@ pub fn session_key_of(t: &Terminal) -> String {
         return t.session_key.clone();
     }
     t.renderer_terminal_id.clone().unwrap_or_else(|| t.id.clone())
-}
-
-/// Mint a process id: `pc-` + 9 chars, matching the renderer's `utils/id.ts`
-/// shape so every id space looks alike apart from its prefix.
-///
-/// PER RUN, deliberately. A process id identifies one PTY run and must not
-/// survive a restart — that is exactly what makes `tm-` (the durable leaf) the
-/// id MCP hands out to agents instead (design 014 §A3).
-pub fn mint_process_id() -> String {
-    format!("pc-{}", &uuid::Uuid::new_v4().to_string().replace('-', "")[..9])
 }
 
 fn default_terminal_cols() -> u16 {
@@ -311,6 +279,7 @@ use std::collections::VecDeque;
 /// select a replacement child between checking and removing it.
 pub struct GenerationSlot<T> {
     next_generation: u64,
+    exhausted: bool,
     current: Option<(u64, T)>,
 }
 
@@ -319,10 +288,24 @@ mod generation_slot_tests {
     use super::GenerationSlot;
 
     #[test]
+    fn exhausted_generation_refuses_spawn_and_stop_invalidates_the_last_claim() {
+        let mut slot = GenerationSlot::new();
+        slot.next_generation = u64::MAX - 1;
+        let generation = slot.claim_generation().unwrap();
+        assert_eq!(generation, u64::MAX);
+        assert_eq!(slot.install_if_current(generation, "control"), Ok(None));
+        assert_eq!(slot.take(), Some("control"));
+        assert!(slot.claim_generation().is_err());
+        assert_eq!(slot.install_if_current(generation, "late"), Err("late"));
+        assert!(!slot.is_present());
+        assert_eq!(slot.next_generation, u64::MAX);
+    }
+
+    #[test]
     fn a_stale_spawn_cannot_replace_a_newer_slot_or_clear_it() {
         let mut slot = GenerationSlot::new();
-        let old = slot.claim_generation();
-        let new = slot.claim_generation();
+        let old = slot.claim_generation().unwrap();
+        let new = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(old, "old"), Err("old"));
         assert_eq!(slot.install_if_current(new, "new"), Ok(None));
         assert!(!slot.clear_if_current(old));
@@ -333,11 +316,11 @@ mod generation_slot_tests {
     #[test]
     fn replacement_returns_the_displaced_handle_and_stop_invalidates_a_spawn_claim() {
         let mut slot = GenerationSlot::new();
-        let first = slot.claim_generation();
+        let first = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(first, "first-child"), Ok(None));
-        let replacement = slot.claim_generation();
+        let replacement = slot.claim_generation().unwrap();
         assert_eq!(slot.install_if_current(replacement, "replacement-child"), Ok(Some("first-child")));
-        let in_flight = slot.claim_generation();
+        let in_flight = slot.claim_generation().unwrap();
         assert_eq!(slot.take(), Some("replacement-child"));
         assert_eq!(slot.install_if_current(in_flight, "late-child"), Err("late-child"));
     }
@@ -347,19 +330,23 @@ impl<T> GenerationSlot<T> {
     pub fn new() -> Self {
         Self {
             next_generation: 0,
+            exhausted: false,
             current: None,
         }
     }
 
-    pub fn claim_generation(&mut self) -> u64 {
-        self.next_generation = self.next_generation.wrapping_add(1);
-        self.next_generation
+    pub fn claim_generation(&mut self) -> Result<u64, String> {
+        if self.exhausted { return Err("process generation exhausted".into()); }
+        match self.next_generation.checked_add(1) {
+            Some(generation) => { self.next_generation = generation; Ok(generation) }
+            None => { self.exhausted = true; Err("process generation exhausted".into()) }
+        }
     }
 
     /// Installs a spawned child only if no later spawn has claimed the slot.
     /// The caller must terminate the returned stale child itself.
     pub fn install_if_current(&mut self, generation: u64, handle: T) -> Result<Option<T>, T> {
-        if self.next_generation == generation {
+        if !self.exhausted && self.next_generation == generation {
             Ok(self.current.replace((generation, handle)).map(|(_, displaced)| displaced))
         } else {
             Err(handle)
@@ -392,7 +379,7 @@ impl<T> GenerationSlot<T> {
     pub fn take(&mut self) -> Option<T> {
         // Stop is a lifecycle boundary: a child which has claimed a generation
         // but has not installed yet must fail installation after this point.
-        self.claim_generation();
+        let _ = self.claim_generation();
         self.current.take().map(|(_, handle)| handle)
     }
 
@@ -439,6 +426,7 @@ pub struct AppState<R: Runtime = Wry> {
     // the same shard — i.e. creating or closing a colliding terminal stalled for
     // the full sleep. Mirrors the `terminal_history` Arc pattern below.
     pub shell_writer_channels: Arc<DashMap<String, Arc<Mutex<Box<dyn std::io::Write + Send>>>>>,
+    pub local_processes: Arc<DashMap<String, crate::pty_manager::LocalProcess>>,
     pub ptys: Arc<DashMap<String, Mutex<Box<dyn portable_pty::MasterPty + Send>>>>,
     // Broadcast channel for PTY output
     pub output_tx: broadcast::Sender<ChannelPayload>,
@@ -577,12 +565,6 @@ pub struct AppState<R: Runtime = Wry> {
     // One-shot restore prefix (previous-session scrollback) per processId, staged by
     // create_terminal and consumed by the /snapshot endpoint on first hydration.
     pub replay_prefix: Arc<DashMap<String, String>>,
-    // Per-terminal serialization for history persistence (review 062): held across
-    // snapshot→render→upsert so write order always matches snapshot order (a slow
-    // periodic-flush render can't overwrite a newer exit snapshot), and taken by
-    // close_terminal around cleanup+row-delete so an in-flight persist can't
-    // resurrect an explicitly-deleted row.
-    pub history_persist_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     // The window label that API/MCP-created terminals route to. The create event is
     // BROADCAST with this label in its payload; each window ignores it unless it
     // matches its own label (the proven app:close-requested pattern — a bare emit_to
@@ -617,7 +599,7 @@ pub struct AppState<R: Runtime = Wry> {
     /// in short synchronous sections; never held across an `.await`.
     pub frozen_hosts: Arc<std::sync::Mutex<Vec<FrozenHost>>>,
     /// Source of `FrozenId`s; ids are never reused within a run.
-    pub frozen_host_seq: Arc<std::sync::atomic::AtomicU32>,
+    pub frozen_host_seq: Arc<std::sync::atomic::AtomicU64>,
     /// Admission to the hosts: who may start or adopt sessions, and when exit,
     /// offload, update or a retirement may proceed. Never held across an `.await`.
     pub host_table: super::host_table::HostTable,
@@ -632,14 +614,11 @@ pub struct AppState<R: Runtime = Wry> {
     /// Durable-identity → process-id lookups (design 014 §A3). Kept in its own
     /// type so it is unit-testable without a Tauri AppHandle.
     pub identity: crate::identity_index::IdentityIndex,
+    /// Shared injectable source of opaque shell-run identities.
+    pub ids: super::IdAllocator,
     /// Shells a window created for a pane that had already moved away, waiting for
     /// the window that has the pane to take them (single use, short TTL).
     pub handoff_offers: crate::session_handoff::HandoffOffers,
-    // Sessions the sidecar still held when we connected (survived a hot-swap),
-    // mapped tab_id -> child pid. Populated once in `ensure_pty_host`;
-    // `create_host_terminal` reattaches to (instead of respawning) any tab_id
-    // present here, restoring the real pid.
-    pub host_session_claims: Arc<DashMap<String, HostSessionClaim>>,
     pub host_restore_pending_windows: Arc<DashMap<String, ()>>,
     pub host_restore_released: Arc<AtomicBool>,
     // Backlog 011: PROCESS id (`pc-`) -> prompt_hook, for sessions REATTACHED after a
@@ -673,27 +652,6 @@ pub struct AppState<R: Runtime = Wry> {
     // every session twice (duplicate replay into live parsers). A queued pass
     // re-snapshots after the first finishes, so its replay is ~empty.
     pub host_recovering: Arc<tokio::sync::Mutex<()>>,
-    // Closes that could not reach the host (pipe was down): host_close records
-    // the tab here and the next successful connect delivers the deferred Close
-    // — otherwise the session lingers alive in the host as an adoptable zombie
-    // the user explicitly closed (review 007 C-2).
-    //
-    // The value is the host the close is owed to. Hosts answer their listings
-    // independently, so one host's answer may only settle its own tombstones.
-    pub host_close_pending: Arc<DashMap<String, crate::elevated_host::HostChannel>>,
-    // Session keys of panes restored from a saved layout that have not yet
-    // found their session (value: when the intent was last refreshed). While a
-    // key is here its pane waits for the owning host instead of being spawned
-    // fresh, and its session is not surfaced as a recovered terminal.
-    pub restoring_keys: Arc<DashMap<String, std::time::Instant>>,
-    // Session keys the user closed while their owning host was still unknown
-    // (value: when). Whichever host later reports such a key, and no
-    // registration on any channel exists for it, closes the session instead of
-    // adopting it.
-    pub closed_unowned: Arc<DashMap<String, std::time::Instant>>,
-    // Restored panes whose session key differs from their leaf (leaf -> key), so
-    // closing the pane by leaf can find the key it was waiting under.
-    pub restoring_leaf_keys: Arc<DashMap<String, String>>,
     // Set once a session key was found registered on one host while another host
     // also reported it, so the user is told about that only once.
     pub duplicate_session_noticed: Arc<AtomicBool>,
@@ -726,6 +684,7 @@ impl<R: Runtime> Clone for AppState<R> {
             terminals: self.terminals.clone(),
             root_leaf_claims: self.root_leaf_claims.clone(),
             shell_writer_channels: self.shell_writer_channels.clone(),
+            local_processes: self.local_processes.clone(),
             ptys: self.ptys.clone(),
             output_tx: self.output_tx.clone(),
             terminal_history: self.terminal_history.clone(),
@@ -771,7 +730,6 @@ impl<R: Runtime> Clone for AppState<R> {
             canvas_nodes: self.canvas_nodes.clone(),
             history_dirty: self.history_dirty.clone(),
             replay_prefix: self.replay_prefix.clone(),
-            history_persist_locks: self.history_persist_locks.clone(),
             active_window: self.active_window.clone(),
             main_window: self.main_window.clone(),
             instance_id: self.instance_id.clone(),
@@ -784,8 +742,8 @@ impl<R: Runtime> Clone for AppState<R> {
             sibling_hold: self.sibling_hold.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),
+            ids: self.ids.clone(),
             handoff_offers: self.handoff_offers.clone(),
-            host_session_claims: self.host_session_claims.clone(),
             host_restore_pending_windows: self.host_restore_pending_windows.clone(),
             host_restore_released: self.host_restore_released.clone(),
             reattach_prompt_hooks: self.reattach_prompt_hooks.clone(),
@@ -793,10 +751,6 @@ impl<R: Runtime> Clone for AppState<R> {
             pty_host_connecting: self.pty_host_connecting.clone(),
             host_stream_offsets: self.host_stream_offsets.clone(),
             host_recovering: self.host_recovering.clone(),
-            host_close_pending: self.host_close_pending.clone(),
-            restoring_keys: self.restoring_keys.clone(),
-            closed_unowned: self.closed_unowned.clone(),
-            restoring_leaf_keys: self.restoring_leaf_keys.clone(),
             duplicate_session_noticed: self.duplicate_session_noticed.clone(),
             recovering: self.recovering.clone(),
             restart_in_flight: self.restart_in_flight.clone(),
@@ -879,7 +833,8 @@ pub(crate) fn retarget_owning_tab(
     // Nothing inside takes another lock, so this cannot deadlock against the
     // read-only occupancy scan in `create_terminal`.
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.owning_tab_id.as_deref() != Some(owner) {
@@ -923,7 +878,8 @@ pub(crate) fn set_display_label(
         .map(str::to_string);
     // `iter_mut`, not scan-then-`get_mut`: the match and the write happen under the same shard guard.
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.display_label != next {
@@ -950,7 +906,8 @@ pub(crate) fn set_title_color(
         .filter(|color| !color.is_empty())
         .map(str::to_string);
     for mut entry in terminals.iter_mut() {
-        if entry.renderer_terminal_id.as_deref() != Some(leaf) {
+        if (leaf.starts_with("pc-") && entry.id != leaf)
+            || (!leaf.starts_with("pc-") && entry.renderer_terminal_id.as_deref() != Some(leaf)) {
             continue;
         }
         if entry.title_color != next {
@@ -1016,9 +973,8 @@ mod terminal_identity_serde_tests {
         }
     }
 
-    /// Design 014 §A2: the four spaces must be simultaneously representable and
-    /// must survive a round trip. `session_key` differs from the leaf ONLY for a
-    /// terminal migrated from a pre-014 build, which is the case pinned here.
+    /// The identity spaces round-trip independently, including exact legacy
+    /// session keys whose renderer leaf has changed.
     #[test]
     fn every_identity_round_trips_including_a_migrated_session_key() {
         let mut t = sample();
@@ -1058,11 +1014,10 @@ mod terminal_identity_serde_tests {
 
     #[test]
     fn mint_process_id_is_prefixed_and_unique() {
-        let a = super::mint_process_id();
-        let b = super::mint_process_id();
-        assert!(a.starts_with("pc-"), "got {a}");
+        let a = crate::state::mint_process_id().unwrap();
+        let b = crate::state::mint_process_id().unwrap();
+        assert!(regex::Regex::new(r"^pc-[0-9a-f]{32}$").unwrap().is_match(&a), "got {a}");
         assert_ne!(a, b, "two mints must not collide");
-        assert_eq!(a.len(), "pc-".len() + 9, "9 chars after the prefix, matching utils/id.ts");
     }
 
     /// The EMITTED key must stay `tab_id`. `#[serde(alias = "tab_id")]` would
@@ -1270,19 +1225,14 @@ mod retarget_owning_tab_tests {
         assert_eq!(t.renderer_terminal_id.as_deref(), Some("tm-x"));
     }
 
-    /// The map is keyed by the PROCESS id; the renderer only ever knows the leaf.
     #[test]
-    fn it_matches_on_the_leaf_not_on_the_map_key() {
+    fn an_explicit_process_reference_updates_only_that_process() {
         let terminals = one_split_pane();
-        assert_eq!(
-            retarget_owning_tab(&terminals, "pc-1", "tb-b"),
-            Ok(false),
-            "the map key is not a renderer identity"
-        );
-        assert_eq!(
-            terminals.get("pc-1").expect("terminal").owning_tab_id.as_deref(),
-            Some("tb-a"),
-        );
+        assert_eq!(retarget_owning_tab(&terminals, "pc-missing", "tb-b"), Ok(false));
+        assert_eq!(terminals.get("pc-1").unwrap().owning_tab_id.as_deref(), Some("tb-a"));
+        assert_eq!(retarget_owning_tab(&terminals, "pc-1", "tb-b"), Ok(true));
+        assert_eq!(terminals.get("pc-1").unwrap().owning_tab_id.as_deref(), Some("tb-b"));
+        assert_eq!(terminals.get("pc-1").unwrap().renderer_terminal_id.as_deref(), Some("tm-x"));
     }
 
     /// Panes move freely; a leaf with no live PTY (never spawned, already exited,

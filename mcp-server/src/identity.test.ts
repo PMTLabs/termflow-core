@@ -52,6 +52,13 @@ describe("assertTerminalRef", () => {
 });
 
 describe("resolveTerminalId enforces the id space", () => {
+    it("preserves full opaque process ids in explicit and caller references", () => {
+        const processId = "pc-0123456789ab4cde8fab0123456789ab";
+        expect(resolveTerminalId(processId, undefined)).toBe(processId);
+        expect(resolveTerminalId("me", processId)).toBe(processId);
+        expect(() => resolveTerminalId(processId + "/other", undefined)).toThrow(/expected only/);
+    });
+
     it("passes a terminal id through", () => {
         expect(resolveTerminalId("tm-9f2c1a4b7", undefined)).toBe("tm-9f2c1a4b7");
     });

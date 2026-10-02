@@ -4,6 +4,9 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
     let (outbound, out_rx) = unbounded_channel::<Frame>();
     (
         PtyHostClient {
+            sessions: Arc::new(Mutex::new(SessionBinding {
+                keys: crate::state::HostKeys::default(), channel: crate::elevated_host::HostChannel::Primary, epoch: 0,
+            })),
             outbound,
             pending: Arc::new(Mutex::new(HashMap::new())),
             req_ctr: Arc::new(AtomicU64::new(0)),
@@ -15,6 +18,7 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             lifecycle_token: Arc::new("tok".into()),
             conn: conn::ConnState::new(),
             exe_origin: Arc::default(),
+            before_stdout: Arc::default(),
         },
         out_rx,
     )

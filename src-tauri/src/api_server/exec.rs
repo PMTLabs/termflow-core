@@ -184,6 +184,9 @@ pub(crate) async fn send_prompt_to_terminal<R: tauri::Runtime>(
     payload: &ExecutePromptReq,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
     use crate::automation::send::{deliver, SubmitPattern, TerminalWriter};
+    if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
+        return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
+    }
 
     // Does this id name a terminal at all? Host-owned terminals have no local writer and route their
     // writes to the sidecar instead. Asked with `contains_key` rather than `get`, because a `get`

@@ -57,7 +57,7 @@ fn installed_as(generation: &str) -> Option<std::path::PathBuf> {
 
 fn frozen(id: u32, generation: Option<&str>, build_id: Option<&str>, client: PtyHostClient) -> FrozenHost {
     FrozenHost {
-        id: FrozenId(id),
+        id: FrozenId(id.into()),
         generation: generation.map(str::to_owned),
         endpoint: format!("endpoint-{id}"),
         client,

@@ -7,7 +7,8 @@ use crate::pty_host_client::{wire_client, PtyHostDeps};
 use super::panes::PanePort;
 use crate::state::host_lifecycle::SiblingSlot;
 use crate::state::host_routing::RoutingPort;
-use crate::state::types::{FrozenHost, HostSessionClaim, Terminal};
+use crate::state::types::{FrozenHost, Terminal};
+use crate::pty_host_client::SessionListing;
 use crate::state::{host_registry, ChannelPayload};
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -46,10 +47,46 @@ pub(super) struct ListGate {
     pub after_answer: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
+/// A reusable one-shot hold with observable arrival and bounded waits.
+#[derive(Default)]
+pub(super) struct EventGate {
+    reached: AtomicUsize,
+    changed: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl EventGate {
+    pub fn count(&self) -> usize { self.reached.load(Ordering::SeqCst) }
+
+    pub async fn wait_reached(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.count() >= count { return; }
+                changed.await;
+            }
+        }).await.expect("gate was not reached");
+    }
+
+    pub fn release(&self) { self.release.notify_one(); }
+
+    pub(super) async fn hold(&self) {
+        self.reached.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
+        self.release.notified().await;
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct HostSpec {
     pub sessions: Vec<SessionMeta>,
+    /// Keep Spawn-created sessions in later listings, including before replies.
+    pub track_spawns: bool,
     pub list: ListBehavior,
+    /// Request-kind holds. Close has no wire reply, so its hold is after application.
+    pub reply_gates: HashMap<&'static str, Arc<EventGate>>,
     /// How long connecting takes.
     pub connect_delay: Duration,
     /// The endpoint exists but nothing can be connected to it: the host is busy
@@ -73,7 +110,9 @@ impl Default for HostSpec {
     fn default() -> Self {
         Self {
             sessions: Vec::new(),
+            track_spawns: false,
             list: ListBehavior::Answer,
+            reply_gates: HashMap::new(),
             connect_delay: Duration::ZERO,
             unreachable: false,
             refused: false,
@@ -137,8 +176,13 @@ struct Ended {
     listed_dead: bool,
 }
 
+type Injection = (Frame, Option<Arc<EventGate>>);
+type InjectionSender = tokio::sync::mpsc::UnboundedSender<Injection>;
+type InjectionReceiver = tokio::sync::mpsc::UnboundedReceiver<Injection>;
+
 pub(super) struct World {
     started: Instant,
+    connections: Mutex<HashMap<(String, usize), InjectionSender>>,
     hosts: Mutex<HashMap<String, (HostSpec, Vec<AbortHandle>)>>,
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
@@ -155,6 +199,7 @@ impl World {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             started: Instant::now(),
+            connections: Mutex::new(HashMap::new()),
             hosts: Mutex::new(HashMap::new()),
             log: Arc::new(Mutex::new(Vec::new())),
             ended: Arc::new(Mutex::new(Vec::new())),
@@ -202,13 +247,16 @@ impl World {
         }
     }
 
-    fn open(&self, endpoint: &str) -> Option<DuplexStream> {
+    pub fn open(&self, endpoint: &str) -> Option<DuplexStream> {
         let mut hosts = self.hosts.lock().unwrap();
         let (spec, tasks) = hosts.get_mut(endpoint)?;
         if spec.unreachable {
             return None;
         }
         let (client, server) = duplex(64 * 1024);
+        let connection = self.connections.lock().unwrap().keys().filter(|(host, _)| host == endpoint).count();
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.connections.lock().unwrap().insert((endpoint.to_owned(), connection), inject_tx);
         let task = tokio::spawn(serve(
             endpoint.to_owned(),
             spec.clone(),
@@ -216,7 +264,7 @@ impl World {
             self.log.clone(),
             self.ended.clone(),
             self.begun.clone(),
-            server,
+            (server, inject_rx),
         ));
         tasks.push(task.abort_handle());
         Some(client)
@@ -265,6 +313,18 @@ impl World {
         self.log.lock().unwrap().iter().filter(|r| r.host == host).map(|r| r.frame.clone()).collect()
     }
 
+    /// Deliver on an exact connection, even when Close already removed the key.
+    pub fn inject_frame(&self, host: &str, connection: usize, frame: Frame, gate: Option<Arc<EventGate>>) {
+        self.connections.lock().unwrap().get(&(host.to_owned(), connection))
+            .expect("unknown host connection").send((frame, gate)).expect("connection ended");
+    }
+
+    pub fn frames_for_session(&self, host: &str, key: &str) -> Vec<Frame> {
+        self.log.lock().unwrap().iter()
+            .filter(|r| r.host == host && r.session() == Some(key))
+            .map(|r| r.frame.clone()).collect()
+    }
+
     pub fn first_at(&self, host: &str, kind: &str) -> Option<Instant> {
         self.frames(host).into_iter().find(|(_, k)| *k == kind).map(|(at, _)| at)
     }
@@ -277,12 +337,34 @@ async fn serve(
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
     begun: Arc<Mutex<Vec<(String, SessionMeta)>>>,
-    server: DuplexStream,
+    connection: (DuplexStream, InjectionReceiver),
 ) {
-    let (mut rd, mut wr) = tokio::io::split(server);
+    let (server, mut injections) = connection;
+    let (mut rd, wr) = tokio::io::split(server);
+    let wr = Arc::new(tokio::sync::Mutex::new(wr));
+    let event_writer = wr.clone();
+    let events = async move {
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let mut deliveries = FuturesUnordered::new();
+        loop {
+            tokio::select! {
+                injection = injections.recv() => {
+                    let Some((frame, gate)) = injection else { break; };
+                    let writer = event_writer.clone();
+                    deliveries.push(async move {
+                        if let Some(gate) = gate { gate.hold().await; }
+                        write_frame(&mut *writer.lock().await, &frame).await
+                    });
+                }
+                _ = deliveries.next(), if !deliveries.is_empty() => {}
+            }
+        }
+    };
+    let requests = async {
     let mut listings = 0usize;
     while let Ok(Some(frame)) = read_frame(&mut rd).await {
         log.lock().unwrap().push(Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() });
+        let kind = Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() }.kind();
         let reply = match frame {
             Frame::Ctrl(Control::Disarm { .. } | Control::Shutdown { .. }) if spec.no_release_ack => None,
             Frame::Ctrl(Control::Disarm { req }) => Some(Response::DisarmAck { req }),
@@ -308,7 +390,10 @@ async fn serve(
                 // close has taken effect.
                 answers.then(|| Response::SessionList { req, sessions: still_open(&spec, &log, &ended, &begun, &host) })
             }
-            Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => Some(Response::Spawned { req, tab_id, pid: 4242 }),
+            Frame::Ctrl(Control::Spawn { req, tab_id, .. }) => {
+                if spec.track_spawns { begun.lock().unwrap().push((host.clone(), meta(&tab_id, 4242))); }
+                Some(Response::Spawned { req, tab_id, pid: 4242 })
+            }
             Frame::Ctrl(Control::AttachAcked { req, tab_id, .. }) => {
                 Some(Response::AttachAck { req, tab_id, alive: true, tail_offset: 0 })
             }
@@ -320,6 +405,7 @@ async fn serve(
             Frame::Ctrl(Control::Shutdown { req, .. }) => Some(Response::ShutdownAck { req }),
             _ => None,
         };
+        if let Some(gate) = spec.reply_gates.get(kind) { gate.hold().await; }
         if let Some(reply) = reply {
             let gate = match &spec.list {
                 ListBehavior::GatedAfter { answered, gate } if listings > *answered && matches!(&reply, Response::SessionList { .. }) => Some(gate),
@@ -329,7 +415,7 @@ async fn serve(
                 gate.reached.notify_one();
                 gate.release.notified().await;
             }
-            if write_frame(&mut wr, &Frame::Resp(reply)).await.is_err() {
+            if write_frame(&mut *wr.lock().await, &Frame::Resp(reply)).await.is_err() {
                 break;
             }
             // On a current-thread runtime this runs before the reader/adopter
@@ -341,6 +427,8 @@ async fn serve(
             }
         }
     }
+    };
+    tokio::select! { _ = requests => {}, _ = events => {} }
     // The client closed the stream (or died): what a real host reacts to.
     log.lock().unwrap().push(Recorded {
         host,
@@ -375,7 +463,9 @@ fn still_open(
             }) && !ended_here(&s.tab_id).is_some_and(|e| !e.listed_dead)
         })
         .map(|s| SessionMeta { alive: s.alive && ended_here(&s.tab_id).is_none(), ..s.clone() })
-        .chain(begun.into_iter().filter(|s| ended_here(&s.tab_id).is_none()))
+        .chain(begun.into_iter().filter(|s| ended_here(&s.tab_id).is_none()
+            && !log.iter().any(|r| r.host == host && r.kind() == "Close" && r.session() == Some(s.tab_id.as_str())
+                && now.duration_since(r.at) >= spec.close_lag)))
         .collect()
 }
 
@@ -409,21 +499,26 @@ pub(super) fn record(endpoint: &str, proto_min: u16, proto_max: u16) -> HostReco
     }
 }
 
+type StorageEffect = Arc<dyn Fn(&str, &str, crate::state::EndKind) + Send + Sync>;
 pub(super) struct Inner {
     pub world: Arc<World>,
     pub table: HostTable,
+    pub ids: crate::state::IdAllocator,
+    pub output: tokio::sync::broadcast::Sender<ChannelPayload>,
+    pub exits: Mutex<Vec<String>>,
+    pub persisted: Mutex<Vec<String>>,
+    pub ending_requested: AtomicUsize,
+    pub storage_effect: Mutex<Option<StorageEffect>>,
+    pub killed: Mutex<Vec<String>>,
+    pub deleted: Mutex<Vec<String>>,
+    pub offsets: Arc<DashMap<String, u64>>,
     pub barrier: Barrier,
     flight: tokio::sync::Mutex<()>,
     candidates: Mutex<Vec<HostCandidate>>,
     current_endpoint: String,
     current: Mutex<Option<PtyHostClient>>,
     frozen: Mutex<Vec<FrozenHost>>,
-    next_id: AtomicU32,
-    pub claims: Arc<DashMap<String, HostSessionClaim>>,
-    pub restoring_keys: DashMap<String, std::time::Instant>,
-    pub restoring_leaf_keys: DashMap<String, String>,
-    pub closed_unowned: DashMap<String, std::time::Instant>,
-    pub host_close_pending: DashMap<String, HostChannel>,
+    next_id: AtomicU64,
     pub host_terminals: DashMap<String, HostChannel>,
     pub terminals: DashMap<String, Terminal>,
     pub discovers: AtomicUsize,
@@ -518,22 +613,31 @@ impl Default for FullKnobs {
 pub(super) struct FakePort(pub Arc<Inner>);
 
 impl FakePort {
+    pub fn with_ids(mut self, ids: crate::state::IdAllocator) -> Self {
+        Arc::get_mut(&mut self.0).expect("inject before cloning the port").ids = ids;
+        self
+    }
+
     pub fn new(world: &Arc<World>, current_endpoint: &str) -> Self {
         Self(Arc::new(Inner {
             world: world.clone(),
             table: HostTable::new(),
+            ids: crate::state::IdAllocator::default(),
+            output: tokio::sync::broadcast::channel(128).0,
+            exits: Mutex::new(Vec::new()),
+            persisted: Mutex::new(Vec::new()),
+            ending_requested: AtomicUsize::new(0),
+            storage_effect: Mutex::new(None),
+            killed: Mutex::new(Vec::new()),
+            deleted: Mutex::new(Vec::new()),
+            offsets: Arc::new(DashMap::new()),
             barrier: Barrier::new(),
             flight: tokio::sync::Mutex::new(()),
             candidates: Mutex::new(Vec::new()),
             current_endpoint: current_endpoint.to_owned(),
             current: Mutex::new(None),
             frozen: Mutex::new(Vec::new()),
-            next_id: AtomicU32::new(1),
-            claims: Arc::new(DashMap::new()),
-            restoring_keys: DashMap::new(),
-            restoring_leaf_keys: DashMap::new(),
-            closed_unowned: DashMap::new(),
-            host_close_pending: DashMap::new(),
+            next_id: AtomicU64::new(1),
             host_terminals: DashMap::new(),
             terminals: DashMap::new(),
             discovers: AtomicUsize::new(0),
@@ -618,6 +722,20 @@ impl FakePort {
 
     /// A pane is registered for `session_key` on `channel`, as after a create.
     pub fn register_terminal(&self, process_id: &str, session_key: &str, channel: HostChannel) {
+        let keys = self.table().keys();
+        match keys.state(channel, session_key) {
+            Some(crate::state::KeyState::Held(cg)) => {
+                keys.publish(&crate::state::KeyStage { channel, key: session_key.into(), cg,
+                    mode: crate::state::StageMode::Attach }, process_id, self.table().epoch(channel).unwrap_or(0));
+            }
+            Some(crate::state::KeyState::Bound(_)) => { self.register_route(channel, session_key, process_id); }
+            other => {
+                let mode = if other == Some(crate::state::KeyState::Listed) { crate::state::StageMode::Attach } else { crate::state::StageMode::Spawn };
+                let (stage, _) = keys.stage(channel, session_key, mode).unwrap();
+                keys.publish(&stage, process_id, self.table().epoch(channel).unwrap_or(0));
+                keys.complete(&stage, process_id);
+            }
+        }
         self.0.host_terminals.insert(process_id.to_owned(), channel);
         self.0.terminals.insert(
             process_id.to_owned(),
@@ -642,12 +760,30 @@ impl FakePort {
         );
     }
 
+    pub fn end_owner(&self, process: &str, kind: crate::state::EndKind) -> bool {
+        self.0.ending_requested.fetch_add(1, Ordering::SeqCst);
+        let effect = self.0.storage_effect.lock().unwrap().clone();
+        let ended = self.table().keys().end_process(process, kind, |leaf| {
+            if let Some(effect) = effect { effect(leaf, process, kind); }
+            match kind {
+                crate::state::EndKind::Exit => self.0.persisted.lock().unwrap().push(process.into()),
+                crate::state::EndKind::Close(crate::state::CloseStorage::Delete) => self.0.deleted.lock().unwrap().push(leaf.into()),
+                _ => {}
+            }
+            self.0.host_terminals.remove(process);
+            self.0.terminals.remove(process);
+        });
+        if let Some(ended) = ended {
+            if matches!(ended.shell.stage, crate::state::ShellStage::Local) && matches!(kind, crate::state::EndKind::Close(_)) {
+                self.0.killed.lock().unwrap().push(process.into());
+            }
+            true
+        } else { false }
+    }
+
     pub fn intent_maps(&self) -> host_registry::IntentMaps<'_> {
         host_registry::IntentMaps {
-            restoring_keys: &self.0.restoring_keys,
-            restoring_leaf_keys: &self.0.restoring_leaf_keys,
-            closed_unowned: &self.0.closed_unowned,
-            terminals: &self.0.terminals,
+            keys: self.0.table.keys(),
         }
     }
 
@@ -660,16 +796,26 @@ impl FakePort {
         self.0.connects.lock().unwrap().iter().filter(|(e, _)| e == endpoint).count()
     }
 
-    fn deps(&self, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
+    pub(super) fn deps(&self, channel: HostChannel, epoch: u64, on_disconnect: Arc<dyn Fn() + Send + Sync>) -> PtyHostDeps {
+        let resolve = self.clone();
+        let exits = self.clone();
         PtyHostDeps {
             lifecycle_token: "tok".into(),
-            output_tx: tokio::sync::broadcast::channel::<ChannelPayload>(16).0,
+            output_tx: self.0.output.clone(),
             output_produced: Arc::new(AtomicU64::new(0)),
-            on_exit: Arc::new(|_, _, _| {}),
+            on_exit: Arc::new(move |process, _, _| {
+                if exits.table().keys().owns_process(&process) {
+                    if exits.table().keys().note_exit(&process) && exits.end_owner(&process, crate::state::EndKind::Exit) {
+                        exits.0.exits.lock().unwrap().push(process);
+                    }
+                } else { exits.0.exits.lock().unwrap().push(process); }
+            }),
             on_gap: Arc::new(|_| {}),
-            resolve_process: Arc::new(|k: &str| Some(k.to_string())),
+            resolve_process: Arc::new(move |k: &str| host_registry::resolve_inbound(
+                &resolve.0.host_terminals, &resolve.0.table, channel, epoch, k,
+            )),
             on_disconnect,
-            stream_offsets: Arc::new(DashMap::new()),
+            stream_offsets: self.0.offsets.clone(),
         }
     }
 }
@@ -704,8 +850,8 @@ impl AdoptionPort for FakePort {
         self.0.frozen.lock().unwrap().clone()
     }
 
-    fn next_frozen_id(&self) -> FrozenId {
-        FrozenId(self.0.next_id.fetch_add(1, Ordering::SeqCst))
+    fn next_frozen_id(&self) -> Result<FrozenId, String> {
+        host_registry::next_frozen_id(&self.0.next_id)
     }
 
     /// Like the real pair: a frozen host is only connected to; the current
@@ -760,10 +906,11 @@ impl AdoptionPort for FakePort {
                 Arc::new(move || {
                     port.0.disconnects.fetch_add(1, Ordering::SeqCst);
                 }),
-                self.0.table.reserve_epoch(),
+                self.0.table.reserve_epoch()?,
             ),
         };
-        let client = wire_client(rd, wr, self.deps(on_disconnect));
+        let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));
+        let client = wire_client(rd, wr, self.deps(channel, epoch, on_disconnect));
         client.set_attach_acks(true);
         client.inject_exe_image(Self::installed_host_image());
         if let Some(verdict) = self.0.exe_origins.lock().unwrap().get(endpoint) {
@@ -772,16 +919,14 @@ impl AdoptionPort for FakePort {
         Ok(Opened { client, epoch, build_id: None })
     }
 
-    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&[SessionMeta]>) {
-        self.0.listings.lock().unwrap().push((channel, sessions.map(<[_]>::len)));
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&SessionListing>) {
+        self.0.listings.lock().unwrap().push((channel, sessions.map(|s| s.sessions.len())));
         let Some(sessions) = sessions else { return };
         let duplicates = host_registry::apply_answered_listing(
             &host_registry::ListingMaps {
                 host_terminals: &self.0.host_terminals,
                 terminals: &self.0.terminals,
-                host_session_claims: &self.0.claims,
-                host_close_pending: &self.0.host_close_pending,
-                closed_unowned: &self.0.closed_unowned,
+                keys: self.table().keys(),
             },
             channel,
             client,
@@ -789,7 +934,6 @@ impl AdoptionPort for FakePort {
             std::time::Instant::now(),
         );
         self.0.duplicates.lock().unwrap().extend(duplicates);
-        host_registry::prune_pending_closes(&self.0.host_close_pending, channel);
     }
 
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String> {
@@ -840,7 +984,15 @@ impl PanePort for FakePort {
     }
 
     fn teardown_pane(&self, process_id: &str) {
+        if self.table().keys().owns_process(process_id) {
+            if self.table().keys().note_exit(process_id) && self.end_owner(process_id, crate::state::EndKind::Exit) {
+                self.0.torn_down.lock().unwrap().push(process_id.into());
+            }
+            return;
+        }
+        if !self.0.terminals.contains_key(process_id) { return; }
         self.0.torn_down.lock().unwrap().push(process_id.to_owned());
+        self.0.table.keys().exit_process(process_id);
         self.0.host_terminals.remove(process_id);
         self.0.terminals.remove(process_id);
     }
@@ -851,22 +1003,20 @@ impl PanePort for FakePort {
 
     fn forget_host(&self, id: FrozenId) {
         let channel = HostChannel::Frozen(id);
+        self.0.table.routes().remove_channel(channel);
         self.0.frozen.lock().unwrap().retain(|h| h.id != id);
-        host_registry::prune_pending_closes(&self.0.host_close_pending, channel);
-        host_registry::forget_reserved_claims_on(&self.0.claims, channel);
+        self.0.table.keys().forget(channel);
     }
 }
 
 impl RoutingPort for FakePort {
-    fn claims(&self) -> &Arc<DashMap<String, HostSessionClaim>> {
-        &self.0.claims
+    fn ids(&self) -> &crate::state::IdAllocator {
+        &self.0.ids
     }
 
-    fn restoring_keys(&self) -> &DashMap<String, std::time::Instant> {
-        &self.0.restoring_keys
-    }
-
-    fn closed_unowned(&self) -> &DashMap<String, std::time::Instant> {
-        &self.0.closed_unowned
+    fn surface_ambiguous(&self, keys: &[String]) {
+        for key in keys {
+            self.announce_recovered(key);
+        }
     }
 }

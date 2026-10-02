@@ -1,6 +1,6 @@
 use super::*;
 use crate::elevated_host::FrozenId;
-use crate::state::types::{HostSessionClaim, HostSessionClaimState};
+use crate::state::{KeyState, CloseState, StageMode};
 use futures::FutureExt;
 use std::time::Duration;
 
@@ -10,8 +10,8 @@ const BOUND: Duration = Duration::from_secs(5);
 
 fn table_with_hosts() -> HostTable {
     let table = HostTable::new();
-    table.publish(PRIMARY, table.reserve_epoch());
-    table.publish(OLD, table.reserve_epoch());
+    table.publish(PRIMARY, table.reserve_epoch().unwrap());
+    table.publish(OLD, table.reserve_epoch().unwrap());
     table
 }
 
@@ -182,11 +182,11 @@ async fn the_quiescer_can_still_connect_while_holding_the_quiesce() {
 #[tokio::test]
 async fn a_superseded_epoch_is_no_longer_current() {
     let table = HostTable::new();
-    let first = table.reserve_epoch();
+    let first = table.reserve_epoch().unwrap();
     assert!(!table.is_current(OLD, first), "nothing is published yet");
     table.publish(OLD, first);
     assert!(table.is_current(OLD, first));
-    let second = table.reserve_epoch();
+    let second = table.reserve_epoch().unwrap();
     table.publish(OLD, second);
     assert!(!table.is_current(OLD, first));
     assert!(table.is_current(OLD, second));
@@ -197,7 +197,7 @@ async fn a_superseded_epoch_is_no_longer_current() {
 async fn republishing_keeps_tickets_of_the_old_connection_counted() {
     let table = table_with_hosts();
     let held = table.begin(OLD).unwrap();
-    table.publish(OLD, table.reserve_epoch());
+    table.publish(OLD, table.reserve_epoch().unwrap());
     assert_eq!(table.drain_host(OLD).err(), Some(DrainRefusal::InFlight));
     drop(held);
     assert!(table.drain_host(OLD).is_ok());
@@ -206,11 +206,11 @@ async fn republishing_keeps_tickets_of_the_old_connection_counted() {
 #[tokio::test]
 async fn publishing_does_not_reopen_a_retired_host() {
     let table = table_with_hosts();
-    let epoch = table.reserve_epoch();
+    let epoch = table.reserve_epoch().unwrap();
     table.publish(OLD, epoch);
     table.drain_host(OLD).unwrap().retire();
 
-    let later = table.reserve_epoch();
+    let later = table.reserve_epoch().unwrap();
     assert!(!table.publish(OLD, later), "a retired host cannot be published again");
     assert_eq!(table.admission(OLD), Some(Admission::Retired));
     assert!(matches!(table.begin(OLD), Err(Busy::Host(OLD, Admission::Retired))));
@@ -221,77 +221,62 @@ async fn publishing_does_not_reopen_a_retired_host() {
 #[tokio::test]
 async fn publishing_during_a_drain_leaves_the_drain_in_charge() {
     let table = table_with_hosts();
-    let epoch = table.reserve_epoch();
+    let epoch = table.reserve_epoch().unwrap();
     table.publish(OLD, epoch);
     let drain = table.drain_host(OLD).unwrap();
 
-    assert!(!table.publish(OLD, table.reserve_epoch()));
+    assert!(!table.publish(OLD, table.reserve_epoch().unwrap()));
     assert_eq!(table.admission(OLD), Some(Admission::Draining), "still closed while the drain is decided");
 
     drop(drain);
     assert_eq!(table.admission(OLD), Some(Admission::Open), "the drain's guard still reopens its own host");
-    assert!(table.publish(OLD, table.reserve_epoch()), "an open host publishes as before");
+    assert!(table.publish(OLD, table.reserve_epoch().unwrap()), "an open host publishes as before");
 }
 
 // ---- claims ---------------------------------------------------------------
 
-fn reserved(pid: u32, channel: HostChannel) -> HostSessionClaim {
-    HostSessionClaim { state: HostSessionClaimState::Reserved, pid, process_id: None, channel }
-}
-
 #[tokio::test]
 async fn ticket_drop_releases_claim() {
     let table = table_with_hosts();
-    let claims: Arc<DashMap<String, HostSessionClaim>> = Arc::new(DashMap::new());
-
-    // A fresh claim the operation never finished is removed.
+    let keys = table.keys();
     {
         let mut ticket = table.begin(PRIMARY).unwrap();
-        let claimed = host_registry::claim_registration(&claims, "fresh", PRIMARY).unwrap();
-        ticket.guard_claim(&claims, "fresh", claimed);
-        assert!(claims.contains_key("fresh"));
+        let (stage, _) = keys.stage(PRIMARY, "fresh", StageMode::Spawn).unwrap();
+        assert_eq!(keys.state(PRIMARY, "fresh"), Some(KeyState::Held(stage.cg)));
+        ticket.guard_key(stage);
     }
-    assert!(!claims.contains_key("fresh"), "a dropped ticket must not leave a session claimed");
+    assert_eq!(keys.state(PRIMARY, "fresh"), Some(KeyState::Ending { close: CloseState::Pending, stamp: None }));
 
-    // A taken-over Reserved claim is put back, pid and host intact, so the
-    // retry that follows can claim it again.
-    claims.insert("held".into(), reserved(77, OLD));
+    keys.listing(OLD, &crate::pty_host_client::SessionListing { request_no: 1, sessions: vec![termflow_pty_protocol::SessionMeta {
+        tab_id: "held".into(), pid: 77, head_offset: 0, tail_offset: 0, alive: true,
+    }] }, |_| false);
     {
         let mut ticket = table.begin(OLD).unwrap();
-        let claimed = host_registry::claim_registration(&claims, "held", OLD).unwrap();
-        assert_eq!(claimed, Some((77, OLD)));
-        ticket.guard_claim(&claims, "held", claimed);
-        assert_eq!(claims.get("held").unwrap().state, HostSessionClaimState::RegistrationInProgress);
+        let (stage, pid) = keys.stage(OLD, "held", StageMode::Attach).unwrap();
+        assert_eq!(pid, 77);
+        assert_eq!(keys.state(OLD, "held"), Some(KeyState::Held(stage.cg)));
+        ticket.guard_key(stage);
     }
-    let restored = claims.get("held").expect("the reservation must survive a failed attach");
-    assert_eq!((restored.state.clone(), restored.pid, restored.channel), (HostSessionClaimState::Reserved, 77, OLD));
-    drop(restored);
-    assert_eq!(
-        host_registry::claim_registration(&claims, "held", OLD).unwrap(),
-        Some((77, OLD)),
-        "a retry can claim it again"
-    );
+    assert_eq!(keys.state(OLD, "held"), Some(KeyState::Listed));
+    let (retry, pid) = keys.stage(OLD, "held", StageMode::Attach).unwrap();
+    assert_eq!(pid, 77, "failed attach leaves the listing's pid intact");
+    keys.abort(&retry);
 
-    // A claim that reached Registered is the operation's result, not debris.
-    claims.clear();
     {
         let mut ticket = table.begin(PRIMARY).unwrap();
-        let claimed = host_registry::claim_registration(&claims, "done", PRIMARY).unwrap();
-        ticket.guard_claim(&claims, "done", claimed);
-        let mut claim = claims.get_mut("done").unwrap();
-        claim.state = HostSessionClaimState::Registered;
-        claim.process_id = Some("pc-1".into());
+        let (stage, _) = keys.stage(PRIMARY, "done", StageMode::Spawn).unwrap();
+        ticket.guard_key(stage);
+        assert!(ticket.complete_key("pc-1"));
     }
-    assert_eq!(claims.get("done").unwrap().state, HostSessionClaimState::Registered);
+    assert_eq!(keys.state(PRIMARY, "done"), Some(KeyState::Bound("pc-1".into())));
 }
 
 #[tokio::test]
 async fn ticket_drop_also_returns_the_slot() {
     let table = table_with_hosts();
     let mut ticket = table.begin(PRIMARY).unwrap();
-    let claims: Arc<DashMap<String, HostSessionClaim>> = Arc::new(DashMap::new());
-    let claimed = host_registry::claim_registration(&claims, "k", PRIMARY).unwrap();
-    ticket.guard_claim(&claims, "k", claimed);
+    let (stage, _) = table.keys().stage(PRIMARY, "k", StageMode::Spawn).unwrap();
+    ticket.guard_key(stage);
     let mut quiesce = Box::pin(table.quiesce(QuiesceReason::Update, BOUND));
     assert!(quiesce.as_mut().now_or_never().is_none());
     drop(ticket);
@@ -339,7 +324,7 @@ async fn a_host_has_one_ticker_and_its_handle_gives_the_place_back() {
     assert!(table.start_ticker(OLD).is_none(), "one per host");
     assert!(table.start_ticker(PRIMARY).is_some(), "another host has its own");
     // A reconnect replaces the connection, not the ticker.
-    table.publish(OLD, table.reserve_epoch());
+    table.publish(OLD, table.reserve_epoch().unwrap());
     assert!(table.start_ticker(OLD).is_none());
     drop(first);
     assert!(table.start_ticker(OLD).is_some(), "a ticker that ended can be started again");

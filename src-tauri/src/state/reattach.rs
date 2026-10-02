@@ -27,7 +27,11 @@ pub fn plan_reattach(
     let mut reattach = Vec::new();
     let mut teardown = Vec::new();
     for tab in tabs {
-        match sessions.iter().find(|m| &m.tab_id == tab) {
+        // This is an already-bound process, not a new pane admission: only
+        // its exact key is eligible, including a legacy or recovered override.
+        let selected = super::restore_candidate(tab, Some(tab), sessions.iter()
+            .filter(|meta| &meta.tab_id == tab).map(|meta| meta.tab_id.as_str()));
+        match selected.and_then(|key| sessions.iter().find(|meta| meta.tab_id == key)) {
             Some(meta) => {
                 // No saved offset (never saw a byte this app-lifetime) ⇒ replay
                 // the whole ring. A saved offset PAST the ring tail can only

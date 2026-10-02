@@ -11,7 +11,6 @@
 use super::fake_hosts::*;
 use super::*;
 use crate::pty_host_client::{connect_or_spawn, resolve_bundled_host_path, PtyHostDeps};
-use crate::state::host_registry;
 use crate::state::host_retire::{start_ticker, EMPTY_FOR, TICK};
 use crate::state::host_table::Admission;
 use std::path::PathBuf;
@@ -110,10 +109,11 @@ async fn a_real_empty_host_exits_after_the_ticker_retires_it() {
     let port = FakePort::new(&world, "somewhere-else");
     // The application's own current host is up, as it is when an older host retires.
     ensure_hosts(&port).await.expect("the current host starts");
-    let id = port.next_frozen_id();
+    let id = port.next_frozen_id().unwrap();
     let channel = HostChannel::Frozen(id);
-    let epoch = port.0.table.reserve_epoch();
+    let epoch = port.0.table.reserve_epoch().unwrap();
     assert!(port.0.table.publish(channel, epoch));
+    client.bind_sessions(port.table().keys(), channel, epoch);
     port.publish_frozen(FrozenHost {
         id,
         generation: None,
@@ -141,5 +141,5 @@ async fn a_real_empty_host_exits_after_the_ticker_retires_it() {
     assert!(port.frozen_hosts().is_empty(), "it left the registry");
     assert!(!client.is_alive(), "the client's transport was closed");
     assert_eq!(disconnects.load(Ordering::SeqCst), 0, "closing on purpose is not a drop that would reconnect");
-    assert!(host_registry::unfinished_claims_on(&port.0.claims, channel) == 0);
+    assert!(port.table().keys().unfinished_on(channel) == 0);
 }

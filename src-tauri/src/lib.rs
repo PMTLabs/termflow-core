@@ -6,6 +6,7 @@ pub mod console_window;
 pub mod context_menu;
 pub mod webview_power;
 mod webview_recovery;
+mod checked_counter;
 pub mod session_notify;
 pub mod app_config;
 pub mod profile;

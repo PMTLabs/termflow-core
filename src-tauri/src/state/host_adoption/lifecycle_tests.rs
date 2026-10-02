@@ -545,6 +545,20 @@ async fn the_update_reports_each_host_that_cannot_survive_it() {
 // ---- a sibling's update --------------------------------------------------------
 
 #[tokio::test(start_paused = true)]
+async fn exhausted_sibling_arm_identity_refuses_before_arming_or_replacing_the_hold() {
+    let (world, port) = adopted(&[]).await;
+    port.sibling_slot().seed_arm_counter(u64::MAX - 1);
+    assert_eq!(sibling_arm(&port, 600).await, SiblingArm::Armed(1));
+    assert_eq!(arm_frames(&world, CURRENT), [(600, None)]);
+    let SiblingArm::Refused(reason) = sibling_arm(&port, 600).await else { panic!("exhaustion must refuse") };
+    assert!(reason.contains("identity exhausted"));
+    assert_eq!(arm_frames(&world, CURRENT), [(600, None)]);
+    assert_eq!(port.table().lifecycle_reason(), Some(QuiesceReason::Update));
+    assert!(sibling_disarm(&port).await);
+    assert_eq!(port.table().lifecycle_reason(), None);
+}
+
+#[tokio::test(start_paused = true)]
 async fn sibling_arm_acts_on_every_owned_host_and_disarm_releases_them_all() {
     let (world, port) = adopted(&[("h1", HostSpec::default()), ("h2", HostSpec::default())]).await;
     let hosts = [CURRENT, "h1", "h2"];

@@ -1,9 +1,8 @@
 use super::fake_hosts::*;
 use super::*;
-use crate::state::host_registry;
 use crate::state::host_table::{Admission, QuiesceReason};
 use crate::state::source_scan::production;
-use crate::state::types::HostSessionClaimState;
+use crate::state::host_keys::KeyKind;
 use std::sync::atomic::Ordering;
 use termflow_pty_protocol::SpawnSpec;
 
@@ -74,16 +73,18 @@ async fn keyed_create(port: &FakePort, session_key: &str) -> Keyed {
     if let Err(unresolved) = port.barrier().wait_resolved(secs(8)).await {
         return Keyed::Pending(unresolved.into_iter().map(|u| u.endpoint).collect());
     }
-    match host_registry::claim_registration(&port.0.claims, session_key, HostChannel::Primary).unwrap() {
-        Some((_, channel)) => {
-            let client = port.client_for(channel).expect("the claimed host is registered");
-            client.attach_confirmed(session_key, 0).await;
+    match crate::state::host_routing::place_for_leaf(port, session_key, Some(session_key)).await.unwrap() {
+        crate::state::Placement::Attach { channel, client, ticket, session_key, .. } => {
+            client.attach_confirmed(&session_key, 0).await;
+            ticket.complete_key("pc-keyed");
             Keyed::Attached(channel)
         }
-        None => {
-            port.current_client().unwrap().spawn_session(session_key, &spawn_spec()).await.unwrap();
+        crate::state::Placement::Spawn { client, ticket, session_key, .. } => {
+            client.spawn_session(&session_key, &spawn_spec()).await.unwrap();
+            ticket.complete_key("pc-keyed");
             Keyed::Spawned
         }
+        crate::state::Placement::InProcess { reason } => panic!("unexpected fallback: {reason}"),
     }
 }
 
@@ -98,8 +99,8 @@ async fn answered_relist_superseded_before_consumption_cannot_reserve_or_settle_
     let old = port.current_client().unwrap();
     world.begin_session(CURRENT, meta("stale-shell", 731));
     world.begin_session(CURRENT, meta("owed-close", 732));
-    port.0.host_close_pending.insert("owed-close".into(), HostChannel::Primary);
-    port.0.host_close_pending.insert("absent-close".into(), HostChannel::Primary);
+    port.table().keys().seed_pending(HostChannel::Primary, "owed-close");
+    port.table().keys().seed_pending(HostChannel::Primary, "absent-close");
     let relist = tokio::spawn({ let port = port.clone(); async move {
         adopt(&port, &current(), HostRole::Current, Instant::now() + ADOPTION_DEADLINE).await
     } });
@@ -113,21 +114,23 @@ async fn answered_relist_superseded_before_consumption_cannot_reserve_or_settle_
     } }));
     gate.release.notify_one();
     assert!(matches!(relist.await.unwrap(), Err(Failure::Superseded)));
-    assert!(port.0.claims.is_empty(), "stale answers must not reserve on the replacement channel");
-    assert_eq!(port.0.host_close_pending.len(), 2, "neither delivered nor absent closes may be pruned");
+    assert!(port.table().keys().listed().is_empty(), "stale answers must not reserve on the replacement channel");
+    assert_eq!(port.table().keys().len(), 2, "neither delivered nor absent closes may be pruned");
     assert_eq!(world.count_everywhere("Close"), 0);
     assert_eq!(port.0.listings.lock().unwrap().len(), 1);
     use crate::state::host_routing::{place, Placement};
     let session_key = "stale-shell";
     match place(&port, session_key, true).await.unwrap() {
-        Placement::Spawn { channel, client, ticket } => {
+        Placement::Spawn { channel, client, ticket, session_key } => {
             assert_eq!(channel, HostChannel::Primary);
-            assert_eq!(client.spawn_session(session_key, &spawn_spec()).await, Ok(4242));
+            assert_eq!(client.spawn_session(&session_key, &spawn_spec()).await, Ok(4242));
             drop(ticket);
         }
         _ => panic!("a stale claim must not turn a fresh session into an attach"),
     }
-    assert_eq!(world.sessions(CURRENT, "Spawn"), ["stale-shell"]);
+    let spawned = world.sessions(CURRENT, "Spawn");
+    assert_eq!(spawned.len(), 1);
+    assert!(spawned[0].starts_with("stale-shell~"));
     assert_eq!(world.count_everywhere("Attach"), 0);
     old.close_transport().await;
     replacement.client.close_transport().await;
@@ -144,8 +147,8 @@ async fn answered_frozen_relist_retired_before_consumption_leaves_no_claims() {
     let channel = HostChannel::Frozen(host.id);
     world.begin_session("h1", meta("late-shell", 731));
     world.begin_session("h1", meta("owed-close", 732));
-    port.0.host_close_pending.insert("owed-close".into(), channel);
-    port.0.host_close_pending.insert("absent-close".into(), channel);
+    port.table().keys().seed_pending(channel, "owed-close");
+    port.table().keys().seed_pending(channel, "absent-close");
     let relist = tokio::spawn({ let port = port.clone(); async move {
         adopt(&port, &frozen("h1"), HostRole::Frozen, Instant::now() + ADOPTION_DEADLINE).await
     } });
@@ -155,8 +158,8 @@ async fn answered_frozen_relist_retired_before_consumption_leaves_no_claims() {
     } }));
     gate.release.notify_one();
     assert!(matches!(relist.await.unwrap(), Err(Failure::Superseded)));
-    assert!(port.0.claims.is_empty(), "no ownership may be recreated on a retired host");
-    assert_eq!(port.0.host_close_pending.len(), 2);
+    assert!(port.table().keys().listed().is_empty(), "no ownership may be recreated on a retired host");
+    assert_eq!(port.table().keys().len(), 2);
     assert_eq!(world.count_everywhere("Close"), 0);
     assert_eq!(port.table().admission(channel), Some(Admission::Retired));
     host.client.close_transport().await;
@@ -176,22 +179,23 @@ async fn unpublished_answer_cannot_apply_when_admission_rejects_publication() {
         });
         let port = FakePort::new(&world, CURRENT);
         let channel = if role == HostRole::Current { HostChannel::Primary } else { HostChannel::Frozen(FrozenId(1)) };
-        port.0.host_close_pending.insert("owed-close".into(), channel);
-        port.0.host_close_pending.insert("absent-close".into(), channel);
+        port.table().keys().seed_pending(channel, "owed-close");
+        port.table().keys().seed_pending(channel, "absent-close");
         let adoption = tokio::spawn({ let port = port.clone(); async move {
             adopt(&port, &candidate(endpoint, role), role, Instant::now() + ADOPTION_DEADLINE).await
         } });
         tokio::time::timeout(secs(2), gate.reached.notified()).await.unwrap();
         *gate.after_answer.lock().unwrap() = Some(Box::new({ let port = port.clone(); move || {
-            assert!(port.table().publish(channel, port.table().reserve_epoch()));
+            assert!(port.table().publish(channel, port.table().reserve_epoch().unwrap()));
             port.table().drain_host(channel).unwrap().retire();
         } }));
         gate.release.notify_one();
         assert!(matches!(adoption.await.unwrap(), Err(Failure::Superseded)));
-        assert!(port.0.claims.is_empty());
-        assert_eq!(port.0.host_close_pending.len(), 2);
+        assert!(port.table().keys().listed().is_empty());
+        assert_eq!(port.table().keys().len(), 2);
         assert!(port.0.listings.lock().unwrap().is_empty());
-        assert_eq!(world.count_everywhere("Close"), 0);
+        assert_eq!(world.count_everywhere("Close"), 2, "pending effects were resent before the first listing, not by the rejected answer");
+        assert_eq!(world.sessions(endpoint, "Close").len(), 2);
         assert!(port.current_client().is_none());
         assert!(port.frozen_hosts().is_empty());
     }
@@ -219,7 +223,7 @@ async fn slow_first_host_does_not_starve_second_hosts_lifecycle_frame() {
     // h2 is already published and resolved while h1 is still stuck.
     let registered = port.frozen_ids();
     assert_eq!(registered.len(), 1, "h2 is published; h1 is not until its listing ends");
-    assert_eq!(port.0.claims.get("k2").unwrap().channel, HostChannel::Frozen(registered[0]));
+    assert_eq!(port.table().keys().snapshot("k2").unwrap().channel, HostChannel::Frozen(registered[0]));
     let unresolved: Vec<_> = port.barrier().unresolved().into_iter().map(|u| u.endpoint).collect();
     assert_eq!(unresolved, vec!["h1"]);
     assert!(ensure.is_finished(), "the current host is up, so ensure_hosts does not wait for h1");
@@ -434,7 +438,7 @@ async fn current_spawn_failure_still_adopts_frozen() {
     ensure_hosts(&port).await.expect("an older host is usable, so this is not a failure");
     assert!(port.current_client().is_none());
     let h1 = HostChannel::Frozen(port.frozen_ids()[0]);
-    assert_eq!(port.0.claims.get("k1").unwrap().channel, h1, "its session is reserved on it");
+    assert_eq!(port.table().keys().snapshot("k1").unwrap().channel, h1, "its session is reserved on it");
     assert!(port.barrier().unresolved().is_empty());
     assert!(port.0.table.begin(h1).is_ok(), "and it accepts attaches");
     assert!(port.0.connects.lock().unwrap().contains(&(CURRENT.to_string(), HostRole::Current)));
@@ -592,7 +596,7 @@ async fn stale_epoch_callback_inert() {
 
     // The host is reconnected: a newer epoch is published, then the OLD
     // connection finally reports its drop.
-    let newer = port.0.table.reserve_epoch();
+    let newer = port.0.table.reserve_epoch().unwrap();
     port.0.table.publish(host, newer);
     world.kill_connections("h1");
     tokio::time::sleep(SEC).await;
@@ -881,18 +885,22 @@ fn no_ticket_for_input_resize_close() {
     for (file, signature, still_does) in [
         ("terminals.rs", "pub fn host_write(", "route_write"),
         ("terminals.rs", "pub fn host_resize(", "route_resize"),
-        ("terminals.rs", "pub fn host_close(", "route_close"),
+        ("terminals.rs", "pub fn host_close(", "close_process"),
+        ("owner_lifecycle.rs", "pub fn close_process(", "end_shell"),
+        ("host_keys/owners.rs", "pub fn end_process(", "Self::mark_end"),
         ("terminals.rs", "pub fn host_repaint(", "route_repaint"),
-        ("host_registry.rs", "pub(super) fn route_write(", "write_stdin"),
-        ("host_registry.rs", "pub(super) fn route_resize(", ".resize("),
+        ("host_registry.rs", "pub(super) fn route_write(", "write_registered"),
+        ("host_registry.rs", "pub(super) fn route_resize(", "resize_registered"),
         ("host_registry.rs", "pub(super) fn route_close(", ".close("),
-        ("host_registry.rs", "pub(super) fn route_repaint(", "nudge_repaint"),
-        ("host_adoption/panes.rs", "pub(in crate::state) fn surface_orphans<", "reserve_session"),
+        ("host_registry.rs", "pub(super) fn route_repaint(", "repaint_owned"),
+        ("host_adoption/panes.rs", "pub(in crate::state) fn surface_orphans<", ".recover_listed("),
+        ("host_keys/effects.rs", "pub(crate) fn recover_listed(", "Self::protected("),
+        ("host_keys/effects.rs", "pub(crate) fn close_original(", "Self::end("),
         ("host_adoption/sweep.rs", "pub(in crate::state) async fn sweep<", "list_sessions"),
     ] {
         let body = fn_body(&source_of(file), signature);
         assert!(body.contains(still_does), "{signature} no longer does `{still_does}` — update this census");
-        for forbidden in ["host_table", ".begin(", "begin_adoption", "begin_as_quiescer", "Ticket"] {
+        for forbidden in [".begin(", "begin_adoption", "begin_as_quiescer", "Ticket"] {
             assert!(!body.contains(forbidden), "{signature} must not take a ticket (found `{forbidden}`)");
         }
     }
@@ -972,9 +980,9 @@ async fn listing_reserves_claims_on_the_listing_host_only() {
     tokio::time::sleep(SEC).await;
     let ids = port.frozen_ids();
     let claim = |k: &str| {
-        let c = port.0.claims.get(k).unwrap();
-        (c.state.clone(), c.pid, c.channel)
+        let c = port.table().keys().snapshot(k).unwrap();
+        (c.state, c.pid, c.channel)
     };
-    assert_eq!(claim("k1"), (HostSessionClaimState::Reserved, 11, HostChannel::Frozen(ids[0])));
-    assert_eq!(claim("k2"), (HostSessionClaimState::Reserved, 22, HostChannel::Frozen(ids[1])));
+    assert_eq!(claim("k1"), (KeyKind::Listed, 11, HostChannel::Frozen(ids[0])));
+    assert_eq!(claim("k2"), (KeyKind::Listed, 22, HostChannel::Frozen(ids[1])));
 }

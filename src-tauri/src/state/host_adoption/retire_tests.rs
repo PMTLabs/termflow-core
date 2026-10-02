@@ -7,12 +7,11 @@ use super::fake_hosts::*;
 use super::reconnect::FrozenReconnect;
 use super::*;
 use crate::state::host_lifecycle::exit_hosts;
-use crate::state::host_registry;
 use crate::state::host_retire::{start_ticker, EMPTY_FOR, TICK};
 use crate::state::host_routing::{place, Placement, HOST_OWNERSHIP_PENDING};
 use crate::state::host_table::{Admission, QuiesceReason};
 use crate::state::source_scan::{fn_body, production};
-use crate::state::types::HostSessionClaimState;
+use crate::state::host_keys::KeyKind;
 use std::sync::atomic::Ordering;
 
 const CURRENT: &str = "cur";
@@ -79,8 +78,8 @@ fn first_after(world: &World, host: &str, kind: &str, since: Instant) -> Option<
     world.first_at(host, kind).map(|at| at.duration_since(since))
 }
 
-fn claim_state(port: &FakePort, key: &str) -> Option<HostSessionClaimState> {
-    port.0.claims.get(key).map(|c| c.state.clone())
+fn claim_state(port: &FakePort, key: &str) -> Option<KeyKind> {
+    port.table().keys().snapshot(key).map(|c| c.state)
 }
 
 // ---- when a host is retired ---------------------------------------------------
@@ -91,7 +90,7 @@ fn claim_state(port: &FakePort, key: &str) -> Option<HostSessionClaimState> {
 async fn unregistered_orphan_exit_retires_within_15s_via_ticker() {
     let (world, port) = retiring(&[("h1", holding(&[("k1", 11)])), ("h2", holding(&[("k2", 22)]))]).await;
     let h1 = channel_of(&port, "h1");
-    assert_eq!(claim_state(&port, "k1"), Some(HostSessionClaimState::Reserved), "the adoption reserved it");
+    assert_eq!(claim_state(&port, "k1"), Some(KeyKind::Listed), "the adoption reserved it");
     let current_frames = world.kinds(CURRENT).len();
 
     tokio::time::sleep(secs(1)).await;
@@ -164,7 +163,7 @@ async fn adoption_alone_starts_the_ticker_that_retires_an_empty_host() {
 async fn listed_alive_exit_before_create_then_answered_dead_retires() {
     for listed_dead in [false, true] {
         let (world, port) = retiring(&[("h1", holding(&[("k1", 11)])), ("h2", holding(&[("k2", 22)]))]).await;
-        assert_eq!(claim_state(&port, "k1"), Some(HostSessionClaimState::Reserved), "listed alive at adoption");
+        assert_eq!(claim_state(&port, "k1"), Some(KeyKind::Listed), "listed alive at adoption");
 
         tokio::time::sleep(secs(1)).await;
         if listed_dead {
@@ -189,7 +188,7 @@ async fn a_live_session_keeps_its_host_and_its_claim() {
     for kind in ["Shutdown", "Eof", "Close"] {
         assert_eq!(world.count("h1", kind), 0, "{kind}");
     }
-    assert_eq!(claim_state(&port, "k1"), Some(HostSessionClaimState::Reserved));
+    assert_eq!(claim_state(&port, "k1"), Some(KeyKind::Listed));
     assert_eq!(registered_endpoints(&port), ["h1"]);
     assert!(world.count("h1", "List") >= 10, "it is looked at every tick, never given up on");
 }
@@ -202,17 +201,17 @@ async fn a_claim_being_registered_is_kept_and_a_returned_one_is_dropped() {
     let h1 = channel_of(&port, "h1");
     let held = place(&port, "k1", false).await.unwrap();
     assert!(matches!(held, Placement::Attach { channel, .. } if channel == h1));
-    assert_eq!(claim_state(&port, "k1"), Some(HostSessionClaimState::RegistrationInProgress));
+    assert_eq!(claim_state(&port, "k1"), Some(KeyKind::Held));
 
     world.end_session("h1", "k1");
     tokio::time::sleep(secs(40)).await;
     assert_eq!(world.count("h1", "Shutdown"), 0, "the create is still holding the host");
-    assert_eq!(claim_state(&port, "k1"), Some(HostSessionClaimState::RegistrationInProgress));
+    assert_eq!(claim_state(&port, "k1"), Some(KeyKind::Held));
 
     // The create gives up: its claim goes back, the next answered listing shows
     // the session gone, and the host retires.
     drop(held);
-    assert_eq!(claim_state(&port, "k1"), Some(HostSessionClaimState::Reserved));
+    assert_eq!(claim_state(&port, "k1"), Some(KeyKind::Listed));
     tokio::time::sleep(secs(20)).await;
     assert_eq!(claim_state(&port, "k1"), None);
     assert_eq!(world.count("h1", "Shutdown"), 1);
@@ -643,7 +642,7 @@ fn adopting_an_older_host_starts_its_ticker_and_nothing_else_does() {
         (".retire_when_open(", &["state/host_retire.rs"][..]),
         // Bounded listings: the ticker's, adoption's own, and the count of what a
         // full update would close.
-        ("list_sessions_within(", &["state/host_retire.rs", "state/host_adoption.rs", "state/update_full.rs"][..]),
+        ("list_sessions_numbered_within(", &["state/host_retire.rs", "state/host_adoption.rs", "state/update_full.rs"][..]),
     ] {
         for (file, text) in &sources {
             if text.contains(needle) {
@@ -657,7 +656,7 @@ fn adopting_an_older_host_starts_its_ticker_and_nothing_else_does() {
     }
     // A timeout wrapped around a listing from outside would drop the request without
     // removing it from the client's pending map; the bound belongs inside it.
-    assert!(sources.iter().any(|(_, text)| text.contains(".list_sessions(")), "no listing was found: vacuous");
+    assert!(sources.iter().any(|(_, text)| text.contains(".list_sessions_numbered(")), "no listing was found: vacuous");
     for (file, text) in &sources {
         for line in text.lines().filter(|l| l.contains("list_sessions")) {
             assert!(!line.contains("timeout("), "{file}: a listing is bounded with `list_sessions_within`, not an outer timeout: {line}");
@@ -692,6 +691,6 @@ async fn a_keyed_create_for_a_session_on_a_draining_host_waits() {
     let refusal = place(&port, "k1", false).await.err().expect("the host is closed to admission");
     assert!(refusal.starts_with(HOST_OWNERSHIP_PENDING), "{refusal}");
     assert_eq!(world.count("h1", "Attach") + world.count("h1", "Spawn"), 0);
-    assert_eq!(host_registry::reserved_channel(&port.0.claims, "k1"), Some(h1), "the claim is still waiting for its pane");
+    assert_eq!(port.table().keys().candidate("k1", None).map(|(channel, _)| channel), Some(h1), "the claim is still waiting for its pane");
     drop(drain);
 }

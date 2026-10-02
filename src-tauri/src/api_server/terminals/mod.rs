@@ -301,6 +301,10 @@ pub(crate) async fn create_terminal(
     State(state): State<AppState>,
     Json(payload): Json<CreateTerminalReq>,
 ) -> impl IntoResponse {
+    // Bind the parent incarnation before spawning can await. Resolving its leaf
+    // again after the spawn could credit a replacement for the old shell's edge.
+    let parent_process = payload.parent_terminal_id.as_deref()
+        .and_then(|parent| state.host_table.keys().resolve_process(parent, false));
     // Resolve profile if provided (handle multiple field names for compatibility)
     let profile_to_use = payload.profile_id.clone()
         .or(payload.profile.clone())
@@ -415,8 +419,19 @@ pub(crate) async fn create_terminal(
                         );
                         // Never fail the spawn for a graph write. Task 16 returns `Result`
                         // precisely so this is a LOGGED failure rather than a silent one.
-                        if let Err(e) = state.canvas_store.insert_edge(&edge) {
-                            log::warn!("[CANVAS] auto-connect edge not stored: {}", e);
+                        if let Some(parent_process) = parent_process {
+                            let worker = state.clone();
+                            let process = id.clone();
+                            let stored = tokio::task::spawn_blocking(move || {
+                                worker.host_table.keys().write_shells(&[
+                                    (&edge.from_id, &parent_process), (&edge.to_id, &process),
+                                ], || worker.canvas_store.insert_edge(&edge))
+                            }).await;
+                            match stored {
+                                Ok(Some(Err(e))) => log::warn!("[CANVAS] auto-connect edge not stored: {e}"),
+                                Err(e) => log::warn!("[CANVAS] auto-connect worker failed: {e}"),
+                                _ => {}
+                            }
                         }
                     }
                     Some(_) => log::debug!(
@@ -486,17 +501,9 @@ pub(crate) async fn delete_terminal(
     // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
-    let id = state.resolve_ref(&id);
-    // Take the pid first (guard drops at end of statement, before cleanup).
-    let Some(pid) = state.terminals.get(&id).map(|t| t.pid) else {
+    if !state.close_process(&id, crate::state::CloseStorage::Preserve) {
         return Json(json!({ "error": "Terminal not found" }));
-    };
-    // Parity with the UI close path: host-owned → tell the sidecar to close the
-    // session; otherwise kill the local shell tree. Then clean up every map.
-    if !state.host_close(&id) {
-        crate::pty_manager::kill_process_tree(pid);
     }
-    state.cleanup_terminal_state(&id);
     Json(json!({ "status": "ok" }))
 }
 
@@ -524,6 +531,9 @@ pub(crate) async fn resize_terminal(
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
     let id = state.resolve_ref(&id);
+    if crate::state::ingress::registered_target(state.host_table.keys(), &id).is_none() {
+        return Json(json!({ "error": "Terminal not found" })).into_response();
+    }
     log::info!("Resize request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Host-owned terminals resize via the sidecar.
@@ -640,6 +650,9 @@ pub(crate) fn write_data_to_terminal(
     data: &str,
 ) -> Result<(), (StatusCode, String)> {
     use std::io::Write;
+    if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
+        return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
+    }
     // Host-owned terminals: forward to the sidecar.
     if state.host_write(id, data.as_bytes()) {
         emit_external_activity(state, id);

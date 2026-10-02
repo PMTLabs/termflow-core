@@ -8,10 +8,8 @@ use termflow_pty_protocol::{read_frame, write_frame, Control, Data, Frame, Respo
 async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_connection() {
     let table = HostTable::new();
     let channels = [HostChannel::Primary, HostChannel::Frozen(FrozenId(7))];
-    let identity = crate::identity_index::IdentityIndex::new();
     let owners = Arc::new(DashMap::new());
-    for (key, process, channel) in [("tm-new", "pc-new", channels[0]), ("tm-old", "pc-old", channels[1])] {
-        identity.index(process, Some(key), key);
+    for (_key, process, channel) in [("tm-new", "pc-new", channels[0]), ("tm-old", "pc-old", channels[1])] {
         owners.insert(process.to_string(), channel);
     }
     let offsets = Arc::new(DashMap::new());
@@ -19,21 +17,27 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
     let (output_tx, mut output) = tokio::sync::broadcast::channel(16);
     let mut connections = Vec::new();
     for channel in channels {
-        let epoch = table.reserve_epoch();
+        let epoch = table.reserve_epoch().unwrap();
         assert!(table.publish(channel, epoch));
         let (stream, server) = tokio::io::duplex(4096);
         let (rd, wr) = tokio::io::split(stream);
-        let (ix, hosts, admission) = (identity.clone(), owners.clone(), table.clone());
+        let (key, process) = if channel == channels[0] { ("tm-new", "pc-new") } else { ("tm-old", "pc-old") };
+        let (hosts, admission) = (owners.clone(), table.clone());
         let (gaps, exits) = (events.clone(), events.clone());
         let deps = PtyHostDeps {
             lifecycle_token: "test".into(), output_tx: output_tx.clone(),
             output_produced: Arc::new(AtomicU64::new(0)), stream_offsets: offsets.clone(),
-            resolve_process: Arc::new(move |key| resolve_inbound(&hosts, &ix, &admission, channel, epoch, key)),
+            resolve_process: Arc::new(move |key| resolve_inbound(&hosts, &admission, channel, epoch, key)),
             on_gap: Arc::new(move |process| gaps.lock().unwrap().push(("gap", process))),
             on_exit: Arc::new(move |process, _, _| exits.lock().unwrap().push(("exit", process))),
             on_disconnect: Arc::new(|| {}),
         };
-        connections.push((wire_client(rd, wr, deps), server));
+        let client = wire_client(rd, wr, deps);
+        client.bind_sessions(table.keys(), channel, epoch);
+        let (stage, _) = table.keys().stage(channel, key, crate::state::StageMode::Spawn).unwrap();
+        assert!(table.keys().publish(&stage, process, epoch));
+        assert!(table.keys().complete(&stage, process));
+        connections.push((client, server));
     }
     for (n, key) in ["tm-new", "tm-old"].iter().enumerate() {
         write_frame(&mut connections[n].1, &Frame::Data(Data::Stdout {
@@ -72,7 +76,7 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
         let (client, server) = &mut connections[1];
         let key = if stale { "tm-old" } else { "tm-new" };
         if stale {
-            assert!(table.publish(channels[1], table.reserve_epoch()));
+            assert!(table.publish(channels[1], table.reserve_epoch().unwrap()));
         }
         for data in [
             Data::Stdout { tab_id: key.into(), offset: 9000, bytes: b"wrong-host".to_vec() },
@@ -101,7 +105,7 @@ async fn two_hosts_route_output_offsets_gap_and_exit_only_to_the_owning_current_
 fn real_host_dependencies_scope_inbound_resolution_to_channel_and_epoch() {
     use crate::state::source_scan::{fn_body, production};
     let port = production(include_str!("../host_port.rs"));
-    assert!(fn_body(&port, "fn host_deps(").contains("host_registry::resolve_inbound(&st.host_terminals, &st.identity, &st.host_table, channel, epoch, k)"));
+    assert!(fn_body(&port, "fn host_deps(").contains("host_registry::resolve_inbound(&st.host_terminals, &st.host_table, channel, epoch, k)"));
     assert!(fn_body(&port, "async fn connect_current(").contains("HostChannel::Primary, my_gen"));
     let frozen = fn_body(&port, "async fn connect_frozen(");
     assert!(frozen.contains("HostChannel::Frozen(id),") && frozen.contains("epoch,"));

@@ -533,14 +533,9 @@ pub(crate) async fn fleet_close(
     );
     match classify_fleet_route(res, crate::fabric_manager::fabric_installed(&state)) {
         ExecuteRoute::Local => {
-            let Some(pid) = state.terminals.get(&state.resolve_ref(&body.terminal_id)).map(|t| t.pid) else {
+            if !state.close_process(&body.terminal_id, crate::state::CloseStorage::Preserve) {
                 return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
-            };
-            // Host-owned → close via the sidecar; else kill the local tree.
-            if !state.host_close(&state.resolve_ref(&body.terminal_id)) {
-                crate::pty_manager::kill_process_tree(pid);
             }
-            state.cleanup_terminal_state(&state.resolve_ref(&body.terminal_id));
             (StatusCode::OK, Json(json!({
                 "machineId": state.instance_id,
                 "terminalId": body.terminal_id,

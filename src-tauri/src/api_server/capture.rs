@@ -333,7 +333,9 @@ pub(crate) async fn resize_with_reflow(
     // reports the DURABLE tm- leaf as `terminalId`, but the per-terminal maps
     // are keyed by the per-run pc- id (design 014 A3). Without this, the
     // documented round trip - read `terminalId`, then address it - 404s.
-    let id = state.resolve_ref(&id);
+    let Some(id) = crate::state::ingress::registered_target(state.host_table.keys(), &id) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Terminal not found" }))).into_response();
+    };
     log::info!("Resize-reflow request for terminal {}: {}x{}", id, payload.cols, payload.rows);
 
     // Check if terminal exists and get its backend type

@@ -88,7 +88,9 @@ pub async fn rename_terminal_history(
     to: String,
 ) -> Result<(), String> {
     let store = state.history_store.clone();
-    tokio::task::spawn_blocking(move || store.rename_renderer_id(&from, &to))
+    tokio::task::spawn_blocking(move || {
+        crate::state::leaf_storage::with_leaves(&[&from, &to], || store.rename_renderer_id(&from, &to))
+    })
         .await
         .map_err(|e| e.to_string())
 }
@@ -172,7 +174,9 @@ pub async fn prune_terminal_history(
     keep_ids: Vec<String>,
 ) -> Result<(), String> {
     let keep: std::collections::HashSet<String> = keep_ids.into_iter().collect();
-    state.history_store.prune(&keep);
-    Ok(())
+    let store = state.history_store.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::state::leaf_storage::with_all(|| store.prune(&keep))
+    }).await.map_err(|e| e.to_string())
 }
 

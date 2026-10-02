@@ -41,7 +41,12 @@ fn census(needle: &str, classified: &[(&str, &str)]) {
 /// behavioural regressions, not by this census.
 #[test]
 fn listing_side_effect_callers_share_post_await_validation() {
-    census(".apply_listing(", &[("state/host_adoption.rs", "apply_validated_listing")]);
+    census(".apply_listing(", &[
+        ("state/host_adoption.rs", "apply_validated_listing"),
+        ("state/host_adoption/reconnect.rs", "reconnect_primary"),
+        ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"),
+        ("state/host_adoption/sweep.rs", "sweep"),
+    ]);
     census("host_registry::apply_answered_listing(", &[("state/host_port.rs", "apply_listing")]);
     census("apply_validated_listing(port,", &[
         ("state/host_adoption.rs", "adopt"),
@@ -74,12 +79,14 @@ fn every_primary_client_access_has_a_scope() {
 
 #[test]
 fn every_host_listing_has_a_scope() {
-    census(".list_sessions(", &[
+    census(".list_sessions_numbered(", &[
         ("state/host_adoption/reconnect.rs", "list_with_retries"), // routed: listing host
         ("state/host_adoption/sweep.rs", "sweep"), // merged: every connected host
     ]);
-    census(".list_sessions_within(", &[
-        ("pty_host_client.rs", "list_sessions"), // routed: self, default deadline adapter
+    census(".list_sessions_within(", &[("pty_host_client.rs", "list_sessions")]);
+    census(".list_sessions_numbered_within(", &[
+        ("pty_host_client.rs", "list_sessions_within"), // observation-only Vec adapter
+        ("pty_host_client.rs", "list_sessions_numbered"), // default deadline adapter
         ("state/host_adoption.rs", "settle"), // routed: each independent candidate
         ("state/host_retire.rs", "sample"), // routed: one frozen id + epoch
         ("state/update_full.rs", "scope_of"), // merged: all owned hosts
@@ -91,8 +98,7 @@ fn every_channel_key_map_access_has_a_scope() {
     census(".host_sessions_by_key(", &[("state/host_port.rs", "panes_on")]); // routed adapter
     census(".panes_on(", &[
         ("state/host_adoption/panes.rs", "reattach_listed"), // routed, fresh ownership
-        ("state/host_adoption/reconnect.rs", "reconnect_primary"), // primary-only
-        ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"), // routed, before
+        ("state/host_adoption/panes.rs", "reconnect_snapshot"), // original routed identity before any wait
         ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"), // routed, after
         ("state/host_adoption/sweep.rs", "sweep"), // merged across hosts
         ("state/host_retire.rs", "facts"), // routed to frozen id
@@ -104,8 +110,9 @@ fn every_channel_key_map_access_has_a_scope() {
 fn every_frozen_channel_expression_is_classified() {
     census("HostChannel::Frozen(", &[
         ("state/host_adoption.rs", "frozen_connection_lost"),
-        ("state/host_adoption.rs", "adopt"),
-        ("state/host_adoption.rs", "adopt"),
+        ("state/host_adoption.rs", "adopt"), // callback channel
+        ("state/host_adoption.rs", "adopt"), // pre-list enqueue binding
+        ("state/host_adoption.rs", "adopt"), // published channel
         ("state/host_adoption/panes.rs", "live_client"),
         ("state/host_adoption/reconnect.rs", "standing"),
         ("state/host_adoption/reconnect.rs", "reconnect_frozen"),
@@ -131,17 +138,22 @@ fn every_frozen_channel_expression_is_classified() {
 
 #[test]
 fn restoring_intent_producers_and_consumers_are_classified() {
-    census(".register_restoring_leaf(", &[("commands/terminal.rs", "register_restoring_leaves")]);
-    census(".forget_restoring_leaf(", &[("commands/terminal.rs", "forget_restoring_leaf")]);
-    census(".restoring_keys()", &[
-        ("state/host_routing.rs", "place"), // classification and TTL refresh
-        ("state/host_routing.rs", "place"),
-        ("state/host_routing.rs", "settle"), // successful placement consumes intent
-        ("state/host_adoption/panes.rs", "surface_orphans"), // every orphan path skips waiting keys
+    census(".register_restoring_leaf(", &[
+        ("commands/terminal.rs", "register_restoring_leaves"),
+        ("state/host_registry.rs", "register_restoring_leaf"),
     ]);
-    census(".closed_unowned()", &[
-        ("state/host_routing.rs", "settle"), // a wanted create supersedes a close
-        ("state/host_adoption/panes.rs", "surface_orphans"), // close rather than surface
+    census(".forget_restoring_leaf(", &[
+        ("commands/terminal.rs", "forget_restoring_leaf"),
+        ("state/host_registry.rs", "forget_restoring_leaf"),
+    ]);
+    census(".is_restoring_key(", &[("state/host_routing.rs", "place_owned")]);
+    census(".refresh_restoring_key(", &[
+        ("state/host_routing.rs", "place_owned"),
+        ("state/host_routing.rs", "place_elevated_process"),
+    ]);
+    census(".recover_listed(", &[
+        ("state/host_adoption/panes.rs", "surface_orphans"),
+        ("state/host_routing.rs", "surface_ambiguity"),
     ]);
     census("host_registry::apply_answered_listing(", &[("state/host_port.rs", "apply_listing")]);
 }
@@ -153,7 +165,7 @@ fn host_entry_points_have_generation_traces() {
         ("pty_host_client/discovery.rs", "fn discover_hosts_in("),
         ("pty_host_client.rs", "fn close_transport("),
         ("state/host_adoption.rs", "async fn adopt<"),
-        ("state/host_routing.rs", "async fn place<"),
+        ("state/host_routing.rs", "async fn place_owned<"),
         ("state/host_adoption/sweep.rs", "async fn sweep<"),
         ("state/host_adoption/reconnect.rs", "async fn reconnect_primary<"),
         ("state/host_adoption/reconnect.rs", "async fn reconnect_frozen<"),

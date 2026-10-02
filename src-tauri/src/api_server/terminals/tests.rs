@@ -23,6 +23,21 @@
     }
 
     #[test]
+    fn opaque_process_and_host_session_keys_round_trip_in_identity_responses() {
+        let mut terminal = identity_sample();
+        terminal.id = "pc-0123456789ab4cde8fab0123456789ab".into();
+        terminal.session_key = "tm-original~0123456789ab4cde8fab0123456789ac".into();
+        let value = terminal_identity_json(&terminal, "ui", crate::state::Marker::Current);
+        let decoded: serde_json::Value = serde_json::from_str(&serde_json::to_string(&value).unwrap()).unwrap();
+        assert_eq!(decoded["processId"], terminal.id);
+        assert_eq!(decoded["id"], terminal.id);
+        assert_eq!(decoded["sessionKey"], terminal.session_key);
+        assert_eq!(decoded["terminalId"], "tm-9f2c1a4b7");
+        let terminal: crate::state::Terminal = serde_json::from_str(&serde_json::to_string(&terminal).unwrap()).unwrap();
+        assert_eq!(terminal.session_key, "tm-original~0123456789ab4cde8fab0123456789ac");
+    }
+
+    #[test]
     fn parent_title_colour_reads_only_the_resolved_parent_leaf() {
         let terminals = DashMap::new();
         let mut parent = identity_sample();

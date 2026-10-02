@@ -40,6 +40,7 @@ fn frozen_channel(port: &FakePort, endpoint: &str) -> HostChannel {
 }
 
 fn recovered(port: &FakePort) -> Vec<String> {
+    port.table().keys().flush_deliveries();
     port.0.recovered.lock().unwrap().clone()
 }
 
@@ -62,7 +63,7 @@ async fn busy_legacy_host_adopted_on_a_later_tick() {
     assert!(sweep(&port).await, "every host is in hand now");
     assert!(port.0.discovers.load(std::sync::atomic::Ordering::SeqCst) > discovered, "each tick rediscovers");
     let legacy = frozen_channel(&port, "legacy");
-    assert_eq!(port.0.claims.get("tm-old").map(|c| c.channel), Some(legacy), "its session is reserved on it");
+    assert_eq!(port.table().keys().snapshot("tm-old").map(|c| c.channel), Some(legacy), "its session is reserved on it");
     assert!(port.barrier().unresolved().is_empty());
     assert_eq!(world.count_everywhere("Spawn"), 0);
     assert_eq!(recovered(&port), vec!["tm-old".to_string()], "and, unclaimed, it is offered to the user");
@@ -97,14 +98,14 @@ async fn orphan_on_frozen_surfaced_with_channel() {
     let h1 = frozen_channel(&port, "h1");
     // Nothing is reserved when the sweep gets to them, so the reservation made when
     // a session is surfaced is the only thing that can name the host it lives on.
-    port.0.claims.clear();
+    port.table().keys().clear_fixture();
 
     assert!(sweep(&port).await);
 
     let mut surfaced = recovered(&port);
     surfaced.sort();
     assert_eq!(surfaced, vec!["tm-stray-1".to_string(), "tm-stray-p".to_string()]);
-    let claim = |key: &str| port.0.claims.get(key).map(|c| (c.pid, c.channel));
+    let claim = |key: &str| port.table().keys().snapshot(key).map(|c| (c.pid, c.channel));
     assert_eq!(claim("tm-stray-1"), Some((6, h1)), "the older host's session is reserved on the older host");
     assert_eq!(claim("tm-stray-p"), Some((5, HostChannel::Primary)));
 }
@@ -116,7 +117,8 @@ async fn a_session_another_host_has_registered_is_not_surfaced_by_this_one() {
     port.register_terminal("pc-1", "tm-dup", HostChannel::Primary);
     ensure_hosts(&port).await.unwrap();
     tokio::time::sleep(SEC).await;
-    port.0.claims.clear();
+    // Preserve the bound key; discard only the older host's listing fixture.
+    port.table().keys().remove_listed_fixture(HostChannel::Frozen(FrozenId(1)));
 
     assert!(sweep(&port).await);
     assert!(recovered(&port).is_empty(), "a registration on any channel suppresses the recovery tab");
@@ -162,7 +164,7 @@ async fn orphan_sweep_does_not_surface_a_restoring_key_on_a_frozen_host() {
     ensure_hosts(&port).await.unwrap();
     tokio::time::sleep(SEC).await;
     let h1 = frozen_channel(&port, "h1");
-    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "tm-wait", None, StdInstant::now()));
+    assert!(host_registry::register_restoring_leaf(&port.intent_maps(), "main", "tm-wait", None, StdInstant::now()));
 
     assert!(sweep(&port).await);
     assert_eq!(recovered(&port), vec!["tm-stray".to_string()], "the waiting pane's session is not turned into a recovered tab");
@@ -170,7 +172,7 @@ async fn orphan_sweep_does_not_surface_a_restoring_key_on_a_frozen_host() {
     // The waiting pane still gets its own session: an Attach to the older host, no Spawn anywhere.
     let session_key = "tm-wait";
     match place(&port, session_key, false).await {
-        Ok(Placement::Attach { channel, client, pid, ticket }) => {
+        Ok(Placement::Attach { channel, client, pid, ticket, .. }) => {
             assert_eq!((channel, pid), (h1, 5));
             client.attach_confirmed(session_key, 0).await;
             drop(ticket);
@@ -193,18 +195,18 @@ async fn sweep_does_not_surface_a_superseded_or_retired_hosts_answer() {
         let (world, port) = machine(HostSpec::default(), &[("h1", delayed)]);
         rediscover_hosts(&port).await.unwrap();
         let channel = frozen_channel(&port, "h1");
-        port.0.claims.clear();
+        port.table().keys().clear_fixture();
         let running = tokio::spawn({ let port = port.clone(); async move { sweep(&port).await } });
         while world.count("h1", "List") < 2 { tokio::task::yield_now().await; }
         if retire {
             port.table().drain_host(channel).unwrap().retire();
         } else {
-            let epoch = port.table().reserve_epoch();
+            let epoch = port.table().reserve_epoch().unwrap();
             assert!(port.table().publish(channel, epoch));
         }
         assert!(!running.await.unwrap(), "a stale answer leaves the sweep retryable");
         assert!(recovered(&port).is_empty(), "the old answer must not emit a recovery tab");
-        assert!(!port.0.claims.contains_key("tm-stray"), "nor reserve a session on a stale host");
+        assert!(!port.table().keys().contains_key("tm-stray"), "nor reserve a session on a stale host");
     }
 }
 
@@ -221,7 +223,7 @@ async fn a_host_that_cannot_be_connected_does_not_stall_the_sweep_of_the_others(
     );
     ensure_hosts(&port).await.unwrap();
     tokio::time::sleep(SEC).await;
-    port.0.claims.clear();
+    port.table().keys().clear_fixture();
     world.kill_connections("stuck");
     world.set_unreachable("stuck", true);
     tokio::time::sleep(SEC).await;

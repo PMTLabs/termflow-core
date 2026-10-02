@@ -124,8 +124,38 @@ fn host_enabled(is_windows: bool, is_unix: bool, env: Option<&str>) -> bool {
 #[cfg(test)]
 mod enabled_tests;
 
+#[cfg(test)]
+mod raw_session_controls {
+    use super::*;
+    impl PtyHostClient {
+        pub fn close(&self, tab_id: &str) {
+            let _ = self.outbound.send(Frame::Ctrl(Control::Close { tab_id: tab_id.to_string() }));
+        }
+    }
+}
+
+/// An answered listing retains the enqueue number that qualifies its evidence.
+#[derive(Clone, Debug)]
+pub struct SessionListing {
+    pub request_no: u64,
+    pub sessions: Vec<SessionMeta>,
+}
+
+impl std::ops::Deref for SessionListing {
+    type Target = [SessionMeta];
+    fn deref(&self) -> &Self::Target { &self.sessions }
+}
+
+#[derive(Clone)]
+struct SessionBinding {
+    keys: crate::state::HostKeys,
+    channel: crate::elevated_host::HostChannel,
+    epoch: u64,
+}
+
 #[derive(Clone)]
 pub struct PtyHostClient {
+    sessions: Arc<Mutex<SessionBinding>>,
     outbound: UnboundedSender<Frame>,
     pending: PendingMap,
     req_ctr: Arc<AtomicU64>,
@@ -158,9 +188,47 @@ pub struct PtyHostClient {
     conn: Arc<ConnState>,
     /// Where the host behind this connection runs from; see `exe_in_payload`.
     exe_origin: Arc<exe_origin::ExeOrigin>,
+    #[cfg(test)]
+    before_stdout: ReaderHook,
 }
 
+#[cfg(test)]
+type ReaderHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+
 impl PtyHostClient {
+    pub(crate) fn bind_sessions(&self, keys: &crate::state::HostKeys, channel: crate::elevated_host::HostChannel, epoch: u64) {
+        *self.sessions.lock().unwrap() = SessionBinding { keys: keys.clone(), channel, epoch };
+        keys.connect(channel, epoch, self.outbound.clone(), self.alive.clone());
+    }
+
+    pub(crate) fn session_epoch(&self, channel: crate::elevated_host::HostChannel) -> Option<u64> {
+        let binding = self.sessions.lock().unwrap();
+        (binding.channel == channel).then_some(binding.epoch)
+    }
+
+    pub(crate) fn write_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.channel == channel && keys.with_registered_on(process, channel, key, binding.epoch, || self.write_stdin(key, bytes)).unwrap_or(false)
+    }
+
+    pub(crate) fn resize_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, cols: u16, rows: u16) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.channel == channel && keys.with_registered_on(process, channel, key, binding.epoch, || self.resize(key, cols, rows)).unwrap_or(false)
+    }
+
+    pub(crate) fn repaint_owned(&self, identity: &crate::state::SessionIdentity, cols: u16, rows: u16) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, || {
+            self.nudge_repaint(&identity.key, cols, rows);
+            true
+        })
+    }
+
+    pub(crate) fn apply_listing_on(&self, keys: &crate::state::HostKeys, channel: crate::elevated_host::HostChannel, listing: &SessionListing, now: std::time::Instant, unregistered: impl Fn(&str) -> bool) -> bool {
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.channel == channel && keys.listing_on(channel, binding.epoch, listing, now, unregistered)
+    }
+
     /// Retention advertised for this connected host. `Unknown` covers legacy,
     /// absent, incomplete, and non-contract records; it never implies
     /// indefinite retention.
@@ -171,8 +239,8 @@ impl PtyHostClient {
     pub fn set_lifecycle(&mut self, lifecycle: HostRetention) {
         self.lifecycle = Arc::new(lifecycle);
     }
-    fn next_req(&self) -> u64 {
-        self.req_ctr.fetch_add(1, Ordering::Relaxed)
+    fn next_req(&self) -> Option<u64> {
+        self.req_ctr.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).ok()
     }
 
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
@@ -217,6 +285,8 @@ impl PtyHostClient {
             self.conn.cancel();
         }
         self.pending.lock().unwrap().clear();
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.disconnect(binding.channel, binding.epoch);
         self.conn.halves_released(BOUND).await
     }
 
@@ -289,25 +359,19 @@ impl PtyHostClient {
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
 
-    pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) {
-        let _ = self.outbound.send(Frame::Data(Data::Stdin {
+    pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
             tab_id: tab_id.to_string(),
             bytes: bytes.to_vec(),
-        }));
+        })).is_ok()
     }
 
-    pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) {
-        let _ = self.outbound.send(Frame::Ctrl(Control::Resize {
+    pub fn resize(&self, tab_id: &str, cols: u16, rows: u16) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Ctrl(Control::Resize {
             tab_id: tab_id.to_string(),
             cols,
             rows,
-        }));
-    }
-
-    pub fn close(&self, tab_id: &str) {
-        let _ = self.outbound.send(Frame::Ctrl(Control::Close {
-            tab_id: tab_id.to_string(),
-        }));
+        })).is_ok()
     }
 
     /// Force a repaint of a host-owned program by nudging the size and
@@ -320,7 +384,7 @@ impl PtyHostClient {
     }
 
     pub fn attach(&self, tab_id: &str, from_offset: u64) {
-        let req = self.next_req();
+        let Some(req) = self.next_req() else { return };
         let _ = self.outbound.send(Frame::Ctrl(Control::Attach {
             req,
             tab_id: tab_id.to_string(),
@@ -334,30 +398,48 @@ impl PtyHostClient {
     /// the host confirmed the session as re-wired and alive (`None` = legacy
     /// host / no confirmation possible — treated as attached, as before).
     pub async fn attach_confirmed(&self, tab_id: &str, from_offset: u64) -> Option<bool> {
+        self.attach_confirmed_inner(tab_id, from_offset, None).await.ok().flatten()
+    }
+
+    pub(crate) async fn attach_owned(&self, identity: &crate::state::SessionIdentity, from_offset: u64) -> Result<Option<bool>, String> {
+        self.attach_confirmed_inner(&identity.key, from_offset, Some(identity)).await
+    }
+
+    async fn attach_confirmed_inner(&self, tab_id: &str, from_offset: u64, identity: Option<&crate::state::SessionIdentity>) -> Result<Option<bool>, String> {
+        let binding = self.sessions.lock().unwrap().clone();
         if !self.attach_acks.load(Ordering::Acquire) {
-            self.attach(tab_id, from_offset);
-            return None;
+            let req = self.next_req().ok_or("terminal host request identity exhausted")?;
+            let enqueue = || self.is_alive() && self.outbound.send(Frame::Ctrl(Control::Attach {
+                req, tab_id: tab_id.into(), from_offset,
+            })).is_ok();
+            let enqueued = if let Some(identity) = identity { binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue) }
+            else { enqueue() };
+            if !enqueued { return Err("host-ownership-pending: attach was not enqueued; retry".into()); }
+            return Ok(None);
         }
         let tab = tab_id.to_string();
         match self
-            .request(move |req| Control::AttachAcked {
+            .request_authorized(std::time::Duration::from_secs(10), move |req| Control::AttachAcked {
                 req,
                 tab_id: tab,
                 from_offset,
+            }, |enqueue| match identity {
+                Some(identity) => binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue),
+                None => enqueue(),
             })
-            .await
+            .await?
         {
             Some(Response::AttachAck { alive, tail_offset, .. }) => {
                 log::info!(
                     "[HOTSWAP] AttachAck for {tab_id}: alive={alive} tail_offset={tail_offset}"
                 );
-                Some(alive)
+                Ok(Some(alive))
             }
             _ => {
                 // Ack-capable host didn't answer in time — the attach itself may
                 // still have landed; log and treat like legacy.
                 log::warn!("[HOTSWAP] no AttachAck for {tab_id} (timeout); assuming attached");
-                None
+                Ok(None)
             }
         }
     }
@@ -377,35 +459,56 @@ impl PtyHostClient {
         timeout: std::time::Duration,
         make: impl FnOnce(u64) -> Control,
     ) -> Option<Response> {
-        let req = self.next_req();
+        self.request_authorized(timeout, make, |enqueue| enqueue()).await.ok().flatten()
+    }
+
+    async fn request_authorized(
+        &self, timeout: std::time::Duration, make: impl FnOnce(u64) -> Control,
+        authorize: impl FnOnce(&mut dyn FnMut() -> bool) -> bool,
+    ) -> Result<Option<Response>, String> {
+        let req = self.next_req().ok_or("terminal host request identity exhausted")?;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
+        let frame = Frame::Ctrl(make(req));
+        let mut frame = Some(frame);
         // `alive` is cleared before the pending map is drained, so a request that
         // slipped in after the drain sees it here instead of waiting out `timeout`.
-        if !self.is_alive() || self.outbound.send(Frame::Ctrl(make(req))).is_err() {
+        if !authorize(&mut || self.is_alive() && self.outbound.send(frame.take().unwrap()).is_ok()) {
             self.pending.lock().unwrap().remove(&req);
-            return None;
+            return Err("host-ownership-pending: terminal host request was not enqueued; retry".into());
         }
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(resp)) => Some(resp),
+            Ok(Ok(resp)) => Ok(Some(resp)),
             _ => {
                 self.pending.lock().unwrap().remove(&req);
-                None
+                Ok(None)
             }
         }
     }
 
     /// Spawn a session; returns the child PID on success.
     pub async fn spawn_session(&self, tab_id: &str, spec: &SpawnSpec) -> Result<u32, String> {
+        self.spawn_session_inner(tab_id, spec, None).await
+    }
+
+    pub(crate) async fn spawn_owned(&self, identity: &crate::state::SessionIdentity, spec: &SpawnSpec) -> Result<u32, String> {
+        self.spawn_session_inner(&identity.key, spec, Some(identity)).await
+    }
+
+    async fn spawn_session_inner(&self, tab_id: &str, spec: &SpawnSpec, identity: Option<&crate::state::SessionIdentity>) -> Result<u32, String> {
         let tab = tab_id.to_string();
         let spec = spec.clone();
+        let binding = self.sessions.lock().unwrap().clone();
         match self
-            .request(move |req| Control::Spawn {
+            .request_authorized(std::time::Duration::from_secs(10), move |req| Control::Spawn {
                 req,
                 tab_id: tab,
                 spec,
+            }, |enqueue| match identity {
+                Some(identity) => binding.keys.enqueue_session_on(identity, binding.channel, binding.epoch, enqueue),
+                None => enqueue(),
             })
-            .await
+            .await?
         {
             Some(Response::Spawned { pid, .. }) => Ok(pid),
             Some(Response::SpawnFailed { error, .. }) => Err(error),
@@ -424,16 +527,33 @@ impl PtyHostClient {
     /// removed from the pending map, so asking again and again of a host that never
     /// answers does not accumulate entries there; a late reply is discarded.
     pub async fn list_sessions_within(&self, timeout: std::time::Duration) -> Option<Vec<SessionMeta>> {
-        let token = self.lifecycle_token.to_string();
-        match self
-            .request_within(timeout, move |req| Control::ListSessions {
-                req,
-                token: Some(token),
-            })
-            .await
-        {
-            Some(Response::SessionList { sessions, .. }) => Some(sessions),
-            _ => None,
+        self.list_sessions_numbered_within(timeout).await.map(|listing| listing.sessions)
+    }
+
+    pub async fn list_sessions_numbered(&self) -> Option<SessionListing> {
+        self.list_sessions_numbered_within(std::time::Duration::from_secs(10)).await
+    }
+
+    pub async fn list_sessions_numbered_within(&self, timeout: std::time::Duration) -> Option<SessionListing> {
+        let req = self.next_req()?;
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(req, tx);
+        let binding = self.sessions.lock().unwrap().clone();
+        let request_no = binding.keys.enqueue_listing_on(binding.channel, binding.epoch, || {
+            self.is_alive() && self.outbound.send(Frame::Ctrl(Control::ListSessions {
+                req, token: Some(self.lifecycle_token.to_string()),
+            })).is_ok()
+        });
+        let Some(request_no) = request_no else {
+            self.pending.lock().unwrap().remove(&req);
+            return None;
+        };
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(Response::SessionList { sessions, .. })) => Some(SessionListing { request_no, sessions }),
+            _ => {
+                self.pending.lock().unwrap().remove(&req);
+                None
+            }
         }
     }
 
@@ -554,10 +674,21 @@ where
     let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let lifecycle_token = Arc::new(deps.lifecycle_token.clone());
     let conn = ConnState::new();
+    let sessions = Arc::new(Mutex::new(SessionBinding {
+        keys: crate::state::HostKeys::default(), channel: crate::elevated_host::HostChannel::Primary, epoch: 0,
+    }));
+    // Standalone lifecycle clients also own an exact binding before any request.
+    sessions.lock().unwrap().keys.connect(crate::elevated_host::HostChannel::Primary, 0, outbound.clone(), alive.clone());
+    let sessions_r = sessions.clone();
+    #[cfg(test)]
+    let before_stdout: ReaderHook = Arc::default();
+    #[cfg(test)]
+    let before_stdout_r = before_stdout.clone();
     let end = Arc::new(ConnLoss {
         conn: conn.clone(),
         alive: alive.clone(),
         pending: pending.clone(),
+        sessions: sessions.clone(),
         on_disconnect: deps.on_disconnect.clone(),
     });
 
@@ -608,12 +739,19 @@ where
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
                     // Ring bookkeeping stays in the HOST's id space — it is the
                     // host's own offset, and reattach replays from it.
+                    let binding = sessions_r.lock().unwrap().clone();
                     match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
                         Some(id) => {
-                            deps.stream_offsets
-                                .insert(tab_id.clone(), offset + bytes.len() as u64);
-                            let _ = deps.output_tx.send(ChannelPayload { id, data: bytes });
-                            deps.output_produced.fetch_add(1, Ordering::Relaxed);
+                            #[cfg(test)]
+                            {
+                                let hook = before_stdout_r.lock().unwrap().clone();
+                                if let Some(hook) = hook { hook(); }
+                            }
+                            binding.keys.publish_frame(binding.channel, &tab_id, binding.epoch, &id, || {
+                                deps.stream_offsets.insert(tab_id.clone(), offset + bytes.len() as u64);
+                                let _ = deps.output_tx.send(ChannelPayload { id: id.clone(), data: bytes });
+                                deps.output_produced.fetch_add(1, Ordering::Relaxed);
+                            });
                         }
                         None => log::warn!(
                             "pty-host: dropping Stdout for unknown session {tab_id}"
@@ -630,7 +768,10 @@ where
                     // An exit for an unknown session still has cleanup value, but
                     // there is no process-keyed state to clean, so drop it rather
                     // than inventing an id.
-                    match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                    let process = route_inbound(&tab_id, |k| (deps.resolve_process)(k));
+                    let binding = sessions_r.lock().unwrap().clone();
+                    binding.keys.observe_exit(binding.channel, binding.epoch, &tab_id);
+                    match process {
                         Some(id) => (deps.on_exit)(id, tab_id, exit_cwd),
                         None => log::warn!("pty-host: dropping Exit for unknown session {tab_id}"),
                     }
@@ -656,6 +797,7 @@ where
     });
 
     PtyHostClient {
+        sessions,
         outbound,
         pending,
         req_ctr,
@@ -667,6 +809,8 @@ where
         lifecycle_token,
         conn,
         exe_origin: Arc::default(),
+        #[cfg(test)]
+        before_stdout,
     }
 }
 
@@ -678,6 +822,7 @@ struct ConnLoss {
     conn: Arc<ConnState>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pending: PendingMap,
+    sessions: Arc<Mutex<SessionBinding>>,
     on_disconnect: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -693,6 +838,8 @@ impl ConnLoss {
         self.alive.store(false, Ordering::Release);
         self.conn.cancel();
         self.pending.lock().unwrap().clear();
+        let binding = self.sessions.lock().unwrap().clone();
+        binding.keys.disconnect(binding.channel, binding.epoch);
         (self.on_disconnect)();
     }
 }
@@ -1299,6 +1446,10 @@ mod discovery_tests;
 
 #[cfg(test)]
 mod conn_tests;
+#[cfg(test)]
+mod counter_tests;
+#[cfg(test)]
+mod sink_tests;
 
 #[cfg(test)]
 mod exe_origin_tests;
@@ -1844,7 +1995,13 @@ mod tests {
 
         let (deps, mut rx, produced) = deps();
         let offsets = deps.stream_offsets.clone();
-        let _client = wire_client(crd, cwr, deps);
+        let client = wire_client(crd, cwr, deps);
+        let keys = crate::state::HostKeys::default();
+        let channel = crate::elevated_host::HostChannel::Primary;
+        client.bind_sessions(&keys, channel, 1);
+        let (stage, _) = keys.stage(channel, "t1", crate::state::StageMode::Spawn).unwrap();
+        assert!(keys.publish(&stage, "t1", 1));
+        assert!(keys.complete(&stage, "t1"));
 
         // Server pushes a Stdout frame to the client.
         write_frame(

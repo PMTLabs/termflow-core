@@ -12,11 +12,10 @@ use super::host_table::HostTable;
 use super::types::{AppState, FrozenHost};
 use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::{
-    ConnectPlan, HostCandidate, HostConnectionOrigin, HostRole, PtyHostClient, PtyHostDeps,
+    ConnectPlan, HostCandidate, HostConnectionOrigin, HostRole, PtyHostClient, PtyHostDeps, SessionListing,
 };
 use std::sync::Arc;
 use tauri::{Emitter, Runtime};
-use termflow_pty_protocol::SessionMeta;
 
 /// Which endpoint to connect to and what the host can do, from its record.
 ///
@@ -81,21 +80,8 @@ impl<R: Runtime> AppState<R> {
                 // sidecar or our own OSC tracking), clean up, notify the UI.
                 let cwd = exit_cwd
                     .or_else(|| st_exit.terminal_cwds.get(&process_id).map(|r| r.value().clone()));
-                // Persist the final parser state BEFORE cleanup discards it — the
-                // periodic flush only runs every 30s, so without this the session's
-                // last moments never reach the history store. Takes the PROCESS id
-                // and derives the history key from the terminal's leaf itself.
-                st_exit.persist_terminal_history(&process_id, chrono::Utc::now().timestamp_millis());
-                st_exit.forget_host_terminal(&process_id);
-                // Ring bookkeeping is keyed by the SESSION, not the process: it is
-                // the host's own offset and lives in the host's id space.
-                st_exit.host_stream_offsets.remove(&session_key);
-                st_exit.forget_host_session_claim_if_owner(&session_key, &process_id);
-                // Drop the identity lookups LAST among the removals but before the
-                // emit — a leaked entry would route a later terminal's output at a
-                // process id that no longer exists.
-                st_exit.identity.unindex(&process_id);
-                st_exit.cleanup_terminal_state(&process_id);
+                let _ = session_key;
+                if !st_exit.exit_process(&process_id) { return; }
                 let _ = st_exit.app_handle.emit(
                     "terminal:exit",
                     serde_json::json!({ "id": process_id, "exitCode": 0, "cwd": cwd }),
@@ -112,7 +98,7 @@ impl<R: Runtime> AppState<R> {
             // (design 014 §A3). An unknown session is DROPPED, never echoed.
             resolve_process: {
                 let st = self.clone();
-                Arc::new(move |k: &str| host_registry::resolve_inbound(&st.host_terminals, &st.identity, &st.host_table, channel, epoch, k))
+                Arc::new(move |k: &str| host_registry::resolve_inbound(&st.host_terminals, &st.host_table, channel, epoch, k))
             },
             on_disconnect,
             stream_offsets: self.host_stream_offsets.clone(),
@@ -125,8 +111,11 @@ impl<R: Runtime> AppState<R> {
         Arc::new(move || {
             // Only act if THIS connection is still the current one — a stale
             // old client's disconnect must not clobber a reconnected client.
-            if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen {
-                return;
+            {
+                let mut slot = st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner());
+                if st_disc.pty_host_gen.load(std::sync::atomic::Ordering::Acquire) != my_gen
+                    || slot.as_ref().is_some_and(|c| c.session_epoch(HostChannel::Primary) != Some(my_gen)) { return; }
+                slot.take();
             }
             // Pipe died (sleep/wake, sidecar crash, …). Do NOT tear the
             // sessions down here: the host may be alive and holding every
@@ -134,7 +123,7 @@ impl<R: Runtime> AppState<R> {
             // client, then reconnect-first; only sessions the host no longer
             // has — or a failed reconnect — are torn down.
             log::warn!("[HOTSWAP] pty-host pipe dropped (gen {my_gen}); trying in-place reconnect");
-            *st_disc.pty_host.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            st_disc.host_table.routes().remove_epoch(HostChannel::Primary, my_gen);
             // The Settings Updates panel caches an offload verdict that is a
             // function of this connection; tell it the answer changed.
             let _ = st_disc.app_handle.emit("pty-host:disconnected", ());
@@ -189,7 +178,7 @@ impl<R: Runtime> AppState<R> {
 
         // Generation for this connection: on_disconnect only nulls `pty_host` if
         // its generation is still current (a dead old client can't clobber a new).
-        let my_gen = self.pty_host_gen.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let my_gen = crate::checked_counter::advance(&self.pty_host_gen)?;
         let deps = self.host_deps(token.clone(), HostChannel::Primary, my_gen, self.primary_disconnect(my_gen));
         // Advertised host pid (if any): connect_or_spawn refuses to spawn a
         // duplicate host while this pid is alive (sleep/wake duplicate-host bug).
@@ -270,7 +259,7 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
         host_registry::frozen_hosts_snapshot(&self.frozen_hosts)
     }
 
-    fn next_frozen_id(&self) -> FrozenId {
+    fn next_frozen_id(&self) -> Result<FrozenId, String> {
         AppState::next_frozen_id(self)
     }
 
@@ -286,57 +275,19 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
         }
     }
 
-    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&[SessionMeta]>) {
-        // The host this listing speaks for. Its answer settles only the closes
-        // owed to it and is compared only against the sessions it owns.
-        // Record sessions that survived a hot-swap (tab_id -> pid) so
-        // create_host_terminal reattaches instead of respawning. `None` means
-        // the host did not answer — treat as unknown, never as empty.
-        match sessions {
-            None => log::warn!(
-                "[HOTSWAP] host {} did not answer ListSessions during connect; \
-                 adoption queue left unchanged",
-                host_label(channel)
-            ),
-            Some([]) => {
-                log::info!(
-                    "[HOTSWAP] host {} reports no surviving sessions (fresh host or clean start)",
-                    host_label(channel)
-                );
-                // Authoritative for THIS host: nothing left for it to close.
-                self.prune_pending_closes(channel);
-            }
-            Some(surviving) => {
-                log::info!(
-                    "[HOTSWAP] host {} holds {} surviving session(s): {}",
-                    host_label(channel),
-                    surviving.len(),
-                    surviving
-                        .iter()
-                        .map(|m| format!("{}(pid {}, alive={})", m.tab_id, m.pid, m.alive))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                let duplicates = host_registry::apply_answered_listing(
-                    &host_registry::ListingMaps {
-                        host_terminals: &self.host_terminals,
-                        terminals: &self.terminals,
-                        host_session_claims: &self.host_session_claims,
-                        host_close_pending: &self.host_close_pending,
-                        closed_unowned: &self.closed_unowned,
-                    },
-                    channel,
-                    client,
-                    surviving,
-                    std::time::Instant::now(),
-                );
-                self.note_duplicate_sessions(&duplicates);
-                // Any remaining tombstone owed to this host names a session its
-                // (authoritative) list doesn't have — moot, drop them. Other
-                // hosts' tombstones are theirs to settle.
-                self.prune_pending_closes(channel);
-            }
-        }
+    fn apply_listing(&self, channel: HostChannel, client: &PtyHostClient, sessions: Option<&SessionListing>) {
+        let Some(listing) = sessions else {
+            log::warn!("[HOTSWAP] host {} did not answer ListSessions; session state left unchanged", host_label(channel));
+            return;
+        };
+        let duplicates = host_registry::apply_answered_listing(
+            &host_registry::ListingMaps {
+                host_terminals: &self.host_terminals,
+                terminals: &self.terminals,
+                keys: self.host_table.keys(),
+            }, channel, client, listing, std::time::Instant::now(),
+        );
+        self.note_duplicate_sessions(&duplicates);
     }
 
     fn publish_current(&self, client: &PtyHostClient) -> Result<(), String> {
@@ -408,11 +359,9 @@ impl<R: Runtime> PanePort for AppState<R> {
 
     fn forget_host(&self, id: FrozenId) {
         let channel = HostChannel::Frozen(id);
+        self.host_table.routes().remove_channel(channel);
         self.remove_frozen_host(id);
-        // What was owed to a host that no longer exists can never be delivered,
-        // and a session reserved on it is gone with it.
-        self.prune_pending_closes(channel);
-        host_registry::forget_reserved_claims_on(&self.host_session_claims, channel);
+        self.host_table.keys().forget(channel);
     }
 }
 
