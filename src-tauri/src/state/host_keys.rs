@@ -59,6 +59,7 @@ struct Inner {
     restore_holders: HashMap<(String, String), restore::Intent>,
     closed_unowned: HashMap<(String, String), restore::Intent>,
     cap: usize,
+    pending_deliveries: std::collections::HashSet<delivery::RecoveryIdentity>,
 }
 
 #[cfg(test)]
@@ -82,6 +83,7 @@ impl HostKeys {
         Self { inner: Arc::new(Mutex::new(Inner {
             keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
             restore_holders: HashMap::new(), closed_unowned: HashMap::new(), cap: ENDING_CAP,
+            pending_deliveries: std::collections::HashSet::new(),
         })), routes, deliveries: Arc::default(),
             #[cfg(test)]
             route_hook: Arc::default(),
@@ -100,6 +102,11 @@ impl HostKeys {
 
     #[cfg(test)]
     pub fn set_cap(&self, cap: usize) { self.lock().cap = cap; }
+
+    #[cfg(test)]
+    pub(crate) fn listing_counts(&self, channel: HostChannel) -> (u64, u64) {
+        self.lock().channels.get(&channel).map_or((0, 0), |c| (c.requests, c.answered))
+    }
 
     pub fn state(&self, channel: HostChannel, key: &str) -> Option<KeyState> {
         self.lock().keys.get(&(channel, key.to_string())).map(|r| r.state.clone())

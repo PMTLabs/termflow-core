@@ -1,5 +1,5 @@
-//! Lexical inventory, not a proof of lifetime safety. Behavioral gates prove
-//! qualification at the effect; this catches new, unclassified sink functions.
+//! Lexical inventory, not a proof of lifetime safety. Named behavioral tests
+//! supplement it; this catches new, unclassified sink functions.
 //! Native PID/HWND effects and arbitrary aliases cannot be inventoried reliably
 //! by these patterns: the manual sink table remains necessary for those.
 
@@ -30,9 +30,9 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("commands/update.rs", &["restart_for_update", "restart_keeping_terminals"], "retained quiesce/exit admission and exact clients"),
     ("commands/window.rs", &["close_all_hosts"], "exit owns closed admission; retained exact clients"),
     ("commands/window.rs", &["flush_all_windows", "open_settings_in_main_window", "set_active_window"], "out of scope window/flush intent; framework objects"),
-    ("elevated_host/mod.rs", &["publish"], "caller retains connecting lifecycle guard through synchronous exact-client installation"),
+    ("elevated_host/mod.rs", &["publish", "publish_client"], "slot lock checks exit fence through exact-client/process installation; refused client is cancelled"),
     ("elevated_host/mod.rs", &["clear_client_on"], "manager slot mutex compares exact client epoch while capturing projection snapshot"),
-    ("elevated_host/mod.rs", &["shutdown"], "closed exit admission; connecting serialization and retained exact transport/process"),
+    ("elevated_host/mod.rs", &["shutdown"], "slot-serialized exit fence; bounded connecting coordination and retained exact transport/process"),
     ("elevated_host/mod.rs", &["shutdown_idle"], "connecting plus channel drain; owner/epoch-qualified compare-detach under ownership mutex"),
     ("fabric_manager.rs", &["emit_peer_event"], "out of scope advisory peer status"),
     ("fabric_manager.rs", &["shutdown_fabric", "shutdown_fabric_generation", "start_fabric"], "generation slot compare-take/install; retained actual child"),
@@ -58,7 +58,8 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/engine_host.rs", &["emit_activity", "emit_changed", "emit_state"], "out of scope rule UI state notifications"),
     ("state/host_adoption.rs", &["adopt"], "retained adoption holder/epoch/client; admission-qualified publication"),
     ("state/host_adoption.rs", &["frozen_connection_lost"], "exact original frozen channel/epoch; successor routes survive"),
-    ("state/host_adoption.rs", &["sync"], "barrier mutex; unique host discovery intent"),
+    ("state/host_adoption.rs", &["sync", "begin_attempt", "abandon_attempt", "mark_retired", "begin_reconnect", "rerun", "drop"], "barrier mutex; host discovery/retirement/reconnect claim lifetime, not a connection outcome"),
+    ("state/host_adoption.rs", &["finish_on", "mark_lost"], "barrier mutex through originating-epoch check and connection outcome mutation; pre-connect failures have no connection origin"),
     ("state/host_adoption/panes.rs", &["reattach_listed"], "original session and client epoch at route publication/post-Attach enqueue"),
     ("state/host_generation.rs", &["notify_terminal_generations"], "out of scope advisory generation refetch notification"),
     ("state/host_keys.rs", &["abort", "apply_exit", "apply_listing", "complete", "connect", "disconnect_inner", "end_staged_exit", "exit_process", "forget", "mark_end", "publish", "restore_route", "send", "stage", "trim"], "ownership/key mutex retained through cell, route, binding and FIFO mutations; exact epoch for publication/detach"),
@@ -75,6 +76,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_port.rs", &["publish_current", "publish_frozen"], "retained admission/epoch/unique frozen identity; advisory connected event"),
     ("state/host_retire.rs", &["retire"], "retained channel drain and exact original epoch/client"),
     ("state/host_table.rs", &["publish"], "admission mutex; monotonic epoch; clears only prior-epoch routes"),
+    ("state/host_table.rs", &["retire", "retire_when_open"], "retained channel drain epoch under admission mutex; retirement flag controls exact guard release"),
     ("state/host_routes.rs", &["register", "remove_channel", "remove_epoch", "remove_key", "remove_process"], "caller retains ownership mutex through route mutation, or exact non-reused pc/epoch removal"),
     ("state/owner_lifecycle.rs", &["complete_create", "end_shell"], "original owner cg/pc; leaf stripes and ownership retained through storage/removal"),
     ("state/terminals.rs", &["begin_host_restore_sweep", "host_restore_window_destroyed", "report_host_restore_settled"], "out of scope durable window restore participation; no shell-addressed effect"),
@@ -152,7 +154,8 @@ fn hits(source: &str) -> BTreeSet<String> {
         r"Control::(?:Spawn|Attach|AttachAcked|Close|Resize|ArmDetach|Disarm|Shutdown|ListSessions)\b|Data::Stdin\b|",
         r"\b(?:outbound|delivery)\s*\.\s*send\s*\(|AssertUnwindSafe\(deliver\)|",
         r"\.\s*(?:bind_sessions|publish_route_on|restore_route|publish_frame|publish_shell_projection)\s*\(|\.connection\s*=|",
-        r"\*self\.(?:client|proc)\s*\.|\b(?:slot|client|proc)\s*\.\s*take\s*\(|self\.current\s*(?:=|\.\s*(?:take|replace)\s*\()|",
+        r"\.\s*(?:resolution|retry_pending|reconnecting|reconnect_again|retired)\s*=|\btake\s*\(\s*&mut\s+\w+\.reconnect_again\s*\)|",
+        r"\*self\.(?:client|proc)\s*\.|\*slot\s*=|\b(?:slot|client|proc)\s*\.\s*take\s*\(|self\.current\s*(?:=|\.\s*(?:take|replace)\s*\()|",
         r"\.\s*(?:persist_snapshot|persist_terminal_history|persist_history_snapshot|insert_edge|delete_edges_for|write_shells)\s*\(|",
         r"\.\s*(?:emit|emit_to|execute|execute_batch|close_transport|shutdown_idle|shutdown|clear_client_on|clear_client|install_if_current|clear_if_current|take_if_current)\s*\(|",
         r"\b(?:terminals|host_terminals|stream_offsets|host_stream_offsets|writers|masters|screens|screen_history|identity_index|identity|leaf_to_process|shell_writer_channels|ptys|terminal_history|terminal_screens|terminal_focus_reporting|tmux_sessions|terminal_cwds|history_dirty|replay_prefix|host_restore_pending_windows|reattach_prompt_hooks|routes|local_processes|restore_holders|closed_unowned|owners|keys|entries)(?:\(\))?\s*(?:\.\s*(?:lock\(\)|unwrap\(\)|keys\(\)|routes\(\)))?\s*\.\s*(?:insert|remove|remove_key|remove_process|remove_channel|remove_epoch|retain|clear|entry|get_mut|register|index|unindex|connect|disconnect)\s*\("
@@ -214,6 +217,11 @@ fn planted_wire_projection_store_route_emit_and_lifecycle_sinks_are_detected() {
         ("new_route", "routes.register(channel, key, pc, epoch);"),
         ("new_emit", "app.emit(event, payload);"),
         ("new_lifecycle", "transport.close_transport().await;"),
+        ("new_barrier_result", "entry.resolution = Resolution::Resolved;"),
+        ("new_barrier_retry", "entry.retry_pending = true;"),
+        ("new_barrier_claim", "entry.reconnecting = false; entry.reconnect_again = true;"),
+        ("new_barrier_retirement", "entry.retired = true;"),
+        ("new_barrier_rerun", "std::mem::take(&mut entry.reconnect_again);"),
     ] {
         let planted = format!("async fn {name}() {{ {body} }}");
         assert_eq!(unlisted("new_sink.rs", &planted), vec![name]);

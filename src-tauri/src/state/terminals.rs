@@ -154,7 +154,9 @@ mod restore_sweep_gate_tests {
         assert!(eligible < emit, "listed-key qualification must precede recovery emission");
         let authority = crate::state::source_scan::production(include_str!("host_keys/effects.rs"));
         let decision = crate::state::source_scan::fn_body(&authority, "fn recover_listed(");
-        assert!(decision.find("Some(&KeyState::Listed)").unwrap() < decision.find("delivery.send(Box::new(announce))").unwrap());
+        let coalesce = decision.find("pending_deliveries.insert(").unwrap();
+        assert!(decision.find("Some(&KeyState::Listed)").unwrap() < coalesce);
+        assert!(coalesce < decision.find("delivery.send(Box::new(move ||").unwrap());
         assert!(decision.contains("let mut inner = self.lock()"));
     }
 
@@ -651,7 +653,14 @@ impl<R: Runtime> AppState<R> {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
     {
-        Box::pin(self.ensure_elevated_host_inner())
+        Box::pin(async {
+            let _guard = self.ensure_elevated_host_for_placement().await?;
+            Ok(())
+        })
+    }
+
+    pub(crate) async fn ensure_elevated_host_for_placement(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        self.elevated_host.ensure_for_placement(|| self.ensure_elevated_host_inner()).await
     }
 
     #[cfg(windows)]
@@ -659,11 +668,7 @@ impl<R: Runtime> AppState<R> {
         if self.elevated_host.is_connected() {
             return Ok(());
         }
-        let _connect_guard = self.elevated_host.connecting.lock().await;
-        if self.elevated_host.is_connected() {
-            return Ok(());
-        }
-
+        // The caller retains connecting through setup and placement.
         // Re-checked here (not just trusted from the renderer's cached
         // `get_admin_tab_support` answer) so a stale or tampered renderer can
         // never drive an elevated spawn past this gate.
@@ -701,6 +706,11 @@ impl<R: Runtime> AppState<R> {
             crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
         };
         log::info!("[ADMIN] elevated pty-host launched (pid {})", launched.pid);
+        if self.elevated_host.is_shutting_down() {
+            drop(listener);
+            self.elevated_host.wait_owned_process(Some(launched)).await;
+            return Err("elevated terminal host is shutting down".into());
+        }
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         let stream = match listener.accept_verified(launched.pid, deadline).await {
@@ -776,8 +786,7 @@ impl<R: Runtime> AppState<R> {
 
         let client = crate::pty_host_client::wire_client(rd, wr, deps);
         client.bind_sessions(self.host_table.keys(), HostChannel::Elevated, epoch);
-        self.elevated_host.publish(client, launched);
-        Ok(())
+        self.elevated_host.publish(client, launched).await
     }
 
     #[cfg(not(windows))]

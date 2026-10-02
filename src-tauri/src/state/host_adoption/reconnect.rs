@@ -216,7 +216,7 @@ async fn reconnect_frozen_pass<P: PanePort>(
         };
         match outcome {
             Ok(adopted) => {
-                port.barrier().finish(key, &host.endpoint, HostRole::Frozen, adopted.resolution);
+                port.barrier().finish_on(key, &host.endpoint, HostRole::Frozen, adopted.resolution, Some((port.table(), channel, adopted.epoch)));
                 let Some(client) = registered(port, id).map(|h| h.client) else { return FrozenReconnect::Inert };
                 let still_current = || listing_is_current(port.table(), channel, adopted.epoch, &client, Admission::Open);
                 match list_with_retries(&client).await {

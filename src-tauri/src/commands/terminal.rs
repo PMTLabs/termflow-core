@@ -470,7 +470,7 @@ async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<Stri
         // NOT wrapped: `ensure_elevated_host` returns the UAC-cancel sentinel
         // verbatim so the renderer can recognise it and stay silent (AC6).
         state.ensure_elevated_host().await?;
-        let _placement_guard = state.elevated_host.connecting.lock().await;
+        let _placement_guard = state.ensure_elevated_host_for_placement().await?;
         let client = match state.elevated_host.client_clone() {
             Some(c) => c,
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),

@@ -11,6 +11,67 @@ const HOST: &str = "owner-host";
 const CHANNEL: HostChannel = HostChannel::Primary;
 const BOUND: Duration = Duration::from_secs(3);
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_frozen_loss_cannot_overwrite_the_reconnected_barrier() {
+    let world = World::new();
+    world.add_host("cur", HostSpec { track_spawns: true, ..HostSpec::default() });
+    world.add_host("old", HostSpec { sessions: vec![meta("control", 41)], ..HostSpec::default() });
+    let port = FakePort::new(&world, "cur");
+    port.set_candidates(vec![candidate("cur", HostRole::Current), candidate("old", HostRole::Frozen)]);
+    rediscover_hosts(&port).await.unwrap();
+    let host = port.frozen_hosts().pop().unwrap();
+    let channel = HostChannel::Frozen(host.id);
+    let key = barrier_key(&host.endpoint);
+    assert_eq!(port.connect_count("old"), 1);
+    assert!(port.barrier().unresolved().is_empty());
+    // Current-connection loss really records uncertainty and reserves its retry.
+    assert!(frozen_connection_lost(port.table(), port.barrier(), host.id, host.epoch, &host.endpoint));
+    assert_eq!(port.barrier().unresolved(), vec![UnresolvedHost { endpoint: "old".into(), reason: "connection lost".into() }]);
+    assert!(!port.barrier().needs_attempt_for(&key));
+    assert!(port.barrier().lock().iter().find(|e| e.key == key).unwrap().retry_pending);
+    port.barrier().finish_on(&key, &host.endpoint, HostRole::Frozen, Resolution::Resolved, Some((port.table(), channel, host.epoch)));
+    assert!(host.client.close_transport().await);
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let resume_rx = Mutex::new(resume_rx);
+    *port.barrier().shared.lost_hook.lock().unwrap() = Some(Arc::new(move || {
+        entered_tx.send(()).unwrap();
+        resume_rx.lock().unwrap().recv_timeout(BOUND).unwrap();
+    }));
+    let delayed = std::thread::spawn({ let port = port.clone(); let host = host.clone(); move || {
+        frozen_connection_lost(port.table(), port.barrier(), host.id, host.epoch, &host.endpoint)
+    }});
+    entered_rx.recv_timeout(BOUND).unwrap();
+    assert!(tokio::time::timeout(BOUND, reconnect::reconnect_disconnected(&port)).await.unwrap());
+    let current = port.frozen_hosts().pop().unwrap();
+    assert!(current.epoch > host.epoch);
+    assert_eq!(port.connect_count("old"), 2);
+    assert_eq!(current.id, host.id);
+    assert!(current.client.is_alive());
+    assert_eq!(port.table().keys().state(channel, "control"), Some(KeyState::Listed));
+    assert!(port.barrier().unresolved().is_empty());
+    resume_tx.send(()).unwrap();
+    assert!(!delayed.join().unwrap());
+    // The successful-result writer is qualified at the same lock-local boundary.
+    port.barrier().finish_on(&key, &host.endpoint, HostRole::Frozen, Resolution::Unresolved("stale answer".into()), Some((port.table(), channel, host.epoch)));
+    assert!(port.barrier().unresolved().is_empty());
+    {
+        let entries = port.barrier().lock();
+        let entry = entries.iter().find(|e| e.key == key).unwrap();
+        assert_eq!(entry.resolution, Resolution::Resolved);
+        assert!(!entry.retry_pending);
+    }
+    assert!(!port.barrier().needs_attempt_for(&key));
+    let placement = tokio::time::timeout(BOUND, crate::state::host_routing::place_owned(&port, "tm-missing", Some("saved-missing"), None)).await.unwrap().unwrap();
+    let crate::state::host_routing::Placement::Spawn { channel: target, client, ticket, session_key } = placement else { panic!("missing saved session must progress to fresh spawn") };
+    assert_eq!(target, HostChannel::Primary);
+    assert_ne!(session_key, "saved-missing");
+    assert_eq!(world.count_everywhere("Spawn"), 0, "placement does not send the spawn itself");
+    drop(ticket);
+    assert!(client.close_transport().await);
+    assert!(current.client.close_transport().await);
+}
+
 #[tokio::test]
 async fn same_leaf_restore_holder_survives_aborted_owner_projection_cleanup() {
     let (world, port) = machine(HostSpec { sessions: vec![meta("shared", 4242), meta("control", 4343)], ..HostSpec::default() });
@@ -193,9 +254,66 @@ fn recovery_delivery_can_reenter_and_block_without_holding_shell_authority() {
     progress_rx.recv_timeout(BOUND).unwrap();
     unrelated.join().unwrap();
     keys.recover_listed(CHANNEL, "next", || true, { let observed = observed.clone(); move || observed.lock().unwrap().push("next") });
+    assert_eq!(keys.pending_deliveries(), 2);
+    for _ in 0..100 {
+        for key in ["orphan", "next"] {
+            keys.recover_listed(CHANNEL, key, || true, || panic!("duplicate pending recovery"));
+        }
+    }
+    assert_eq!(keys.pending_deliveries(), 2);
     assert!(observed.lock().unwrap().is_empty());
     resume_tx.send(()).unwrap();
     keys.flush_deliveries();
     assert_eq!(*observed.lock().unwrap(), vec!["orphan", "next"]);
+    assert_eq!(keys.pending_deliveries(), 0);
     assert_eq!(keys.state(CHANNEL, "orphan"), Some(KeyState::Listed));
+    // Completion clears the pending identity, so a later retry remains possible.
+    keys.recover_listed(CHANNEL, "orphan", || true, { let observed = observed.clone(); move || observed.lock().unwrap().push("retry") });
+    keys.flush_deliveries();
+    assert_eq!(*observed.lock().unwrap(), vec!["orphan", "next", "retry"]);
+}
+
+#[tokio::test]
+async fn repeated_sweeps_coalesce_recovery_behind_a_held_observer() {
+    let (world, port) = machine(HostSpec { sessions: vec![meta("orphan", 41), meta("next", 42)], ..HostSpec::default() });
+    ensure_hosts(&port).await.unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    port.table().keys().recover_listed(CHANNEL, "orphan", || true, { let port = port.clone(); move || {
+        entered_tx.send(()).unwrap();
+        resume_rx.recv_timeout(BOUND).unwrap();
+        port.0.recovered.lock().unwrap().push("orphan".into());
+    }});
+    entered_rx.recv_timeout(BOUND).unwrap();
+    assert_eq!(port.table().keys().pending_deliveries(), 1);
+    for _ in 0..20 { assert!(tokio::time::timeout(BOUND, sweep(&port)).await.unwrap()); }
+    assert!(world.count(HOST, "List") >= 21);
+    assert_eq!(port.table().keys().listed().len(), 2);
+    assert_eq!(port.table().keys().pending_deliveries(), 2);
+    assert!(port.0.recovered.lock().unwrap().is_empty());
+    resume_tx.send(()).unwrap();
+    port.table().keys().flush_deliveries();
+    assert_eq!(*port.0.recovered.lock().unwrap(), vec!["orphan", "next"]);
+    assert_eq!(port.table().keys().pending_deliveries(), 0);
+    assert_eq!(world.count_everywhere("Close"), 0);
+    assert_eq!(world.count_everywhere("Spawn"), 0);
+}
+
+#[test]
+fn panicking_recovery_releases_its_identity_and_preserves_the_next_delivery() {
+    let keys = HostKeys::default();
+    keys.listing(CHANNEL, &SessionListing { request_no: 1, sessions: vec![meta("panic", 41), meta("next", 42)] }, |_| false);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    keys.recover_listed(CHANNEL, "panic", || true, { let seen = seen.clone(); move || {
+        seen.lock().unwrap().push("panic");
+        panic!("observer failure");
+    }});
+    keys.recover_listed(CHANNEL, "next", || true, { let seen = seen.clone(); move || seen.lock().unwrap().push("next") });
+    keys.flush_deliveries();
+    assert_eq!(*seen.lock().unwrap(), vec!["panic", "next"]);
+    assert_eq!(keys.pending_deliveries(), 0);
+    keys.recover_listed(CHANNEL, "panic", || true, { let seen = seen.clone(); move || seen.lock().unwrap().push("retry") });
+    keys.flush_deliveries();
+    assert_eq!(*seen.lock().unwrap(), vec!["panic", "next", "retry"]);
+    assert_eq!(keys.pending_deliveries(), 0);
 }

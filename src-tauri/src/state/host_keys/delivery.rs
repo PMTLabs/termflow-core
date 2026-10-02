@@ -5,6 +5,7 @@ use super::*;
 use std::sync::mpsc::{channel, Sender};
 
 pub(super) type Delivery = Box<dyn FnOnce() + Send>;
+pub(super) type RecoveryIdentity = (HostChannel, String, Option<u64>, u32, std::time::Instant);
 
 impl HostKeys {
     pub(super) fn delivery_sender(&self) -> &Sender<Delivery> {
@@ -19,6 +20,9 @@ impl HostKeys {
             sender
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn pending_deliveries(&self) -> usize { self.lock().pending_deliveries.len() }
 
     #[cfg(test)]
     pub(crate) fn flush_deliveries(&self) {

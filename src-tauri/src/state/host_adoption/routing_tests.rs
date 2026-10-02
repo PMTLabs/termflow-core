@@ -477,10 +477,12 @@ fn the_orphan_surfacing_site_consults_restore_intent_before_it_reserves_or_emits
     let eligible = recovery.find("Some(&KeyState::Listed)").unwrap();
     let protected = recovery.find("Self::protected(").unwrap();
     let ending = recovery.find("Self::end(").unwrap();
-    let enqueue = recovery.find("delivery.send(Box::new(announce))").unwrap();
-    assert!(eligible < enqueue && protected < enqueue && ending < enqueue);
+    let enqueue = recovery.find("delivery.send(Box::new(move ||").unwrap();
+    let coalesce = recovery.find("pending_deliveries.insert(").unwrap();
+    assert!(eligible < coalesce && protected < coalesce && ending < coalesce && coalesce < enqueue);
     assert!(recovery.contains("let mut inner = self.lock()"));
-    assert!(recovery.contains("else { let _ = delivery.send"), "ending and recovery enqueue are exclusive");
+    let alternative = recovery.find("else {").unwrap();
+    assert!(ending < alternative && alternative < coalesce, "ending and recovery enqueue are exclusive");
     assert!(!recovery.contains("announce()"), "framework delivery must not run under ownership");
     let worker = source_of("host_keys/delivery.rs");
     assert!(worker.contains("while let Ok(deliver) = receiver.recv()"));

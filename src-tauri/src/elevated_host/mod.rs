@@ -18,7 +18,7 @@ pub mod pipe_server;
 
 use crate::pty_host_client::PtyHostClient;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Returned verbatim (never wrapped in a longer message) by
 /// `AppState::ensure_elevated_host` when the user denies the UAC prompt, so
@@ -63,6 +63,7 @@ pub struct ElevatedHost {
     /// generation is still current, mirroring `AppState::pty_host_gen` — a
     /// dying old client can't clobber a freshly reconnected one.
     gen: AtomicU64,
+    shutting_down: AtomicBool,
 }
 
 impl Default for ElevatedHost {
@@ -79,6 +80,7 @@ impl ElevatedHost {
             #[cfg(windows)]
             proc: Mutex::new(None),
             gen: AtomicU64::new(0),
+            shutting_down: AtomicBool::new(false),
         }
     }
 
@@ -101,13 +103,43 @@ impl ElevatedHost {
         crate::checked_counter::advance(&self.gen)
     }
 
-    /// Publish a freshly connected client and its launched process, becoming
-    /// the current connection. Mirrors the primary's own "publish, then
-    /// re-check is_alive" step in `ensure_pty_host_inner`.
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.shutting_down.load(Ordering::Acquire)
+    }
+
+    /// Recheck connection setup while holding placement admission against idle
+    /// teardown. The caller's earlier ensure may have lost its connection.
+    pub(crate) async fn ensure_for_placement<F: std::future::Future<Output = Result<(), String>>>(
+        &self, ensure: impl FnOnce() -> F,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, String> {
+        let guard = self.connecting.lock().await;
+        if self.is_shutting_down() { return Err("elevated terminal host is shutting down".into()); }
+        if !self.is_connected() { ensure().await?; }
+        if self.is_shutting_down() { return Err("elevated terminal host is shutting down".into()); }
+        Ok(guard)
+    }
+
+    fn publish_client(&self, client: PtyHostClient, install_process: impl FnOnce()) -> Result<(), PtyHostClient> {
+        let mut slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_shutting_down() { return Err(client); }
+        install_process();
+        *slot = Some(client);
+        Ok(())
+    }
+
+    /// Exit and installation share the slot lock. A consent result arriving
+    /// after exit owns cleanup, not permission to publish a new connection.
     #[cfg(windows)]
-    pub fn publish(&self, client: PtyHostClient, proc: launch::LaunchedProcess) {
-        *self.client.lock().unwrap_or_else(|e| e.into_inner()) = Some(client);
-        *self.proc.lock().unwrap_or_else(|e| e.into_inner()) = Some(proc);
+    pub async fn publish(&self, client: PtyHostClient, proc: launch::LaunchedProcess) -> Result<(), String> {
+        let mut proc = Some(proc);
+        if let Err(client) = self.publish_client(client, || {
+            *self.proc.lock().unwrap_or_else(|e| e.into_inner()) = proc.take();
+        }) {
+            client.close_transport().await;
+            self.wait_owned_process(proc).await;
+            return Err("elevated terminal host is shutting down".into());
+        }
+        Ok(())
     }
 
     pub(crate) fn clear_client_on<T>(&self, epoch: u64, snapshot: impl FnOnce() -> T) -> Option<T> {
@@ -143,7 +175,13 @@ impl ElevatedHost {
     /// Global exit owns closed admission. Stop the transport explicitly: the
     /// key authority retains a sender, so clone-count EOF is not a shutdown signal.
     pub async fn shutdown(&self) {
-        let _connecting = self.connecting.lock().await;
+        // Consent is external and may never settle. Fence publication first,
+        // then give setup only a short opportunity to leave its critical section.
+        {
+            let _slot = self.client.lock().unwrap_or_else(|e| e.into_inner());
+            self.shutting_down.store(true, Ordering::Release);
+        }
+        let _connecting = tokio::time::timeout(std::time::Duration::from_millis(100), self.connecting.lock()).await.ok();
         let client = self.client.lock().unwrap_or_else(|e| e.into_inner()).take();
         #[cfg(windows)]
         let proc = self.proc.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -153,7 +191,7 @@ impl ElevatedHost {
     }
 
     #[cfg(windows)]
-    async fn wait_owned_process(&self, proc: Option<launch::LaunchedProcess>) {
+    pub(crate) async fn wait_owned_process(&self, proc: Option<launch::LaunchedProcess>) {
         let Some(proc) = proc else { return; };
         let pid = proc.pid;
         let exited = tokio::task::spawn_blocking(move || wait_for_exit(proc, 5_000)).await.unwrap_or(false);
@@ -163,7 +201,15 @@ impl ElevatedHost {
 
     #[cfg(test)]
     pub(crate) fn install_client(&self, client: PtyHostClient) {
-        *self.client.lock().unwrap() = Some(client);
+        assert!(self.publish_client(client, || {}).is_ok());
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_test_client(&self, client: PtyHostClient) -> bool {
+        match self.publish_client(client, || {}) {
+            Ok(()) => true,
+            Err(client) => { client.close_transport().await; false }
+        }
     }
 }
 

@@ -96,6 +96,8 @@ struct Entry {
 struct BarrierShared {
     entries: Mutex<Vec<Entry>>,
     changed: watch::Sender<u64>,
+    #[cfg(test)]
+    lost_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 /// Per-host resolution of the surviving hosts. Cheap to clone.
@@ -113,7 +115,10 @@ impl Default for Barrier {
 impl Barrier {
     pub fn new() -> Self {
         Self {
-            shared: Arc::new(BarrierShared { entries: Mutex::new(Vec::new()), changed: watch::channel(0).0 }),
+            shared: Arc::new(BarrierShared { entries: Mutex::new(Vec::new()), changed: watch::channel(0).0,
+                #[cfg(test)]
+                lost_hook: Mutex::new(None),
+            }),
         }
     }
 
@@ -197,8 +202,15 @@ impl Barrier {
     /// An attempt ended with `resolution`. Records the host if it was not
     /// tracked and the outcome is a real one.
     pub fn finish(&self, key: &str, endpoint: &str, role: HostRole, resolution: Resolution) {
+        self.finish_on(key, endpoint, role, resolution, None);
+    }
+
+    fn finish_on(&self, key: &str, endpoint: &str, role: HostRole, resolution: Resolution, origin: Option<(&HostTable, HostChannel, u64)>) {
         {
             let mut entries = self.lock();
+            // Loss and answered-result writes share this lock. A newer result
+            // cannot be overwritten by a callback that passed an earlier check.
+            if origin.is_some_and(|(table, channel, epoch)| !table.is_current(channel, epoch)) { return; }
             match entries.iter_mut().find(|e| e.key == key) {
                 // A retired host's answer is moot: nothing waits for it.
                 Some(entry) if entry.retired => {}
@@ -273,12 +285,18 @@ impl Barrier {
     /// A rediscovery does not retry it (`retry_pending` stays set): the host's own
     /// reconnect does, and until that settles it the host keeps holding every pane
     /// that waits for the hosts to answer.
-    pub fn mark_lost(&self, key: &str, reason: &str) {
-        if let Some(entry) = self.lock().iter_mut().find(|e| e.key == key) {
-            entry.resolution = Resolution::Unresolved(reason.to_owned());
-            entry.retry_pending = true;
+    fn mark_lost(&self, key: &str, reason: &str, table: &HostTable, channel: HostChannel, epoch: u64) -> bool {
+        {
+            let mut entries = self.lock();
+            if !table.is_current(channel, epoch) { return false; }
+            if let Some(entry) = entries.iter_mut().find(|e| e.key == key) {
+                if entry.retired { return false; }
+                entry.resolution = Resolution::Unresolved(reason.to_owned());
+                entry.retry_pending = true;
+            }
         }
         self.notify();
+        true
     }
 
     /// Claim the right to reconnect `key`. `None` when a reconnect of it is
@@ -380,9 +398,13 @@ pub(super) fn frozen_connection_lost(
     if !table.is_current(channel, epoch) || table.admission(channel) == Some(Admission::Retired) {
         return false;
     }
+    #[cfg(test)]
+    {
+        let hook = barrier.shared.lost_hook.lock().unwrap().clone();
+        if let Some(hook) = hook { hook(); }
+    }
     table.routes().remove_epoch(channel, epoch);
-    barrier.mark_lost(&barrier_key(endpoint), "connection lost");
-    true
+    barrier.mark_lost(&barrier_key(endpoint), "connection lost", table, channel, epoch)
 }
 
 // ---- the port -------------------------------------------------------------
@@ -616,7 +638,7 @@ async fn adopt<P: AdoptionPort>(
                 client.close_transport().await;
                 return Err(Failure::Superseded);
             }
-            port.publish_current(&client).map_err(Failure::Other)?;
+            port.publish_current(&client).map_err(|reason| Failure::Publication { channel: HostChannel::Primary, epoch: opened.epoch, reason })?;
             apply_validated_listing(port, HostChannel::Primary, opened.epoch, &client, listing.as_ref())?;
             (HostChannel::Primary, opened.epoch)
         }
@@ -647,6 +669,8 @@ enum Failure {
     Superseded,
     /// Nothing listens on the host's endpoint.
     EndpointGone(String),
+    /// Publication failed after a connection acquired its epoch.
+    Publication { channel: HostChannel, epoch: u64, reason: String },
     Other(String),
 }
 
@@ -655,7 +679,7 @@ impl Failure {
         match self {
             Failure::ConnectionLost => CONNECTION_LOST.to_string(),
             Failure::Superseded => "the terminal host connection or admission changed".to_string(),
-            Failure::EndpointGone(reason) | Failure::Other(reason) => reason,
+            Failure::EndpointGone(reason) | Failure::Other(reason) | Failure::Publication { reason, .. } => reason,
         }
     }
 }
@@ -696,7 +720,10 @@ async fn attempt<P: AdoptionPort>(
         Ok(done) if !port.table().is_current(done.channel, done.epoch) => {
             log::info!("[GEN] discarding a listing of {} from a superseded connection", candidate.endpoint);
         }
-        Ok(done) => port.barrier().finish(&key, &candidate.endpoint, role, done.resolution.clone()),
+        Ok(done) => port.barrier().finish_on(&key, &candidate.endpoint, role, done.resolution.clone(), Some((port.table(), done.channel, done.epoch))),
+        Err(Failure::Publication { channel, epoch, reason }) => port.barrier().finish_on(
+            &key, &candidate.endpoint, role, Resolution::Unresolved(reason.clone()), Some((port.table(), *channel, *epoch)),
+        ),
         // A dropped connection is left as the drop callback recorded it.
         Err(Failure::ConnectionLost) => {}
         // Discovery found this endpoint without any process behind it (an old

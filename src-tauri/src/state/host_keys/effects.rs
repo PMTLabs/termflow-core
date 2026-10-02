@@ -50,7 +50,21 @@ impl HostKeys {
         let now = std::time::Instant::now();
         if Self::protected(&inner, key, now) { return; }
         if Self::unowned_due(&inner, key, now) { Self::end(&mut inner, channel, key, CloseState::Pending); }
-        else { let _ = delivery.send(Box::new(announce)); }
+        else {
+            let record = inner.keys.get(&(channel, key.into())).unwrap();
+            let identity = (channel, key.to_owned(), inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).map(|c| c.epoch), record.pid, record.order);
+            if !inner.pending_deliveries.insert(identity.clone()) { return; }
+            let authority = Arc::downgrade(&self.inner);
+            let completed = identity.clone();
+            if delivery.send(Box::new(move || {
+                // Keep executing work pending too: repeated sweeps behind a slow
+                // observer must not accumulate copies. Panic still releases it.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(announce));
+                if let Some(authority) = authority.upgrade() {
+                    authority.lock().unwrap_or_else(|e| e.into_inner()).pending_deliveries.remove(&completed);
+                }
+            })).is_err() { inner.pending_deliveries.remove(&identity); }
+        }
     }
 
     pub(crate) fn publish_route_on(&self, identity: &SessionIdentity, channel: HostChannel, epoch: u64) -> bool {
