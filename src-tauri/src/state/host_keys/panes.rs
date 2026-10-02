@@ -240,8 +240,8 @@ impl HostKeys {
                 inner.panes.holders.remove(&pi);
                 return PaneResult::Existing { pc };
             } else if matches!(row.state, OwnerState::Placing { .. }) && row.started && row.owner == Owner::Orphaned {
-                // The page that started this create ended while it was in flight: a
-                // successor pane joins that work instead of contending or spawning again.
+                // An orphaned started placement can be claimed by a successor pane, which
+                // joins the existing work instead of contending or spawning again.
                 let row = inner.owners.get_mut(leaf).unwrap();
                 row.owner = Owner::Pane(pi);
                 let cg = row.cg;
