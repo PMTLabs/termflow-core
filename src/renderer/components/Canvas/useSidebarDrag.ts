@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { capturePaneEffect } from '../../services/paneEffect';
 import { useDispatch, useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { setGroupGeom, setNodeGeom, setSidebarWidth } from '../../store/slices/canvasSlice';
@@ -30,6 +31,7 @@ import type { CanvasModel } from './canvasSelectors';
 const ROW_SLOP = 6;
 
 interface RowDrag {
+  current: () => boolean;
   terminalId: string;
   tabId: string;
   title: string;
@@ -85,7 +87,7 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
     (terminalId: string, tabId: string, title: string, titleColor?: string) => (e: React.PointerEvent) => {
       // Not `preventDefault`: the row's own click and double-click must still happen when this
       // turns out to be a press rather than a drag.
-      rowDrag.current = { terminalId, tabId, title, titleColor, startX: e.clientX, startY: e.clientY, moved: false };
+      rowDrag.current = { terminalId, tabId, title, titleColor, startX: e.clientX, startY: e.clientY, moved: false, current: capturePaneEffect(terminalId) };
       (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     },
     [],
@@ -124,7 +126,7 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
       }
 
       const rd = rowDrag.current;
-      if (!rd) return;
+      if (!rd || !rd.current()) return;
       if (!rd.moved && Math.hypot(e.clientX - rd.startX, e.clientY - rd.startY) < ROW_SLOP) return;
       rd.moved = true;
       setDraggingId(rd.terminalId);
@@ -147,7 +149,7 @@ export function useSidebarDrag(model: CanvasModel): SidebarDrag {
       setDraggingId(null);
       setDropTabId(null);
       setGhost(null);
-      if (!rd?.moved) return;
+      if (!rd?.moved || !rd.current()) return;
       justDragged.current = true;
       if (!target || target === rd.tabId) return;
       applyRegroup(rd.terminalId, rd.tabId, target);

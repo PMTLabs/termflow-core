@@ -23,6 +23,7 @@ import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { addTabTree, setActiveTabId, focusPane } from '../store/slices/panesSlice';
 import { generateId } from '../utils/id';
 import { paneIncarnations, accepted } from './paneIncarnations';
+import { captureWorkspace, isCurrentWorkspace } from './workspaceReplacement';
 import { terminalService } from './TerminalService';
 import { reattachPromptGate, markArmProbePending } from './reattachGate';
 import {
@@ -94,6 +95,8 @@ export async function restoreHiddenAgentTerminals(
   // would be bound to a dead process and reported as a successful restore.
   // This read also supplies the CURRENT processId, which is what makes the
   // restore correct across a respawn that reused the leaf id.
+  const workspace = captureWorkspace();
+  const protocol = paneIncarnations;
   let live: Map<string, string>;
   try {
     live = liveAgentProcessIds(await fetchLiveTerminalRows());
@@ -116,6 +119,7 @@ export async function restoreHiddenAgentTerminals(
   let firstPaneId: string | null = null;
 
   for (const candidate of candidates) {
+    if (!isCurrentWorkspace(workspace) || protocol.ended) { skipped.push(candidate); continue; }
     if (visible.has(candidate.terminalId)) {
       skipped.push(candidate);
       continue;
@@ -129,9 +133,12 @@ export async function restoreHiddenAgentTerminals(
 
     const tabId = generateId('tb');
     const paneId = generateId('pn');
-    const [pi] = paneIncarnations.prepare([{ paneId, leaf: candidate.terminalId, restore: true }]);
-    if (paneIncarnations.enabled && !accepted(await paneIncarnations.bind(pi, liveProcessId, 'restore'))) {
-      await paneIncarnations.depart(pi);
+    const [pi] = protocol.prepare([{ paneId, leaf: candidate.terminalId, restore: true }]);
+    const bound = !protocol.enabled || accepted(await protocol.bind(pi, liveProcessId, 'restore'));
+    const nowVisible = visibleTerminalIds(store?.getState()?.panes?.treesByTabId ?? {});
+    if (!bound || !isCurrentWorkspace(workspace) || protocol.ended
+        || protocol.capture(candidate.terminalId, paneId) !== pi || nowVisible.has(candidate.terminalId)) {
+      await protocol.depart(pi);
       skipped.push(candidate);
       continue;
     }
@@ -178,7 +185,8 @@ export async function restoreHiddenAgentTerminals(
   // Activate the first restored tab — recovering a stranded agent and leaving it
   // off screen would only half-answer the request. Done once, after the loop, so
   // restoring five terminals does not walk the user through five activations.
-  if (firstTabId) {
+  if (firstTabId && isCurrentWorkspace(workspace)
+      && (!store?.getState()?.tabs || store.getState().tabs.tabs.some((tab: { id: string }) => tab.id === firstTabId))) {
     dispatch(setActiveTab(firstTabId));
     dispatch(setActiveTabId(firstTabId));
     if (firstPaneId) dispatch(focusPane(firstPaneId));

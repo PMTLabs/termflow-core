@@ -1,4 +1,5 @@
 import type { PaneNode } from '../store/slices/panesSlice';
+import { captureWorkspace, isCurrentWorkspace } from './workspaceReplacement';
 
 // JSON counters are restricted to safe integers here; exhaustion refuses new work rather
 // than rounding two identities to the same number. Rust counters remain checked u64s.
@@ -61,6 +62,11 @@ export class PaneIncarnations {
   private observed = new Set<string>();
   private staged = new Map<string, PaneDescriptor[]>();
   private timer?: ReturnType<typeof setTimeout>;
+  private registrationTimer?: ReturnType<typeof setTimeout>;
+  private registrationWatchdog?: ReturnType<typeof setInterval>;
+  private registering = false;
+  private listeners = new Set<() => void>();
+  private stagedCaptures = new Map<string, Map<string, PaneCapture>>();
   private attempt = 0;
   private sending = false;
   private stopped = false;
@@ -72,6 +78,22 @@ export class PaneIncarnations {
 
   get enabled(): boolean { return !!this.bridge && !this.stopped; }
   get ended(): boolean { return this.stopped; }
+  get waitingForRegistration(): boolean { return this.registering; }
+
+  subscribe = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+
+  private changed(): void { this.listeners.forEach(listener => listener()); }
+
+  isCurrent(leaf: string, paneId: string | undefined, pi: PaneCapture | undefined): boolean {
+    return !this.stopped && this.capture(leaf, paneId) === pi && !!pi && !this.isSuppressed(pi);
+  }
+
+  capturesForLeaf(leaf: string): PaneCapture[] {
+    return [...this.slots.values()].filter(slot => slot.descriptor.leaf === leaf).map(slot => slot.pi);
+  }
 
   async pageIdentity(): Promise<{ wi: number; pg: number } | undefined> {
     if (!this.enabled) return undefined;
@@ -86,12 +108,20 @@ export class PaneIncarnations {
     if (!this.bridge) { this.releaseRegistration!({ wi: 0, pg: 0 }); return; }
     window.addEventListener('beforeunload', this.onUnload, { once: true });
     let delay = 50;
+    this.registering = true;
+    // Registration allocates a page, unlike an op replay. Observe an unresolved invoke,
+    // but never race it with a second allocation or discard its eventual page reply.
+    this.registrationWatchdog = setInterval(() => this.failure(), 1000);
     const register = async (): Promise<void> => {
       try {
         const answer = await this.bridge!('register_page', undefined);
         if (this.stopped) return;
         if (answer.status === 'Registered') {
           if (!Number.isSafeInteger(answer.pg) || !Number.isSafeInteger(answer.wi)) throw new Error('page identity exhausted');
+          this.registering = false;
+          clearInterval(this.registrationWatchdog);
+          this.registrationWatchdog = undefined;
+          this.failures = 0;
           this.releaseRegistration!(answer);
           return;
         }
@@ -99,7 +129,7 @@ export class PaneIncarnations {
         this.failure();
       }
       if (this.stopped) return;
-      this.timer = setTimeout(() => { this.timer = undefined; void register(); }, delay);
+      this.registrationTimer = setTimeout(() => { this.registrationTimer = undefined; void register(); }, delay);
       delay = Math.min(delay * 2, 1000);
     };
     void register();
@@ -112,6 +142,11 @@ export class PaneIncarnations {
     this.sending = false;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
+    if (this.registrationTimer !== undefined) clearTimeout(this.registrationTimer);
+    if (this.registrationWatchdog !== undefined) clearInterval(this.registrationWatchdog);
+    this.registrationTimer = undefined;
+    this.registrationWatchdog = undefined;
+    this.registering = false;
     this.releaseRegistration?.({ wi: 0, pg: 0 });
     this.queue.splice(0).forEach(item => item.resolve(result));
   }
@@ -124,6 +159,8 @@ export class PaneIncarnations {
     this.slots.clear();
     this.observed.clear();
     this.staged.clear();
+    this.stagedCaptures.clear();
+    this.changed();
   }
 
   resync(): void {
@@ -196,15 +233,19 @@ export class PaneIncarnations {
 
   /** Call before installing a normal pane. Transfer entries are made only by adopt. */
   prepare(panes: PaneDescriptor[]): PaneCapture[] {
-    return panes.map(descriptor => {
+    let changed = false;
+    const captures = panes.map(descriptor => {
       const old = this.slots.get(descriptor.paneId);
       if (old && old.descriptor.leaf === descriptor.leaf && !old.suppressed) return old.pi;
       if (old && !old.suppressed) void this.depart(old.pi);
       const pi = this.mint();
       this.slots.set(descriptor.paneId, { descriptor, pi, suppressed: false, installed: this.observed.has(descriptor.paneId) });
+      changed = true;
       void this.send(async () => ({ kind: 'enter', panes: [{ ...descriptor, pi: await pi }] }));
       return pi;
     });
+    if (changed) this.changed();
+    return captures;
   }
 
   discardPrepared(pis: PaneCapture[] = [...this.slots.values()].map(slot => slot.pi)): void {
@@ -214,7 +255,10 @@ export class PaneIncarnations {
   }
 
   capture(leaf: string, paneId?: string): PaneCapture | undefined {
-    if (paneId) return this.slots.get(paneId)?.pi;
+    if (paneId) {
+      const slot = this.slots.get(paneId);
+      return slot?.descriptor.leaf === leaf ? slot.pi : undefined;
+    }
     return [...this.slots.values()].find(slot => slot.descriptor.leaf === leaf && !slot.suppressed)?.pi;
   }
 
@@ -236,6 +280,7 @@ export class PaneIncarnations {
 
   depart(pi: PaneCapture): Promise<PaneResult> {
     for (const [id, slot] of this.slots) if (slot.pi === pi) this.slots.delete(id);
+    this.changed();
     return this.send(async () => ({ kind: 'depart', pi: await pi }));
   }
 
@@ -249,6 +294,7 @@ export class PaneIncarnations {
 
   async create(cg: number, request: Omit<AdmittedCreateRequest, 'pg' | 'cg'>): Promise<string> {
     const { pg } = await this.registration!;
+    if (!this.enabled) throw new Error('page ended');
     return this.bridge!('create_admitted_terminal', { request: { ...request, pg, cg } });
   }
 
@@ -266,7 +312,11 @@ export class PaneIncarnations {
   observe(panes: PaneDescriptor[]): void {
     const current = new Map(panes.map(pane => [pane.paneId, pane]));
     this.observed = new Set(current.keys());
-    for (const [tx, panes] of this.staged) if (panes.every(pane => !current.has(pane.paneId))) this.staged.delete(tx);
+    for (const [tx, panes] of this.staged) if (panes.every(pane => !current.has(pane.paneId)
+        || this.slots.get(pane.paneId)?.pi !== this.stagedCaptures.get(tx)?.get(pane.paneId))) {
+      this.staged.delete(tx);
+      this.stagedCaptures.delete(tx);
+    }
     for (const [id, slot] of this.slots) {
       if (current.get(id)?.leaf === slot.descriptor.leaf) { slot.installed = true; continue; }
       if (!slot.installed) continue;
@@ -274,6 +324,7 @@ export class PaneIncarnations {
       if (!slot.suppressed) void this.depart(slot.pi);
     }
     this.prepare(panes.filter(pane => !this.slots.has(pane.paneId)));
+    this.changed();
   }
 
   attachStore(store: { getState: () => { panes: { treesByTabId: Record<string, PaneNode | null> }; tabs: { tabs: { id: string }[] } }; subscribe: (fn: () => void) => () => void }): void {
@@ -297,26 +348,34 @@ export class PaneIncarnations {
     // Suppress the differ while the UI still contains the staged source copy.
     panes.forEach(pane => { this.slots.get(pane.paneId)!.suppressed = true; });
     this.staged.set(tx, sources.map(slot => slot!.descriptor));
+    this.stagedCaptures.set(tx, new Map(panes.map((pane, i) => [pane.paneId, captures[i]!])));
     const result = await this.send(async () => ({ kind: 'stash', tx, ...(ui === undefined ? {} : { ui }), pairs: await Promise.all(sources.map(async (slot, i) => ({ ...slot!.descriptor, pi: await captures[i]! }))) }));
     if (!accepted(result)) {
       this.staged.delete(tx);
-      sources.forEach((slot, i) => { if (slot) slot.suppressed = suppressed[i]; });
+      this.stagedCaptures.delete(tx);
+      sources.forEach((slot, i) => { if (slot && this.slots.get(panes[i].paneId) === slot) slot.suppressed = suppressed[i]; });
     }
     return result;
   }
 
-  async cancel(tx: string, panes: PaneDescriptor[], processes: Map<string, string>): Promise<void> {
+  async cancel(tx: string, panes: PaneDescriptor[], processes: Map<string, string>, isPresent: (pane: PaneDescriptor) => boolean = () => true): Promise<void> {
+    const workspace = captureWorkspace();
+    const sources = this.stagedCaptures.get(tx) ?? new Map(panes.map(pane => [pane.paneId, this.capture(pane.leaf, pane.paneId)]));
     const result = await this.send({ kind: 'cancel', tx });
     // Expiry already released the transfer. Re-enter without reviving its authority;
     // an orphaned shell can only be rebound by an ordinary restore.
     if (!accepted(result) && result.status !== 'Rejected') throw new Error(`transfer cancel ${result.status}`);
     const descriptors = (this.staged.get(tx) ?? panes).filter(descriptor =>
-      panes.some(pane => pane.paneId === descriptor.paneId && pane.leaf === descriptor.leaf));
+      panes.some(pane => pane.paneId === descriptor.paneId && pane.leaf === descriptor.leaf)
+      && (!this.capture(descriptor.leaf, descriptor.paneId) || sources.get(descriptor.paneId) === this.capture(descriptor.leaf, descriptor.paneId))
+      && isPresent(descriptor) && isCurrentWorkspace(workspace) && !this.stopped);
     this.staged.delete(tx);
-    panes.forEach(pane => this.slots.delete(pane.paneId));
+    this.stagedCaptures.delete(tx);
+    descriptors.forEach(pane => this.slots.delete(pane.paneId));
     const pis = this.prepare(descriptors);
-    for (let i = 0; i < panes.length; i++) {
-      const pc = processes.get(panes[i].leaf);
+    for (let i = 0; i < descriptors.length; i++) {
+      if (!this.isCurrent(descriptors[i].leaf, descriptors[i].paneId, pis[i])) continue;
+      const pc = processes.get(descriptors[i].leaf);
       if (pc) {
         const bound = await this.bind(pis[i], pc, result.status === 'Rejected' ? 'restore' : 'transfer');
         if (!accepted(bound)) throw new Error(`transfer rollback bind ${bound.status}`);
@@ -325,6 +384,7 @@ export class PaneIncarnations {
   }
 
   async installTransfer(tx: string, panes: PaneDescriptor[] | ((ui: unknown) => PaneDescriptor[]), install: (ui?: unknown) => void | Promise<void>): Promise<void> {
+    const workspace = captureWorkspace();
     const taken = await this.send({ kind: 'take', tx });
     if (taken.status !== 'Taken') throw new Error(`transfer take ${taken.status}`);
     const ui = taken.payload.ui;
@@ -336,8 +396,12 @@ export class PaneIncarnations {
     const pis = descriptors.map(() => this.mint());
     const adopted = await this.send(async () => ({ kind: 'adopt', tx, pairs: await Promise.all(descriptors.map(async (pane, i) => ({ ...pane, pi: await pis[i] }))) }));
     if (!accepted(adopted)) throw new Error(`transfer adopt ${adopted.status}`);
-    descriptors.forEach((descriptor, i) => this.slots.set(descriptor.paneId, { descriptor, pi: pis[i], suppressed: false, installed: false }));
-    try { await install(ui); }
+    try {
+      if (!isCurrentWorkspace(workspace) || !this.enabled) throw new Error('transfer workspace replaced');
+      descriptors.forEach((descriptor, i) => this.slots.set(descriptor.paneId, { descriptor, pi: pis[i], suppressed: false, installed: false }));
+      this.changed();
+      await install(ui);
+    }
     catch (error) {
       for (const pi of pis) await this.depart(pi);
       throw error;
@@ -349,8 +413,9 @@ export const accepted = (result: PaneResult): boolean => ['Ok', 'Inert', 'Existi
 
 export async function acceptsTransferNotice(notice: { wi?: number; pg?: number }): Promise<boolean> {
   if (paneIncarnations.ended) return false;
-  const page = await paneIncarnations.pageIdentity();
-  return !!page && page.wi === notice.wi && page.pg === notice.pg;
+  const client = paneIncarnations;
+  const page = await client.pageIdentity();
+  return client === paneIncarnations && client.enabled && !!page && page.wi === notice.wi && page.pg === notice.pg;
 }
 export function describePanes(tree: PaneNode | null, restore = false): PaneDescriptor[] {
   if (!tree) return [];

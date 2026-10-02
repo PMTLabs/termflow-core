@@ -176,7 +176,8 @@ describe('the connection is selectable and deletable', () => {
   it('removes from the mirror only after the server confirms', () => {
     const drop = callback(MODE, 'dropEdge');
     expect(drop).toContain('void deleteEdge(id).then((ok) => {');
-    expect(drop).toContain('if (ok) dispatch(removeEdge(id));');
+    expect(drop).toContain('const workspace = captureWorkspace();');
+    expect(drop).toContain('if (ok && isCurrentWorkspace(workspace)) dispatch(removeEdge(id));');
   });
 
   it('reads both selection flags into the resolver', () => {

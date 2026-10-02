@@ -153,11 +153,60 @@ test('registration doubles retry delay to its cap and unload cancels further reg
   }
   gates.release('register_page', 7, { status: 'Retry' });
   await flush();
-  expect(jest.getTimerCount()).toBe(1);
+  expect(jest.getTimerCount()).toBe(2); // backoff plus the non-racing registration observer
   window.dispatchEvent(new Event('beforeunload'));
   expect(jest.getTimerCount()).toBe(0);
   await jest.advanceTimersByTimeAsync(5000);
   expect(gates.calls('register_page')).toHaveLength(8);
+});
+
+test.each(['pending', 'Retry'])('registration %s is observable, warns without a second pending allocation, and stops on unload', async mode => {
+  const control = harness();
+  const completed = control.client.send({ kind: 'settle' });
+  await flush(); control.ack(0); await completed;
+  expect(control.applied).toHaveLength(1);
+  const warn = jest.fn();
+  const register = jest.fn(() => mode === 'pending' ? new Promise(() => {}) : Promise.resolve({ status: 'Retry' }));
+  const bridge = jest.fn(async (name: string) => name === 'register_page' ? register() : { status: 'Ack', result: { status: 'Ok' } }) as unknown as PaneBridge;
+  const client = new PaneIncarnations(bridge, warn); clients.push(client);
+  let settled = false;
+  const waiting = client.send({ kind: 'enter', panes: [] }).then(result => { settled = true; return result; });
+  await jest.advanceTimersByTimeAsync(3000);
+  expect(warn).toHaveBeenCalledTimes(1);
+  expect(client.waitingForRegistration).toBe(true);
+  expect(settled).toBe(false);
+  expect(bridge).toHaveBeenCalled();
+  expect((bridge as jest.Mock).mock.calls.every(([name]) => name === 'register_page')).toBe(true);
+  expect(register.mock.calls.length).toBe(mode === 'pending' ? 1 : 7);
+  window.dispatchEvent(new Event('beforeunload'));
+  expect(await waiting).toMatchObject({ status: 'Rejected' });
+  const count = register.mock.calls.length;
+  expect(jest.getTimerCount()).toBe(0);
+  await jest.advanceTimersByTimeAsync(5000);
+  expect(register).toHaveBeenCalledTimes(count);
+});
+
+test('resync during registration backoff leaves registration alive and completes the queued head', async () => {
+  const gates = gatedBridge();
+  const bridge = ((name: string, args: any) => gates.command(name)(args)) as PaneBridge;
+  const client = new PaneIncarnations(bridge); clients.push(client);
+  const waiting = client.send({ kind: 'settle' });
+  gates.release('register_page', 0, { status: 'Retry' }); await flush();
+  expect(jest.getTimerCount()).toBe(2);
+  client.resync(); await flush();
+  await jest.advanceTimersByTimeAsync(50);
+  expect(gates.calls('register_page')).toHaveLength(2);
+  gates.release('register_page', 1, { status: 'Registered', wi: 2, pg: 22 }); await flush();
+  expect(gates.calls('pane_op')).toEqual([[{ request: { pg: 22, seq: 1, op: { kind: 'settle' } } }]]);
+  gates.release('pane_op', 0, { status: 'Ack', result: { status: 'Ok' } });
+  expect(await waiting).toEqual({ status: 'Ok' });
+  expect(client.waitingForRegistration).toBe(false);
+  expect(jest.getTimerCount()).toBe(0);
+  const pending = client.send({ kind: 'settle' }); await flush();
+  expect(jest.getTimerCount()).toBe(1);
+  window.dispatchEvent(new Event('beforeunload'));
+  expect(await pending).toMatchObject({ status: 'Rejected' });
+  expect(jest.getTimerCount()).toBe(0);
 });
 
 test('the store differ enters distinct same-leaf copies and departs only the disappearing copy', async () => {

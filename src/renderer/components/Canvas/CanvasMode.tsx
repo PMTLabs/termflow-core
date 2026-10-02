@@ -1,3 +1,5 @@
+import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
+import { capturePaneEffect } from '../../services/paneEffect';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
@@ -648,8 +650,9 @@ export const CanvasMode: React.FC = () => {
   // endpoint that returns the authoritative row, so there is nothing to poll for.
   useEffect(() => {
     let cancelled = false;
+    const workspace = captureWorkspace();
     void fetchGraph().then((graph) => {
-      if (!cancelled && graph) dispatch(setEdges(graph.edges));
+      if (!cancelled && isCurrentWorkspace(workspace) && graph) dispatch(setEdges(graph.edges));
     });
     return () => { cancelled = true; };
   }, [dispatch]);
@@ -661,9 +664,10 @@ export const CanvasMode: React.FC = () => {
   const publishTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (publishTimer.current) clearTimeout(publishTimer.current);
+    const workspace = captureWorkspace();
     publishTimer.current = setTimeout(() => {
       publishTimer.current = null;
-      void putNodes(nodeRegistryPayload(model));
+      if (isCurrentWorkspace(workspace)) void putNodes(nodeRegistryPayload(model));
     }, PUBLISH_DEBOUNCE_MS);
     return () => {
       if (publishTimer.current) clearTimeout(publishTimer.current);
@@ -719,8 +723,9 @@ export const CanvasMode: React.FC = () => {
    * on the next restart, with nothing on screen to explain where it came from.
    */
   const dropEdge = useCallback((id: string) => {
+    const workspace = captureWorkspace();
     void deleteEdge(id).then((ok) => {
-      if (ok) dispatch(removeEdge(id));
+      if (ok && isCurrentWorkspace(workspace)) dispatch(removeEdge(id));
     });
   }, [dispatch]);
 
@@ -1183,6 +1188,9 @@ export const CanvasMode: React.FC = () => {
     // NOT a bare `createEdge`: the endpoint 404s on a terminal it has not registered, and this
     // one is several async hops from existing. See `canvasConnect`.
     if (source) {
+      const sourceCurrent = capturePaneEffect(source.terminalId);
+      const destinationCurrent = capturePaneEffect(plan.leafId);
+      const current = () => mounted.current && sourceCurrent() && destinationCurrent();
       void connectWhenReady(
         {
           isReady: isTerminalAlive,
@@ -1192,12 +1200,12 @@ export const CanvasMode: React.FC = () => {
           // Stop polling if the canvas is unmounted while we wait. Without this the loop
           // ran its full ten seconds against a screen nobody is looking at and then wired
           // the pair anyway.
-          abandoned: () => !mounted.current,
+          abandoned: () => !current(),
         },
         source.terminalId,
         plan.leafId,
       ).then((edge) => {
-        if (edge) dispatch(addEdge(edge));
+        if (edge && current()) dispatch(addEdge(edge));
       });
     }
   }, [spawnMenu, model.nodes, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt]);

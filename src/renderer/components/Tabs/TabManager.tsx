@@ -1,4 +1,5 @@
 import { paneIncarnations, describePanes } from '../../services/paneIncarnations';
+import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
 import React, { useCallback, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { store, RootState, AppDispatch } from '../../store';
@@ -42,6 +43,8 @@ interface PendingClose {
   anchorTitle: string;
   /** tabId -> title, captured at request time so a later tab change can't blank one. */
   titlesById: Record<string, string>;
+  workspace: object;
+  trees: Record<string, unknown>;
 }
 
 /**
@@ -690,7 +693,8 @@ export const TabManager: React.FC<TabManagerProps> = () => {
     closeReqSeq.current = seq;
     setProcessInfo(new Map());
     setProcessLoaded(false);
-    setPendingClose({ kind, tabIds, anchorTitle, titlesById });
+    const trees = Object.fromEntries(tabIds.map(id => [id, store.getState().panes.treesByTabId[id]]));
+    setPendingClose({ kind, tabIds, anchorTitle, titlesById, workspace: captureWorkspace(), trees });
     void resolveProcesses(tabIds, seq);
   }, [resolveProcesses, closeOneTab]);
 
@@ -713,7 +717,9 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   }, [handleCloseRequestKind, closeOneTab]);
 
   const handleConfirmClose = useCallback(() => {
-    if (pendingClose) pendingClose.tabIds.forEach((id) => closeOneTab(id));
+    if (pendingClose && isCurrentWorkspace(pendingClose.workspace)) pendingClose.tabIds.forEach(id => {
+      if (store.getState().panes.treesByTabId[id] === pendingClose.trees[id]) closeOneTab(id);
+    });
     setPendingClose(null);
     setProcessInfo(new Map());
     setProcessLoaded(false);

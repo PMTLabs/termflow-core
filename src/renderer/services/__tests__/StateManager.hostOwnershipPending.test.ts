@@ -154,18 +154,51 @@ test('failed registration fails closed and automatically retries before mount', 
   expect(register).toHaveBeenCalledTimes(2);
 });
 
-test('failed restore registration preserves saved state for Retry without mounting leaves', async () => {
-  localStorage.setItem(sessionStateKey(), JSON.stringify({ ...savedLayout(), timestamp: Date.now(), tabPanes: { 'tb-saved': leaf('tm-saved') } }));
-  register.mockRejectedValue(new Error('transport down'));
-  const restoring = StateManager.restoreState(store.dispatch);
+test('aged scheduled retries retain the same restore head and eventually install the exact saved pane', async () => {
+  const saved = JSON.stringify({ ...savedLayout(), timestamp: Date.now(), tabPanes: { 'tb-saved': leaf('tm-saved') } });
+  localStorage.setItem(sessionStateKey(), saved);
+  const requests: any[] = [];
+  let refuse = true;
+  const bridge = (async (command: string, args: any) => {
+    if (command === 'register_page') return { status: 'Registered', wi: 1, pg: 11 };
+    requests.push(args.request);
+    if (refuse) throw new Error('transport down');
+    return { status: 'Ack', result: { status: 'Ok' } };
+  }) as PaneBridge;
+  installPaneIncarnations(new PaneIncarnations(bridge));
+  let completed = false;
+  const restoring = StateManager.restoreState(store.dispatch).then(result => { completed = true; return result; });
   await flush();
+  expect(requests).toHaveLength(1);
+  const head = requests[0];
+  expect(head.op).toMatchObject({ kind: 'enter', panes: [{ leaf: 'tm-saved', pi: { pg: 11, seq: 1 } }] });
+  await jest.advanceTimersByTimeAsync(50);
+  expect(requests).toHaveLength(2);
+  jest.setSystemTime(Date.now() + 89_999);
+  await jest.advanceTimersByTimeAsync(50);
+  expect(requests).toHaveLength(3);
+  expect(completed).toBe(false);
   jest.setSystemTime(Date.now() + 16 * 60_000);
-  expect(store.getState().tabs.tabs).toHaveLength(0);
-  installPaneIncarnations(new PaneIncarnations());
-  expect(await restoring).toBe(false);
-  expect(localStorage.getItem(sessionStateKey())).not.toBeNull();
+  const beforeAged = requests.length;
+  await jest.advanceTimersByTimeAsync(50);
+  expect(requests).toHaveLength(beforeAged + 1);
+  expect(requests.every(request => JSON.stringify(request) === JSON.stringify(head))).toBe(true);
+  expect(completed).toBe(false);
   expect(store.getState().tabs.tabs).toHaveLength(0);
   expect((window as any).__TAB_PANES__).toEqual({});
+  expect(jest.getTimerCount()).toBe(1);
+  await StateManager.saveState();
+  expect(localStorage.getItem(sessionStateKey())).toBe(saved);
+  refuse = false;
+  await jest.advanceTimersByTimeAsync(50);
+  expect(await restoring).toBe(true);
+  expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-saved']);
+  expect(store.getState().panes.treesByTabId['tb-saved']).toEqual(leaf('tm-saved'));
+  expect((window as any).__TAB_PANES__['tb-saved']).toEqual(leaf('tm-saved'));
+  expect(requests[requests.length - 1].op).toEqual({ kind: 'enter', panes: [] });
+  expect(jest.getTimerCount()).toBe(0);
+  window.dispatchEvent(new Event('beforeunload'));
+  expect(jest.getTimerCount()).toBe(0);
 });
 
 test('a newer replacement supersedes a load waiting at the registration await', async () => {

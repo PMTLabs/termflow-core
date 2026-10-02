@@ -37,6 +37,9 @@ export class TerminalServiceClass {
   // Cleared in finally so a failed create never poisons the next attempt.
   private inFlightCreates = new Map<string | PaneCapture, { terminalId: string; promise: Promise<string> }>();
   private hostWaitStates = new Map<string, HostWaitState>();
+  // Keep the raw placement outcome even when its original copy leaves. A replacement
+  // must wait for that work and bind its exact process, not race a Parked placement.
+  private placements = new Map<string, { pi: PaneCapture; work: Promise<string> }>();
 
   constructor(
     private readonly paneTrees: () => Record<string, PaneNode | null> =
@@ -91,15 +94,8 @@ export class TerminalServiceClass {
 
           // Also clean up from the global terminal init map (if available)
           // This allows re-creation if the same terminalId is used again
-          if ((window as any).terminalInitMap) {
-            (window as any).terminalInitMap.delete(terminalId);
-          }
-          if ((window as any).terminalInitPromises) {
-            (window as any).terminalInitPromises.delete(terminalId);
-          }
-          if ((window as any).terminalInitLock) {
-            (window as any).terminalInitLock.delete(terminalId);
-          }
+          this.clearInitGuards(terminalId);
+          this.placements.delete(terminalId);
           break;
         }
       }
@@ -159,6 +155,8 @@ export class TerminalServiceClass {
     const createPromise = this.createTerminalWithRetry(
       terminalId, shellType, name, cwd, cols, rows, owningTabId, sessionKey,
       elevated === true, mode, paneId, typeof createKey === 'string' ? undefined : createKey,
+      protocol.enabled ? [...this.inFlightCreates.entries()].find(([key, entry]) => key !== createKey && entry.terminalId === terminalId
+        && typeof key !== 'string' && (!protocol.capturesForLeaf(terminalId).includes(key) || protocol.isSuppressed(key)))?.[1].promise : undefined,
     );
     this.inFlightCreates.set(createKey, { terminalId, promise: createPromise });
     try {
@@ -187,16 +185,17 @@ export class TerminalServiceClass {
   private async createTerminalWithRetry(
     terminalId: string, shellType: string, name?: string, cwd?: string,
     cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean,
-    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture,
+    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture, predecessor?: Promise<string>,
   ): Promise<string> {
+    if (predecessor) await predecessor.catch(() => {});
     let hostDeadline: number | undefined;
     let lifecycleDeadline: number | undefined;
     let hostDelay = 1000;
     let firstAttempt = true;
-    this.setHostWaitState(terminalId, undefined);
     while (true) {
       if (this.incarnations().ended
           || (this.incarnations().enabled && (this.incarnations().capture(terminalId, paneId) !== pi || (pi && this.incarnations().isSuppressed(pi))))) return '';
+      if (firstAttempt) this.setHostWaitState(terminalId, undefined);
       // A move is not a close. Only this webview's trees may authorize its next attempt.
       const owner = findTabIdByTerminalId(this.paneTrees(), terminalId);
       if (!owner) {
@@ -209,7 +208,7 @@ export class TerminalServiceClass {
         const pid = await this.createTerminalInner(
           terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi,
         );
-        this.setHostWaitState(terminalId, undefined);
+        if (!this.incarnations().enabled || this.incarnations().isCurrent(terminalId, paneId, pi)) this.setHostWaitState(terminalId, undefined);
         return pid;
       } catch (error) {
         if (this.incarnations().ended
@@ -277,16 +276,31 @@ export class TerminalServiceClass {
       let admission: Awaited<ReturnType<PaneIncarnations['admit']>> = { status: 'Inert' };
       if (protocol.enabled) {
         if (!attemptPi) throw new Error('host-session-contended: pane copy is not present');
-        admission = await protocol.admit(attemptPi, mode);
+        const previous = this.placements.get(terminalId);
+        if (previous && previous.pi !== attemptPi
+            && (!protocol.capturesForLeaf(terminalId).includes(previous.pi) || protocol.isSuppressed(previous.pi))) {
+          const pc = await previous.work;
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          const bound = await protocol.bind(attemptPi, pc, 'restore');
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          if (!accepted(bound)) throw new Error('host-session-contended: original placement cannot be rebound');
+          admission = { status: 'Existing', pc };
+        } else {
+          admission = await protocol.admit(attemptPi, mode);
+        }
       }
       if (admission.status === 'Inert') {
         processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
       } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
         processId = admission.pc;
       } else if (admission.status === 'Create' || admission.status === 'Join') {
-        const created = await protocol.create(admission.cg, {
+        const work = protocol.create(admission.cg, {
           leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
         });
+        const placement = { pi: attemptPi!, work };
+        this.placements.set(terminalId, placement);
+        void work.catch(() => { if (this.placements.get(terminalId) === placement) this.placements.delete(terminalId); });
+        const created = await work;
         if (protocol.ended) return '';
         processId = created;
       } else if (admission.status === 'Retry' || admission.status === 'Pending') {
@@ -409,7 +423,9 @@ export class TerminalServiceClass {
     const protocol = this.incarnations();
     if (!protocol.enabled) return true;
     const pi = this.capturePane(terminalId, paneId);
-    return !!pi && accepted(await protocol.bind(pi, processId, 'restore'));
+    if (!pi) return false;
+    const result = await protocol.bind(pi, processId, 'restore');
+    return protocol.isCurrent(terminalId, paneId, pi) && accepted(result);
   }
 
   async closeTerminal(terminalId: string, captured?: PaneCapture | PaneCapture[]): Promise<void> {
@@ -426,7 +442,7 @@ export class TerminalServiceClass {
     if (ownedClose && !results.some(accepted)) return;
     if (!process) {
       console.log(`TerminalService: No process found for terminal ${terminalId} - already closed?`);
-      this.setHostWaitState(terminalId, undefined);
+      if (!protocol.enabled || pis.some(copy => protocol.capture(terminalId) === copy)) this.setHostWaitState(terminalId, undefined);
       return; // A waiting restored pane has no process, but still has restore intent.
     }
 
@@ -435,6 +451,7 @@ export class TerminalServiceClass {
       if (!ownedClose) await this.api().closeTerminal(process.id);
       if (this.processes.get(terminalId) !== process) return;
       this.processes.delete(terminalId);
+      this.placements.delete(terminalId);
       // Forget this terminal's per-pane zoom so closed terminals don't pile up in
       // the zoom slice. Moves use detachTerminal (which keeps the entry so zoom
       // survives the move), so clearing here only affects genuine closes. Dispatch
@@ -485,9 +502,13 @@ export class TerminalServiceClass {
   attachExistingTerminal(terminalId: string, processId: string, promptGate?: PromptGate | null): void {
     this.registerExistingTerminal(terminalId, processId);
     const w = window as any;
-    if (w.terminalInitLock) w.terminalInitLock.set(terminalId, true);
-    if (w.terminalInitPromises) w.terminalInitPromises.set(terminalId, Promise.resolve(processId));
-    if (w.terminalInitMap) w.terminalInitMap.set(terminalId, true);
+    const protocol = this.incarnations();
+    const keys: (string | PaneCapture)[] = protocol.enabled ? protocol.capturesForLeaf(terminalId) : [terminalId];
+    for (const key of keys) {
+      w.terminalInitLock?.set(key, true);
+      w.terminalInitPromises?.set(key, Promise.resolve(processId));
+      w.terminalInitMap?.set(key, true);
+    }
     if (promptGate) this.promptGateHandoff.set(terminalId, promptGate);
     console.log(`TerminalService: Attached existing terminal ${terminalId} -> process ${processId} (guards seeded)`);
   }
@@ -568,15 +589,22 @@ export class TerminalServiceClass {
   detachTerminal(terminalId: string): void {
     this.processes.delete(terminalId);
     this.hostWaitStates.delete(terminalId);
-    const w = window as any;
-    w.terminalInitLock?.delete(terminalId);
-    w.terminalInitPromises?.delete(terminalId);
-    w.terminalInitMap?.delete(terminalId);
+    this.placements.delete(terminalId);
+    this.clearInitGuards(terminalId);
     // A pane attached-but-not-yet-mounted here, then detached again to a THIRD
     // window before it ever mounted, would otherwise leak this entry forever.
     this.promptGateHandoff.delete(terminalId);
     this.keyboardProtocolHandoff.delete(terminalId);
     console.log(`TerminalService: Detached terminal ${terminalId} (PTY left running)`);
+  }
+
+  private clearInitGuards(terminalId: string): void {
+    const w = window as any;
+    for (const key of [terminalId, ...this.incarnations().capturesForLeaf(terminalId)]) {
+      w.terminalInitLock?.delete(key);
+      w.terminalInitPromises?.delete(key);
+      w.terminalInitMap?.delete(key);
+    }
   }
 
   getProcessId(terminalId: string): string | undefined {

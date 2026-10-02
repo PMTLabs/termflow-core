@@ -3,11 +3,12 @@ jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: 
 jest.mock('../../../TerminalContainer', () => ({ clearTabPanes: jest.fn() }));
 import { store } from '../../../../store';
 import { addTab, clearAllTabs, removeTab } from '../../../../store/slices/tabsSlice';
-import { addTabTree, resetPanes, removeTabTree } from '../../../../store/slices/panesSlice';
+import { addTabTree, resetPanes, removeTabTree, insertPaneIntoTab } from '../../../../store/slices/panesSlice';
 import { terminalService, TerminalServiceClass } from '../../../../services/TerminalService';
 import { PaneIncarnations, installPaneIncarnations, acceptsTransferNotice, type PaneBridge, type PaneRequest } from '../../../../services/paneIncarnations';
 import { gatedBridge } from '../../../../__testFixtures__/gatedBridge';
-import { detachTabToNewWindow, applyReattachByToken } from '../detach';
+import { detachTabToNewWindow, detachPaneToNewWindow, dropTabAcrossWindows, applyReattachByToken } from '../detach';
+import { StateManager } from '../../../../services/StateManager';
 import type { DetachPayload } from '../types';
 
 const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
@@ -83,6 +84,76 @@ test.each([false, true])('failed build rollback reenters exactly once and binds 
   } finally { cleanup(h.client); }
 });
 
+test.each(['tab', 'pane', 'drop'])('successful %s transfer removes staged members but retains a split added while take is held', async kind => {
+  seed('move', 'tm-move'); seed('control', 'tm-control');
+  const h = harness(); h.client.attachStore(store);
+  const route = h.gates.command('route');
+  (window as any).electronAPI = { createDetachedWindow: jest.fn(route), resolveTabDrop: jest.fn(route), adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
+  terminalService.registerExistingTerminal('tm-move', 'pc-original');
+  terminalService.registerExistingTerminal('tm-control', 'pc-control');
+  try {
+    await flush(); h.ack(0); await flush(); h.ack(1); await flush();
+    const original = h.client.capture('tm-move', 'pn-move')!;
+    const control = h.client.capture('tm-control', 'pn-control')!;
+    const transferring = kind === 'drop' ? dropTabAcrossWindows({ tabId: 'tb-move', tabTitle: 'Moved', clientX: 4, clientY: 5 })
+      : kind === 'pane' ? detachPaneToNewWindow({ sourceTabId: 'tb-move', paneNode: store.getState().panes.treesByTabId['tb-move']! })
+      : detachTabToNewWindow({ tabId: 'tb-move', tabTitle: 'Moved' });
+    await flush();
+    expect(h.requests[2].op).toMatchObject({ kind: 'stash', pairs: [{ leaf: 'tm-move', pi: await original }] });
+    h.ack(2); await flush();
+    expect(h.gates.calls('route')).toHaveLength(1);
+    const token = h.gates.calls('route')[0][0];
+    expect(h.gates.calls('wait_transfer_taken')).toEqual([[{ pg: 71, tx: token }]]);
+    store.dispatch(insertPaneIntoTab({ tabId: 'tb-move', targetPaneId: 'pn-move', zone: 'right', node: { id: 'pn-new', type: 'terminal', terminalId: 'tm-new' } }));
+    terminalService.registerExistingTerminal('tm-new', 'pc-new');
+    await flush(); h.ack(3); await flush();
+    const added = h.client.capture('tm-new', 'pn-new')!;
+    expect(added).toBeDefined();
+    h.gates.release('wait_transfer_taken', 0, true);
+    h.gates.release('route', 0, true);
+    await transferring; await flush();
+    expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-move', 'tb-control']);
+    expect(store.getState().panes.treesByTabId['tb-move']).toMatchObject({ id: 'pn-new', terminalId: 'tm-new' });
+    expect(h.client.capture('tm-new', 'pn-new')).toBe(added);
+    expect(h.client.capture('tm-control', 'pn-control')).toBe(control);
+    expect(terminalService.getProcessId('tm-new')).toBe('pc-new');
+    expect(terminalService.getProcessId('tm-control')).toBe('pc-control');
+    expect(terminalService.getProcessId('tm-move')).toBeUndefined();
+    expect(h.requests.filter(request => request.op.kind === 'depart')).toHaveLength(0);
+  } finally { terminalService.detachTerminal('tm-new'); cleanup(h.client); }
+});
+
+test('a successful detach cannot remove a loaded replacement with the original durable pane and tab ids', async () => {
+  seed('move', 'tm-move'); seed('control', 'tm-control');
+  const h = harness(); h.client.attachStore(store);
+  (window as any).__REDUX_STORE__ = store;
+  (window as any).electronAPI = { createDetachedWindow: jest.fn(h.gates.command('build')), adoptConsoleWindow: jest.fn().mockResolvedValue(undefined) };
+  terminalService.registerExistingTerminal('tm-move', 'pc-original');
+  try {
+    await flush(); h.ack(0); await flush(); h.ack(1); await flush();
+    const original = h.client.capture('tm-move', 'pn-move');
+    const transferring = detachTabToNewWindow({ tabId: 'tb-move', tabTitle: 'Moved' });
+    await flush(); h.ack(2); await flush();
+    const tree = { id: 'pn-move', type: 'terminal', terminalId: 'tm-move' };
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{ id: 'replacement', name: 'Replacement', tabs: [{ id: 'tb-move', title: 'Replacement' }], activeTabId: 'tb-move', activePaneId: tree.id, paneTree: tree, treesByTabId: { 'tb-move': tree }, createdAt: Date.now(), updatedAt: Date.now() }]));
+    const replacing = StateManager.loadLayout('replacement', store.dispatch);
+    await flush(); h.ack(3); await flush(); // control depart; the staged original does not depart
+    await jest.advanceTimersByTimeAsync(100);
+    expect(h.requests[4].op).toMatchObject({ kind: 'enter', panes: [{ leaf: 'tm-move' }] });
+    h.ack(4); await flush(); h.ack(5); await flush();
+    expect(await replacing).toBe(true);
+    const replacement = h.client.capture('tm-move', 'pn-move');
+    expect(replacement).not.toBe(original);
+    terminalService.registerExistingTerminal('tm-move', 'pc-replacement');
+    h.gates.release('wait_transfer_taken', 0, true); h.gates.release('build', 0, true);
+    await transferring;
+    expect(store.getState().tabs.tabs.map(tab => tab.title)).toEqual(['Replacement']);
+    expect(store.getState().panes.treesByTabId['tb-move']).toMatchObject(tree);
+    expect(h.client.capture('tm-move', 'pn-move')).toBe(replacement);
+    expect(terminalService.getProcessId('tm-move')).toBe('pc-replacement');
+  } finally { cleanup(h.client); }
+});
+
 test('untaken expiry and build failure cannot reenter a source copy already removed from the live store', async () => {
   seed('move', 'tm-move'); seed('control', 'tm-control');
   const h = harness(); h.client.attachStore(store);
@@ -101,6 +172,35 @@ test('untaken expiry and build failure cannot reenter a source copy already remo
     expect(await h.client.capture('tm-control', 'pn-control')!).toEqual(control);
     expect(store.getState().tabs.tabs.map(tab => tab.id)).toEqual(['tb-control']);
   } finally { cleanup(h.client); }
+});
+
+test('a transfer adopt reply held across a real layout load cannot overwrite the replacement slot', async () => {
+  seed('control', 'tm-control');
+  const h = harness(); h.client.attachStore(store);
+  (window as any).__REDUX_STORE__ = store;
+  const payload: DetachPayload = { kind: 'tab', tabId: 'tb-move', tabTitle: 'Old transfer', paneTree: { id: 'pn-move', type: 'terminal', terminalId: 'tm-move' }, terminals: [{ terminalId: 'tm-move', processId: 'pc-transfer', shellType: 'default' }] };
+  const attach = jest.spyOn(terminalService, 'attachExistingTerminal');
+  try {
+    await flush(); h.ack(0); await flush();
+    const installing = applyReattachByToken('old-destination').catch(error => error.message);
+    await flush(); h.ack(1, { status: 'Taken', payload: { ui: payload, panes: [{ paneId: 'pn-move', leaf: 'tm-move' }] } }); await flush();
+    expect(h.requests[2].op).toMatchObject({ kind: 'adopt', pairs: [{ pi: { pg: 71, seq: 2 } }] });
+    const tree = payload.paneTree;
+    localStorage.setItem('auto-terminal-layouts', JSON.stringify([{ id: 'destination', name: 'Destination', tabs: [{ id: 'tb-move', title: 'Replacement' }], activeTabId: 'tb-move', activePaneId: tree.id, paneTree: tree, treesByTabId: { 'tb-move': tree }, createdAt: Date.now(), updatedAt: Date.now() }]));
+    const replacing = StateManager.loadLayout('destination', store.dispatch);
+    await jest.advanceTimersByTimeAsync(100);
+    const replacement = h.client.capture('tm-move', 'pn-move');
+    expect(replacement).toBeDefined();
+    h.ack(2); await flush();
+    expect(attach).not.toHaveBeenCalled();
+    h.ack(3); await flush(); h.ack(4); await flush(); h.ack(5); await flush();
+    expect(await replacing).toBe(true);
+    expect(h.requests[6].op).toEqual({ kind: 'depart', pi: { pg: 71, seq: 2 } });
+    h.ack(6); expect(await installing).toBe('transfer workspace replaced');
+    expect(h.client.capture('tm-move', 'pn-move')).toBe(replacement);
+    expect(store.getState().tabs.tabs.map(tab => tab.title)).toEqual(['Replacement']);
+    expect(attach).not.toHaveBeenCalled();
+  } finally { attach.mockRestore(); cleanup(h.client); }
 });
 
 test('throwing real UI install departs every adopted copy but keeps the control pane', async () => {

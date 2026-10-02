@@ -1,4 +1,5 @@
-import { paneIncarnations, describePanes, accepted } from '../../../services/paneIncarnations';
+import { paneIncarnations, describePanes, accepted, type PaneCapture, type PaneDescriptor } from '../../../services/paneIncarnations';
+import { captureWorkspace, isCurrentWorkspace } from '../../../services/workspaceReplacement';
 import { store } from '../../../store';
 import { addTab, setActiveTab, removeTab } from '../../../store/slices/tabsSlice';
 import {
@@ -23,6 +24,45 @@ const DETACH_PREFIX = 'detach-';
 const stagedPayloads = new Map<string, DetachPayload>();
 const stagedOutcomes = new Map<string, Promise<boolean>>();
 const rollbacks = new Map<string, Promise<void>>();
+const stagedSources = new Map<string, SourceRemoval>();
+export interface SourceRemoval {
+  workspace: object;
+  members: { pane: PaneDescriptor; pi?: PaneCapture; pc?: string }[];
+}
+export function captureSourceRemoval(tree: PaneNode): SourceRemoval {
+  return { workspace: captureWorkspace(), members: describePanes(tree).map(pane => ({
+    pane, pi: paneIncarnations.capture(pane.leaf, pane.paneId), pc: terminalService.getProcessId(pane.leaf),
+  })) };
+}
+
+function sourceMemberCurrent(source: SourceRemoval, pane: PaneDescriptor, pi?: PaneCapture): boolean {
+  return isCurrentWorkspace(source.workspace) && !paneIncarnations.ended
+    && (!paneIncarnations.enabled || (!!pi && paneIncarnations.capture(pane.leaf, pane.paneId) === pi));
+}
+
+/** Remove staged copies, not later siblings or a replacement with the same durable ids. */
+function removeQualifiedSource(tabId: string, source: SourceRemoval): void {
+  const removed: typeof source.members = [];
+  for (const member of source.members) {
+    const live = describePanes(store.getState().panes.treesByTabId[tabId] ?? null);
+    if (!sourceMemberCurrent(source, member.pane, member.pi)
+        || !live.some(pane => pane.paneId === member.pane.paneId && pane.leaf === member.pane.leaf)) continue;
+    store.dispatch(removePaneFromTab({ tabId, paneId: member.pane.paneId }));
+    removed.push(member);
+  }
+  if (removed.length && tabHasNoPanes(store.getState().panes.treesByTabId, tabId)) {
+    store.dispatch(removeTabTree(tabId));
+    store.dispatch(removeTab(tabId));
+  }
+  const state = store.getState();
+  const visible = new Set(state.tabs.tabs.flatMap(tab => getAllTerminalIds(state.panes.treesByTabId[tab.id] ?? null)));
+  for (const { pane, pc } of removed) {
+    if (visible.has(pane.leaf) || terminalService.getProcessId(pane.leaf) !== pc) continue;
+    store.dispatch(clearSessionClosed({ terminalId: pane.leaf }));
+    terminalService.detachTerminal(pane.leaf);
+  }
+}
+
 
 export async function waitDetachTransfer(token: string): Promise<boolean> {
   return stagedOutcomes.get(token) ?? false;
@@ -31,9 +71,12 @@ export async function waitDetachTransfer(token: string): Promise<boolean> {
 export async function stageDetachPayload(token: string, payload: DetachPayload): Promise<void> {
   if (!paneIncarnations.enabled) throw new Error('transfer requires a desktop page');
   const panes = describePanes(payload.paneTree);
+  const source = captureSourceRemoval(payload.paneTree);
   const result = await paneIncarnations.stash(token, panes, payload);
   if (!accepted(result)) throw new Error(`transfer stash ${result.status}`);
+  if (paneIncarnations.ended) throw new Error('transfer page ended');
   stagedPayloads.set(token, payload);
+  stagedSources.set(token, source);
   const outcome = paneIncarnations.waitTransfer(token);
   stagedOutcomes.set(token, outcome);
   void outcome.then(taken => {
@@ -52,14 +95,22 @@ export async function cancelDetachTransfer(token: string): Promise<void> {
   stagedOutcomes.delete(token);
   const state = store.getState();
   const present = state.tabs.tabs.flatMap(tab => describePanes(state.panes.treesByTabId[tab.id] ?? null));
-  const remaining = describePanes(payload.paneTree).filter(pane => present.some(copy => copy.paneId === pane.paneId && copy.leaf === pane.leaf));
-  const rollback = paneIncarnations.cancel(token, remaining, new Map(payload.terminals.map(t => [t.terminalId, t.processId])));
+  const source = stagedSources.get(token);
+  stagedSources.delete(token);
+  const remaining = describePanes(payload.paneTree).filter(pane => present.some(copy => copy.paneId === pane.paneId && copy.leaf === pane.leaf)
+    && !!source?.members.some(member => member.pane.paneId === pane.paneId && sourceMemberCurrent(source, pane, member.pi)));
+  const rollback = paneIncarnations.cancel(token, remaining, new Map(payload.terminals.map(t => [t.terminalId, t.processId])), pane => {
+    const current = store.getState();
+    return current.tabs.tabs.some(tab => describePanes(current.panes.treesByTabId[tab.id] ?? null)
+      .some(copy => copy.paneId === pane.paneId && copy.leaf === pane.leaf));
+  });
   rollbacks.set(token, rollback);
   try { await rollback; }
-  finally { rollbacks.delete(token); }
+  finally { if (rollbacks.get(token) === rollback) rollbacks.delete(token); }
 }
 
 async function installTransferredPayload(token: string, payload: DetachPayload | undefined, install: (payload: DetachPayload) => void): Promise<void> {
+  const workspace = captureWorkspace();
   await paneIncarnations.installTransfer(token, ui => {
     // UI data describes the installation, never the authority to own a shell.
     payload = (ui ?? payload) as DetachPayload | undefined;
@@ -67,12 +118,13 @@ async function installTransferredPayload(token: string, payload: DetachPayload |
     return describePanes(payload.paneTree);
   }, async () => {
     install(payload!);
-    for (const pane of describePanes(payload!.paneTree)) {
+    const members = describePanes(payload!.paneTree).map(pane => ({ pane, pi: paneIncarnations.capture(pane.leaf, pane.paneId) }));
+    for (const { pane, pi } of members) {
       const terminal = payload!.terminals.find(t => t.terminalId === pane.leaf);
-      const pi = paneIncarnations.capture(pane.leaf, pane.paneId);
       if (terminal && pi) {
+        if (!isCurrentWorkspace(workspace) || !paneIncarnations.isCurrent(pane.leaf, pane.paneId, pi)) throw new Error('transfer pane replaced');
         const bound = await paneIncarnations.bind(pi, terminal.processId, 'transfer');
-        if (!accepted(bound)) throw new Error(`transfer bind ${bound.status}`);
+        if (!accepted(bound) || !isCurrentWorkspace(workspace) || !paneIncarnations.isCurrent(pane.leaf, pane.paneId, pi)) throw new Error(`transfer bind ${bound.status}`);
       }
     }
   });
@@ -192,7 +244,16 @@ export function newDetachToken(): string {
 }
 
 /** Remove a just-moved pane from its source tab, closing the tab if it empties. */
-export function removeSourcePane(sourceTabId: string, sourcePaneId: string, terminalIds: string[] = []): void {
+export function removeSourcePane(sourceTabId: string, sourcePaneId: string, terminalIds: string[] = [], source?: SourceRemoval): void {
+  source ??= [...stagedSources.values()].find(staged => staged.members.some(member => member.pane.paneId === sourcePaneId));
+  if (source) {
+    removeQualifiedSource(sourceTabId, source);
+    for (const [token, staged] of stagedSources) if (staged.members.some(member => source!.members.some(original => original.pi === member.pi))) {
+      stagedSources.delete(token); stagedPayloads.delete(token); stagedOutcomes.delete(token);
+    }
+    return;
+  }
+  if (paneIncarnations.enabled) return;
   for (const [token, payload] of stagedPayloads) {
     if (describePanes(payload.paneTree).some(pane => pane.paneId === sourcePaneId)) {
       stagedPayloads.delete(token);
@@ -223,10 +284,11 @@ export async function detachPaneToNewWindow(opts: {
   cursor?: { x: number; y: number };
 }): Promise<void> {
   const payload = buildPaneDetachPayload(opts.paneNode, opts.cursor, opts.sourceTabId);
+  const source = captureSourceRemoval(payload.paneTree);
   const ok = await openWindowWithPayload(payload);
   if (!ok) return;
   // The PTY keeps running in the shared backend; just drop the pane from here.
-  removeSourcePane(opts.sourceTabId, opts.paneNode.id, payload.terminals.map((t) => t.terminalId));
+  removeSourcePane(opts.sourceTabId, opts.paneNode.id, payload.terminals.map((t) => t.terminalId), source);
 }
 
 /** Build a whole-tab detach payload from a tab's pane tree, or null if missing. */
@@ -260,7 +322,15 @@ export function buildTabDetachPayload(
 }
 
 /** Remove a handed-off tab from this window (its PTYs live on in the backend). */
-export function removeSourceTab(tabId: string, terminalIds: string[]): void {
+export function removeSourceTab(tabId: string, terminalIds: string[], source?: SourceRemoval): void {
+  if (source) {
+    removeQualifiedSource(tabId, source);
+    for (const [token, staged] of stagedSources) if (staged.members.some(member => source.members.some(original => original.pi === member.pi))) {
+      stagedSources.delete(token); stagedPayloads.delete(token); stagedOutcomes.delete(token);
+    }
+    return;
+  }
+  if (paneIncarnations.enabled) return;
   for (const [token, payload] of stagedPayloads) if (payload.tabId === tabId) {
     stagedPayloads.delete(token);
     stagedOutcomes.delete(token);
@@ -298,9 +368,10 @@ export async function detachTabToNewWindow(opts: {
 }): Promise<void> {
   const payload = buildTabDetachPayload(opts.tabId, opts.tabTitle, opts.cursor);
   if (!payload) return;
+  const source = captureSourceRemoval(payload.paneTree);
   const ok = await openWindowWithPayload(payload);
   if (!ok) return;
-  removeSourceTab(opts.tabId, payload.terminals.map((t) => t.terminalId));
+  removeSourceTab(opts.tabId, payload.terminals.map((t) => t.terminalId), source);
 }
 
 /**
@@ -322,6 +393,7 @@ export async function dropTabAcrossWindows(opts: {
   }
   const payload = buildTabDetachPayload(opts.tabId, opts.tabTitle, { x: opts.clientX, y: opts.clientY });
   if (!payload) return;
+  const source = captureSourceRemoval(payload.paneTree);
   const terminalIds = payload.terminals.map((t) => t.terminalId);
   const isLastTab = store.getState().tabs.tabs.length <= 1;
 
@@ -351,7 +423,7 @@ export async function dropTabAcrossWindows(opts: {
 
   stagedPayloads.delete(token);
   stagedOutcomes.delete(token);
-  removeSourceTab(opts.tabId, terminalIds);
+  removeSourceTab(opts.tabId, terminalIds, source);
   // If that was the last tab, this window is now empty — close it.
   await closeWindowIfEmpty();
 }

@@ -1,4 +1,5 @@
 import { paneIncarnations, describePanes, accepted } from './paneIncarnations';
+import { replaceWorkspace } from './workspaceReplacement';
 import { Dispatch } from '@reduxjs/toolkit';
 import { RootState } from '../store';
 import { addTab, setActiveTab, clearAllTabs, updateTabMeta } from '../store/slices/tabsSlice';
@@ -394,7 +395,9 @@ class StateManagerClass {
       // the OLD key and restores nothing. Failures are logged and swallowed —
       // losing one pane's scrollback is bad, but aborting restore over it would
       // leave the session unopened, which is worse.
+      const beforeMigration = this.loadGeneration;
       await this.migrateHistoryForRenamedLeaves(leafRenames);
+      if (beforeMigration !== this.loadGeneration) return false;
       console.log(`Restoring state from ${new Date(appState.timestamp).toLocaleString()}`);
       
       // Check if state is not too old (24 hours)
@@ -679,7 +682,7 @@ class StateManagerClass {
           if (!pi) continue;
           const bound = await paneIncarnations.bind(pi, keep.processId, 'reconcile');
           if (!isCurrent()) return;
-          if (!accepted(bound)) continue;
+          if (!accepted(bound) || !paneIncarnations.isCurrent(rendererId, prepared[index].paneId, pi)) continue;
         }
         // Registers id→process AND seeds the init guards so the mount effect
         // reuses the live PTY (covers tab-root and split panes). The prompt-gate
@@ -1097,8 +1100,9 @@ class StateManagerClass {
     const pis = paneIncarnations.prepare(panes);
     // This FIFO barrier follows every restoring enter, before either mirror mounts.
     const ready = await paneIncarnations.send({ kind: 'enter', panes: [] });
-    if (!isCurrent() || !accepted(ready)) paneIncarnations.discardPrepared(pis);
-    return isCurrent() && accepted(ready);
+    const current = () => isCurrent() && panes.every((pane, i) => paneIncarnations.isCurrent(pane.leaf, pane.paneId, pis[i]));
+    if (!current() || !accepted(ready)) paneIncarnations.discardPrepared(pis);
+    return current() && accepted(ready);
   }
 
   /**
@@ -1519,7 +1523,9 @@ class StateManagerClass {
           : sanitizedLayout.paneTree ?? undefined;
       const tree = savedTree === undefined ? undefined : remintCollisions(savedTree);
       const generation = this.loadGeneration;
-      const isCurrent = () => generation === this.loadGeneration && !this.replacementInFlight;
+      const isCurrent = () => generation === this.loadGeneration && !this.replacementInFlight
+        && store.getState().panes.treesByTabId === state.panes.treesByTabId
+        && store.getState().tabs.tabs === state.tabs.tabs;
       if (!await this.registerRestoringTrees({ paneTree: tree }, isCurrent)) return false;
       if (!isCurrent()) return false;
 
@@ -1713,6 +1719,7 @@ class StateManagerClass {
    * Clear current state (used before loading a layout)
    */
   private clearCurrentState(dispatch: Dispatch): void {
+    replaceWorkspace();
     paneIncarnations.discardPrepared();
     // Clear the local tab panes mapping
     clearTabPanes();
