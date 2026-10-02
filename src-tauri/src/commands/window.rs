@@ -416,7 +416,13 @@ pub async fn create_detached_window(
     token: String,
     x: Option<f64>,
     y: Option<f64>,
+    pg: Option<u64>,
+    state: State<'_, AppState>,
 ) -> Result<String, String> {
+    let taken = if let Some(pg) = pg {
+        state.host_table.keys().verify_transfer_source(window.label(), pg, &token)?;
+        Some(state.host_table.keys().watch_transfer(window.label(), pg, &token)?)
+    } else { None };
     let label = format!("detach-{}", token);
     // Match the main window (tauri.conf): empty/hidden title + Overlay title bar
     // so the custom in-app tab bar is the only header (no native "TermFlow"
@@ -490,6 +496,9 @@ pub async fn create_detached_window(
         record_new_window(&app_handle, &window, id, (900, 600));
     }
     refresh_menu(&app_handle);
+    if let Some(taken) = taken {
+        if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
+    }
     Ok(label)
 }
 

@@ -154,13 +154,16 @@ pub async fn hide_drag_preview(app_handle: tauri::AppHandle) -> Result<(), Strin
 /// payload by `token`) and return true; otherwise return false so the caller
 /// opens a new window. The payload must already be stashed under `token`.
 #[tauri::command]
-pub fn resolve_tab_drop(
+pub async fn resolve_tab_drop(
     app_handle: tauri::AppHandle,
     window: tauri::WebviewWindow,
     token: String,
     x: f64,
     y: f64,
+    pg: Option<u64>,
+    state: State<'_, AppState>,
 ) -> Result<bool, String> {
+    let taken = if let Some(pg) = pg { Some(state.host_table.keys().watch_transfer(window.label(), pg, &token)?) } else { None };
     // Global physical point of the drop, from the source window's content origin.
     let (px, py) = match (window.inner_position(), window.scale_factor()) {
         (Ok(origin), Ok(scale)) => (origin.x as f64 + x * scale, origin.y as f64 + y * scale),
@@ -186,10 +189,17 @@ pub fn resolve_tab_drop(
                 // listener acts only if it IS the target. (Same proven pattern as
                 // `app:close-requested`. A bare emit_to wasn't reaching the JS
                 // listener, and w.emit would let the source steal its own payload.)
-                let _ = app_handle.emit(
-                    "tab-drag:reattach",
-                    serde_json::json!({ "token": token, "target": label }),
-                );
+                if let Some(pg) = pg {
+                    let app = app_handle.clone();
+                    if !state.host_table.keys().route_pane_transfer(window.label(), pg, &token, &label, move |notice| {
+                        let _ = app.emit("tab-drag:reattach", notice);
+                    })? { continue; }
+                } else {
+                    let _ = app_handle.emit(
+                        "tab-drag:reattach",
+                        serde_json::json!({ "token": token, "target": label }),
+                    );
+                }
                 let _ = w.set_focus(); // bring the receiving window to the front
                 // Deliberately NOT restore_and_focus: this path only raises the window, and
                 // unminimizing a window the user left minimized would be a behaviour change.
@@ -198,6 +208,9 @@ pub fn resolve_tab_drop(
                 // otherwise a tab dropped into a minimized window reveals a blank one.
                 crate::webview_power::sync(&w);
                 log::info!("resolve_tab_drop: reattaching into {}", label);
+                if let Some(taken) = taken {
+                    if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
+                }
                 return Ok(true);
             }
         } else {
@@ -234,7 +247,13 @@ pub fn begin_global_pane_drag(
     window: tauri::Window,
     token: String,
     payload: serde_json::Value,
+    pg: Option<u64>,
 ) -> Result<(), String> {
+    if let Some(pg) = pg {
+        return state.host_table.keys().begin_pane_drag(window.label(), pg, &token, move |notice| {
+            let _ = app_handle.emit("pane-drag:active", notice);
+        });
+    }
     state.detach_payloads.insert(token.clone(), payload);
     *state.active_global_drag.lock().map_err(|e| e.to_string())? = Some(GlobalDrag {
         token: token.clone(),
@@ -252,7 +271,15 @@ pub fn claim_global_pane_drag(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
+    window: tauri::Window,
+    pg: Option<u64>,
 ) -> Result<Option<serde_json::Value>, String> {
+    if let Some(pg) = pg {
+        return state.host_table.keys().claim_pane_drag(window.label(), pg, &token, move |source, token| {
+            if let Some(notice) = source { let _ = app_handle.emit("pane-drag:claimed", notice); }
+            let _ = app_handle.emit("pane-drag:ended", token);
+        });
+    }
     let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
         Some(g) if g.token == token => {
@@ -279,7 +306,13 @@ pub fn resolve_orphan_global_drag(
     state: State<'_, AppState>,
     window: tauri::Window,
     token: String,
+    pg: Option<u64>,
 ) -> Result<bool, String> {
+    if let Some(pg) = pg {
+        return state.host_table.keys().end_pane_drag(window.label(), pg, &token, true, move |token| {
+            let _ = app_handle.emit("pane-drag:ended", token);
+        });
+    }
     let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
     match guard.as_ref() {
         Some(g) if g.token == token && g.source_label == window.label() => {
@@ -298,7 +331,15 @@ pub fn cancel_global_pane_drag(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     token: String,
+    window: tauri::Window,
+    pg: Option<u64>,
 ) -> Result<(), String> {
+    if let Some(pg) = pg {
+        state.host_table.keys().end_pane_drag(window.label(), pg, &token, false, move |token| {
+            let _ = app_handle.emit("pane-drag:ended", token);
+        })?;
+        return Ok(());
+    }
     let mut guard = state.active_global_drag.lock().map_err(|e| e.to_string())?;
     let owns = matches!(guard.as_ref(), Some(g) if g.token == token);
     if owns {

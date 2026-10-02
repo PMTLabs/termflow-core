@@ -75,6 +75,16 @@ impl WindowPages {
 
     pub(super) fn window_of(&self, pg: u64) -> Option<u64> { self.pages.get(&pg).copied() }
 
+    pub(super) fn label_of(&self, pg: u64) -> Option<(&str, u64)> {
+        let wi = self.window_of(pg)?;
+        self.committed.iter().find(|(_, current)| **current == wi).map(|(label, _)| (label.as_str(), wi))
+    }
+
+    pub(super) fn latest_page(&self, label: &str) -> Option<PageIdentity> {
+        let wi = *self.committed.get(label)?;
+        self.pages.iter().rev().find(|(_, current)| **current == wi).map(|(pg, _)| PageIdentity { wi, pg: *pg })
+    }
+
     pub(super) fn sender(&self, label: &str, pg: u64) -> Result<PageIdentity, String> {
         let wi = self.window_of(pg).ok_or("page is no longer live")?;
         if self.committed.get(label) != Some(&wi) { return Err("page does not belong to calling window".into()); }

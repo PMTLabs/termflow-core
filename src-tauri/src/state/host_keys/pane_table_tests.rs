@@ -5,6 +5,8 @@ use crate::state::host_keys::PageRegistration;
 mod transfer_tests;
 #[path = "pane_end_tests.rs"]
 mod end_tests;
+#[path = "pane_payload_tests.rs"]
+mod payload_tests;
 
 struct Page { label: &'static str, wi: u64, pg: u64, seq: u64, incarnation: u64 }
 impl Page {
@@ -194,7 +196,7 @@ fn page_end_orphans_live_shells_removes_held_and_preserves_other_window() {
     page.admit(&keys, pending.pi);
     let waiting = page.entry("tm-waiting", true);
     assert_eq!(page.op(&keys, PaneOp::Enter { panes: vec![waiting.clone()] }), PaneResult::Ok);
-    assert_eq!(page.op(&keys, PaneOp::Stash { tx: "held".into(), pairs: vec![waiting.clone()] }), PaneResult::Ok);
+    assert_eq!(page.op(&keys, PaneOp::Stash { ui: None, tx: "held".into(), pairs: vec![waiting.clone()] }), PaneResult::Ok);
     assert!(matches!(other.op(&keys, PaneOp::Take { tx: "held".into() }), PaneResult::Taken { .. }));
     let held = other.entry("tm-waiting", false);
     assert_eq!(other.op(&keys, PaneOp::Adopt { tx: "held".into(), pairs: vec![held.clone()] }), PaneResult::Ok);

@@ -10,8 +10,8 @@ fn restaging_a_source_member_moves_its_holder_out_of_the_old_transfer() {
     assert_eq!(source.op(&keys, PaneOp::Enter { panes: vec![a.clone(), b.clone()] }), PaneResult::Ok);
     let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
     let now = Instant::now();
-    assert_eq!(source.op_at(&keys, PaneOp::Stash { tx: "old".into(), pairs: vec![a.clone(), b] }, now).0, PaneResult::Ok);
-    assert_eq!(source.op_at(&keys, PaneOp::Stash { tx: "new".into(), pairs: vec![a] }, now + Duration::from_secs(59)).0, PaneResult::Ok);
+    assert_eq!(source.op_at(&keys, PaneOp::Stash { ui: None, tx: "old".into(), pairs: vec![a.clone(), b] }, now).0, PaneResult::Ok);
+    assert_eq!(source.op_at(&keys, PaneOp::Stash { ui: None, tx: "new".into(), pairs: vec![a] }, now + Duration::from_secs(59)).0, PaneResult::Ok);
     assert_eq!(keys.lock().panes.transfers.len(), 2);
     assert_eq!(keys.lock().panes.transfers["old"].members.len(), 1);
     keys.expire_transfers(now + TRANSFER_DEADLINE);
@@ -33,7 +33,7 @@ fn held_close_and_depart_remove_only_the_named_processless_owner() {
         let mut destination = Page::new(&keys, "destination");
         let a = source.enter(&keys, "tm-a");
         let b = source.enter(&keys, "tm-b");
-        assert_eq!(source.op(&keys, PaneOp::Stash { tx: "held".into(), pairs: vec![a, b] }), PaneResult::Ok);
+        assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "held".into(), pairs: vec![a, b] }), PaneResult::Ok);
         assert!(matches!(destination.op(&keys, PaneOp::Take { tx: "held".into() }), PaneResult::Taken { .. }));
         let a = destination.entry("tm-a", false);
         let b = destination.entry("tm-b", false);
@@ -59,7 +59,7 @@ fn cancelling_transfer_after_source_ends_orphans_live_and_removes_held() {
         let live = register_shell(&keys, &mut source, "tm-live", "pc-live");
         let waiting = source.enter(&keys, "tm-waiting");
         let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
-        assert_eq!(source.op(&keys, PaneOp::Stash { tx: "cancel".into(), pairs: vec![live, waiting] }), PaneResult::Ok);
+        assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "cancel".into(), pairs: vec![live, waiting] }), PaneResult::Ok);
         if taken { assert!(matches!(destination.op(&keys, PaneOp::Take { tx: "cancel".into() }), PaneResult::Taken { .. })); }
         assert_eq!(keys.destroy_window("source", source.wi).len(), 1);
         assert_eq!(keys.pane_owner("tm-live"), Some(Owner::Transfer { tx: "cancel".into(), taken }));
@@ -99,7 +99,7 @@ fn binding_registered_shell_cannot_renew_ended_transfer_holder() {
     let cg = source.admit(&keys, entry.pi);
     keys.stage_shell("tm-waiting", cg, "pc-waiting", None).unwrap();
     let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
-    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "complete".into(), pairs: vec![entry] }), PaneResult::Ok);
+    assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "complete".into(), pairs: vec![entry] }), PaneResult::Ok);
     assert!(keys.is_restoring_key("legacy-tm-waiting", Instant::now()));
     keys.complete_shell("tm-waiting", cg, &StagedShell { process: "pc-waiting".into(), stage: ShellStage::Local });
     assert!(!keys.is_restoring_key("legacy-tm-waiting", Instant::now()));

@@ -21,28 +21,63 @@ import { DetachPayload, DetachTerminal } from './types';
 
 const DETACH_PREFIX = 'detach-';
 const stagedPayloads = new Map<string, DetachPayload>();
+const stagedOutcomes = new Map<string, Promise<boolean>>();
+const rollbacks = new Map<string, Promise<void>>();
+
+export async function waitDetachTransfer(token: string): Promise<boolean> {
+  return stagedOutcomes.get(token) ?? !paneIncarnations.enabled;
+}
 
 export async function stageDetachPayload(token: string, payload: DetachPayload): Promise<void> {
   if (!paneIncarnations.enabled) return;
   const panes = describePanes(payload.paneTree);
-  const result = await paneIncarnations.stash(token, panes);
+  const result = await paneIncarnations.stash(token, panes, payload);
   if (!accepted(result)) throw new Error(`transfer stash ${result.status}`);
-  if (result.status !== 'Inert') stagedPayloads.set(token, payload);
+  if (result.status !== 'Inert') {
+    stagedPayloads.set(token, payload);
+    const outcome = paneIncarnations.waitTransfer(token);
+    stagedOutcomes.set(token, outcome);
+    void outcome.then(taken => {
+      if (!taken && !paneIncarnations.ended) return cancelDetachTransfer(token);
+      return undefined;
+    }).catch(error => console.warn('Could not observe transfer outcome', error));
+  }
 }
 
 export async function cancelDetachTransfer(token: string): Promise<void> {
+  const pending = rollbacks.get(token);
+  if (pending) return pending;
   const payload = stagedPayloads.get(token);
   if (!payload) return;
-  await paneIncarnations.cancel(token, describePanes(payload.paneTree), new Map(payload.terminals.map(t => [t.terminalId, t.processId])));
+  // A build refusal and the expiry notification can race; roll back only once.
   stagedPayloads.delete(token);
+  stagedOutcomes.delete(token);
+  const state = store.getState();
+  const present = state.tabs.tabs.flatMap(tab => describePanes(state.panes.treesByTabId[tab.id] ?? null));
+  const remaining = describePanes(payload.paneTree).filter(pane => present.some(copy => copy.paneId === pane.paneId && copy.leaf === pane.leaf));
+  const rollback = paneIncarnations.cancel(token, remaining, new Map(payload.terminals.map(t => [t.terminalId, t.processId])));
+  rollbacks.set(token, rollback);
+  try { await rollback; }
+  finally { rollbacks.delete(token); }
 }
 
-async function installTransferredPayload(token: string, payload: DetachPayload, install: () => void): Promise<void> {
-  await paneIncarnations.installTransfer(token, describePanes(payload.paneTree), install);
-  for (const terminal of payload.terminals) {
-    const pi = paneIncarnations.capture(terminal.terminalId);
-    if (pi) await paneIncarnations.bind(pi, terminal.processId, 'transfer');
-  }
+async function installTransferredPayload(token: string, payload: DetachPayload | undefined, install: (payload: DetachPayload) => void): Promise<void> {
+  await paneIncarnations.installTransfer(token, ui => {
+    // UI data describes the installation, never the authority to own a shell.
+    payload = (ui ?? payload) as DetachPayload | undefined;
+    if (!payload?.paneTree || !Array.isArray(payload.terminals)) throw new Error('transfer has no UI payload');
+    return describePanes(payload.paneTree);
+  }, async () => {
+    install(payload!);
+    for (const pane of describePanes(payload!.paneTree)) {
+      const terminal = payload!.terminals.find(t => t.terminalId === pane.leaf);
+      const pi = paneIncarnations.capture(pane.leaf, pane.paneId);
+      if (terminal && pi) {
+        const bound = await paneIncarnations.bind(pi, terminal.processId, 'transfer');
+        if (!accepted(bound)) throw new Error(`transfer bind ${bound.status}`);
+      }
+    }
+  });
 }
 
 /** A random handoff token (label-safe: lowercase alphanumerics only). */
@@ -110,9 +145,10 @@ async function openWindowWithPayload(payload: DetachPayload): Promise<boolean> {
   try {
     await stageDetachPayload(token, payload);
     if (!paneIncarnations.enabled && payload.terminals.length === 0) return false;
-    await api.stashDetachPayload(token, payload);
+    if (!paneIncarnations.enabled) await api.stashDetachPayload(token, payload);
     await api.createDetachedWindow(token, payload.cursor?.x, payload.cursor?.y);
     stagedPayloads.delete(token);
+    stagedOutcomes.delete(token);
     return true;
   } catch (error) {
     await cancelDetachTransfer(token);
@@ -163,7 +199,10 @@ export function newDetachToken(): string {
 /** Remove a just-moved pane from its source tab, closing the tab if it empties. */
 export function removeSourcePane(sourceTabId: string, sourcePaneId: string, terminalIds: string[] = []): void {
   for (const [token, payload] of stagedPayloads) {
-    if (describePanes(payload.paneTree).some(pane => pane.paneId === sourcePaneId)) stagedPayloads.delete(token);
+    if (describePanes(payload.paneTree).some(pane => pane.paneId === sourcePaneId)) {
+      stagedPayloads.delete(token);
+      stagedOutcomes.delete(token);
+    }
   }
   store.dispatch(removePaneFromTab({ tabId: sourceTabId, paneId: sourcePaneId }));
   // Detaching the last pane hands the terminal to another WINDOW, so there is nothing left
@@ -231,7 +270,10 @@ export function buildTabDetachPayload(
 
 /** Remove a handed-off tab from this window (its PTYs live on in the backend). */
 export function removeSourceTab(tabId: string, terminalIds: string[]): void {
-  for (const [token, payload] of stagedPayloads) if (payload.tabId === tabId) stagedPayloads.delete(token);
+  for (const [token, payload] of stagedPayloads) if (payload.tabId === tabId) {
+    stagedPayloads.delete(token);
+    stagedOutcomes.delete(token);
+  }
   // Every terminal that LEAVES this window loses its session-exit record here (`plan/024` Req 4).
   //
   // Detach reaches neither `closePaneNonBlocking` nor `TabManager.closeOneTab`, the two paths
@@ -295,7 +337,7 @@ export async function dropTabAcrossWindows(opts: {
   const token = newDetachToken();
   await stageDetachPayload(token, payload);
   if (!paneIncarnations.enabled && payload.terminals.length === 0) return;
-  try { await api.stashDetachPayload(token, payload); }
+  try { if (!paneIncarnations.enabled) await api.stashDetachPayload(token, payload); }
   catch (error) { await cancelDetachTransfer(token); throw error; }
 
   let reattached = false;
@@ -303,7 +345,8 @@ export async function dropTabAcrossWindows(opts: {
     try {
       reattached = await api.resolveTabDrop(token, opts.clientX, opts.clientY);
     } catch (e) {
-      console.error('resolveTabDrop failed', e);
+      await cancelDetachTransfer(token);
+      throw e;
     }
   }
 
@@ -311,7 +354,9 @@ export async function dropTabAcrossWindows(opts: {
     // Released over empty desktop. Detaching the ONLY tab into a fresh window is
     // pointless (it just relocates this window) — snap back and discard.
     if (isLastTab) {
-      try { await api.takeDetachPayload?.(token); } catch { /* discard stash */ }
+      if (!paneIncarnations.enabled) {
+        try { await api.takeDetachPayload?.(token); } catch { /* discard stash */ }
+      }
       await cancelDetachTransfer(token);
       return;
     }
@@ -320,6 +365,7 @@ export async function dropTabAcrossWindows(opts: {
   }
 
   stagedPayloads.delete(token);
+  stagedOutcomes.delete(token);
   removeSourceTab(opts.tabId, terminalIds);
   // If that was the last tab, this window is now empty — close it.
   await closeWindowIfEmpty();
@@ -350,6 +396,10 @@ function seedKeyboardProtocol(t: DetachTerminal): void {
 /** Target-window handler: take the stashed payload for `token` and add it as a tab. */
 export async function applyReattachByToken(token: string): Promise<void> {
   const api = window.electronAPI;
+  if (paneIncarnations.enabled) {
+    await installTransferredPayload(token, undefined, applyDetachPayload);
+    return;
+  }
   if (!api?.takeDetachPayload) return;
   let payload: DetachPayload | null = null;
   try {
@@ -358,7 +408,7 @@ export async function applyReattachByToken(token: string): Promise<void> {
     console.error('Tab reattach: failed to take payload', e);
     return;
   }
-  if (payload) await installTransferredPayload(token, payload, () => applyDetachPayload(payload));
+  if (payload) await installTransferredPayload(token, payload, applyDetachPayload);
 }
 
 /**
@@ -419,7 +469,7 @@ function resolveLocalTarget(x: number, y: number): { tabId: string; paneId: stri
  * bar / empty area or for a whole-tab payload.
  */
 export function applyCrossWindowPayload(payload: DetachPayload, x?: number, y?: number, token?: string): void | Promise<void> {
-  if (token) return installTransferredPayload(token, payload, () => { applyCrossWindowPayload(payload, x, y); });
+  if (token) return installTransferredPayload(token, payload, transferred => { applyCrossWindowPayload(transferred, x, y); });
   const target = (typeof x === 'number' && typeof y === 'number') ? resolveLocalTarget(x, y) : null;
   if (!target?.tabId || !target.paneId || payload.kind !== 'pane') {
     applyDetachPayload(payload);
@@ -452,6 +502,10 @@ export async function reconstructDetachedWindow(): Promise<boolean> {
   const label = api.getWindowLabel();
   if (!label.startsWith(DETACH_PREFIX)) return false;
   const token = label.slice(DETACH_PREFIX.length);
+  if (paneIncarnations.enabled) {
+    await installTransferredPayload(token, undefined, applyDetachPayload);
+    return true;
+  }
   let payload: DetachPayload | null = null;
   try {
     payload = await api.takeDetachPayload(token);
@@ -461,6 +515,6 @@ export async function reconstructDetachedWindow(): Promise<boolean> {
   }
   if (!payload) return false;
   // Attach BEFORE any pane mounts so the init guard reuses the live process.
-  await installTransferredPayload(token, payload, () => applyDetachPayload(payload));
+  await installTransferredPayload(token, payload, applyDetachPayload);
   return true;
 }

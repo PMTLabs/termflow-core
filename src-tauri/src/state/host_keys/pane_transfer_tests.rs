@@ -9,10 +9,10 @@ fn stash_departed_source_keeps_authority_for_only_its_own_transfer_member() {
     let b = register_shell(&keys, &mut source, "tm-b", "pc-b");
     let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
     assert_eq!(source.op(&keys, PaneOp::Depart { pi: a.pi }), PaneResult::Ok);
-    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "pair".into(), pairs: vec![a.clone(), b.clone()] }), PaneResult::Ok);
+    assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "pair".into(), pairs: vec![a.clone(), b.clone()] }), PaneResult::Ok);
     assert_eq!(keys.pane_owner("tm-a"), Some(Owner::Transfer { tx: "pair".into(), taken: false }));
     assert_eq!(keys.pane_owner("tm-b"), Some(Owner::Transfer { tx: "pair".into(), taken: false }));
-    assert!(matches!(source.op(&keys, PaneOp::Stash { tx: "pair".into(), pairs: vec![b.clone()] }), PaneResult::Rejected { .. }));
+    assert!(matches!(source.op(&keys, PaneOp::Stash { ui: None, tx: "pair".into(), pairs: vec![b.clone()] }), PaneResult::Rejected { .. }));
     let (result, effects) = source.op_at(&keys, PaneOp::Close { pi: a.pi }, Instant::now());
     assert_eq!(result, PaneResult::Ok);
     assert_eq!(effects.closes, vec!["pc-a"]);
@@ -33,7 +33,7 @@ fn adopt_replay_enters_once_preserves_held_and_orphans_unnamed_shell() {
     let waiting = source.entry("tm-waiting", true);
     assert_eq!(source.op(&keys, PaneOp::Enter { panes: vec![waiting.clone()] }), PaneResult::Ok);
     let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
-    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "move".into(), pairs: vec![live.clone(), waiting.clone()] }), PaneResult::Ok);
+    assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "move".into(), pairs: vec![live.clone(), waiting.clone()] }), PaneResult::Ok);
     assert!(matches!(keys.owner_state("tm-waiting"), Some((0, OwnerState::Held))));
     let source_copy = source.enter(&keys, "tm-waiting");
     assert_eq!(source.op(&keys, PaneOp::AdmitCreate { pi: source_copy.pi, mode: CreateMode::Mount }), PaneResult::Contended);
@@ -70,7 +70,7 @@ fn adopted_placing_copy_joins_original_admission_in_destination_page() {
     let cg = source.admit(&keys, entry.pi);
     assert!(matches!(keys.admitted_work("source", source.pg, "tm-waiting", cg).unwrap(), CreateAdmission::Run(actual) if actual == cg));
     let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
-    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "placing".into(), pairs: vec![entry] }), PaneResult::Ok);
+    assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "placing".into(), pairs: vec![entry] }), PaneResult::Ok);
     assert!(matches!(destination.op(&keys, PaneOp::Take { tx: "placing".into() }), PaneResult::Taken { .. }));
     let entry = destination.entry("tm-waiting", false);
     assert_eq!(destination.op(&keys, PaneOp::Adopt { tx: "placing".into(), pairs: vec![entry.clone()] }), PaneResult::Ok);
@@ -90,7 +90,7 @@ fn transfer_timeouts_are_non_destructive_and_taken_resets_injected_deadline() {
         assert_eq!(source.op(&keys, PaneOp::Enter { panes: vec![waiting.clone()] }), PaneResult::Ok);
         let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
         let now = Instant::now();
-        let (result, effects) = source.op_at(&keys, PaneOp::Stash { tx: "timeout".into(), pairs: vec![live, waiting] }, now);
+        let (result, effects) = source.op_at(&keys, PaneOp::Stash { ui: None, tx: "timeout".into(), pairs: vec![live, waiting] }, now);
         assert_eq!(result, PaneResult::Ok);
         assert!(effects.wake_transfers);
         let mut deadline = now + TRANSFER_DEADLINE;
@@ -127,7 +127,7 @@ fn source_end_preserves_transfer_until_destination_end_or_deadline() {
         assert_eq!(source.op(&keys, PaneOp::Enter { panes: vec![waiting.clone()] }), PaneResult::Ok);
         let control = register_shell(&keys, &mut control_page, "tm-control", "pc-control");
         let now = Instant::now();
-        assert_eq!(source.op_at(&keys, PaneOp::Stash { tx: "move".into(), pairs: vec![live, waiting] }, now).0, PaneResult::Ok);
+        assert_eq!(source.op_at(&keys, PaneOp::Stash { ui: None, tx: "move".into(), pairs: vec![live, waiting] }, now).0, PaneResult::Ok);
         if taken { assert!(matches!(destination.op_at(&keys, PaneOp::Take { tx: "move".into() }, now).0, PaneResult::Taken { .. })); }
         assert_eq!(keys.destroy_window("source", source.wi).len(), 1);
         assert_eq!(keys.pane_owner("tm-live"), Some(Owner::Transfer { tx: "move".into(), taken }));
@@ -151,7 +151,7 @@ fn cancel_and_source_self_take_park_live_shell_and_remove_held() {
             let live = register_shell(&keys, &mut source, "tm-live", "pc-live");
             let waiting = source.enter(&keys, "tm-waiting");
             let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
-            assert_eq!(source.op(&keys, PaneOp::Stash { tx: "rollback".into(), pairs: vec![live.clone(), waiting] }), PaneResult::Ok);
+            assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "rollback".into(), pairs: vec![live.clone(), waiting] }), PaneResult::Ok);
             if taken { assert!(matches!(destination.op(&keys, PaneOp::Take { tx: "rollback".into() }), PaneResult::Taken { .. })); }
             assert_eq!(source.op(&keys, PaneOp::Adopt { tx: "rollback".into(), pairs: vec![] }), PaneResult::Contended);
             let op = if self_take { PaneOp::Take { tx: "rollback".into() } } else { PaneOp::Cancel { tx: "rollback".into() } };
@@ -174,10 +174,10 @@ fn failed_transfer_batches_have_no_partial_ownership_or_membership_changes() {
     let live = register_shell(&keys, &mut source, "tm-live", "pc-live");
     let control = register_shell(&keys, &mut destination, "tm-control", "pc-control");
     let missing = source.entry("tm-missing", false);
-    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "bad".into(), pairs: vec![live.clone(), missing.clone()] }), PaneResult::Contended);
+    assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "bad".into(), pairs: vec![live.clone(), missing.clone()] }), PaneResult::Contended);
     assert_eq!(keys.pane_owner("tm-live"), Some(Owner::Pane(live.pi)));
     assert_eq!(source.op(&keys, PaneOp::AdmitCreate { pi: live.pi, mode: CreateMode::Mount }), PaneResult::AlreadyBound { pc: "pc-live".into() });
-    assert_eq!(source.op(&keys, PaneOp::Stash { tx: "good".into(), pairs: vec![live] }), PaneResult::Ok);
+    assert_eq!(source.op(&keys, PaneOp::Stash { ui: None, tx: "good".into(), pairs: vec![live] }), PaneResult::Ok);
     assert!(matches!(destination.op(&keys, PaneOp::Take { tx: "good".into() }), PaneResult::Taken { .. }));
     let wrong = destination.entry("tm-wrong", false);
     assert!(matches!(destination.op(&keys, PaneOp::Adopt { tx: "good".into(), pairs: vec![wrong.clone()] }), PaneResult::Rejected { .. }));

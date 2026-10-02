@@ -21,7 +21,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("automation_store/sql/methods.rs", &["append", "bump_and_trim", "clear_completed", "delete_rule", "duplicate_automation", "mark_completed", "set_enabled_checked", "touch_target", "write_rule"], "DB mutex/transaction; out of scope durable rules and historical logs"),
     ("canvas_store.rs", &["delete_edge", "delete_edges_for", "insert_edge", "schema", "update_label"], "DB mutex; shell writers retain leaf stripes/current owner; user edits are durable intent"),
     ("commands/config_history.rs", &["merge_config"], "out of scope user command/directory history merge"),
-    ("commands/drag.rs", &["begin_global_pane_drag", "cancel_global_pane_drag", "claim_global_pane_drag", "resolve_orphan_global_drag", "resolve_tab_drop", "show_drag_preview"], "drag mutex/token; out of scope durable page/layout operations"),
+    ("commands/drag.rs", &["begin_global_pane_drag", "cancel_global_pane_drag", "claim_global_pane_drag", "resolve_orphan_global_drag", "resolve_tab_drop", "show_drag_preview"], "native notifications queued by ownership-qualified pg/wi/tx sinks with immutable page receipts; inert compatibility drag mutex/token; preview geometry is UI intent"),
     ("commands/terminal.rs", &["create_terminal", "host_fallback", "stage_scrollback"], "new unique/full pc replay and prompt-hook projections; original owner completion"),
     ("commands/terminal.rs", &["register_host_terminal"], "Placing original pc under ownership mutex through index/projection inserts"),
     ("commands/terminal.rs", &["run_create"], "original cg/pc/key and client epoch at publication/enqueue; admission ticket"),
@@ -69,6 +69,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/host_keys/owners.rs", &["abort_create", "admit_create", "close_row_locked", "complete_shell", "end_process", "release_stage", "remove_held", "set_stage"], "owner row cg/pc and key in one ownership mutex; storage effect retained before row removal"),
     ("state/host_keys/pages.rs", &["register_page"], "committed window and checked page identity under ownership mutex through stream installation"),
     ("state/host_keys/panes.rs", &["admit_pane", "admitted_work", "apply_pane_op", "bind_pane", "depart_pane", "insert_panes", "pane_op_at"], "sender window/page, exact pi/cg/pc and next-seq qualification under ownership mutex; immutable close pc dispatched to stripe-qualified end_process"),
+    ("state/host_keys/pane_payloads.rs", &["begin_pane_drag", "claim_pane_drag", "end_pane_drag", "route_pane_transfer"], "original sender pg/wi/tx and target committed page rechecked under ownership through nonblocking delivery enqueue; immutable page receipts rejected by successor renderers"),
     ("state/host_keys/pane_transfers.rs", &["adopt_panes", "end_pane_pages", "finish_transfer", "remove_transfer_member", "stash_panes", "take_panes"], "original page/tx/member/owner qualification at atomic mutation under ownership mutex; deadlines release ownership only; shell endings remain stripe-qualified"),
     ("state/host_keys/restore.rs", &["forget_pane_holder", "register_pane_holder", "settle_pane_restore", "reap_expired_restore_intents", "settle_restore_markers"], "owner/holder/alias/marker facts in one ownership mutex"),
     ("state/host_lifecycle.rs", &["sibling_arm"], "hold slot mutex; unique checked arm token and exact original clients/quiesce"),
@@ -155,13 +156,13 @@ fn hits(source: &str) -> BTreeSet<String> {
     // listed too. The function-name inventory must explain, not hide, those hits.
     let pattern = Regex::new(concat!(
         r"Control::(?:Spawn|Attach|AttachAcked|Close|Resize|ArmDetach|Disarm|Shutdown|ListSessions)\b|Data::Stdin\b|",
-        r"\b(?:outbound|delivery)\s*\.\s*send\s*\(|AssertUnwindSafe\(deliver\)|",
+        r"\b(?:outbound|delivery)\s*\.\s*send\s*\(|\.delivery_sender\(\)\s*\.\s*send\s*\(|AssertUnwindSafe\(deliver\)|",
         r"\.\s*(?:bind_sessions|publish_route_on|restore_route|publish_frame|publish_shell_projection)\s*\(|\.connection\s*=|",
         r"\.\s*(?:resolution|retry_pending|reconnecting|reconnect_again|retired)\s*=|\btake\s*\(\s*&mut\s+\w+\.reconnect_again\s*\)|",
         r"\*self\.(?:client|proc)\s*\.|\*slot\s*=|\b(?:slot|client|proc)\s*\.\s*take\s*\(|self\.current\s*(?:=|\.\s*(?:take|replace)\s*\()|",
         r"\.\s*(?:persist_snapshot|persist_terminal_history|persist_history_snapshot|insert_edge|delete_edges_for|write_shells)\s*\(|",
         r"\.\s*(?:emit|emit_to|execute|execute_batch|close_transport|shutdown_idle|shutdown|clear_client_on|clear_client|install_if_current|clear_if_current|take_if_current)\s*\(|",
-        r"\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
+        r"\binner\s*\.\s*panes\s*\.\s*active_drag\s*=|\binner\s*\.\s*panes\s*\.\s*(?:streams|present|holders|incarnation_high|transfers)\s*\.\s*(?:insert|remove|retain|clear|entry|get_mut)\s*\(|",
         r"\b(?:terminals|host_terminals|stream_offsets|host_stream_offsets|writers|masters|screens|screen_history|identity_index|identity|leaf_to_process|shell_writer_channels|ptys|terminal_history|terminal_screens|terminal_focus_reporting|tmux_sessions|terminal_cwds|history_dirty|replay_prefix|host_restore_pending_windows|reattach_prompt_hooks|routes|local_processes|restore_holders|closed_unowned|owners|keys|entries)(?:\(\))?\s*(?:\.\s*(?:lock\(\)|unwrap\(\)|keys\(\)|routes\(\)))?\s*\.\s*(?:insert|remove|remove_key|remove_process|remove_channel|remove_epoch|retain|clear|entry|get_mut|register|index|unindex|connect|disconnect)\s*\("
     )).unwrap();
     let spans = fn_spans(&text);

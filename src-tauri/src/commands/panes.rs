@@ -34,6 +34,19 @@ pub(crate) fn pane_op(window: WebviewWindow, state: State<'_, AppState>, request
     Ok(reply)
 }
 
+pub(crate) async fn transfer_taken(mut receiver: tokio::sync::watch::Receiver<Option<bool>>) -> bool {
+    loop {
+        if let Some(taken) = *receiver.borrow_and_update() { return taken; }
+        if receiver.changed().await.is_err() { return false; }
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn wait_transfer_taken(window: WebviewWindow, state: State<'_, AppState>, pg: u64, tx: String) -> Result<bool, String> {
+    let receiver = state.host_table.keys().watch_transfer(window.label(), pg, &tx)?;
+    Ok(transfer_taken(receiver).await)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AdmittedCreateRequest {

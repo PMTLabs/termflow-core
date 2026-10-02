@@ -7,6 +7,9 @@ use crate::state::host_routing::{place_owned, Placement};
 use termflow_pty_protocol::SpawnSpec;
 use std::collections::HashMap;
 
+#[path = "pane_transfer_effect_tests.rs"]
+mod transfer_tests;
+
 struct Page { label: &'static str, wi: u64, pg: u64, seq: u64, incarnation: u64 }
 impl Page {
     fn new(port: &FakePort, label: &'static str) -> Self {

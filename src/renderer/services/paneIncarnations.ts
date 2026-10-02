@@ -14,14 +14,15 @@ export type PaneOp =
   | { kind: 'depart' | 'close'; pi: PaneIncarnation }
   | { kind: 'admit_create'; pi: PaneIncarnation; mode: CreateMode }
   | { kind: 'bind'; pi: PaneIncarnation; pc: string; via: BindVia }
-  | { kind: 'stash' | 'adopt'; tx: string; pairs: PaneEntry[] }
+  | { kind: 'stash'; tx: string; pairs: PaneEntry[]; ui?: unknown }
+  | { kind: 'adopt'; tx: string; pairs: PaneEntry[] }
   | { kind: 'take' | 'cancel'; tx: string }
   | { kind: 'settle' };
 export type PaneResult =
   | { status: 'Ok' | 'Inert' | 'Retry' | 'Pending' | 'Contended' }
   | { status: 'Create' | 'Join'; cg: Counter }
   | { status: 'Existing' | 'AlreadyBound'; pc: string }
-  | { status: 'Taken'; payload: { panes: PaneDescriptor[] } }
+  | { status: 'Taken'; payload: { panes: PaneDescriptor[]; ui?: unknown } }
   | { status: 'Rejected'; message: string };
 export interface PaneRequest { pg: Counter; seq: Counter; op: PaneOp }
 export type PaneReply = { status: 'Ack'; result: PaneResult } | { status: 'Resync'; nextSeq: Counter };
@@ -34,6 +35,7 @@ export interface PaneCommands {
   pane_op: { args: { request: PaneRequest }; result: PaneReply };
   create_admitted_terminal: { args: { request: AdmittedCreateRequest }; result: string };
   close_process: { args: { pc: string; reap: boolean }; result: PaneResult };
+  wait_transfer_taken: { args: { pg: number; tx: string }; result: boolean };
 }
 export type PaneBridge = <K extends keyof PaneCommands>(
   command: K, args: PaneCommands[K]['args'],
@@ -74,6 +76,13 @@ export class PaneIncarnations {
 
   get enabled(): boolean { return !this.degraded && !this.stopped; }
   get ended(): boolean { return this.stopped; }
+
+  async pageIdentity(): Promise<{ wi: number; pg: number } | undefined> {
+    if (!this.enabled) return undefined;
+    this.start();
+    const page = await this.registration!;
+    return this.enabled ? page : undefined;
+  }
 
   start(): void {
     if (this.registration || this.stopped) return;
@@ -216,8 +225,13 @@ export class PaneIncarnations {
     return [...this.slots.values()].find(slot => slot.descriptor.leaf === leaf && !slot.suppressed)?.pi;
   }
 
+  isSuppressed(pi: PaneCapture): boolean {
+    return [...this.slots.values()].some(slot => slot.pi === pi && slot.suppressed);
+  }
+
   captureClose(leaf: string, paneId?: string): PaneCapture | undefined {
-    const pi = this.capture(leaf, paneId);
+    const pi = paneId ? this.slots.get(paneId)?.pi
+      : [...this.slots.values()].find(slot => slot.descriptor.leaf === leaf)?.pi;
     for (const slot of this.slots.values()) if (slot.pi === pi) slot.suppressed = true;
     return pi;
   }
@@ -248,6 +262,12 @@ export class PaneIncarnations {
       this.degrade();
       return undefined;
     }
+  }
+
+  async waitTransfer(tx: string): Promise<boolean> {
+    const page = await this.pageIdentity();
+    if (!page) return false;
+    return this.bridge!('wait_transfer_taken', { pg: page.pg, tx });
   }
 
   async reap(pc: string, fallback: () => Promise<void>): Promise<void> {
@@ -285,38 +305,48 @@ export class PaneIncarnations {
     observe();
   }
 
-  async stash(tx: string, panes: PaneDescriptor[]): Promise<PaneResult> {
+  async stash(tx: string, panes: PaneDescriptor[], ui?: unknown): Promise<PaneResult> {
+    if (this.staged.has(tx)) return { status: 'Rejected', message: 'transfer token already staged' };
     const sources = panes.map(pane => this.slots.get(pane.paneId));
     const captures = sources.map(slot => slot?.pi);
     if (captures.some(pi => !pi)) throw new Error('transfer source pane is not present');
+    const suppressed = sources.map(slot => slot!.suppressed);
     // Suppress the differ while the UI still contains the staged source copy.
     panes.forEach(pane => { this.slots.get(pane.paneId)!.suppressed = true; });
     this.staged.set(tx, sources.map(slot => slot!.descriptor));
-    const result = await this.send(async () => ({ kind: 'stash', tx, pairs: await Promise.all(sources.map(async (slot, i) => ({ ...slot!.descriptor, pi: await captures[i]! }))) }));
+    const result = await this.send(async () => ({ kind: 'stash', tx, ...(ui === undefined ? {} : { ui }), pairs: await Promise.all(sources.map(async (slot, i) => ({ ...slot!.descriptor, pi: await captures[i]! }))) }));
     if (!accepted(result)) {
       this.staged.delete(tx);
-      sources.forEach(slot => { if (slot) slot.suppressed = false; });
+      sources.forEach((slot, i) => { if (slot) slot.suppressed = suppressed[i]; });
     }
     return result;
   }
 
   async cancel(tx: string, panes: PaneDescriptor[], processes: Map<string, string>): Promise<void> {
     const result = await this.send({ kind: 'cancel', tx });
-    if (!accepted(result)) throw new Error(`transfer cancel ${result.status}`);
-    const descriptors = this.staged.get(tx) ?? panes;
+    // Expiry already released the transfer. Re-enter without reviving its authority;
+    // an orphaned shell can only be rebound by an ordinary restore.
+    if (!accepted(result) && result.status !== 'Rejected') throw new Error(`transfer cancel ${result.status}`);
+    const descriptors = (this.staged.get(tx) ?? panes).filter(descriptor =>
+      panes.some(pane => pane.paneId === descriptor.paneId && pane.leaf === descriptor.leaf));
     this.staged.delete(tx);
     panes.forEach(pane => this.slots.delete(pane.paneId));
     const pis = this.prepare(descriptors);
     for (let i = 0; i < panes.length; i++) {
       const pc = processes.get(panes[i].leaf);
-      if (pc) await this.bind(pis[i], pc, 'transfer');
+      if (pc) {
+        const bound = await this.bind(pis[i], pc, result.status === 'Rejected' ? 'restore' : 'transfer');
+        if (!accepted(bound)) throw new Error(`transfer rollback bind ${bound.status}`);
+      }
     }
   }
 
-  async installTransfer(tx: string, panes: PaneDescriptor[], install: () => void | Promise<void>): Promise<void> {
+  async installTransfer(tx: string, panes: PaneDescriptor[] | ((ui: unknown) => PaneDescriptor[]), install: (ui?: unknown) => void | Promise<void>): Promise<void> {
     const taken = await this.send({ kind: 'take', tx });
     if (taken.status !== 'Taken' && taken.status !== 'Inert') throw new Error(`transfer take ${taken.status}`);
-    const descriptors = panes.map(pane => {
+    const ui = taken.status === 'Taken' ? taken.payload.ui : undefined;
+    const members = typeof panes === 'function' ? panes(ui) : panes;
+    const descriptors = members.map(pane => {
       const member = taken.status === 'Taken' ? taken.payload.panes.find(source => source.leaf === pane.leaf) : undefined;
       return { ...pane, restore: member?.restore ?? pane.restore, override: member?.override ?? pane.override };
     });
@@ -324,7 +354,7 @@ export class PaneIncarnations {
     const adopted = await this.send(async () => ({ kind: 'adopt', tx, pairs: await Promise.all(descriptors.map(async (pane, i) => ({ ...pane, pi: await pis[i] }))) }));
     if (!accepted(adopted)) throw new Error(`transfer adopt ${adopted.status}`);
     descriptors.forEach((descriptor, i) => this.slots.set(descriptor.paneId, { descriptor, pi: pis[i], suppressed: false, installed: false }));
-    try { await install(); }
+    try { await install(ui); }
     catch (error) {
       for (const pi of pis) await this.depart(pi);
       throw error;
@@ -333,6 +363,12 @@ export class PaneIncarnations {
 }
 
 export const accepted = (result: PaneResult): boolean => ['Ok', 'Inert', 'Existing', 'AlreadyBound'].includes(result.status);
+
+export async function acceptsTransferNotice(notice: { wi?: number; pg?: number }): Promise<boolean> {
+  if (paneIncarnations.ended) return false;
+  const page = await paneIncarnations.pageIdentity();
+  return page ? page.wi === notice.wi && page.pg === notice.pg : true;
+}
 export function describePanes(tree: PaneNode | null, restore = false): PaneDescriptor[] {
   if (!tree) return [];
   if (tree.type === 'terminal' && tree.terminalId) return [{ paneId: tree.id, leaf: tree.terminalId, restore, override: tree.sessionKey }];

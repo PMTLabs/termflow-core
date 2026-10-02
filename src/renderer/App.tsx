@@ -1,4 +1,4 @@
-import { paneIncarnations } from './services/paneIncarnations';
+import { paneIncarnations, acceptsTransferNotice } from './services/paneIncarnations';
 import React, { useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
@@ -215,7 +215,10 @@ const App: React.FC = () => {
           const p = event?.payload;
           if (!p || typeof p !== 'object') return;
           if (p.target !== myLabel || typeof p.token !== 'string') return;
-          void applyReattachByToken(p.token);
+          void acceptsTransferNotice(p).then(matches => {
+            if (matches) return applyReattachByToken(p.token);
+            return undefined;
+          }).catch(error => console.error('Tab transfer failed', error));
         });
       } catch {
         // Not under Tauri — cross-window reattach unavailable.

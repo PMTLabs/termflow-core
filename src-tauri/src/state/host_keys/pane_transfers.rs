@@ -1,7 +1,7 @@
 use super::*;
 
 impl HostKeys {
-    pub(super) fn stash_panes(inner: &mut Inner, page: PageIdentity, tx: &str, pairs: Vec<PaneEntry>, now: Instant) -> PaneResult {
+    pub(super) fn stash_panes(inner: &mut Inner, page: PageIdentity, tx: &str, pairs: Vec<PaneEntry>, ui: Option<serde_json::Value>, now: Instant) -> PaneResult {
         if tx.is_empty() || inner.panes.transfers.contains_key(tx) { return rejected("transfer token already staged or empty"); }
         let mut leaves = std::collections::HashSet::new();
         for pair in &pairs {
@@ -25,7 +25,8 @@ impl HostKeys {
             // Holder metadata remains keyed by the original pi until registration
             // or abandonment; merely taking a transfer cannot expire it.
         }
-        inner.panes.transfers.insert(tx.into(), Transfer { source: page.pg, destination: None, stamp: now, members: pairs });
+        let (taken, _) = tokio::sync::watch::channel(None);
+        inner.panes.transfers.insert(tx.into(), Transfer { source: page.pg, destination: None, stamp: now, members: pairs, ui, taken });
         PaneResult::Ok
     }
     pub(super) fn take_panes(inner: &mut Inner, pg: u64, tx: &str, now: Instant) -> PaneResult {
@@ -38,7 +39,8 @@ impl HostKeys {
         let transfer = inner.panes.transfers.get_mut(tx).unwrap();
         transfer.destination = Some(pg);
         transfer.stamp = now;
-        let payload = TransferPayload { panes: transfer.members.iter().map(|m| {
+        transfer.taken.send_replace(Some(true));
+        let payload = TransferPayload { ui: transfer.ui.clone(), panes: transfer.members.iter().map(|m| {
             let mut descriptor = m.descriptor.clone();
             descriptor.restore = inner.panes.holders.contains_key(&m.pi);
             descriptor
@@ -76,6 +78,7 @@ impl HostKeys {
             inner.panes.holders.remove(&member.pi);
         }
         inner.panes.transfers.remove(tx);
+        if inner.panes.active_drag.as_deref() == Some(tx) { inner.panes.active_drag = None; }
         PaneResult::Ok
     }
     pub(super) fn cancel_panes(inner: &mut Inner, tx: &str) -> PaneResult {
@@ -85,6 +88,8 @@ impl HostKeys {
     }
     fn finish_transfer(inner: &mut Inner, tx: &str, cancel: bool) {
         let Some(transfer) = inner.panes.transfers.remove(tx) else { return; };
+        if inner.panes.active_drag.as_deref() == Some(tx) { inner.panes.active_drag = None; }
+        if transfer.taken.borrow().is_none() { transfer.taken.send_replace(Some(false)); }
         let source_live = inner.window_pages.window_of(transfer.source).is_some();
         for member in &transfer.members {
             let leaf = &member.descriptor.leaf;

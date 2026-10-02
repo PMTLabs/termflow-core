@@ -961,6 +961,7 @@ pub fn run() {
         commands::list_window_session_ids,
         commands::register_page,
         commands::pane_op,
+        commands::wait_transfer_taken,
         commands::create_admitted_terminal,
         commands::close_process,
         commands::flush_session_ack,

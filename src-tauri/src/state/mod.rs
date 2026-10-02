@@ -40,6 +40,8 @@ mod owner_wiring_tests;
 #[cfg(test)]
 mod pane_wiring_tests;
 #[cfg(test)]
+mod transfer_wiring_tests;
+#[cfg(test)]
 mod mutator_wiring_tests;
 #[cfg(test)]
 mod sink_inventory_tests;

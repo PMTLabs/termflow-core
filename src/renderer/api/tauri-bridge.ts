@@ -10,6 +10,13 @@ import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { getStoredApiToken, setStoredApiToken } from '../services/profileScope';
 import { apiBase, invalidateApiBase } from './apiBase';
+import { paneIncarnations } from '../services/paneIncarnations';
+
+async function transferPageArgs(): Promise<{ pg?: number }> {
+  if (paneIncarnations.ended) throw new Error('transfer page ended');
+  const page = await paneIncarnations.pageIdentity();
+  return page ? { pg: page.pg } : {};
+}
 
 export interface NetworkConfig {
   apiPort: number;
@@ -860,7 +867,7 @@ const tauriBridge: ElectronAPI = {
     return invoke('take_detach_payload', { token });
   },
   createDetachedWindow: async (token, x, y) => {
-    return invoke('create_detached_window', { token, x, y });
+    return invoke('create_detached_window', { token, x, y, ...await transferPageArgs() });
   },
   createNewWindow: async () => {
     return invoke('create_new_window');
@@ -890,16 +897,16 @@ const tauriBridge: ElectronAPI = {
     return response.status === 204 ? null : response.json();
   },
   beginGlobalPaneDrag: async (token, payload) => {
-    await invoke('begin_global_pane_drag', { token, payload });
+    await invoke('begin_global_pane_drag', { token, payload, ...await transferPageArgs() });
   },
   claimGlobalPaneDrag: async (token) => {
-    return invoke('claim_global_pane_drag', { token });
+    return invoke('claim_global_pane_drag', { token, ...await transferPageArgs() });
   },
   resolveOrphanGlobalDrag: async (token) => {
-    return invoke('resolve_orphan_global_drag', { token });
+    return invoke('resolve_orphan_global_drag', { token, ...await transferPageArgs() });
   },
   cancelGlobalPaneDrag: async (token) => {
-    await invoke('cancel_global_pane_drag', { token });
+    await invoke('cancel_global_pane_drag', { token, ...await transferPageArgs() });
   },
 
   // Tab tear-off preview window
@@ -915,7 +922,7 @@ const tauriBridge: ElectronAPI = {
 
   // Cross-window tab drop: hit-test the release point against other windows.
   resolveTabDrop: async (token, x, y) => {
-    return invoke('resolve_tab_drop', { token, x, y });
+    return invoke('resolve_tab_drop', { token, x, y, ...await transferPageArgs() });
   },
 
   // Rebuild the native Window menu so its window list reflects current titles.

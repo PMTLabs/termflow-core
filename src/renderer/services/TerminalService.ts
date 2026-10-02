@@ -216,7 +216,7 @@ export class TerminalServiceClass {
     this.setHostWaitState(terminalId, undefined);
     while (true) {
       if (this.incarnations().ended
-          || (this.incarnations().enabled && this.incarnations().capture(terminalId, paneId) !== pi)) return '';
+          || (this.incarnations().enabled && (this.incarnations().capture(terminalId, paneId) !== pi || (pi && this.incarnations().isSuppressed(pi))))) return '';
       // A move is not a close. Only this webview's trees may authorize its next attempt.
       const owner = findTabIdByTerminalId(this.paneTrees(), terminalId);
       if (!owner) {
@@ -233,7 +233,7 @@ export class TerminalServiceClass {
         return pid;
       } catch (error) {
         if (this.incarnations().ended
-            || (this.incarnations().enabled && this.incarnations().capture(terminalId, paneId) !== pi)) return '';
+            || (this.incarnations().enabled && (this.incarnations().capture(terminalId, paneId) !== pi || (pi && this.incarnations().isSuppressed(pi))))) return '';
         // An attempt can be in flight when the pane moves away. Whatever it
         // reports, this window no longer has a pane to report it to.
         if (!findTabIdByTerminalId(this.paneTrees(), terminalId)) {
@@ -402,7 +402,7 @@ export class TerminalServiceClass {
       // The pane may have left this window while this create was in flight.
       if (protocol.ended) return '';
       if (!findTabIdByTerminalId(this.paneTrees(), terminalId)
-          || (protocol.enabled && protocol.capture(terminalId, paneId) !== attemptPi)) {
+          || (protocol.enabled && (protocol.capture(terminalId, paneId) !== attemptPi || (attemptPi && protocol.isSuppressed(attemptPi))))) {
         await this.releaseAbsentCreate(terminalId, processId);
         return '';
       }

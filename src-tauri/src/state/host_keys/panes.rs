@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 #[path = "pane_transfers.rs"]
 mod transfers;
+#[path = "pane_payloads.rs"]
+mod payloads;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PaneIdentity { pub pg: u64, pub seq: u64 }
@@ -42,7 +44,7 @@ pub(crate) enum PaneOp {
     AdmitCreate { pi: PaneIdentity, mode: CreateMode },
     Bind { pi: PaneIdentity, pc: String, via: BindVia },
     Close { pi: PaneIdentity },
-    Stash { tx: String, pairs: Vec<PaneEntry> },
+    Stash { tx: String, pairs: Vec<PaneEntry>, #[serde(default)] ui: Option<serde_json::Value> },
     Take { tx: String },
     Adopt { tx: String, pairs: Vec<PaneEntry> },
     Cancel { tx: String },
@@ -60,7 +62,10 @@ pub(crate) enum PaneResult {
     Rejected { message: String },
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct TransferPayload { pub panes: Vec<PaneDescriptor> }
+pub(crate) struct TransferPayload {
+    pub panes: Vec<PaneDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")] pub ui: Option<serde_json::Value>,
+}
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status")]
 pub(crate) enum PaneReply {
@@ -77,6 +82,7 @@ pub(super) struct PaneTable {
     pub incarnation_high: HashMap<u64, u64>,
     pub holders: HashMap<PaneIdentity, super::restore::Aliases>,
     pub transfers: HashMap<String, Transfer>,
+    pub active_drag: Option<String>,
 }
 #[derive(Clone)]
 pub(super) struct Transfer {
@@ -84,6 +90,8 @@ pub(super) struct Transfer {
     pub destination: Option<u64>,
     pub stamp: Instant,
     pub members: Vec<PaneEntry>,
+    pub ui: Option<serde_json::Value>,
+    pub taken: tokio::sync::watch::Sender<Option<bool>>,
 }
 pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(60);
 
@@ -142,7 +150,7 @@ impl HostKeys {
                 Self::close_leaf_locked(inner, &leaf, CloseStorage::Delete, effects);
                 PaneResult::Ok
             }
-            PaneOp::Stash { tx, pairs } => Self::stash_panes(inner, page, &tx, pairs, now),
+            PaneOp::Stash { tx, pairs, ui } => Self::stash_panes(inner, page, &tx, pairs, ui, now),
             PaneOp::Take { tx } => Self::take_panes(inner, page.pg, &tx, now),
             PaneOp::Adopt { tx, pairs } => Self::adopt_panes(inner, page.pg, &tx, pairs),
             PaneOp::Cancel { tx } => Self::cancel_panes(inner, &tx),

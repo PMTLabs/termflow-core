@@ -33,7 +33,7 @@ test('the real detach installer waits for a retried adopt acknowledgment and att
   try {
     const installing = applyReattachByToken('tx-exact'); await flush();
     expect(requests[0].op).toEqual({ kind: 'take', tx: 'tx-exact' });
-    gates.release('pane_op', 0, { status: 'Ack', result: { status: 'Taken', payload: { panes: [{ paneId: 'pn-move', leaf: 'tm-move', restore: true }] } } });
+    gates.release('pane_op', 0, { status: 'Ack', result: { status: 'Taken', payload: { ui: payload, panes: [{ paneId: 'pn-move', leaf: 'tm-move', restore: true }] } } });
     await flush();
     expect(requests[1].op).toMatchObject({ kind: 'adopt', tx: 'tx-exact', pairs: [{ paneId: 'pn-move', leaf: 'tm-move', restore: true, pi: { pg: 31, seq: 1 } }] });
     expect(applies).toBe(2);

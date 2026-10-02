@@ -286,7 +286,7 @@ async fn staged_and_taken_transfer_members_protect_listed_keys_until_transfer_en
         let mut source = Page::new(&port, "source");
         let mut destination = Page::new(&port, "destination");
         let held = source.enter(&port, "tm-held", Some(K), now);
-        assert_eq!(source.op(&port, PaneOp::Stash { tx: "tx".into(), pairs: vec![held] }, now), PaneResult::Ok);
+        assert_eq!(source.op(&port, PaneOp::Stash { ui: None, tx: "tx".into(), pairs: vec![held] }, now), PaneResult::Ok);
         if taken {
             let PaneResult::Taken { payload } = destination.op(&port, PaneOp::Take { tx: "tx".into() }, now) else { panic!("taken"); };
             assert_eq!(payload.panes.len(), 1);
