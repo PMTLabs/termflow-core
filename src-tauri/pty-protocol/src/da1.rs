@@ -1051,8 +1051,11 @@ mod tests {
 
     #[test]
     fn a_later_reply_waits_for_the_earlier_one_even_when_its_thread_runs_first() {
-        // The scheduler is taken out of the picture: both reply threads are captured, then the
-        // SECOND is started alone. Without the turn barrier it writes straight away.
+        // Thread START order is taken out of the scheduler's hands: both reply threads are
+        // captured, the SECOND is started alone and confirmed running, and only then may the first
+        // run. Without the turn barrier the second writes as soon as it runs, which the 150 ms wait
+        // after it is confirmed running makes visible. (A thread descheduled that long right after
+        // starting could still hide it; the stress test above remains for that reason.)
         type Run = Box<dyn FnOnce() + Send + 'static>;
         let captured = Arc::new(Mutex::new(Vec::<Run>::new()));
         let capture = |captured: &Arc<Mutex<Vec<Run>>>| {
@@ -1071,7 +1074,12 @@ mod tests {
         assert_eq!(runs.len(), 2, "one thread start per reply");
         let (first, second) = (runs.remove(0), runs.remove(0));
 
-        let t_second = std::thread::spawn(second);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let t_second = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            second();
+        });
+        started_rx.recv_timeout(std::time::Duration::from_secs(5)).expect("the second reply's thread must be running");
         std::thread::sleep(std::time::Duration::from_millis(150));
         assert!(sink.0.lock().unwrap().is_empty(), "the DA1 reply must not reach the writer ahead of the cursor report");
 

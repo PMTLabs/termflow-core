@@ -277,6 +277,12 @@ impl PtyHostClient {
         self.inherit_cursor.load(Ordering::Acquire)
     }
 
+    /// The process id serving this connection, asked of the live connection (Windows). `None`
+    /// off Windows, and when the lookup failed.
+    pub fn server_pid(&self) -> Option<u32> {
+        self.exe_origin.server_pid()
+    }
+
     /// Whether an intentional exit must announce itself to this host.
     pub fn shutdown_control(&self) -> bool {
         self.shutdown_control.load(Ordering::Acquire)
@@ -1824,23 +1830,43 @@ pub fn host_inherits_cursor(record: Option<&termflow_pty_protocol::HostRecord>) 
     record.is_some_and(|r| r.capabilities & termflow_pty_protocol::CAP_INHERIT_CURSOR != 0)
 }
 
-/// [`host_inherits_cursor`] for a host THIS connection just launched. The plan was made
-/// from the record read BEFORE the launch, which for a fresh host is no record at all; the
-/// host writes its own record before it serves, so by the time the connection is up the
-/// file holds the answer.
-pub fn spawned_host_inherits_cursor() -> bool {
+/// [`host_inherits_cursor`] for a record that must belong to the process serving the
+/// connection: the connection reports a server pid and the record repeats it. A readable record
+/// of a host that is gone (its replacement could not publish its own) names another pid and
+/// says nothing about this host; a connection whose server pid is unknown cannot vouch for any
+/// record.
+pub fn host_inherits_cursor_served_by(
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    server_pid: Option<u32>,
+) -> bool {
+    record.is_some_and(|r| server_pid == Some(r.pid)) && host_inherits_cursor(record)
+}
+
+/// [`host_inherits_cursor_served_by`] for a host THIS connection just launched. The plan was
+/// made from the record read BEFORE the launch, which for a fresh host is no record at all (or
+/// a dead host's); the host writes its own record before it serves, so by the time the
+/// connection is up the file normally holds the answer, and `server_pid` says whether it does.
+pub fn spawned_host_inherits_cursor(server_pid: Option<u32>) -> bool {
     let record = record_path().and_then(|p| termflow_pty_protocol::read_record(&p).ok().flatten());
-    host_inherits_cursor(record.as_ref())
+    host_inherits_cursor_served_by(record.as_ref(), server_pid)
+}
+
+/// An ADOPTED host's verdict: the selected record's (`planned`), unless the connection shows the
+/// record names a different process than the one serving it (both pids known and different).
+/// An unknown pid on either side leaves the record's verdict as it was.
+pub fn adopted_host_inherits_cursor(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
+    planned && !matches!((record_pid, server_pid), (Some(record), Some(server)) if record != server)
 }
 
 /// Whether the host a connection ended up on can be asked for a cursor row.
 ///
-/// A host THIS process launched is judged by the record it wrote itself and by nothing else
-/// (`spawned`, called only then). The plan's flags came from the record read BEFORE the
+/// A host THIS process launched is judged by the record that names the process serving the
+/// connection and by nothing else (`spawned`, called only then; see
+/// [`spawned_host_inherits_cursor`]). The plan's flags came from the record read BEFORE the
 /// launch; when a live host died between that read and the launch, that record is the DEAD
 /// host's, and its positive bit must not carry over to a replacement that may not honour a row
 /// (inbox ConPTY, a bundled load that failed): the GUI would anchor the replay on a row ConPTY
-/// was never told. An ADOPTED host keeps the verdict of the record it was selected from.
+/// was never told. An ADOPTED host keeps `planned` (see [`adopted_host_inherits_cursor`]).
 pub fn connected_host_inherits_cursor(
     origin: HostConnectionOrigin,
     planned: bool,

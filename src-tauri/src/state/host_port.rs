@@ -200,12 +200,14 @@ impl<R: Runtime> AppState<R> {
         // A host we spawned ourselves (this build's bundled sidecar, installed
         // under its own content hash by `resolve_host_launch`) announces too.
         client.set_shutdown_control(flags.shutdown_control || origin == HostConnectionOrigin::SpawnedHere);
-        // A host launched just now is judged by the record IT wrote, not by the one `flags` was
-        // made from (read before the launch; possibly a host that has since died).
+        // A host launched just now is judged by the record that names the process serving this
+        // connection, not by the one `flags` was made from (read before the launch; possibly a
+        // host that has since died). An adopted host keeps its selected record's verdict unless
+        // the connection shows that record is another process's.
         client.set_inherit_cursor(crate::pty_host_client::connected_host_inherits_cursor(
             origin,
-            flags.inherit_cursor,
-            crate::pty_host_client::spawned_host_inherits_cursor,
+            crate::pty_host_client::adopted_host_inherits_cursor(flags.inherit_cursor, candidate.pid, client.server_pid()),
+            || crate::pty_host_client::spawned_host_inherits_cursor(client.server_pid()),
         ));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
