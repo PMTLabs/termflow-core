@@ -230,7 +230,13 @@ impl<R: Runtime> AppState<R> {
         })?;
         client.set_attach_acks(flags.attach_acks);
         client.set_shutdown_control(flags.shutdown_control);
-        client.set_inherit_cursor(flags.inherit_cursor);
+        // Always adopted: the selected record's verdict, unless the connection shows that record
+        // names another process than the one answering (the same rule as the primary connect).
+        client.set_inherit_cursor(crate::pty_host_client::adopted_host_inherits_cursor(
+            flags.inherit_cursor,
+            candidate.pid,
+            client.server_pid(),
+        ));
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
         let build_id = candidate.record.as_ref().and_then(|r| r.build_id.clone());
         client.set_advertised_build_id(build_id.clone());

@@ -1853,7 +1853,8 @@ pub fn spawned_host_inherits_cursor(server_pid: Option<u32>) -> bool {
 
 /// An ADOPTED host's verdict: the selected record's (`planned`), unless the connection shows the
 /// record names a different process than the one serving it (both pids known and different).
-/// An unknown pid on either side leaves the record's verdict as it was.
+/// An unknown pid on either side leaves the record's verdict as it was. Every adoption asks it:
+/// the primary connect (through [`connected_host_inherits_cursor`]) and the frozen connect.
 pub fn adopted_host_inherits_cursor(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
     planned && !matches!((record_pid, server_pid), (Some(record), Some(server)) if record != server)
 }

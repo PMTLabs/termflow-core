@@ -58,6 +58,14 @@ fn a_readable_record_of_a_dead_host_does_not_speak_for_the_host_serving_the_conn
     assert!(!host_inherits_cursor_served_by(Some(&dead_but_capable), None), "an unknown server pid vouches for nothing");
     assert!(!host_inherits_cursor_served_by(Some(&record(100, CAP_DRAIN)), Some(100)), "the right host without the bit");
     assert!(!host_inherits_cursor_served_by(None, Some(100)), "no record");
+    // The comparison is between the record's pid and the server's, whatever they are: a second
+    // pair (neither number shared with the first, one above and one below its mate) keeps a
+    // hard-coded pid from passing.
+    let other_capable = record(4242, CAP_INHERIT_CURSOR);
+    assert!(host_inherits_cursor_served_by(Some(&other_capable), Some(4242)), "a different host, also named by its record");
+    assert!(!host_inherits_cursor_served_by(Some(&other_capable), Some(100)), "the first host's pid is not this record's");
+    assert!(!host_inherits_cursor_served_by(Some(&dead_but_capable), Some(4242)), "and the converse");
+    assert!(!host_inherits_cursor_served_by(Some(&other_capable), Some(7)), "a pid below the record's");
 }
 
 #[test]
@@ -69,22 +77,38 @@ fn an_adopted_hosts_record_is_trusted_unless_it_names_another_process() {
     assert!(!adopted_host_inherits_cursor(false, Some(5), Some(5)), "a negative record stays negative");
     // the record belongs to a different process than the one answering
     assert!(!adopted_host_inherits_cursor(true, Some(5), Some(6)));
+    // other numbers, both orders: the rule is "the two differ", not a particular pair
+    assert!(adopted_host_inherits_cursor(true, Some(9001), Some(9001)));
+    assert!(!adopted_host_inherits_cursor(true, Some(9001), Some(12)));
+    assert!(!adopted_host_inherits_cursor(true, Some(12), Some(9001)));
 }
 
-/// The decision above only matters if the connect paths use it: pin that the launch path asks
-/// through it with its own origin (not OR-ing the plan's flag with a re-read) and that the
-/// adopt-only path still takes the selected record's flag.
+/// The decisions above only matter if the connect paths use them: pin that the launch path asks
+/// through them with its own origin (not OR-ing the plan's flag with a re-read) and that the
+/// adopt-only path applies the same pid check to its selected record, each in its own function.
 #[test]
 fn the_connect_paths_record_the_verdict_through_that_one_decision() {
     let src: String = production(include_str!("host_port.rs")).chars().filter(|c| !c.is_whitespace()).collect();
+    // `connect_current` is declared before `connect_frozen`; splitting there gives each its region.
+    let (current, frozen) = src.split_once("asyncfnconnect_frozen(").expect("connect_frozen is declared after connect_current");
     assert!(
-        src.contains(
+        current.contains(
             "client.set_inherit_cursor(crate::pty_host_client::connected_host_inherits_cursor(origin,crate::pty_host_client::adopted_host_inherits_cursor(flags.inherit_cursor,candidate.pid,client.server_pid()),||crate::pty_host_client::spawned_host_inherits_cursor(client.server_pid()),));"
         ),
         "the launch path must ask connected_host_inherits_cursor with its own origin and the connection's server pid"
     );
-    assert!(src.contains("client.set_inherit_cursor(flags.inherit_cursor);"), "the adopt-only path keeps its selected record's flag");
-    assert_eq!(src.matches("set_inherit_cursor(").count(), 2, "every place that records the verdict is covered above");
+    assert!(
+        frozen.contains(
+            "client.set_inherit_cursor(crate::pty_host_client::adopted_host_inherits_cursor(flags.inherit_cursor,candidate.pid,client.server_pid(),));"
+        ),
+        "the adopt-only path must drop a record that names another process than the one answering"
+    );
+    assert_eq!(current.matches("set_inherit_cursor(").count(), 1, "one place records the verdict on the launch path");
+    assert_eq!(frozen.matches("set_inherit_cursor(").count(), 1, "one place records the verdict on the adopt-only path");
+    assert!(
+        !src.contains("set_inherit_cursor(flags.inherit_cursor)"),
+        "the selected record's bit taken as-is trusts a record that may belong to a process that has exited"
+    );
     assert!(
         !src.contains("flags.inherit_cursor||"),
         "OR-ing the plan's bit with a re-read keeps a dead host's `capable` on its replacement"
