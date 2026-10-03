@@ -66,6 +66,13 @@ fn a_readable_record_of_a_dead_host_does_not_speak_for_the_host_serving_the_conn
     assert!(!host_inherits_cursor_served_by(Some(&other_capable), Some(100)), "the first host's pid is not this record's");
     assert!(!host_inherits_cursor_served_by(Some(&dead_but_capable), Some(4242)), "and the converse");
     assert!(!host_inherits_cursor_served_by(Some(&other_capable), Some(7)), "a pid below the record's");
+    // The whole pid is compared: pids above 16 bits, and two that differ only above the low 16 bits.
+    let wide = record(70_000, CAP_INHERIT_CURSOR);
+    assert!(host_inherits_cursor_served_by(Some(&wide), Some(70_000)), "a pid wider than 16 bits");
+    assert!(!host_inherits_cursor_served_by(Some(&wide), Some(70_000 + 65_536)), "same low 16 bits, another process");
+    let widest = record(u32::MAX, CAP_INHERIT_CURSOR);
+    assert!(host_inherits_cursor_served_by(Some(&widest), Some(u32::MAX)), "the largest pid");
+    assert!(!host_inherits_cursor_served_by(Some(&widest), Some(u32::MAX - 1)), "the neighbour of the largest pid");
 }
 
 #[test]
@@ -81,6 +88,10 @@ fn an_adopted_hosts_record_is_trusted_unless_it_names_another_process() {
     assert!(adopted_host_inherits_cursor(true, Some(9001), Some(9001)));
     assert!(!adopted_host_inherits_cursor(true, Some(9001), Some(12)));
     assert!(!adopted_host_inherits_cursor(true, Some(12), Some(9001)));
+    // the whole pid: wider than 16 bits, and two that share their low 16 bits
+    assert!(adopted_host_inherits_cursor(true, Some(70_000), Some(70_000)));
+    assert!(!adopted_host_inherits_cursor(true, Some(70_000), Some(70_000 + 65_536)));
+    assert!(!adopted_host_inherits_cursor(true, Some(u32::MAX), Some(u32::MAX - 1)));
 }
 
 /// The decisions above only matter if the connect paths use them: pin that the launch path asks
@@ -89,8 +100,12 @@ fn an_adopted_hosts_record_is_trusted_unless_it_names_another_process() {
 #[test]
 fn the_connect_paths_record_the_verdict_through_that_one_decision() {
     let src: String = production(include_str!("host_port.rs")).chars().filter(|c| !c.is_whitespace()).collect();
-    // `connect_current` is declared before `connect_frozen`; splitting there gives each its region.
-    let (current, frozen) = src.split_once("asyncfnconnect_frozen(").expect("connect_frozen is declared after connect_current");
+    // Each function's region runs from its own declaration to the other's (the later one to the end
+    // of the file), so the order they are declared in does not matter.
+    let at = |declaration: &str| src.find(declaration).unwrap_or_else(|| panic!("{declaration} is declared"));
+    let (current_at, frozen_at) = (at("asyncfnconnect_current("), at("asyncfnconnect_frozen("));
+    let region = |from: usize, other: usize| if other > from { &src[from..other] } else { &src[from..] };
+    let (current, frozen) = (region(current_at, frozen_at), region(frozen_at, current_at));
     assert!(
         current.contains(
             "client.set_inherit_cursor(crate::pty_host_client::connected_host_inherits_cursor(origin,crate::pty_host_client::adopted_host_inherits_cursor(flags.inherit_cursor,candidate.pid,client.server_pid()),||crate::pty_host_client::spawned_host_inherits_cursor(client.server_pid()),));"
