@@ -16,7 +16,7 @@ pub use profiles::{
     load_custom_profiles, save_custom_profiles, update_custom_profile, ProfilesConfig,
     ShellProfile,
 };
-pub use spawn::spawn_terminal;
+pub use spawn::{ensure_bundled_conpty, spawn_terminal};
 pub use local_process::{kill_process_tree, LocalProcess};
 pub use spawn_spec::{
     build_spawn_spec, shell_emits_prompt_osc, FOREIGN_TERMINAL_ENV, HOST_CONTROL_ENV,

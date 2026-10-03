@@ -96,7 +96,7 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
     let local = production(include_str!("../pty_manager/spawn.rs"));
     let spawn = fn_body(&local, concat!("fn spawn_", "terminal("));
     assert!(spawn.contains("app_state.exit_process(&thread_id)"));
-    assert!(spawn.find("keys.restage_shell(").unwrap() < spawn.find("openpty(").unwrap());
+    assert!(spawn.find("keys.restage_shell(").unwrap() < spawn.find("open_pty(").unwrap());
     assert!(spawn.find("app_state.complete_create(").unwrap() < spawn.find("thread::spawn(").unwrap());
     let run = fn_body(&commands, "fn run_create(");
     assert!(run.find("ticket.publish_key(").unwrap() < run.find("register_host_terminal(").unwrap());

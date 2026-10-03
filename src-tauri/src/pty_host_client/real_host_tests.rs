@@ -187,6 +187,7 @@ async fn a_real_respawn_uses_a_new_key_and_rejects_held_output_from_the_closed_s
         shell: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(),
         args: if cfg!(windows) { vec!["/D".into(), "/Q".into()] } else { vec!["-i".into()] },
         env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24,
+        initial_cursor_row: None,
     };
     assert!(client.spawn_session(&first_session_key, &spec).await.unwrap() > 0);
     let initial = tokio::time::timeout(Duration::from_secs(5), output.recv()).await.unwrap().unwrap();

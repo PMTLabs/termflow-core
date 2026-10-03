@@ -152,7 +152,7 @@ fn session_lifecycle_has_one_authority_and_one_wire_close_sender() {
     assert!(failure.find("state.cleanup_terminal_maps(").unwrap() < failure.find("host_fallback(").unwrap());
     let local = scanned.iter().find(|(p, _)| p == "pty_manager/spawn.rs").unwrap();
     let spawn = fn_body(&local.1, concat!("fn spawn_", "terminal("));
-    assert!(spawn.find("keys.restage_shell(").unwrap() < spawn.find("openpty(").unwrap());
+    assert!(spawn.find("keys.restage_shell(").unwrap() < spawn.find("open_pty(").unwrap());
     let owners = scanned.iter().find(|(p, _)| p == "state/host_keys/owners.rs").unwrap();
     let stage = fn_body(&owners.1, "fn set_stage(");
     assert!(stage.find("self.release_stage(").unwrap() < stage.find("*target = Some(").unwrap());

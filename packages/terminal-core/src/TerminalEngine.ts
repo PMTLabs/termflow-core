@@ -7,6 +7,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import type { ISearchOptions } from '@xterm/addon-search';
 import { KeyboardProtocolState, encodeKey } from './keyboardProtocol';
 import { Win32InputModeState, encodeWin32Key, scanWin32ModeSequences } from './win32InputMode';
+import { wrapRestoreReplay } from './restoreReplay';
 import { HeuristicCapture, decideSuggestKey } from './commandCapture';
 import type { SuggestPopupState } from './commandCapture';
 import {
@@ -3342,11 +3343,16 @@ export class TerminalEngine {
       let snapshot = '';
       let snapCols = 0;
       let snapRows = 0;
+      // A restore's replay (previous-session scrollback only), and where its cursor must end up.
+      let prefixOnly = false;
+      let anchorRow: number | undefined;
       if (typeof this.bridge.getSnapshot === 'function') {
         const result = await this.bridge.getSnapshot(processId, cols, rows);
         snapshot = result?.snapshot || '';
         snapCols = result?.cols ?? 0;
         snapRows = result?.rows ?? 0;
+        prefixOnly = result?.prefixOnly === true;
+        anchorRow = typeof result?.anchorRow === 'number' ? result.anchorRow : undefined;
       }
 
       if (cancelled()) {
@@ -3381,15 +3387,34 @@ export class TerminalEngine {
         // FIRST chunk of every Windows session — it reliably lands in this dropped
         // window, and losing it sticks the whole session on legacy encoding (live
         // bug: every fresh Windows tab lost the handshake). Apply it before the drop.
-        if (this.isWindowsPlatform()) {
+        // (A prefix-only snapshot keeps its buffered bytes and writes them below, through the
+        // parser, so its handler sees the handshake itself.)
+        if (!prefixOnly && this.isWindowsPlatform()) {
           const verdict = scanWin32ModeSequences(entry.pendingOutput.join(''));
           if (verdict === 'enable') this.win32State.enable();
           else if (verdict === 'disable') this.win32State.disable();
         }
         term.reset();
-        this.writeHydratedScreen(term, snapshot);
+        // A restore's replay is placed so the cursor ends on the row ConPTY thinks the prompt is
+        // on (`anchorRow`); without one it is written as it comes, as before.
+        this.writeHydratedScreen(
+          term,
+          prefixOnly && anchorRow !== undefined ? wrapRestoreReplay(snapshot, anchorRow, term.rows) : snapshot,
+        );
+        const pendingText = prefixOnly ? entry.pendingOutput.join('') : '';
         entry.pendingOutput = [];
         entry.pendingOutputBytes = 0;
+        // A prefix-only snapshot is NOT the screen, so what the shell printed while we were
+        // hydrating (its first prompt, ConPTY's startup positioning) is not reflected in it:
+        // write it after the replay, in order, instead of dropping it as a snapshot would.
+        // Not handled: the hydration buffer is tail-capped (HYDRATION_BUFFER_CAP_BYTES). A screen
+        // snapshot covers whatever the cap evicted; a prefix-only one does not, so if the shell
+        // printed more than the cap before this point only the tail survives. That takes millions
+        // of characters inside one snapshot round trip, so it is left unrepaired rather than
+        // guessed at; a repair would need an authoritative resync that this path does not have.
+        if (pendingText) {
+          term.write(pendingText);
+        }
         // Record what we painted so mirror resync() can diff against it.
         entry.lastSnapshot = snapshot;
         // Zoom-to-fit the freshly-sized grid into the pane.

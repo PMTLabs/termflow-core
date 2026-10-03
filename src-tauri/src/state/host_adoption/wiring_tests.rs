@@ -29,7 +29,7 @@ pub(crate) async fn exercise_generations(current: String, candidates: Vec<HostCa
         port.current_client().unwrap().set_shutdown_control(true);
         assert_eq!(port.table().keys().snapshot("tm-old").unwrap().channel, channel);
 
-        let spec = SpawnSpec { shell: "test-shell".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 };
+        let spec = SpawnSpec { shell: "test-shell".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24, initial_cursor_row: None };
         let old_session_key = "tm-old";
         match place(&port, old_session_key, true).await.unwrap() {
             Placement::Attach { channel: target, client, pid, ticket, .. } => {

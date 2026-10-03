@@ -55,6 +55,31 @@
         assert_eq!(parent_title_color(&terminals, Some("tm-gone")), None);
     }
 
+    /// The renderer needs two things beyond the replay text to put its cursor where ConPTY believes
+    /// the prompt is, and not to throw away the shell's own output as a snapshot would let it.
+    #[test]
+    fn a_restore_snapshot_says_it_is_prefix_only_and_carries_its_anchor_only_when_it_has_one() {
+        for row in [1u16, 7, 24] {
+            let anchored = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: Some(row) }, 24, 80);
+            assert_eq!(anchored, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true, "anchorRow": row }));
+        }
+        let plain = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: None }, 24, 80);
+        assert_eq!(plain, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true }));
+        assert!(plain.get("anchorRow").is_none(), "an absent anchor is absent, not null: the renderer leaves the cursor alone");
+    }
+
+    /// The wire-shape test above is vacuous if the handler builds its restore response another way.
+    #[test]
+    fn the_snapshot_handler_serves_a_staged_restore_through_the_restore_body() {
+        let source = include_str!("mod.rs").replace("\r\n", "\n");
+        let handler = &source[source.find("pub(crate) async fn get_terminal_snapshot(").expect("handler")..];
+        let handler = &handler[..handler.find("\n}\n").expect("end of handler")];
+        assert!(handler.contains("state.replay_prefix.remove(&id)"));
+        assert!(handler.contains("return Json(restore_snapshot_body(&prefix, rows, cols));"));
+        // The screen-based snapshot is the terminal's real screen: it must NOT claim to be prefix-only.
+        assert_eq!(handler.matches("prefixOnly").count(), 0, "prefixOnly belongs to restore_snapshot_body alone");
+    }
+
     #[test]
     fn create_terminal_event_carries_the_parent_title_colour_without_replacing_routing() {
         let source = include_str!("mod.rs");

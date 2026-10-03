@@ -34,6 +34,11 @@ function readLicenseTexts(dir) {
   return out || null;
 }
 
+// A THIRD-PARTY crate vendored into this repo (src-tauri/vendor/<crate>, e.g. the patched
+// portable-pty) is a path dependency with no registry source, but it is not ours: its
+// license/attribution must still be reproduced, exactly as when it came from crates.io.
+const isVendoredCrate = (p) => /[\\/]vendor[\\/]/.test(p.manifest_path);
+
 function rustDeps(manifestPath, label) {
   if (!existsSync(manifestPath)) return [];
   let meta;
@@ -48,7 +53,7 @@ function rustDeps(manifestPath, label) {
   for (const p of meta.packages || []) {
     // Skip our own crates (workspace members) and local path-only crates (no registry source).
     if (members.has(p.id)) continue;
-    if (!p.source) continue; // path dep (ours / vendored)
+    if (!p.source && !isVendoredCrate(p)) continue; // path dep (ours)
     deps.push({
       name: p.name,
       version: p.version,

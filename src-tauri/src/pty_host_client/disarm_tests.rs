@@ -13,6 +13,7 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle: Arc::new(HostRetention::Unknown),
             alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             lifecycle_token: Arc::new("tok".into()),

@@ -25,12 +25,12 @@
 use crate::ring::ReplayRing;
 use crate::util::find_utf8_boundary;
 use anyhow::Result;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtyPair, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
-use termflow_pty_protocol::da1::{send_da1_reply, StartupDa1};
+use termflow_pty_protocol::da1::{inheritable_cursor_row, StartupDa1, StartupReplies};
 use termflow_pty_protocol::pump::pump_output;
 use termflow_pty_protocol::{Data, SpawnSpec};
 use tokio::sync::mpsc::Sender;
@@ -42,6 +42,20 @@ type MasterSlot = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
 /// cascade-crash and kill every session.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Open the pseudoconsole. `inherit_cursor` (Windows only; the caller already checked the
+/// bundled ConPTY is active) creates it with `PSEUDOCONSOLE_INHERIT_CURSOR`, which makes
+/// ConPTY ask the terminal where the cursor is and start the child there. `portable-pty`
+/// has no switch for it, hence the vendored crate (`vendor/portable-pty/VENDORED.md`).
+fn open_pty(size: PtySize, inherit_cursor: bool) -> Result<PtyPair> {
+    #[cfg(windows)]
+    if inherit_cursor {
+        return portable_pty::win::conpty::ConPtySystem::default().openpty_inheriting_cursor(size);
+    }
+    #[cfg(not(windows))]
+    let _ = inherit_cursor;
+    native_pty_system().openpty(size)
 }
 
 pub struct Session {
@@ -90,13 +104,14 @@ impl Session {
         events: Sender<Data>,
         attached_initial: bool,
     ) -> Result<Session> {
-        let sys = native_pty_system();
-        let pair = sys.openpty(PtySize {
-            rows: spec.rows,
-            cols: spec.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })?;
+        // A restored terminal asks for its child to start on the row its replayed history ends
+        // on (see `SpawnSpec::initial_cursor_row`). Honoured only where ConPTY can; the reader's
+        // filter below is built from this same answer so the two cannot disagree.
+        let cursor_row = inheritable_cursor_row(spec.initial_cursor_row);
+        let pair = open_pty(
+            PtySize { rows: spec.rows, cols: spec.cols, pixel_width: 0, pixel_height: 0 },
+            cursor_row.is_some(),
+        )?;
 
         let mut cmd = CommandBuilder::new(&spec.shell);
         cmd.args(&spec.args);
@@ -147,7 +162,7 @@ impl Session {
             writer: writer.clone(),
             da1_reply_requested: da1_reply_requested.clone(),
         };
-        std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_platform()));
+        std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_spawn(cursor_row)));
 
         Ok(Session {
             tab_id,
@@ -317,13 +332,16 @@ fn run_reader<R: Read>(mut reader: R, sh: ReaderShared, mut da1: StartupDa1) {
     // True after a live frame was dropped under backpressure; the next
     // successful send is preceded by a Gap so the GUI resyncs.
     let mut lost = false;
+    let mut replies = StartupReplies::new(sh.writer.clone(), sh.tab_id.clone());
     pump_output(
         &mut reader,
         find_utf8_boundary,
         &mut da1,
-        |consumed| {
-            sh.da1_reply_requested.store(true, Ordering::Release);
-            send_da1_reply(sh.writer.clone(), sh.tab_id.clone(), consumed);
+        |reply| {
+            if reply.da1 {
+                sh.da1_reply_requested.store(true, Ordering::Release);
+            }
+            replies.send(reply);
         },
         |data| {
             let mut r = lock(&sh.ring);
@@ -415,6 +433,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            initial_cursor_row: None,
         }
     }
 
@@ -450,6 +469,7 @@ mod tests {
                 cwd: None,
                 cols: 80,
                 rows: 24,
+                initial_cursor_row: None,
             }
         } else {
             SpawnSpec {
@@ -460,6 +480,7 @@ mod tests {
                 cwd: None,
                 cols: 80,
                 rows: 24,
+                initial_cursor_row: None,
             }
         }
     }
@@ -512,6 +533,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            initial_cursor_row: None,
         };
         let sess = Session::spawn("tab-resize".into(), &spec, 4096, tx, true).unwrap();
         sess.resize(120, 40).expect("resize a live pty succeeds");
@@ -589,6 +611,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            initial_cursor_row: None,
         };
         let sess = Session::spawn("tab-bg".into(), &spec, 8192, tx, true).unwrap();
 
@@ -902,9 +925,10 @@ mod tests {
         let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
         for needle in [
             "let pair_reader = pair.master.try_clone_reader()?;",
-            "std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_platform()));",
+            "std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_spawn(cursor_row)));",
             "pump_output( &mut reader, find_utf8_boundary, &mut da1,",
-            "send_da1_reply(sh.writer.clone(), sh.tab_id.clone(), consumed)",
+            "StartupReplies::new(sh.writer.clone(), sh.tab_id.clone())",
+            "replies.send(reply);",
         ] {
             assert!(flat.contains(needle), "session.rs must contain `{needle}` outside comments");
         }
@@ -915,17 +939,13 @@ mod tests {
         assert_eq!(private_read_spellings("let n = r.read(&mut b)?;"), vec![".read("]);
     }
 
-    /// THE real-ConPTY test. `portable-pty` resolves kernel32-vs-bundled ONCE per
-    /// process, so running this in the shared test process could certify whichever
-    /// backend an earlier test happened to open. The outer test therefore re-executes
-    /// this binary with `TF_DA1_CHILD=1`, and the child preloads the bundled pair
-    /// BEFORE any `openpty`.
+    /// Re-execute this test binary running ONLY the body test `body`, in a fresh process, and
+    /// require it to print `marker`. `portable-pty` resolves kernel32-vs-bundled ONCE per
+    /// process, so running a real-ConPTY test in the shared test process could certify whichever
+    /// backend an earlier test happened to open: the child preloads the bundled pair BEFORE any
+    /// `openpty`.
     #[cfg(windows)]
-    #[test]
-    fn bundled_conpty_handshake_is_answered_by_the_host_session() {
-        if std::env::var_os("TF_DA1_CHILD").is_some() {
-            return; // the child runs the body below, not this driver
-        }
+    fn run_in_fresh_process(body: &str, marker: &str) {
         // Output goes to files (not pipes) so the parent can poll for a deadline without a
         // pipe-buffer deadlock; the body's own 12 s loop does not bound `Session::spawn` or teardown.
         /// Kills and reaps the child and removes the output files on EVERY exit path, including
@@ -947,14 +967,14 @@ mod tests {
         }
         let dir = std::env::temp_dir();
         let (out_path, err_path) = (
-            dir.join(format!("tf-da1-{}.out", std::process::id())),
-            dir.join(format!("tf-da1-{}.err", std::process::id())),
+            dir.join(format!("tf-da1-{body}-{}.out", std::process::id())),
+            dir.join(format!("tf-da1-{body}-{}.err", std::process::id())),
         );
         let mut guard = Cleanup { paths: vec![out_path.clone(), err_path.clone()], child: None };
         let (out_file, err_file) = (std::fs::File::create(&out_path).unwrap(), std::fs::File::create(&err_path).unwrap());
         guard.child = Some(
             std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["fresh_process_bundled_handshake_body", "--nocapture", "--test-threads=1"])
+                .args([body, "--nocapture", "--test-threads=1"])
                 .env("TF_DA1_CHILD", "1")
                 .stdout(out_file)
                 .stderr(err_file)
@@ -976,9 +996,27 @@ mod tests {
             std::fs::read_to_string(&out_path).unwrap_or_default(),
             std::fs::read_to_string(&err_path).unwrap_or_default()
         );
-        let status = status.unwrap_or_else(|| panic!("fresh-process handshake test hung (killed after 60 s):\n{text}"));
-        assert!(status.success(), "fresh-process handshake test failed:\n{text}");
-        assert!(text.contains("DA1-FRESH-OK"), "child did not report success (vacuous pass?):\n{text}");
+        let status = status.unwrap_or_else(|| panic!("fresh-process test `{body}` hung (killed after 60 s):\n{text}"));
+        assert!(status.success(), "fresh-process test `{body}` failed:\n{text}");
+        assert!(text.contains(marker), "child did not report success (vacuous pass?):\n{text}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_conpty_handshake_is_answered_by_the_host_session() {
+        if std::env::var_os("TF_DA1_CHILD").is_some() {
+            return; // the child runs the body below, not this driver
+        }
+        run_in_fresh_process("fresh_process_bundled_handshake_body", "DA1-FRESH-OK");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bundled_conpty_starts_the_child_on_the_row_the_spec_asks_for() {
+        if std::env::var_os("TF_DA1_CHILD").is_some() {
+            return;
+        }
+        run_in_fresh_process("fresh_process_inherit_cursor_body", "INHERIT-FRESH-OK");
     }
 
     #[cfg(windows)]
@@ -1003,6 +1041,7 @@ mod tests {
             cwd: None,
             cols: 100,
             rows: 30,
+            initial_cursor_row: None,
         };
         let (tx, mut rx) = channel(1024);
         let t0 = Instant::now();
@@ -1052,4 +1091,87 @@ mod tests {
         println!("DA1-FRESH-OK reply_requested_at={t_reply:?} child_output_at={t_nonce:?}");
     }
 
+    /// Spawn `echo NONCE` through a real `Session` asking for `initial_cursor_row`, and return
+    /// (everything the host forwarded, time of the nonce). The host answers ConPTY's startup
+    /// queries itself, so a passing run needs no renderer.
+    #[cfg(windows)]
+    fn forwarded_stream(row: Option<u16>, nonce: &str) -> (Vec<u8>, Duration) {
+        let spec = SpawnSpec {
+            shell: "cmd.exe".into(),
+            args: vec!["/D".into(), "/C".into(), format!("echo {nonce}")],
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 100,
+            rows: 30,
+            initial_cursor_row: row,
+        };
+        let (tx, mut rx) = channel(1024);
+        let t0 = Instant::now();
+        let sess = Session::spawn("tab-inherit-real".into(), &spec, 1 << 16, tx, true).unwrap();
+        let (mut all, mut t_nonce) = (Vec::<u8>::new(), None);
+        while t0.elapsed() < Duration::from_secs(12) {
+            match rx.try_recv() {
+                Ok(Data::Stdout { bytes, .. }) => {
+                    all.extend(bytes);
+                    if t_nonce.is_none() && String::from_utf8_lossy(&all).contains(nonce) {
+                        t_nonce = Some(t0.elapsed());
+                    }
+                }
+                Ok(Data::Exit { .. }) => break,
+                Ok(other) => panic!("unexpected frame from a healthy session: {other:?}"),
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
+        assert_eq!(sess.replay_from(0).1, all, "the ring equals the forwarded stream");
+        (all, t_nonce.expect("the child's output never arrived"))
+    }
+
+    /// The whole host-side feature against the REAL bundled ConPTY: a pseudoconsole created
+    /// inheriting row N asks `ESC[6n`, the host's reader answers it (stripping the query),
+    /// and ConPTY then starts the child on row N — visible as `ESC[N;1H` ahead of its output.
+    /// Two different rows are requested (12 and 5), each of which must produce its own
+    /// positioning and not the other's: a host that honoured one fixed row would pass with one.
+    /// The `None` run is the control: it must NOT move the cursor to either row, and must not
+    /// have been created inheriting (no `ESC[6n` answered, no stall).
+    #[cfg(windows)]
+    #[test]
+    fn fresh_process_inherit_cursor_body() {
+        if std::env::var_os("TF_DA1_CHILD").is_none() {
+            return; // only meaningful in the dedicated child process
+        }
+        let _ = termflow_pty_protocol::conpty::init_for_current_exe();
+        assert!(
+            termflow_pty_protocol::conpty::is_bundled_active(),
+            "the bundled ConPTY did not load, so this test would certify the inbox backend. \
+             Keep CARGO_TARGET_DIR under src-tauri/ (or unset)."
+        );
+        assert!(termflow_pty_protocol::da1::inherit_cursor_supported());
+        let nonce = "TF-INHERIT-NONCE-5c1e";
+
+        let positioning = |row: u16| format!("\u{1b}[{row};1H");
+        let mut slowest = Duration::ZERO;
+        for (row, other) in [(12u16, 5u16), (5, 12)] {
+            let (with_row, t_with) = forwarded_stream(Some(row), nonce);
+            slowest = slowest.max(t_with);
+            let text = String::from_utf8_lossy(&with_row).into_owned();
+            let at_row = text
+                .find(&positioning(row))
+                .unwrap_or_else(|| panic!("ConPTY never positioned the child on row {row}: {text:?}"));
+            let at_nonce = text.find(nonce).unwrap();
+            assert!(at_row < at_nonce, "the child's output must follow the positioning: {text:?}");
+            assert!(!text.contains(&positioning(other)), "asked for row {row}, ConPTY also moved to row {other}: {text:?}");
+            assert!(!with_row.windows(4).any(|w| w == b"\x1b[6n"), "the cursor query must not be forwarded: {text:?}");
+            assert!(!with_row.windows(3).any(|w| w == b"\x1b[c"), "the DA1 query must not be forwarded: {text:?}");
+            assert!(t_with < Duration::from_millis(2500), "un-answered ConPTY stalls >= 3 s; got {t_with:?}");
+        }
+
+        let (plain, _) = forwarded_stream(None, nonce);
+        let text = String::from_utf8_lossy(&plain).into_owned();
+        for row in [12u16, 5] {
+            assert!(!text.contains(&positioning(row)), "a spec without a row must start on row 1: {text:?}");
+        }
+
+        println!("INHERIT-FRESH-OK slowest_with_row={slowest:?}");
+    }
 }

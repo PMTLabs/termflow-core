@@ -193,7 +193,14 @@ async fn main() {
             // Drain/takeover is NOT implemented yet — do not advertise CAP_DRAIN.
             capabilities: termflow_pty_protocol::CAP_ATTACH_ACK
                 | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
-                | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL,
+                | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
+                // Only once the bundled ConPTY is loaded (`init_for_current_exe` above): the
+                // inbox one is not measured to honour an inherited cursor.
+                | if termflow_pty_protocol::da1::inherit_cursor_supported() {
+                    termflow_pty_protocol::CAP_INHERIT_CURSOR
+                } else {
+                    0
+                },
             // The bound applies to an authenticated, purpose-labelled LOCAL
             // hold and to the crash hold an unannounced disconnect opens
             // (`SessionManager::on_gui_disconnect`). Legacy/unlabelled sibling

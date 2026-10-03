@@ -5,7 +5,7 @@
 //! `terminal_display_name`). Split out of the former `commands.rs`.
 
 use tauri::State;
-use crate::state::AppState;
+use crate::state::{plan_restore, AppState, CursorFrame, ReplayPrefix};
 use crate::pty_manager;
 use std::collections::HashMap;
 use std::io::Write;
@@ -144,9 +144,11 @@ pub async fn create_terminal(
     // session, seed it into the fresh parser (via spawn_terminal, before the
     // reader thread starts — see the ratchet note on stage_scrollback) and stage
     // it as a one-shot prefix. The /snapshot endpoint prepends it on this
-    // terminal's first hydration, so the engine's existing reset()+write replay
-    // shows "old scrollback → divider → fresh prompt" with no engine change.
+    // terminal's first hydration, and the engine's reset()+write replay of it shows
+    // "old scrollback → divider → fresh prompt". The replay is placed so the renderer's
+    // cursor is on the row ConPTY believes the prompt is on (`state::restore_frame`).
     let history_prefix = tab_id.as_ref().and_then(|t| restore_prefix(state.inner(), t));
+    let (seed, cursor_row, staged) = plan_in_process_restore(history_prefix, rows, cols);
 
     let id = pty_manager::spawn_terminal(
         state.inner().clone(),
@@ -162,11 +164,12 @@ pub async fn create_terminal(
         // which then filed history under the ephemeral pc- id (review 062 F-01).
         tab_id,
         owning_tab_id,
-        history_prefix.clone(),
+        seed,
+        cursor_row,
         None,
     )?;
 
-    if let Some(prefix) = history_prefix {
+    if let Some(prefix) = staged {
         state.replay_prefix.insert(id.clone(), prefix);
     }
 
@@ -465,7 +468,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
         // history precedes the ring bytes in the parser (see stage_scrollback).
         // History is keyed by the LEAF; the parser it seeds is keyed by the
         // PROCESS id — the two are no longer the same string.
-        stage_scrollback(state, &id, &process_id);
+        stage_scrollback(state, &id, &process_id, CursorFrame::Unmanaged, rows, cols);
         // RP-3: transactional when the host supports it (AttachAck), silently
         // legacy otherwise. A confirmed-dead session still completes reattach —
         // the replayed ring + Exit tombstone render the final state honestly.
@@ -488,8 +491,11 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
-    stage_scrollback(state, &id, &process_id);
-    let spec = pty_manager::build_spawn_spec(
+    // A restore needs ConPTY's cursor frame to match the replay the renderer is about to show
+    // (see `state::restore_frame`): ask the host to start the child on the row the replay ends on
+    // when it can, otherwise push the replay above the viewport so row 1 is true.
+    let cursor_row = stage_scrollback(state, &id, &process_id, CursorFrame::choose(client.inherit_cursor()), rows, cols);
+    let mut spec = pty_manager::build_spawn_spec(
         &session_key,
         // The LEAF, not the session key: this is what the child shell reads as
         // TERMFLOW_TERMINAL_ID to identify itself to MCP (design 014 A6.1).
@@ -504,6 +510,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
             .exempt_loopback_from_proxy
             .load(std::sync::atomic::Ordering::Relaxed),
     );
+    spec.initial_cursor_row = cursor_row;
     // Timed because this round trip is the user-visible "how long until my new
     // tab appears": the sidecar answers `Spawn` from ONE sequential frame loop,
     // so any slow inline work in another frame's handler (notably a `Close`'s
@@ -702,10 +709,46 @@ fn restore_prefix<R: tauri::Runtime>(state: &AppState<R>, history_key: &str) -> 
 /// MUST run after init_screen and BEFORE any live output can reach the parser
 /// (host attach releases replay bytes; spawn starts the shell), or the seed
 /// would land after newer bytes and disorder the persisted history.
-fn stage_scrollback<R: tauri::Runtime>(state: &AppState<R>, history_key: &str, target_id: &str) {
-    let Some(prefix) = restore_prefix(state, history_key) else { return };
-    state.feed_screen(target_id, prefix.as_bytes());
-    state.replay_prefix.insert(target_id.to_string(), prefix);
+///
+/// `frame` says how the restored replay and the shell's cursor are kept in one frame
+/// (`state::restore_frame`); `rows`×`cols` is the size the terminal is being created at.
+/// Returns the row to put in `SpawnSpec::initial_cursor_row` — `Some` only when the
+/// pseudoconsole is to be created inheriting the cursor.
+fn stage_scrollback<R: tauri::Runtime>(
+    state: &AppState<R>,
+    history_key: &str,
+    target_id: &str,
+    frame: CursorFrame,
+    rows: u16,
+    cols: u16,
+) -> Option<u16> {
+    let prefix = restore_prefix(state, history_key)?;
+    let plan = plan_restore(&prefix, rows, cols, frame);
+    state.feed_screen(target_id, plan.seed.as_bytes());
+    state.replay_prefix.insert(target_id.to_string(), ReplayPrefix { text: prefix, anchor_row: plan.anchor_row });
+    plan.spawn_cursor_row
+}
+
+/// [`stage_scrollback`] for the in-process spawn, which seeds its parser itself (inside
+/// `spawn_terminal`, after the pseudoconsole is open). Returns what to hand to `spawn_terminal`
+/// (the parser seed, the row to open the pseudoconsole inheriting) and what to stage for the
+/// renderer once it has returned.
+fn plan_in_process_restore(
+    history_prefix: Option<String>,
+    rows: u16,
+    cols: u16,
+) -> (Option<String>, Option<u16>, Option<ReplayPrefix>) {
+    // Whether the in-process pseudoconsole can inherit the cursor is only known once the bundled
+    // ConPTY has been loaded, which `spawn_terminal` would otherwise do after this decision.
+    pty_manager::ensure_bundled_conpty();
+    let frame = CursorFrame::choose(termflow_pty_protocol::da1::inherit_cursor_supported());
+    match history_prefix {
+        Some(prefix) => {
+            let plan = plan_restore(&prefix, rows, cols, frame);
+            (Some(plan.seed), plan.spawn_cursor_row, Some(ReplayPrefix { text: prefix, anchor_row: plan.anchor_row }))
+        }
+        None => (None, None, None),
+    }
 }
 
 /// Spawn in-process when the sidecar is unavailable. Preserves the tab_id and
@@ -737,6 +780,7 @@ fn host_fallback(
     // Seed + register the tab_id via spawn_terminal (both land before the reader
     // thread starts), then stage the renderer's one-shot prefix under the new id.
     let history_prefix = restore_prefix(state, tab_id);
+    let (seed, cursor_row, staged) = plan_in_process_restore(history_prefix, rows, cols);
     // In-process fallback: `spawn_terminal` mints its own `pc-` id, so only the
     // leaf and the owner are needed here — see `resolve_owner`.
     let leaf = tab_id.to_string();
@@ -752,10 +796,11 @@ fn host_fallback(
         name,
         Some(leaf),
         owner,
-        history_prefix.clone(),
+        seed,
+        cursor_row,
         Some(cg),
     )?;
-    if let Some(prefix) = history_prefix {
+    if let Some(prefix) = staged {
         state.replay_prefix.insert(fallback_id.clone(), prefix);
     }
     Ok(fallback_id)
@@ -1009,7 +1054,7 @@ pub async fn close_terminal(
 // (see api_server.rs for the precedent).
 #[cfg(all(test, feature = "integration-tests"))]
 mod scrollback_restore_tests {
-    use crate::state::AppState;
+    use crate::state::{AppState, CursorFrame};
 
     fn temp_db(tag: &str) -> std::path::PathBuf {
         let mut p = std::env::temp_dir();
@@ -1108,7 +1153,7 @@ mod scrollback_restore_tests {
         // App restart: fresh parser for the same tab, restore staged, new output.
         state.init_screen("tb-hist", 24, 80);
         register_terminal(&state, "tb-hist");
-        super::stage_scrollback(&state, "tb-hist", "tb-hist");
+        super::stage_scrollback(&state, "tb-hist", "tb-hist", CursorFrame::Unmanaged, 24, 80);
         state.feed_screen("tb-hist", b"new-session output\r\n");
 
         // The next flush must preserve the restored history.
@@ -1122,6 +1167,53 @@ mod scrollback_restore_tests {
         assert!(stored.contains("new-session output"), "new output must be persisted");
         // The renderer's one-shot replay prefix must still be staged unchanged.
         assert!(state.replay_prefix.get("tb-hist").is_some(), "renderer prefix must stay staged");
+    }
+
+    /// The three things a restore must keep in ONE frame: the row the renderer is told to anchor
+    /// on, the row ConPTY is asked to start the child on, and where the backend parser's cursor
+    /// sits. Any two disagreeing is the reported defect (typed text on the old content).
+    #[test]
+    fn stage_scrollback_hands_the_renderer_the_spawn_and_the_parser_one_frame() {
+        let mut long_src = vt100::Parser::new(24, 80, 5000);
+        for i in 0..100 {
+            long_src.process(format!("old-line-{:04}\r\n", i).as_bytes());
+        }
+        let long = String::from_utf8_lossy(&crate::state::render_full_scrollback(long_src.screen_mut()).expect("dump")).into_owned();
+        for (tag, blob) in [("short", "one\r\ntwo".to_string()), ("long", long)] {
+            for frame in [CursorFrame::Inherited, CursorFrame::AboveTheFold, CursorFrame::Unmanaged] {
+                let (_app, state) = mock_state();
+                let key = format!("tb-{tag}-{frame:?}");
+                state.history_store.init(&temp_db(&key));
+                state.history_store.upsert(&key, std::slice::from_ref(&blob), 1);
+                state.init_screen(&key, 24, 80);
+                register_terminal(&state, &key);
+
+                let spawn_row = super::stage_scrollback(&state, &key, &key, frame, 24, 80);
+
+                let staged = state.replay_prefix.get(&key).expect("a restore stages its prefix").clone();
+                assert!(staged.text.ends_with(crate::state::REPLAY_SEPARATOR), "{tag}/{frame:?}: the renderer is sent the replay itself");
+                let parser_row = {
+                    let screen = state.terminal_screens.get(&key).expect("parser");
+                    let parser = screen.lock().unwrap();
+                    parser.screen().cursor_position().0 + 1
+                };
+                match frame {
+                    CursorFrame::Inherited => {
+                        assert!(staged.anchor_row.is_some(), "{tag}");
+                        assert_eq!(spawn_row, staged.anchor_row, "{tag}: ConPTY is asked for the row the renderer anchors on");
+                        assert_eq!(staged.anchor_row, Some(parser_row), "{tag}: and the parser agrees");
+                    }
+                    CursorFrame::AboveTheFold => {
+                        assert_eq!(spawn_row, None, "{tag}: no row is asked for, ConPTY starts on row 1");
+                        assert_eq!(staged.anchor_row, Some(1), "{tag}");
+                        assert_eq!(parser_row, 1, "{tag}: the parser's screen is the empty one the renderer leaves");
+                    }
+                    CursorFrame::Unmanaged => {
+                        assert_eq!((spawn_row, staged.anchor_row), (None, None), "{tag}: unchanged behaviour");
+                    }
+                }
+            }
+        }
     }
 
     /// A dying session must persist its final parser state under its tab_id
@@ -1307,6 +1399,35 @@ mod host_identity_tests {
     fn a_supplied_owner_is_carried_through() {
         let h = host_identity("tm-9f2c1a4b7", Some("tm-9f2c1a4b7"), Some("tb-4e8d0c2f1"));
         assert_eq!(h.owner.as_deref(), Some("tb-4e8d0c2f1"));
+    }
+}
+
+/// Plain `#[cfg(test)]` (not `integration-tests`): needs no tauri runtime, so it runs on Windows too.
+#[cfg(test)]
+mod restore_frame_wiring_tests {
+    /// The in-process spawn decides the same three things before `spawn_terminal` runs. The
+    /// invariant that matters whatever this machine's ConPTY: a row is asked for only together
+    /// with an identical anchor, and a restore with no anchor asks for no row.
+    #[test]
+    fn the_in_process_plan_asks_for_a_row_only_with_the_same_anchor() {
+        assert_eq!(super::plan_in_process_restore(None, 24, 80), (None, None, None));
+        let prefix = format!("one\r\ntwo{}", crate::state::REPLAY_SEPARATOR);
+        let (seed, cursor_row, staged) = super::plan_in_process_restore(Some(prefix.clone()), 24, 80);
+        let staged = staged.expect("a restore stages its prefix");
+        assert_eq!(staged.text, prefix);
+        assert!(seed.is_some());
+        // `plan_in_process_restore` loads the bundled ConPTY first, so this reads the answer it acted on.
+        if termflow_pty_protocol::da1::inherit_cursor_supported() {
+            assert!(cursor_row.is_some(), "a capable in-process ConPTY is asked for a row");
+            assert_eq!(cursor_row, staged.anchor_row, "and it is the row the renderer anchors on");
+        } else {
+            assert_eq!(cursor_row, None, "one that cannot honour a row is not asked for one");
+        }
+        if cfg!(windows) {
+            assert!(staged.anchor_row.is_some(), "Windows always aligns the frames, one way or the other");
+        } else {
+            assert_eq!(staged.anchor_row, None);
+        }
     }
 }
 

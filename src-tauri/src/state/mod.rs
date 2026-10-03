@@ -28,7 +28,10 @@ pub(crate) mod leaf_storage;
 mod leaf_storage_tests;
 #[cfg(test)]
 mod storage_wiring_tests;
+#[cfg(test)]
+mod inherit_cursor_wiring_tests;
 mod render;
+mod restore_frame;
 mod engine_host;
 mod reattach;
 #[cfg(test)]
@@ -52,6 +55,7 @@ pub use types::*;
 pub use incarnation_ids::{IdAllocator, mint_process_id, mint_session_key, parse_session_key, restore_candidate, SessionKeyKind};
 pub use host_routes::HostRoutes;
 pub use host_keys::{HostKeys, KeyState, CloseState, KeyStage, StageMode, CreateAdmission, CreateMode, CloseStorage, EndKind, ShellStage, StagedShell, OwnerState, Completion, CloseAction, JOIN_DEADLINE};
+pub use restore_frame::{plan_restore, CursorFrame, RestorePlan};
 pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, strip_cursor_state_tail, tail_text_with};
 pub use reattach::{ReattachAction, ReattachPlan, plan_reattach};
 pub use host_table::{Admission, Busy, DrainGuard, DrainRefusal, HostTable, QuiesceGuard, QuiesceReason, Ticket, LIFECYCLE_BUSY};

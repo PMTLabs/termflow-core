@@ -31,23 +31,27 @@ struct HostFlags {
     endpoint: String,
     attach_acks: bool,
     shutdown_control: bool,
+    /// The host can start a child on a requested cursor row (`CAP_INHERIT_CURSOR`). False for
+    /// no record: a restore then keeps the child on row 1 rather than asking for a row.
+    inherit_cursor: bool,
 }
 
 fn host_flags(plan: &ConnectPlan, record_less_endpoint: &str) -> Result<HostFlags, String> {
     match plan {
         ConnectPlan::LegacyOrNone => {
             log::info!("[HOTSWAP] no host discovery record — legacy/none; using {record_less_endpoint}");
-            Ok(HostFlags { endpoint: record_less_endpoint.to_owned(), attach_acks: false, shutdown_control: true })
+            Ok(HostFlags { endpoint: record_less_endpoint.to_owned(), attach_acks: false, shutdown_control: true, inherit_cursor: false })
         }
         ConnectPlan::Bootstrap { endpoint, version, instance_id, host_caps, lifecycle: _ } => {
             let attach_acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
             let shutdown_control = host_caps & termflow_pty_protocol::CAP_SHUTDOWN_CONTROL != 0;
+            let inherit_cursor = host_caps & termflow_pty_protocol::CAP_INHERIT_CURSOR != 0;
             log::info!(
                 "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
                  caps={host_caps:#x} endpoint={endpoint} (attach_acks={attach_acks}, \
-                 shutdown_control={shutdown_control})"
+                 shutdown_control={shutdown_control}, inherit_cursor={inherit_cursor})"
             );
-            Ok(HostFlags { endpoint: endpoint.clone(), attach_acks, shutdown_control })
+            Ok(HostFlags { endpoint: endpoint.clone(), attach_acks, shutdown_control, inherit_cursor })
         }
         ConnectPlan::Incompatible { instance_id } => {
             // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
@@ -196,6 +200,15 @@ impl<R: Runtime> AppState<R> {
         // A host we spawned ourselves (this build's bundled sidecar, installed
         // under its own content hash by `resolve_host_launch`) announces too.
         client.set_shutdown_control(flags.shutdown_control || origin == HostConnectionOrigin::SpawnedHere);
+        // A host launched just now is judged by the record that names the process serving this
+        // connection, not by the one `flags` was made from (read before the launch; possibly a
+        // host that has since died). An adopted host keeps its selected record's verdict unless
+        // the connection shows that record is another process's.
+        client.set_inherit_cursor(crate::pty_host_client::connected_host_inherits_cursor(
+            origin,
+            crate::pty_host_client::adopted_host_inherits_cursor(flags.inherit_cursor, candidate.pid, client.server_pid()),
+            || crate::pty_host_client::spawned_host_inherits_cursor(client.server_pid()),
+        ));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })
@@ -217,6 +230,13 @@ impl<R: Runtime> AppState<R> {
         })?;
         client.set_attach_acks(flags.attach_acks);
         client.set_shutdown_control(flags.shutdown_control);
+        // Always adopted: the selected record's verdict, unless the connection shows that record
+        // names another process than the one answering (the same rule as the primary connect).
+        client.set_inherit_cursor(crate::pty_host_client::adopted_host_inherits_cursor(
+            flags.inherit_cursor,
+            candidate.pid,
+            client.server_pid(),
+        ));
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
         let build_id = candidate.record.as_ref().and_then(|r| r.build_id.clone());
         client.set_advertised_build_id(build_id.clone());

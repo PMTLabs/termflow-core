@@ -10,6 +10,10 @@ export interface TerminalSnapshot {
   snapshot: string;
   rows: number;
   cols: number;
+  // Restore replay only (see terminal-core's TerminalSnapshot): the snapshot is a previous
+  // session's scrollback, not the screen, and `anchorRow` is where the cursor must end up.
+  prefixOnly?: boolean;
+  anchorRow?: number;
 }
 
 export interface NetworkConfig {

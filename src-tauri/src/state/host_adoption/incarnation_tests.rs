@@ -24,7 +24,7 @@ fn machine(sessions: Vec<termflow_pty_protocol::SessionMeta>, ids: IdAllocator) 
 }
 
 fn spec() -> SpawnSpec {
-    SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 }
+    SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24, initial_cursor_row: None }
 }
 
 async fn execute(port: &FakePort, process: &str, placement: Placement) -> String {
@@ -244,7 +244,7 @@ fn process_allocator_and_host_spawn_wiring_have_no_short_id_reconstruction() {
     let local = production(include_str!("../../pty_manager/spawn.rs"));
     let local_body = fn_body(&local, "fn spawn_terminal(");
     assert!(local_body.contains("local_identity(&app_state.ids, renderer_terminal_id.as_deref())?"));
-    assert!(local_body.find("local_identity(").unwrap() < local_body.find("openpty(").unwrap());
+    assert!(local_body.find("local_identity(").unwrap() < local_body.find("open_pty(").unwrap());
     assert!(fn_body(&local, "fn local_identity(").contains("ids.mint_process_id()?"));
     let routing = production(include_str!("../host_routing.rs"));
     assert!(fn_body(&routing, "async fn place_process_create(").contains("self.ids.mint_process_id()?"));
