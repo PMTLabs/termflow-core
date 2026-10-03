@@ -34,3 +34,8 @@ windows-sys = { version = "0.59", features = [
 # shows a proper icon in Task Manager. Windows-only; no effect on macOS/Linux.
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# TermFlow-patched copy of portable-pty 0.8.1 (opt-in PSEUDOCONSOLE_INHERIT_CURSOR).
+# Same crate the app uses; see ../vendor/portable-pty/VENDORED.md.
+[patch.crates-io]
+portable-pty = { path = "../vendor/portable-pty" }

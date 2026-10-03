@@ -22,6 +22,7 @@ fn spawn_spec() -> SpawnSpec {
         cwd: None,
         cols: 80,
         rows: 24,
+        initial_cursor_row: None,
     }
 }
 

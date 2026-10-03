@@ -16,7 +16,7 @@ fn machine(spec: HostSpec) -> (Arc<World>, FakePort) {
 }
 
 fn spec() -> SpawnSpec {
-    SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 }
+    SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24, initial_cursor_row: None }
 }
 
 async fn until(mut predicate: impl FnMut() -> bool) {

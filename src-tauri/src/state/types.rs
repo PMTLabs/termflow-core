@@ -18,6 +18,17 @@ use super::render::FocusReportingTracker;
 /// the screen snapshot that follows it doesn't paint over it.
 pub const REPLAY_SEPARATOR: &str = "\r\n\x1b[2m──── session restored ──── \x1b[0m\r\n\r\n";
 
+/// A restored terminal's one-shot replay for the renderer's first hydration: the previous
+/// session's scrollback (blob + [`REPLAY_SEPARATOR`]) and where the renderer must put its
+/// cursor afterwards (see `restore_frame`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayPrefix {
+    pub text: String,
+    /// The row (1-based) the shell's prompt will be on in ConPTY's frame. `None`: leave the
+    /// cursor where the replay ended.
+    pub anchor_row: Option<u16>,
+}
+
 /// The boot window's label (Tauri's default when `tauri.conf.json` defines no
 /// explicit `label`). Also the fallback target for API/MCP terminal routing.
 pub const DEFAULT_ACTIVE_WINDOW: &str = "main";
@@ -551,7 +562,7 @@ pub struct AppState<R: Runtime = Wry> {
     pub history_dirty: Arc<DashMap<String, ()>>,
     // One-shot restore prefix (previous-session scrollback) per processId, staged by
     // create_terminal and consumed by the /snapshot endpoint on first hydration.
-    pub replay_prefix: Arc<DashMap<String, String>>,
+    pub replay_prefix: Arc<DashMap<String, ReplayPrefix>>,
     // The window label that API/MCP-created terminals route to. The create event is
     // BROADCAST with this label in its payload; each window ignores it unless it
     // matches its own label (the proven app:close-requested pattern — a bare emit_to

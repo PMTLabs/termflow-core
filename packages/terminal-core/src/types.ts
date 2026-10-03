@@ -1,6 +1,22 @@
 import type { FontWeight, Terminal } from '@xterm/xterm';
 
-export interface TerminalSnapshot { snapshot: string; rows: number; cols: number }
+export interface TerminalSnapshot {
+  snapshot: string;
+  rows: number;
+  cols: number;
+  /**
+   * The snapshot is NOT the terminal's screen but only a restored session's previous scrollback
+   * (plus the "session restored" divider). Whatever the new shell printed since it started is
+   * not in it, so output the engine buffered while hydrating must be kept and written after it
+   * instead of being discarded as "already reflected in the snapshot".
+   */
+  prefixOnly?: boolean;
+  /**
+   * 1-based row the cursor must be on after the replay: the row ConPTY believes the shell's prompt
+   * is on. Absent = leave the cursor where the replay ended. See `restoreReplay.ts`.
+   */
+  anchorRow?: number;
+}
 export interface Disposable { dispose(): void }
 
 // Backlog 011 prompt gate (see TerminalEngine's promptOscSeen/promptArmed doc

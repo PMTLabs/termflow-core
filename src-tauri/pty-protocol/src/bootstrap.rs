@@ -58,6 +58,11 @@ pub const CAP_LIFECYCLE_CONTRACT: u32 = 1 << 2;
 /// this bit MUST send `Shutdown` on an intentional exit, or its shells outlive
 /// it for the retention window. Absent ⇒ legacy host: disconnect is teardown.
 pub const CAP_SHUTDOWN_CONTROL: u32 = 1 << 3;
+/// Host honours `SpawnSpec::initial_cursor_row`: it creates the pseudoconsole inheriting the
+/// cursor and answers ConPTY's startup cursor query with that row. Advertised only when the
+/// host's ConPTY is the bundled one, which is the only one this was measured against. A GUI
+/// that does not see this bit must not assume the shell's prompt sits on the requested row.
+pub const CAP_INHERIT_CURSOR: u32 = 1 << 4;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

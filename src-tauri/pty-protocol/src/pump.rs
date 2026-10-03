@@ -7,7 +7,7 @@
 //! boundary function (each crate already has its own, unchanged), what `emit` does
 //! with a finished chunk, and what happens when the handshake is answered.
 
-use crate::da1::StartupDa1;
+use crate::da1::{StartupDa1, StartupReply};
 use std::io::Read;
 
 /// How the stream ended.
@@ -25,13 +25,16 @@ pub enum PumpEnd {
 /// emitted through the same `emit`, so a chunk boundary can never reorder or drop
 /// the last bytes.
 ///
-/// `on_answered(consumed)` fires exactly once, when the startup DA1 has been removed
-/// from the stream; the caller must then send [`crate::da1::DA1_REPLY`] to the PTY.
+/// `on_reply` fires whenever the startup filter removed a query from the stream and a reply
+/// is now due: once for the startup cursor-position query (only when the filter was given a
+/// cursor row) and once for the startup DA1, or once for both when they arrive in the same
+/// read. The caller must send the reply bytes to the PTY, in the order given — the cursor
+/// report has to reach ConPTY before the DA1 answer does (see [`crate::da1::StartupReplies`]).
 pub fn pump_output<R: Read>(
     reader: &mut R,
     boundary: fn(&[u8]) -> usize,
     da1: &mut StartupDa1,
-    mut on_answered: impl FnMut(usize),
+    mut on_reply: impl FnMut(StartupReply<'_>),
     mut emit: impl FnMut(Vec<u8>),
 ) -> PumpEnd {
     let mut buf = [0u8; 4096];
@@ -42,8 +45,13 @@ pub fn pump_output<R: Read>(
             Ok(n) => {
                 let was_armed = da1.is_armed();
                 let filtered = da1.filter(&buf[..n]);
-                if filtered.answered {
-                    on_answered(filtered.consumed);
+                if !filtered.reply.is_empty() {
+                    on_reply(StartupReply {
+                        bytes: &filtered.reply,
+                        cursor: filtered.cursor_answered,
+                        da1: filtered.answered,
+                        consumed: filtered.consumed,
+                    });
                 } else if was_armed && !da1.is_armed() {
                     log::debug!(
                         "[CONPTY] startup DA1 filter retired after {} bytes without seeing a query",
@@ -138,7 +146,7 @@ mod tests {
     fn run(mut r: Script, armed: bool) -> Run {
         let mut da1 = StartupDa1::new(armed);
         let (mut emitted, mut answered_at) = (Vec::new(), Vec::new());
-        let end = pump_output(&mut r, boundary, &mut da1, |c| answered_at.push(c), |d| emitted.push(d));
+        let end = pump_output(&mut r, boundary, &mut da1, |r| answered_at.push(r.consumed), |d| emitted.push(d));
         Run { emitted, answered_at, end }
     }
 

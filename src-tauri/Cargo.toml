@@ -174,3 +174,9 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
+
+# TermFlow-patched copy of portable-pty 0.8.1: adds an opt-in
+# PSEUDOCONSOLE_INHERIT_CURSOR so a restored terminal's ConPTY starts its cursor on the
+# row the replayed history left it. See vendor/portable-pty/VENDORED.md.
+[patch.crates-io]
+portable-pty = { path = "vendor/portable-pty" }

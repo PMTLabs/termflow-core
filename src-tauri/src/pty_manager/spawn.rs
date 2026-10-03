@@ -64,6 +64,36 @@ fn find_utf8_boundary(data: &[u8]) -> usize {
     0
 }
 
+/// Sideload the modern ConPTY once per process, before the first pseudoconsole opens
+/// (`portable-pty` resolves its function table once). Public so a caller can ask what the
+/// in-process pseudoconsole will be able to do (`da1::inherit_cursor_supported`) BEFORE it
+/// calls [`spawn_terminal`]. A no-op off Windows.
+pub fn ensure_bundled_conpty() {
+    #[cfg(windows)]
+    {
+        static CONPTY_INIT: std::sync::Once = std::sync::Once::new();
+        CONPTY_INIT.call_once(|| {
+            let _ = termflow_pty_protocol::conpty::init_for_current_exe();
+        });
+    }
+}
+
+/// Open the pseudoconsole. `inherit_cursor` (Windows only; the caller already checked the
+/// bundled ConPTY is active) creates it with `PSEUDOCONSOLE_INHERIT_CURSOR`: ConPTY asks the
+/// terminal where the cursor is and starts the child there. `portable-pty` has no switch for it,
+/// hence the vendored crate (`vendor/portable-pty/VENDORED.md`).
+fn open_pty(size: PtySize, inherit_cursor: bool) -> Result<portable_pty::PtyPair, String> {
+    #[cfg(windows)]
+    if inherit_cursor {
+        return portable_pty::win::conpty::ConPtySystem::default()
+            .openpty_inheriting_cursor(size)
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(windows))]
+    let _ = inherit_cursor;
+    NativePtySystem::default().openpty(size).map_err(|e| e.to_string())
+}
+
 /// Prepare both local identities before any PTY or child can be created. The
 /// shell reads the durable leaf when present, not the per-run process handle.
 fn local_identity(ids: &crate::state::IdAllocator, leaf: Option<&str>) -> Result<(String, String), String> {
@@ -121,6 +151,11 @@ pub fn spawn_terminal(
     // next flush preserves it instead of overwriting the stored row with only this
     // session's content (the scrollback-persistence "ratchet" bug).
     history_seed: Option<String>,
+    // `Some(row)` opens the pseudoconsole inheriting the cursor, so the child starts on `row`
+    // instead of row 1 — what makes a restored terminal's prompt the row its replay put the
+    // cursor on (`state::restore_frame`). Honoured only when the bundled ConPTY is loaded; the
+    // caller decided `history_seed` on the same fact, so it asks only when it will be.
+    initial_cursor_row: Option<u16>,
     admission: Option<u64>,
 ) -> Result<String, String> {
     let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
@@ -140,14 +175,8 @@ pub fn spawn_terminal(
     if let Some(old) = old { app_state.dispose_staged(&old); }
     let owner_leaf = leaf.to_string();
     // Plan 049: sideload modern ConPTY once, before the first pseudoconsole opens.
-    #[cfg(windows)]
-    {
-        static CONPTY_INIT: std::sync::Once = std::sync::Once::new();
-        CONPTY_INIT.call_once(|| {
-            let _ = termflow_pty_protocol::conpty::init_for_current_exe();
-        });
-    }
-    let pty_system = NativePtySystem::default();
+    ensure_bundled_conpty();
+    let cursor_row = termflow_pty_protocol::da1::inheritable_cursor_row(initial_cursor_row);
     
     let size = PtySize {
         rows,
@@ -269,7 +298,7 @@ pub fn spawn_terminal(
         }
     }
 
-    let pair = pty_system.openpty(size).map_err(|e| e.to_string())?;
+    let pair = open_pty(size, cursor_row.is_some())?;
     
     let child = pair.slave.spawn_command(cmd_builder).map_err(|e| e.to_string())?;
     let pid = child.process_id().unwrap_or(0);
@@ -348,14 +377,13 @@ pub fn spawn_terminal(
         // The read loop is shared with the pty-host session reader (plan 050): it applies
         // the ConPTY startup-handshake filter, the 4KB-read UTF-8 carry (an incomplete
         // trailing scalar waits for the next read) and the ordered EOF/error tail.
-        let mut da1 = termflow_pty_protocol::da1::StartupDa1::for_platform();
+        let mut da1 = termflow_pty_protocol::da1::StartupDa1::for_spawn(cursor_row);
+        let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone());
         termflow_pty_protocol::pump::pump_output(
             &mut reader,
             find_utf8_boundary,
             &mut da1,
-            |consumed| {
-                termflow_pty_protocol::da1::send_da1_reply(writer.clone(), thread_id.clone(), consumed)
-            },
+            |reply| replies.send(reply),
             |data| {
                 // Producer heartbeat for the pipeline watchdog (lib.rs):
                 // "produced advances while consumed doesn't" = stalled consumer.
@@ -455,9 +483,12 @@ mod reader_wiring_tests {
         for needle in [
             "let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;",
             "let mut reader = reader;",
-            "da1::StartupDa1::for_platform()",
+            "da1::StartupDa1::for_spawn(cursor_row)",
+            "da1::StartupReplies::new(writer.clone(), thread_id.clone())",
             "pump::pump_output( &mut reader, find_utf8_boundary, &mut da1,",
-            "da1::send_da1_reply(writer.clone(), thread_id.clone(), consumed)",
+            "|reply| replies.send(reply),",
+            "let cursor_row = termflow_pty_protocol::da1::inheritable_cursor_row(initial_cursor_row);",
+            "let pair = open_pty(size, cursor_row.is_some())?;",
         ] {
             assert!(flat.contains(needle), "spawn.rs must contain `{needle}` outside comments");
         }

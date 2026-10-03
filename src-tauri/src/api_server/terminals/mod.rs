@@ -832,9 +832,9 @@ pub(crate) async fn get_terminal_snapshot(
     // after the divider, pushing the restored content up into scrollback where the
     // user can scroll back to it.
     if let Some((_, prefix)) = state.replay_prefix.remove(&id) {
-        log::info!("Restored {} bytes of prior-session scrollback for terminal {}", prefix.len(), id);
+        log::info!("Restored {} bytes of prior-session scrollback for terminal {}", prefix.text.len(), id);
         let (rows, cols) = terminal_size_for_output(&state, &id);
-        return Json(json!({ "snapshot": prefix, "rows": rows, "cols": cols }));
+        return Json(restore_snapshot_body(&prefix, rows, cols));
     }
     match state.screen_snapshot(&id) {
         Some(mut bytes) => {
@@ -854,6 +854,22 @@ pub(crate) async fn get_terminal_snapshot(
             Json(json!({ "snapshot": "", "rows": 0, "cols": 0 }))
         }
     }
+}
+
+/// The `/snapshot` body for a restore replay.
+///
+/// `prefixOnly` says the snapshot is NOT the terminal's screen: it holds only the previous session's
+/// scrollback, so whatever the shell printed since it started (live output the renderer already
+/// received) is not in it and must be kept, not discarded as a snapshot would let it be.
+/// `anchorRow` is the row the renderer must put its cursor on after the replay, the row ConPTY
+/// believes the shell's prompt is on (`state::restore_frame`); absent when nothing needs aligning,
+/// and the renderer then leaves the cursor where the replay ended.
+pub(crate) fn restore_snapshot_body(prefix: &crate::state::ReplayPrefix, rows: u16, cols: u16) -> serde_json::Value {
+    let mut body = json!({ "snapshot": prefix.text, "rows": rows, "cols": cols, "prefixOnly": true });
+    if let Some(row) = prefix.anchor_row {
+        body["anchorRow"] = json!(row);
+    }
+    body
 }
 
 /// The `GET /api/terminals/:id/screen` response body, extracted so a unit test can pin

@@ -18,7 +18,7 @@ fn secs(n: u64) -> Duration {
 }
 
 fn spawn_spec() -> SpawnSpec {
-    SpawnSpec { shell: "sh".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 }
+    SpawnSpec { shell: "sh".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24, initial_cursor_row: None }
 }
 
 fn frozen(name: &str) -> HostCandidate {

@@ -174,6 +174,12 @@ pub struct PtyHostClient {
     /// shells running for the host's retention window. A legacy host tears
     /// down on disconnect and would never ack, so it must not be asked.
     shutdown_control: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the connected host advertised `CAP_INHERIT_CURSOR`: its bundled ConPTY
+    /// can start a child on the row `SpawnSpec::initial_cursor_row` names. A restored
+    /// terminal needs that for ConPTY's cursor frame to match the renderer's (see
+    /// `state::restore_frame`). False for a legacy host, an elevated host, and one whose
+    /// record says no: the restore then keeps the child on row 1 instead.
+    inherit_cursor: Arc<std::sync::atomic::AtomicBool>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -258,6 +264,17 @@ impl PtyHostClient {
     /// `Shutdown` to tear down (`CAP_SHUTDOWN_CONTROL`; see field doc).
     pub fn set_shutdown_control(&self, v: bool) {
         self.shutdown_control.store(v, Ordering::Release);
+    }
+
+    /// Mark that the connected host can start a child on a requested cursor row
+    /// (`CAP_INHERIT_CURSOR`; see field doc).
+    pub fn set_inherit_cursor(&self, v: bool) {
+        self.inherit_cursor.store(v, Ordering::Release);
+    }
+
+    /// Whether a `Spawn` to this host may carry `initial_cursor_row` (see field doc).
+    pub fn inherit_cursor(&self) -> bool {
+        self.inherit_cursor.load(Ordering::Acquire)
     }
 
     /// Whether an intentional exit must announce itself to this host.
@@ -804,6 +821,7 @@ where
         survives_hotswap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
@@ -1800,6 +1818,21 @@ fn advertised_retention(rec: &termflow_pty_protocol::HostRecord) -> HostRetentio
     }
 }
 
+/// Whether a host's discovery record advertises `CAP_INHERIT_CURSOR`. No record (a legacy
+/// host, or none) is a "no": it cannot be asked for a row it was never built to honour.
+pub fn host_inherits_cursor(record: Option<&termflow_pty_protocol::HostRecord>) -> bool {
+    record.is_some_and(|r| r.capabilities & termflow_pty_protocol::CAP_INHERIT_CURSOR != 0)
+}
+
+/// [`host_inherits_cursor`] for a host THIS connection just launched. The plan was made
+/// from the record read BEFORE the launch, which for a fresh host is no record at all; the
+/// host writes its own record before it serves, so by the time the connection is up the
+/// file holds the answer.
+pub fn spawned_host_inherits_cursor() -> bool {
+    let record = record_path().and_then(|p| termflow_pty_protocol::read_record(&p).ok().flatten());
+    host_inherits_cursor(record.as_ref())
+}
+
 /// Decide how to connect from an already-read discovery record.
 pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> ConnectPlan {
     match record {
@@ -2106,6 +2139,7 @@ mod tests {
             cwd: None,
             cols: 80,
             rows: 24,
+            initial_cursor_row: None,
         };
         let pid = client.spawn_session("t1", &spec).await.unwrap();
         assert_eq!(pid, 4321);

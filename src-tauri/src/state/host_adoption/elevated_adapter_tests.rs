@@ -40,7 +40,7 @@ async fn elevated_create_uses_the_prepared_allocator_identity_and_refuses_rng_fa
     assert!(ticket.publish_key(&pc));
     port.register_terminal(&pc, &session_key, channel);
     let identity = port.table().keys().session_identity(channel, &session_key, &pc).unwrap();
-    let spec = termflow_pty_protocol::SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 83, rows: 29 };
+    let spec = termflow_pty_protocol::SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 83, rows: 29, initial_cursor_row: None };
     assert_eq!(client.spawn_owned(&identity, &spec).await.unwrap(), 4242);
     assert_eq!(world.sessions("owner-host", "Spawn"), vec![session_key.clone()]);
     assert_eq!(port.table().routes().resolve(channel, &session_key, port.table().epoch(channel).unwrap(), true), Some(pc.clone()));

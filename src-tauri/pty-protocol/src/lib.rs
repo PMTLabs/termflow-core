@@ -15,7 +15,7 @@ pub mod spec;
 
 pub use bootstrap::{
     negotiate, read_hello, write_hello, Hello, HelloKind, CAP_ATTACH_ACK, CAP_DRAIN,
-    CAP_LIFECYCLE_CONTRACT, CAP_SHUTDOWN_CONTROL, PROTOCOL_MAX, PROTOCOL_MIN,
+    CAP_INHERIT_CURSOR, CAP_LIFECYCLE_CONTRACT, CAP_SHUTDOWN_CONTROL, PROTOCOL_MAX, PROTOCOL_MIN,
 };
 pub use discovery::{
     read_record, remove_record_if_owned, write_record, HostRecord, LifecycleContract,

@@ -26,6 +26,7 @@ async fn request_holds_are_observable_and_do_not_delay_another_host() {
         let request = match kind {
             "Spawn" => Control::Spawn { req: 7, tab_id: "held-key".into(), spec: SpawnSpec {
                 shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24,
+                initial_cursor_row: None,
             } },
             "Attach" => Control::AttachAcked { req: 7, tab_id: "held-key".into(), from_offset: 0 },
             "List" => Control::ListSessions { req: 7, token: None },

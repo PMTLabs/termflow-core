@@ -125,6 +125,7 @@ termflow-core/
 │   │   │                              # Windows-integration and support modules (ConPTY console ownership, WebView2 GPU preference/power-suspend, panic reporting, shell-integration, profile identity, async history flush)
 │   │   └── state.rs                    # Application state (network config, API shutdown handle, McpProcessHandle)
 │   ├── pty-host/, pty-protocol/        # Separate Cargo manifests: Windows PTY-host sidecar + shared PTY wire protocol
+│   ├── vendor/portable-pty/            # Vendored, patched copy of the MIT crate portable-pty 0.8.1 (one opt-in flag: ConPTY `PSEUDOCONSOLE_INHERIT_CURSOR`, used by a restored terminal's cursor-frame alignment — see VENDORED.md; wired in by `[patch.crates-io]` in the app and pty-host manifests)
 │   ├── build.rs                        # Build script (compiles MCP sidecar for bundling; does not manage it at runtime)
 │   ├── capabilities/                   # Tauri permission scopes (shell sidecar, dialog:allow-open)
 │   ├── Cargo.toml                      # Rust dependencies (clap, portable-pty, rusqlite, tauri-plugin-dialog, etc)

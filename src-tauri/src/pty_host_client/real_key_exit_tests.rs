@@ -77,6 +77,7 @@ async fn real_reader_and_attach_exits_each_prevent_their_older_listing_from_rele
         shell: if cfg!(windows) { "cmd.exe" } else { "/bin/sh" }.into(),
         args: if cfg!(windows) { vec!["/D".into(), "/Q".into()] } else { vec!["-i".into()] },
         env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24,
+        initial_cursor_row: None,
     };
     assert!(client.spawn_session(&session_key, &spec).await.unwrap() > 0);
     assert!(table.keys().complete(&stage, &process));

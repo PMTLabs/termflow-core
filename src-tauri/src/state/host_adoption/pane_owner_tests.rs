@@ -55,7 +55,7 @@ async fn run(port: &FakePort, label: &str, pg: u64, leaf: &str, cg: u64) -> Resu
             let identity = port.table().keys().session_identity(channel, &key, &pc).unwrap();
             port.register_terminal(&pc, &key, channel);
             port.0.terminals.get_mut(&pc).unwrap().renderer_terminal_id = Some(leaf.into());
-            assert_eq!(client.spawn_owned(&identity, &SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24 }).await?, 4242);
+            assert_eq!(client.spawn_owned(&identity, &SpawnSpec { shell: "fake".into(), args: vec![], env: vec![], env_remove: vec![], cwd: None, cols: 80, rows: 24, initial_cursor_row: None }).await?, 4242);
             let shell = StagedShell { process: pc.clone(), stage: ShellStage::Hosted(ticket.key_stage().unwrap()) };
             crate::state::owner_lifecycle::finish_create(port.table().keys(), leaf, cg, &shell, |_| panic!("stale fixture"), |kind| { assert!(port.end_owner(&pc, kind)); });
             Ok(pc)

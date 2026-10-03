@@ -16,6 +16,18 @@ fn record(proto_min: u16, proto_max: u16) -> HostRecord {
 }
 
 #[test]
+fn a_host_inherits_the_cursor_only_when_its_record_says_so() {
+    use super::host_inherits_cursor;
+    assert!(!host_inherits_cursor(None), "no record is a legacy host: it was never built to honour a row");
+    let mut rec = record(1, 1);
+    assert!(!host_inherits_cursor(Some(&rec)), "a host without the bit must not be asked");
+    rec.capabilities |= termflow_pty_protocol::CAP_INHERIT_CURSOR;
+    assert!(host_inherits_cursor(Some(&rec)));
+    rec.capabilities = termflow_pty_protocol::CAP_INHERIT_CURSOR;
+    assert!(host_inherits_cursor(Some(&rec)), "independent of every other capability");
+}
+
+#[test]
 fn no_record_is_legacy_or_none() {
     assert_eq!(plan_connection(None), ConnectPlan::LegacyOrNone);
 }

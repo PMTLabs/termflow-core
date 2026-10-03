@@ -299,6 +299,7 @@ pub(crate) fn build_spawn_spec_with(
         cwd: resolved_cwd,
         cols,
         rows,
+        initial_cursor_row: None,
     }
 }
 

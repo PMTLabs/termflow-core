@@ -804,6 +804,7 @@ mod tests {
                 cwd: None,
                 cols: 80,
                 rows: 24,
+                initial_cursor_row: None,
             }
         }
         #[cfg(unix)]
@@ -821,6 +822,7 @@ mod tests {
                 cwd: None,
                 cols: 80,
                 rows: 24,
+                initial_cursor_row: None,
             }
         }
     }

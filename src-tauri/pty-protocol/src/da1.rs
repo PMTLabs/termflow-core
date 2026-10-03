@@ -18,14 +18,54 @@
 //! DA1 is only safe from it once something else (the backend's own preamble, or
 //! any other byte) has been seen first. The result depends only on the byte
 //! stream, never on how `read()` happened to chunk it.
+//!
+//! **Cursor report.** A pseudoconsole created with `PSEUDOCONSOLE_INHERIT_CURSOR`
+//! (a restored terminal, see `pty-host`'s `Session::spawn`) opens with `ESC[6n`
+//! BEFORE the DA1 query and starts the child's cursor wherever the reply says,
+//! instead of at row 1. When the filter was given a cursor row it answers that one
+//! query the same way — at the producer, stripped from the stream, `ESC[row;1R` —
+//! and stays armed for the DA1 behind it. The reply MUST precede the DA1 reply:
+//! ConPTY treats the DA1 answer as "the terminal has nothing more to say" and
+//! settles for row 1 if the cursor report has not arrived by then.
 
 use std::borrow::Cow;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// What xterm.js itself answers to DA1 (`InputHandler.ts` for `termName: xterm`):
 /// a VT100 with the advanced video option.
 pub const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
+
+/// The cursor-position report for a startup `ESC[6n`: row `row` (1-based), column 1.
+/// A restored terminal's replay always ends at the start of a line.
+pub fn cursor_report(row: u16) -> Vec<u8> {
+    format!("\x1b[{};1R", row.max(1)).into_bytes()
+}
+
+/// The cursor row a new pseudoconsole should be created inheriting: `requested`, but only
+/// where ConPTY is measured to honour it — the bundled one (it asks for the cursor before
+/// the DA1 and never hangs on a missing reply). The inbox ConPTY and every other platform
+/// get `None`, i.e. a plain pseudoconsole whose child starts on row 1.
+///
+/// Callers use the SAME answer to create the pseudoconsole and to build the reader's
+/// [`StartupDa1::for_spawn`] filter, so the two cannot disagree.
+pub fn inheritable_cursor_row(requested: Option<u16>) -> Option<u16> {
+    requested.filter(|_| inherit_cursor_supported())
+}
+
+/// Whether this process creates pseudoconsoles that can inherit the cursor — what a host
+/// advertises as `CAP_INHERIT_CURSOR`. True exactly when the bundled ConPTY is loaded
+/// (so only after `conpty::init_for_current_exe`), and never off Windows.
+pub fn inherit_cursor_supported() -> bool {
+    #[cfg(windows)]
+    {
+        crate::conpty::is_bundled_active()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
 
 /// Stop accepting new preamble sequences once this many raw bytes were seen.
 /// Checked only at a sequence boundary, so a sequence that STARTED below the
@@ -55,6 +95,13 @@ pub struct Filtered<'a> {
     /// True exactly once per filter: the startup DA1 was found in this chunk and
     /// removed. The caller must now send [`DA1_REPLY`] to the PTY.
     pub answered: bool,
+    /// True at most once per filter: the startup cursor-position query was found in
+    /// this chunk and removed (only when the filter was given a cursor row).
+    pub cursor_answered: bool,
+    /// Every reply now due, concatenated in the order the queries appeared — the
+    /// cursor report first, then [`DA1_REPLY`]. Empty when nothing was answered.
+    /// Sending it as ONE write keeps that order.
+    pub reply: Vec<u8>,
     /// Raw bytes consumed so far, for diagnostics.
     pub consumed: usize,
 }
@@ -63,6 +110,13 @@ pub struct Filtered<'a> {
 #[derive(Debug)]
 pub struct StartupDa1 {
     armed: bool,
+    /// Answer (and strip) the DA1 query. False when the filter is armed ONLY for the
+    /// cursor report (an inbox ConPTY that was asked to inherit the cursor): there a
+    /// DA1 is not ours to eat, so it retires the filter and goes to the renderer.
+    answer_da1: bool,
+    /// The report to send for the first `ESC[6n`; `None` = do not touch cursor queries.
+    cursor_reply: Option<Vec<u8>>,
+    cursor_done: bool,
     mode: Mode,
     consumed: usize,
     /// Bytes of the in-progress sequence, withheld until it resolves.
@@ -71,7 +125,27 @@ pub struct StartupDa1 {
 
 impl StartupDa1 {
     pub fn new(armed: bool) -> Self {
-        Self { armed, mode: Mode::Ground, consumed: 0, held: Vec::new() }
+        Self {
+            armed,
+            answer_da1: armed,
+            cursor_reply: None,
+            cursor_done: false,
+            mode: Mode::Ground,
+            consumed: 0,
+            held: Vec::new(),
+        }
+    }
+
+    /// Also answer the startup cursor-position query with `row` (see the module doc).
+    /// Arms the filter even when DA1 answering is off: a pseudoconsole created with
+    /// `PSEUDOCONSOLE_INHERIT_CURSOR` WILL ask, and the child does not start until it is
+    /// answered (or, on the bundled ConPTY, until the DA1 behind it times out).
+    pub fn with_cursor_row(mut self, row: Option<u16>) -> Self {
+        if let Some(row) = row {
+            self.cursor_reply = Some(cursor_report(row));
+            self.armed = true;
+        }
+        self
     }
 
     /// Armed only when the bundled (modern) ConPTY has been loaded — the inbox ConPTY
@@ -90,18 +164,33 @@ impl StartupDa1 {
         }
     }
 
+    /// [`Self::for_platform`] for a session whose pseudoconsole was (or was not) created
+    /// inheriting the cursor: `cursor_row` is `Some` exactly when it was.
+    pub fn for_spawn(cursor_row: Option<u16>) -> Self {
+        Self::for_platform().with_cursor_row(cursor_row)
+    }
+
     pub fn is_armed(&self) -> bool {
         self.armed
     }
 
     /// Filter one raw read. Never loses or reorders a byte other than the
-    /// startup DA1 itself; held bytes are released in order.
+    /// startup DA1 (and, when configured, the startup cursor query) itself; held
+    /// bytes are released in order.
     pub fn filter<'a>(&mut self, chunk: &'a [u8]) -> Filtered<'a> {
         if !self.armed {
-            return Filtered { bytes: Cow::Borrowed(chunk), answered: false, consumed: self.consumed };
+            return Filtered {
+                bytes: Cow::Borrowed(chunk),
+                answered: false,
+                cursor_answered: false,
+                reply: Vec::new(),
+                consumed: self.consumed,
+            };
         }
         let mut out: Vec<u8> = Vec::with_capacity(chunk.len() + self.held.len());
+        let mut reply: Vec<u8> = Vec::new();
         let mut answered = false;
+        let mut cursor_answered = false;
         for (i, &b) in chunk.iter().enumerate() {
             let before = self.consumed;
             self.consumed += 1;
@@ -133,14 +222,27 @@ impl StartupDa1 {
                     }
                     0x40..=0x7e => {
                         let params = &self.held[2..];
-                        if b == b'c' && (params.is_empty() || params == b"0") {
+                        let is_da1 = b == b'c' && (params.is_empty() || params == b"0");
+                        let is_cursor_query = b == b'n' && params == b"6";
+                        if is_da1 && self.answer_da1 {
                             // The startup DA1: drop it, answer once, retire for good.
                             self.held.clear();
                             self.armed = false;
                             self.mode = Mode::Ground;
                             out.extend_from_slice(&chunk[i + 1..]);
+                            reply.extend_from_slice(DA1_REPLY);
                             answered = true;
                             break;
+                        } else if is_cursor_query && !self.cursor_done && self.cursor_reply.is_some() {
+                            // The startup cursor query of an INHERIT_CURSOR pseudoconsole: drop
+                            // it, answer it once, and stay armed — the DA1 comes right behind.
+                            self.held.clear();
+                            self.mode = Mode::Ground;
+                            self.cursor_done = true;
+                            if let Some(report) = &self.cursor_reply {
+                                reply.extend_from_slice(report);
+                            }
+                            cursor_answered = true;
                         } else if matches!(b, b't' | b'h' | b'l') {
                             // Another preamble sequence: forward it and stay armed.
                             self.held.push(b);
@@ -158,7 +260,7 @@ impl StartupDa1 {
                 },
             }
         }
-        Filtered { bytes: Cow::Owned(out), answered, consumed: self.consumed }
+        Filtered { bytes: Cow::Owned(out), answered, cursor_answered, reply, consumed: self.consumed }
     }
 
     /// Stream ended (EOF or read error): release anything still held, in order.
@@ -178,12 +280,119 @@ impl StartupDa1 {
     }
 }
 
-/// Write the reply under the writer mutex (poison-tolerant: a panicked input
+/// Write `bytes` under the writer mutex (poison-tolerant: a panicked input
 /// writer must not turn into a 3 s stall).
-pub fn write_da1_reply(writer: &Mutex<Box<dyn Write + Send>>) -> std::io::Result<()> {
+pub fn write_reply(writer: &Mutex<Box<dyn Write + Send>>, bytes: &[u8]) -> std::io::Result<()> {
     let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
-    w.write_all(DA1_REPLY)?;
+    w.write_all(bytes)?;
     w.flush()
+}
+
+/// [`write_reply`] for the DA1 answer.
+pub fn write_da1_reply(writer: &Mutex<Box<dyn Write + Send>>) -> std::io::Result<()> {
+    write_reply(writer, DA1_REPLY)
+}
+
+/// One batch of replies that [`StartupDa1::filter`] made due, as the shared pump hands it
+/// to its caller.
+#[derive(Debug, Clone, Copy)]
+pub struct StartupReply<'a> {
+    /// What to write, in query order (cursor report, then DA1).
+    pub bytes: &'a [u8],
+    /// `bytes` starts with the cursor-position report.
+    pub cursor: bool,
+    /// `bytes` ends with the DA1 reply.
+    pub da1: bool,
+    /// Raw bytes consumed so far, for diagnostics.
+    pub consumed: usize,
+}
+
+impl StartupReply<'_> {
+    fn what(&self) -> &'static str {
+        match (self.cursor, self.da1) {
+            (true, true) => "cursor report + DA1",
+            (true, false) => "cursor report",
+            _ => "DA1",
+        }
+    }
+}
+
+/// Hands out write turns so replies reach the PTY in the order they were requested even
+/// though each is written from its own thread.
+#[derive(Debug, Default)]
+struct Turns {
+    next: Mutex<u64>,
+    cv: Condvar,
+}
+
+impl Turns {
+    fn wait(&self, n: u64) {
+        let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        while *next != n {
+            next = self.cv.wait(next).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn done(&self) {
+        *self.next.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        self.cv.notify_all();
+    }
+}
+
+/// Ends the turn when dropped, so a panic while writing cannot park every later reply.
+struct EndTurn<'a>(&'a Turns);
+impl Drop for EndTurn<'_> {
+    fn drop(&mut self) {
+        self.0.done();
+    }
+}
+
+/// The startup replies of ONE session, written strictly in the order they were sent.
+///
+/// A reply is written from a short-lived thread so the reader never blocks on the writer
+/// mutex (an input write can hold it through an unbounded `WriteFile`; output keeps
+/// draining while the reply waits its turn). With two possible replies — the cursor
+/// report and then DA1 — separate threads could otherwise race, and a DA1 that lands
+/// first makes ConPTY settle for row 1. At most two threads per session, because the
+/// filter retires on the first DA1 and answers the cursor query once.
+pub struct StartupReplies {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    label: String,
+    turns: Arc<Turns>,
+    issued: u64,
+}
+
+impl StartupReplies {
+    pub fn new(writer: Arc<Mutex<Box<dyn Write + Send>>>, label: String) -> Self {
+        Self { writer, label, turns: Arc::new(Turns::default()), issued: 0 }
+    }
+
+    /// Queue `reply` behind everything sent before it. Never blocks on the writer.
+    pub fn send(&mut self, reply: StartupReply<'_>) {
+        let turn = self.issued;
+        self.issued += 1;
+        let (what, consumed) = (reply.what(), reply.consumed);
+        let bytes = reply.bytes.to_vec();
+        let run = {
+            let (writer, label, turns) = (self.writer.clone(), self.label.clone(), self.turns.clone());
+            move || {
+                turns.wait(turn);
+                let _end = EndTurn(&turns);
+                match write_reply(&writer, &bytes) {
+                    Ok(()) => log::info!("[CONPTY] answered startup {what} for {label} ({consumed} bytes in)"),
+                    Err(e) => log::warn!(
+                        "[CONPTY] could not answer startup {what} for {label}: {e}; the shell will start \
+                         only after ConPTY's ~3 s handshake timeout"
+                    ),
+                }
+            }
+        };
+        // No thread to be had: write inline rather than leave every later turn waiting.
+        if let Err(e) = std::thread::Builder::new().name("startup-reply".into()).spawn(run.clone()) {
+            log::warn!("[CONPTY] could not start the startup reply thread for {}: {e}; writing inline", self.label);
+            run();
+        }
+    }
 }
 
 /// Send the reply from a one-shot thread so the reader never blocks on the writer
@@ -567,5 +776,197 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(*sink.0.lock().unwrap(), DA1_REPLY);
+    }
+
+    // ---- startup cursor report (INHERIT_CURSOR) ---------------------------------
+
+    /// What the bundled ConPTY 1.24 sends when created with `PSEUDOCONSOLE_INHERIT_CURSOR`
+    /// (measured): the cursor query sits BEFORE the DA1 query.
+    const INHERIT_PREAMBLE: &[u8] = b"\x1b[1t\x1b[6n\x1b[c\x1b[?1004h\x1b[?9001h";
+    const INHERIT_PREAMBLE_WITHOUT_QUERIES: &[u8] = b"\x1b[1t\x1b[?1004h\x1b[?9001h";
+
+    /// Feed `stream` cut at `cuts` through `f`; returns (forwarded bytes after `finish`,
+    /// every reply batch in the order the filter asked for it).
+    fn run_with(mut f: StartupDa1, stream: &[u8], cuts: &[usize]) -> (Vec<u8>, Vec<Vec<u8>>) {
+        let (mut out, mut replies, mut start) = (Vec::new(), Vec::new(), 0);
+        for &end in cuts.iter().chain(std::iter::once(&stream.len())) {
+            let r = f.filter(&stream[start..end]);
+            out.extend_from_slice(&r.bytes);
+            if !r.reply.is_empty() {
+                replies.push(r.reply.clone());
+            }
+            start = end;
+        }
+        out.extend_from_slice(&f.finish());
+        (out, replies)
+    }
+
+    fn inheriting(row: u16) -> StartupDa1 {
+        StartupDa1::new(true).with_cursor_row(Some(row))
+    }
+
+    #[test]
+    fn the_cursor_report_format_is_row_then_column_one() {
+        assert_eq!(cursor_report(24), b"\x1b[24;1R");
+        assert_eq!(cursor_report(1), b"\x1b[1;1R");
+        assert_eq!(cursor_report(0), b"\x1b[1;1R", "a zero row is not a valid cursor position");
+    }
+
+    #[test]
+    fn both_startup_queries_are_answered_stripped_and_ordered_for_every_chunking() {
+        let want_replies = [cursor_report(24), DA1_REPLY.to_vec()].concat();
+        for cuts in chunkings(INHERIT_PREAMBLE.len()) {
+            let (out, replies) = run_with(inheriting(24), INHERIT_PREAMBLE, &cuts);
+            assert_eq!(out, INHERIT_PREAMBLE_WITHOUT_QUERIES, "forwarded bytes for cuts {cuts:?}");
+            assert_eq!(replies.concat(), want_replies, "the cursor report must come before DA1; cuts {cuts:?}");
+            assert!(replies.len() <= 2, "at most one batch per query; cuts {cuts:?}");
+        }
+    }
+
+    #[test]
+    fn the_cursor_report_is_due_before_the_da1_has_even_arrived() {
+        // ConPTY may hold the child on the cursor report alone; waiting for the DA1 behind it
+        // would be a deadlock, so the reply is requested as soon as the query is complete.
+        let mut f = inheriting(12);
+        let r = f.filter(b"\x1b[1t\x1b[6n");
+        assert_eq!(r.reply, cursor_report(12));
+        assert!(r.cursor_answered && !r.answered);
+        assert_eq!(&*r.bytes, b"\x1b[1t", "the query itself is not forwarded");
+        assert!(f.is_armed(), "the DA1 is still to come");
+        let r = f.filter(b"\x1b[c");
+        assert_eq!(r.reply, DA1_REPLY);
+        assert!(r.answered && !r.cursor_answered);
+        assert!(!f.is_armed());
+    }
+
+    #[test]
+    fn a_filter_without_a_cursor_row_leaves_the_cursor_query_to_the_renderer() {
+        // The default for every spawn that did not ask ConPTY to inherit the cursor: an `ESC[6n`
+        // in the preamble is just another CSI, so the filter retires and forwards it untouched.
+        let stream = b"\x1b[1t\x1b[6n\x1b[c";
+        for cuts in chunkings(stream.len()) {
+            let (out, replies) = run_with(StartupDa1::new(true), stream, &cuts);
+            assert_eq!(out, stream, "cuts {cuts:?}");
+            assert!(replies.is_empty(), "nothing is answered, cuts {cuts:?}");
+        }
+    }
+
+    #[test]
+    fn only_the_first_cursor_query_is_answered() {
+        let stream = b"\x1b[6n\x1b[6n\x1b[c";
+        let (out, replies) = run_with(inheriting(9), stream, &[]);
+        assert_eq!(out, b"\x1b[6n\x1b[c", "a second query belongs to the renderer and retires the filter");
+        assert_eq!(replies.concat(), cursor_report(9));
+    }
+
+    #[test]
+    fn a_cursor_query_after_text_is_a_childs_own_and_is_never_answered() {
+        let stream = b"\x1b[1thello\x1b[6n";
+        let (out, replies) = run_with(inheriting(9), stream, &[]);
+        assert_eq!(out, stream);
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn only_the_plain_cursor_report_query_is_recognised() {
+        for query in [&b"\x1b[5n"[..], b"\x1b[?6n", b"\x1b[6;1n", b"\x1b[n"] {
+            let (out, replies) = run_with(inheriting(9), query, &[]);
+            assert_eq!(out, query, "{query:?} must be forwarded");
+            assert!(replies.is_empty(), "{query:?} must not be answered");
+        }
+    }
+
+    #[test]
+    fn a_cursor_only_filter_answers_the_cursor_query_and_hands_the_da1_to_the_renderer() {
+        // An inbox ConPTY that was asked to inherit the cursor: DA1 is not ours to eat there.
+        let f = StartupDa1::new(false).with_cursor_row(Some(7));
+        assert!(f.is_armed(), "asking for the cursor must arm the filter by itself");
+        let (out, replies) = run_with(f, INHERIT_PREAMBLE, &[]);
+        assert_eq!(out, b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h", "DA1 stays in the stream");
+        assert_eq!(replies.concat(), cursor_report(7));
+    }
+
+    #[test]
+    fn no_cursor_row_means_exactly_the_old_filter() {
+        // `None` must not disturb a disarmed filter either.
+        let f = StartupDa1::new(false).with_cursor_row(None);
+        assert!(!f.is_armed());
+        let (out, replies) = run_with(f, INHERIT_PREAMBLE, &[]);
+        assert_eq!(out, INHERIT_PREAMBLE);
+        assert!(replies.is_empty());
+    }
+
+    // ---- ordered reply sender -----------------------------------------------------
+
+    fn wait_for(sink: &Shared, len: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while sink.0.lock().unwrap().len() < len && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn replies_reach_the_writer_in_the_order_they_were_sent() {
+        // Two threads race for the writer mutex; the turn counter, not the scheduler, decides.
+        // Repeated so a wrong implementation loses the race at least once.
+        let cursor = cursor_report(24);
+        for round in 0..200 {
+            let sink = Shared::default();
+            let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(sink.clone()));
+            let mut replies = StartupReplies::new(writer, format!("round-{round}"));
+            replies.send(StartupReply { bytes: &cursor, cursor: true, da1: false, consumed: 6 });
+            replies.send(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 });
+            wait_for(&sink, cursor.len() + DA1_REPLY.len());
+            assert_eq!(*sink.0.lock().unwrap(), [cursor.clone(), DA1_REPLY.to_vec()].concat(), "round {round}");
+        }
+    }
+
+    #[test]
+    fn sending_a_reply_never_blocks_the_reader_on_a_held_writer_lock() {
+        let sink = Shared::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(sink.clone()));
+        let guard = writer.lock().unwrap(); // an input write holding the mutex
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let caller = {
+            let writer = writer.clone();
+            std::thread::spawn(move || {
+                let mut replies = StartupReplies::new(writer, "t".into());
+                replies.send(StartupReply { bytes: b"\x1b[3;1R", cursor: true, da1: false, consumed: 4 });
+                replies.send(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 });
+                let _ = done_tx.send(());
+            })
+        };
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("send must return while the writer lock is held elsewhere");
+        caller.join().unwrap();
+        assert!(sink.0.lock().unwrap().is_empty(), "replies wait for the writer lock");
+        drop(guard);
+        wait_for(&sink, 6 + DA1_REPLY.len());
+        assert_eq!(*sink.0.lock().unwrap(), [&b"\x1b[3;1R"[..], DA1_REPLY].concat());
+    }
+
+    #[test]
+    fn a_failed_write_does_not_park_the_reply_behind_it() {
+        struct FailsOnce(Shared, bool);
+        impl Write for FailsOnce {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                if !self.1 {
+                    self.1 = true;
+                    return Err(io::ErrorKind::BrokenPipe.into());
+                }
+                self.0.write(b)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Shared::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(FailsOnce(sink.clone(), false)));
+        let mut replies = StartupReplies::new(writer, "t".into());
+        replies.send(StartupReply { bytes: b"\x1b[3;1R", cursor: true, da1: false, consumed: 4 });
+        replies.send(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 });
+        wait_for(&sink, DA1_REPLY.len());
+        assert_eq!(*sink.0.lock().unwrap(), DA1_REPLY, "the second reply still goes out");
     }
 }
