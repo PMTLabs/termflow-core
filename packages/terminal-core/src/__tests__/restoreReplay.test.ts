@@ -20,7 +20,7 @@ interface RealTerminal {
       cursorX: number;
       cursorY: number;
       length: number;
-      getLine(n: number): { translateToString(trim?: boolean): string } | undefined;
+      getLine(n: number): { isWrapped: boolean; translateToString(trim?: boolean): string } | undefined;
     };
   };
   write(data: string, cb?: () => void): void;
@@ -47,8 +47,26 @@ function allLines(term: RealTerminal): string[] {
   return Array.from({ length: b.length }, (_, i) => b.getLine(i)?.translateToString(true) ?? '');
 }
 
+/** The buffer as the lines that were WRITTEN: wrapped rows are joined back (untrimmed until joined). */
+function logicalLines(term: RealTerminal): string[] {
+  const b = term.buffer.active;
+  const out: string[] = [];
+  for (let i = 0; i < b.length; i++) {
+    const line = b.getLine(i);
+    const text = line?.translateToString(false) ?? '';
+    if (line?.isWrapped && out.length > 0) out[out.length - 1] += text;
+    else out.push(text);
+  }
+  return out.map((l) => l.trimEnd());
+}
+
+/** The divider exactly as the user sees it (the backend's `REPLAY_SEPARATOR` text, without styling). */
+const DIVIDER_TEXT = '──── session restored ────';
+
 interface Outcome {
   lines: string[];
+  /** The same buffer with wrapped rows joined back into the lines that were written. */
+  logical: string[];
   /** Viewport row (1-based) the typed text is on. */
   typedViewportRow: number;
   /** Absolute buffer index of the typed row and of the divider. */
@@ -74,6 +92,7 @@ async function restoreAndType(rows: number, cols: number, histLines: number, anc
     const typedAbs = lines.findIndex((l) => l.includes('PS> typed-text'));
     return {
       lines,
+      logical: logicalLines(term),
       typedViewportRow: typedAbs - term.buffer.active.baseY + 1,
       typedAbs,
       // The divider's rule characters, not its words: on a narrow pane the text wraps mid-phrase.
@@ -117,9 +136,32 @@ describe('wrapRestoreReplay on the real xterm parser', () => {
     // ...BELOW the divider, so it can never sit over restored content.
     expect(out.dividerAbs).toBeGreaterThanOrEqual(0);
     expect(out.typedAbs).toBeGreaterThan(out.dividerAbs);
+    // The divider itself is intact, once, with its whole text (a pane narrower than it wraps it).
+    expect(out.logical.filter((l) => l.includes('session restored'))).toEqual([DIVIDER_TEXT]);
     // Nothing the user had is lost or reordered: every history line is still there, oldest first.
     const kept = survivors(out.lines);
     expect(kept).toEqual(Array.from({ length: hist }, (_, i) => `old-line-${String(i + 1).padStart(3, '0')}`));
+  });
+
+  test('the scroll region is released: later output scrolls the whole pane, not rows 1..anchor', async () => {
+    // ConPTY/the shell keep writing after the restore. If the replay's scroll region were left in
+    // place, the cursor could never get below the anchor row and the rest of the pane would be dead.
+    const rows = 24;
+    for (const anchor of [1, 6, 12]) {
+      const term = new Terminal({ rows, cols: 80, scrollback: 5000, allowProposedApi: true });
+      try {
+        await write(term, wrapRestoreReplay(history(40) + DIVIDER, anchor, rows));
+        const output = Array.from({ length: 60 }, (_, i) => `out-${String(i + 1).padStart(2, '0')}`);
+        await write(term, output.map((l) => `${l}\r\n`).join(''));
+        const b = term.buffer.active;
+        expect(b.cursorY).toBe(rows - 1);
+        const lines = allLines(term);
+        expect(lines.filter((l) => l.startsWith('out-'))).toEqual(output);
+        expect(survivors(lines)).toHaveLength(40);
+      } finally {
+        term.dispose();
+      }
+    }
   });
 
   test('the typed row holds the prompt alone (no old text bleeds into it)', async () => {

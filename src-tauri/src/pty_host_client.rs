@@ -1833,6 +1833,25 @@ pub fn spawned_host_inherits_cursor() -> bool {
     host_inherits_cursor(record.as_ref())
 }
 
+/// Whether the host a connection ended up on can be asked for a cursor row.
+///
+/// A host THIS process launched is judged by the record it wrote itself and by nothing else
+/// (`spawned`, called only then). The plan's flags came from the record read BEFORE the
+/// launch; when a live host died between that read and the launch, that record is the DEAD
+/// host's, and its positive bit must not carry over to a replacement that may not honour a row
+/// (inbox ConPTY, a bundled load that failed): the GUI would anchor the replay on a row ConPTY
+/// was never told. An ADOPTED host keeps the verdict of the record it was selected from.
+pub fn connected_host_inherits_cursor(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    spawned: impl FnOnce() -> bool,
+) -> bool {
+    match origin {
+        HostConnectionOrigin::SpawnedHere => spawned(),
+        HostConnectionOrigin::Adopted => planned,
+    }
+}
+
 /// Decide how to connect from an already-read discovery record.
 pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> ConnectPlan {
     match record {

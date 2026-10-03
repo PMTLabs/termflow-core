@@ -3407,6 +3407,11 @@ export class TerminalEngine {
         // A prefix-only snapshot is NOT the screen, so what the shell printed while we were
         // hydrating (its first prompt, ConPTY's startup positioning) is not reflected in it:
         // write it after the replay, in order, instead of dropping it as a snapshot would.
+        // Not handled: the hydration buffer is tail-capped (HYDRATION_BUFFER_CAP_BYTES). A screen
+        // snapshot covers whatever the cap evicted; a prefix-only one does not, so if the shell
+        // printed more than the cap before this point only the tail survives. That takes millions
+        // of characters inside one snapshot round trip, so it is left unrepaired rather than
+        // guessed at; a repair would need an authoritative resync that this path does not have.
         if (pendingText) {
           term.write(pendingText);
         }

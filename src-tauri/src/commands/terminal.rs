@@ -144,8 +144,9 @@ pub async fn create_terminal(
     // session, seed it into the fresh parser (via spawn_terminal, before the
     // reader thread starts — see the ratchet note on stage_scrollback) and stage
     // it as a one-shot prefix. The /snapshot endpoint prepends it on this
-    // terminal's first hydration, so the engine's existing reset()+write replay
-    // shows "old scrollback → divider → fresh prompt" with no engine change.
+    // terminal's first hydration, and the engine's reset()+write replay of it shows
+    // "old scrollback → divider → fresh prompt". The replay is placed so the renderer's
+    // cursor is on the row ConPTY believes the prompt is on (`state::restore_frame`).
     let history_prefix = tab_id.as_ref().and_then(|t| restore_prefix(state.inner(), t));
     let (seed, cursor_row, staged) = plan_in_process_restore(history_prefix, rows, cols);
 
@@ -1415,7 +1416,13 @@ mod restore_frame_wiring_tests {
         let staged = staged.expect("a restore stages its prefix");
         assert_eq!(staged.text, prefix);
         assert!(seed.is_some());
-        assert!(cursor_row.is_none() || cursor_row == staged.anchor_row, "{cursor_row:?} vs {:?}", staged.anchor_row);
+        // `plan_in_process_restore` loads the bundled ConPTY first, so this reads the answer it acted on.
+        if termflow_pty_protocol::da1::inherit_cursor_supported() {
+            assert!(cursor_row.is_some(), "a capable in-process ConPTY is asked for a row");
+            assert_eq!(cursor_row, staged.anchor_row, "and it is the row the renderer anchors on");
+        } else {
+            assert_eq!(cursor_row, None, "one that cannot honour a row is not asked for one");
+        }
         if cfg!(windows) {
             assert!(staged.anchor_row.is_some(), "Windows always aligns the frames, one way or the other");
         } else {

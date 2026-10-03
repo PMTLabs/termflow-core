@@ -164,6 +164,32 @@ mod tests {
         assert!(r.emitted.iter().all(|c| !c.is_empty()), "never emits an empty chunk");
     }
 
+    /// What `pump_output` hands `on_reply` for a filter that also answers the cursor query:
+    /// (reply bytes, carries the cursor report, carries the DA1 answer).
+    fn replies_for(reads: &[&[u8]]) -> Vec<(Vec<u8>, bool, bool)> {
+        let mut r = Script::ok(reads);
+        let mut da1 = StartupDa1::new(true).with_cursor_row(Some(7));
+        let mut got = Vec::new();
+        pump_output(&mut r, boundary, &mut da1, |r| got.push((r.bytes.to_vec(), r.cursor, r.da1)), |_| {});
+        got
+    }
+
+    #[test]
+    fn the_pump_says_what_each_reply_contains() {
+        let cursor = b"\x1b[7;1R".to_vec();
+        // Both queries in one read: ONE batch, cursor report first, flagged as both.
+        assert_eq!(
+            replies_for(&[b"\x1b[1t\x1b[6n\x1b[c\x1b[?1004h"]),
+            vec![([cursor.as_slice(), b"\x1b[?1;2c"].concat(), true, true)]
+        );
+        // Split across reads: the cursor report is due first and is NOT a DA1 answer (the host sets
+        // its "DA1 requested" flag from `da1` alone); the DA1 answer follows, without the cursor flag.
+        assert_eq!(
+            replies_for(&[b"\x1b[1t\x1b[6n", b"\x1b[c\x1b[?1004h"]),
+            vec![(cursor.clone(), true, false), (b"\x1b[?1;2c".to_vec(), false, true)]
+        );
+    }
+
     #[test]
     fn the_query_split_across_reads_is_still_removed() {
         let r = run(Script::ok(&[b"\x1b", b"[", b"c", b"\x1b[?9001h"]), true);

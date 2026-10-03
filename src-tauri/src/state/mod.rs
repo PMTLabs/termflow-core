@@ -28,6 +28,8 @@ pub(crate) mod leaf_storage;
 mod leaf_storage_tests;
 #[cfg(test)]
 mod storage_wiring_tests;
+#[cfg(test)]
+mod inherit_cursor_wiring_tests;
 mod render;
 mod restore_frame;
 mod engine_host;

@@ -200,11 +200,13 @@ impl<R: Runtime> AppState<R> {
         // A host we spawned ourselves (this build's bundled sidecar, installed
         // under its own content hash by `resolve_host_launch`) announces too.
         client.set_shutdown_control(flags.shutdown_control || origin == HostConnectionOrigin::SpawnedHere);
-        // A host launched just now had no record when `flags` was made; ask the one it wrote.
-        client.set_inherit_cursor(
-            flags.inherit_cursor
-                || (origin == HostConnectionOrigin::SpawnedHere && crate::pty_host_client::spawned_host_inherits_cursor()),
-        );
+        // A host launched just now is judged by the record IT wrote, not by the one `flags` was
+        // made from (read before the launch; possibly a host that has since died).
+        client.set_inherit_cursor(crate::pty_host_client::connected_host_inherits_cursor(
+            origin,
+            flags.inherit_cursor,
+            crate::pty_host_client::spawned_host_inherits_cursor,
+        ));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })

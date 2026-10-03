@@ -1128,11 +1128,12 @@ mod tests {
     }
 
     /// The whole host-side feature against the REAL bundled ConPTY: a pseudoconsole created
-    /// inheriting row 12 asks `ESC[6n`, the host's reader answers it (stripping the query),
-    /// and ConPTY then starts the child on row 12 — visible as `ESC[12;1H` ahead of its output.
-    /// The `None` run is the control: it must NOT move the cursor, and must not have been
-    /// created inheriting (no `ESC[6n` answered, no stall). Without it a ConPTY that always
-    /// positioned at row 12 would pass.
+    /// inheriting row N asks `ESC[6n`, the host's reader answers it (stripping the query),
+    /// and ConPTY then starts the child on row N — visible as `ESC[N;1H` ahead of its output.
+    /// Two different rows are requested (12 and 5), each of which must produce its own
+    /// positioning and not the other's: a host that honoured one fixed row would pass with one.
+    /// The `None` run is the control: it must NOT move the cursor to either row, and must not
+    /// have been created inheriting (no `ESC[6n` answered, no stall).
     #[cfg(windows)]
     #[test]
     fn fresh_process_inherit_cursor_body() {
@@ -1148,19 +1149,29 @@ mod tests {
         assert!(termflow_pty_protocol::da1::inherit_cursor_supported());
         let nonce = "TF-INHERIT-NONCE-5c1e";
 
-        let (with_row, t_with) = forwarded_stream(Some(12), nonce);
-        let text = String::from_utf8_lossy(&with_row).into_owned();
-        let at_row = text.find("\u{1b}[12;1H").unwrap_or_else(|| panic!("ConPTY never positioned the child on row 12: {text:?}"));
-        let at_nonce = text.find(nonce).unwrap();
-        assert!(at_row < at_nonce, "the child's output must follow the positioning: {text:?}");
-        assert!(!with_row.windows(4).any(|w| w == b"\x1b[6n"), "the cursor query must not be forwarded: {text:?}");
-        assert!(!with_row.windows(3).any(|w| w == b"\x1b[c"), "the DA1 query must not be forwarded: {text:?}");
-        assert!(t_with < Duration::from_millis(2500), "un-answered ConPTY stalls >= 3 s; got {t_with:?}");
+        let positioning = |row: u16| format!("\u{1b}[{row};1H");
+        let mut slowest = Duration::ZERO;
+        for (row, other) in [(12u16, 5u16), (5, 12)] {
+            let (with_row, t_with) = forwarded_stream(Some(row), nonce);
+            slowest = slowest.max(t_with);
+            let text = String::from_utf8_lossy(&with_row).into_owned();
+            let at_row = text
+                .find(&positioning(row))
+                .unwrap_or_else(|| panic!("ConPTY never positioned the child on row {row}: {text:?}"));
+            let at_nonce = text.find(nonce).unwrap();
+            assert!(at_row < at_nonce, "the child's output must follow the positioning: {text:?}");
+            assert!(!text.contains(&positioning(other)), "asked for row {row}, ConPTY also moved to row {other}: {text:?}");
+            assert!(!with_row.windows(4).any(|w| w == b"\x1b[6n"), "the cursor query must not be forwarded: {text:?}");
+            assert!(!with_row.windows(3).any(|w| w == b"\x1b[c"), "the DA1 query must not be forwarded: {text:?}");
+            assert!(t_with < Duration::from_millis(2500), "un-answered ConPTY stalls >= 3 s; got {t_with:?}");
+        }
 
         let (plain, _) = forwarded_stream(None, nonce);
         let text = String::from_utf8_lossy(&plain).into_owned();
-        assert!(!text.contains("\u{1b}[12;1H"), "a spec without a row must start on row 1: {text:?}");
+        for row in [12u16, 5] {
+            assert!(!text.contains(&positioning(row)), "a spec without a row must start on row 1: {text:?}");
+        }
 
-        println!("INHERIT-FRESH-OK with_row_at={t_with:?}");
+        println!("INHERIT-FRESH-OK slowest_with_row={slowest:?}");
     }
 }

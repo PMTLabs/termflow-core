@@ -31,7 +31,7 @@ function makeFakeBridge(snapshot: () => Promise<Partial<TerminalSnapshot>>): Fak
     write: () => {},
     resize: () => {},
     getSnapshot: (_pid, cols, rows) =>
-      snapshot().then((r) => ({ snapshot: '', ...r, rows, cols }) as TerminalSnapshot),
+      snapshot().then((r) => ({ snapshot: '', rows, cols, ...r }) as TerminalSnapshot),
     pushData(processId, data) {
       (dataCbs.get(processId) ?? []).forEach((cb) => cb(data));
     },
@@ -79,11 +79,21 @@ async function hydrateWith(key: string, snap: Partial<TerminalSnapshot>, live: s
 }
 
 test('a restore replay is placed on the anchor row, in the pane`s own size', async () => {
-  const term = await hydrateWith('rr1', { snapshot: 'HISTORY+DIVIDER', prefixOnly: true, anchorRow: 18 }, []);
+  // The backend reports a DIFFERENT size (10x50) than the pane (24 rows): the anchor is clamped
+  // to the pane, never to what the snapshot says. The expected bytes are spelled out, not computed
+  // with `wrapRestoreReplay`, so a wrong wrapper cannot satisfy its own expectation here.
+  const term = await hydrateWith('rr1', { snapshot: 'HISTORY+DIVIDER', prefixOnly: true, anchorRow: 18, rows: 10, cols: 50 }, []);
+  expect(term.rows).toBe(24);
   expect(term.resetCount).toBe(1);
-  expect(term.written).toEqual([wrapRestoreReplay('HISTORY+DIVIDER', 18, term.rows)]);
+  expect(term.written).toEqual(['\x1b[1;18r\x1b[1;1HHISTORY+DIVIDER\x1b[r\x1b[18;1H']);
   expect(terminalCache.get('rr1')!.lastHydratedProcessId).toBe('p1');
   expect(terminalCache.get('rr1')!.hydrating).toBe(false);
+});
+
+test('an anchor beyond the pane is clamped to the pane`s own rows, not the snapshot`s', async () => {
+  const term = await hydrateWith('rr1b', { snapshot: 'HISTORY', prefixOnly: true, anchorRow: 99, rows: 10, cols: 50 }, []);
+  expect(term.rows).toBe(24);
+  expect(term.written).toEqual(['\x1b[1;24r\x1b[1;1HHISTORY\x1b[r\x1b[24;1H']);
 });
 
 test('a restore replay with no anchor is written as it comes (the unchanged behaviour)', async () => {

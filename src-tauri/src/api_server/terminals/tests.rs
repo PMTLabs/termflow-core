@@ -59,8 +59,10 @@
     /// the prompt is, and not to throw away the shell's own output as a snapshot would let it.
     #[test]
     fn a_restore_snapshot_says_it_is_prefix_only_and_carries_its_anchor_only_when_it_has_one() {
-        let anchored = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: Some(7) }, 24, 80);
-        assert_eq!(anchored, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true, "anchorRow": 7 }));
+        for row in [1u16, 7, 24] {
+            let anchored = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: Some(row) }, 24, 80);
+            assert_eq!(anchored, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true, "anchorRow": row }));
+        }
         let plain = restore_snapshot_body(&crate::state::ReplayPrefix { text: "abc".into(), anchor_row: None }, 24, 80);
         assert_eq!(plain, serde_json::json!({ "snapshot": "abc", "rows": 24, "cols": 80, "prefixOnly": true }));
         assert!(plain.get("anchorRow").is_none(), "an absent anchor is absent, not null: the renderer leaves the cursor alone");

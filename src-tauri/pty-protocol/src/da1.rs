@@ -30,6 +30,7 @@
 
 use std::borrow::Cow;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// What xterm.js itself answers to DA1 (`InputHandler.ts` for `termName: xterm`):
@@ -322,15 +323,26 @@ impl StartupReply<'_> {
 #[derive(Debug, Default)]
 struct Turns {
     next: Mutex<u64>,
+    /// Set when a reply could not be started at all (no thread): its turn will never be taken,
+    /// so nothing may wait for it.
+    abandoned: AtomicBool,
     cv: Condvar,
 }
 
 impl Turns {
     fn wait(&self, n: u64) {
         let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
-        while *next != n {
+        while *next != n && !self.abandoned.load(Ordering::Acquire) {
             next = self.cv.wait(next).unwrap_or_else(|e| e.into_inner());
         }
+    }
+
+    /// A turn will never be taken: release everything waiting behind it.
+    fn abandon(&self) {
+        self.abandoned.store(true, Ordering::Release);
+        // Take the lock before notifying so a waiter either sees the flag or is woken.
+        let _next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        self.cv.notify_all();
     }
 
     fn done(&self) {
@@ -354,7 +366,8 @@ impl Drop for EndTurn<'_> {
 /// draining while the reply waits its turn). With two possible replies — the cursor
 /// report and then DA1 — separate threads could otherwise race, and a DA1 that lands
 /// first makes ConPTY settle for row 1. At most two threads per session, because the
-/// filter retires on the first DA1 and answers the cursor query once.
+/// filter retires on the first DA1 and answers the cursor query once. A reply that cannot get
+/// a thread is dropped and logged, never written on the caller's thread (see `send_with`).
 pub struct StartupReplies {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     label: String,
@@ -369,6 +382,22 @@ impl StartupReplies {
 
     /// Queue `reply` behind everything sent before it. Never blocks on the writer.
     pub fn send(&mut self, reply: StartupReply<'_>) {
+        self.send_with(reply, spawn_startup_reply);
+    }
+
+    /// [`Self::send`] with the thread start spelled out, so a test can make it fail or hold it.
+    ///
+    /// When `spawn` fails the reply is DROPPED, not written inline: this runs on the output
+    /// reader, and an input write can hold the writer mutex through an unbounded `WriteFile`,
+    /// so waiting for the mutex here could stop output from draining. (The one-shot DA1 sender
+    /// this replaced did the same: log and carry on, and ConPTY falls back to its own defaults
+    /// or its ~3 s handshake timeout.) The turn is abandoned so a reply behind it does not wait
+    /// for a write that will never happen.
+    fn send_with(
+        &mut self,
+        reply: StartupReply<'_>,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+    ) {
         let turn = self.issued;
         self.issued += 1;
         let (what, consumed) = (reply.what(), reply.consumed);
@@ -387,12 +416,20 @@ impl StartupReplies {
                 }
             }
         };
-        // No thread to be had: write inline rather than leave every later turn waiting.
-        if let Err(e) = std::thread::Builder::new().name("startup-reply".into()).spawn(run.clone()) {
-            log::warn!("[CONPTY] could not start the startup reply thread for {}: {e}; writing inline", self.label);
-            run();
+        if let Err(e) = spawn(Box::new(run)) {
+            log::warn!(
+                "[CONPTY] could not start the startup {what} reply thread for {}: {e}; dropping it \
+                 (ConPTY falls back to its own defaults or its ~3 s handshake timeout)",
+                self.label
+            );
+            self.turns.abandon();
         }
     }
+}
+
+/// The production thread start of [`StartupReplies`]: one short-lived named thread per reply.
+fn spawn_startup_reply(run: Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()> {
+    std::thread::Builder::new().name("startup-reply".into()).spawn(run).map(drop)
 }
 
 /// Send the reply from a one-shot thread so the reader never blocks on the writer
@@ -968,5 +1005,79 @@ mod tests {
         replies.send(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 });
         wait_for(&sink, DA1_REPLY.len());
         assert_eq!(*sink.0.lock().unwrap(), DA1_REPLY, "the second reply still goes out");
+    }
+
+    /// `thread::Builder::spawn` failing, as it does when the OS has no thread to give.
+    fn no_thread(_run: Box<dyn FnOnce() + Send + 'static>) -> io::Result<()> {
+        Err(io::Error::new(io::ErrorKind::WouldBlock, "no thread to give"))
+    }
+
+    #[test]
+    fn a_reply_that_cannot_get_a_thread_is_dropped_never_written_on_the_readers_thread() {
+        let sink = Shared::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(sink.clone()));
+        let guard = writer.lock().unwrap(); // an input write holding the mutex through a slow WriteFile
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let caller = {
+            let writer = writer.clone();
+            std::thread::spawn(move || {
+                let mut replies = StartupReplies::new(writer, "t".into());
+                replies.send_with(StartupReply { bytes: b"\x1b[3;1R", cursor: true, da1: false, consumed: 4 }, no_thread);
+                replies.send_with(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 }, no_thread);
+                let _ = done_tx.send(());
+            })
+        };
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a failed thread start must not wait on the writer lock (that would stall output)");
+        caller.join().unwrap();
+        drop(guard);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(sink.0.lock().unwrap().is_empty(), "a dropped reply is never written inline");
+    }
+
+    #[test]
+    fn a_dropped_reply_does_not_park_the_one_behind_it() {
+        // The cursor report (turn 0) gets no thread; the DA1 reply (turn 1) starts normally and
+        // must not wait for a write that is never going to happen.
+        let sink = Shared::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(sink.clone()));
+        let mut replies = StartupReplies::new(writer, "t".into());
+        replies.send_with(StartupReply { bytes: b"\x1b[3;1R", cursor: true, da1: false, consumed: 4 }, no_thread);
+        replies.send(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 });
+        wait_for(&sink, DA1_REPLY.len());
+        assert_eq!(*sink.0.lock().unwrap(), DA1_REPLY);
+    }
+
+    #[test]
+    fn a_later_reply_waits_for_the_earlier_one_even_when_its_thread_runs_first() {
+        // The scheduler is taken out of the picture: both reply threads are captured, then the
+        // SECOND is started alone. Without the turn barrier it writes straight away.
+        type Run = Box<dyn FnOnce() + Send + 'static>;
+        let captured = Arc::new(Mutex::new(Vec::<Run>::new()));
+        let capture = |captured: &Arc<Mutex<Vec<Run>>>| {
+            let captured = captured.clone();
+            move |run: Run| -> io::Result<()> {
+                captured.lock().unwrap().push(run);
+                Ok(())
+            }
+        };
+        let sink = Shared::default();
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(boxed(sink.clone()));
+        let mut replies = StartupReplies::new(writer, "t".into());
+        replies.send_with(StartupReply { bytes: b"\x1b[3;1R", cursor: true, da1: false, consumed: 4 }, capture(&captured));
+        replies.send_with(StartupReply { bytes: DA1_REPLY, cursor: false, da1: true, consumed: 9 }, capture(&captured));
+        let mut runs = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(runs.len(), 2, "one thread start per reply");
+        let (first, second) = (runs.remove(0), runs.remove(0));
+
+        let t_second = std::thread::spawn(second);
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(sink.0.lock().unwrap().is_empty(), "the DA1 reply must not reach the writer ahead of the cursor report");
+
+        let t_first = std::thread::spawn(first);
+        t_first.join().unwrap();
+        t_second.join().unwrap();
+        assert_eq!(*sink.0.lock().unwrap(), [&b"\x1b[3;1R"[..], DA1_REPLY].concat());
     }
 }
