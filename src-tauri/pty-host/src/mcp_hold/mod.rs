@@ -11,9 +11,13 @@
 //! The real holder (bind retry, HTTP, timers) is 054 T5. Until then the
 //! production spawn function is [`placeholder_spawn`], which binds nothing.
 
-// Wired into the real holder by 054 T5; until then only the tests reach it.
+// Wired into the real holder by 054 T5; until then only the tests reach them.
+#[allow(dead_code)]
+mod http;
 #[allow(dead_code)]
 mod message;
+#[allow(dead_code)]
+mod rpc;
 
 use std::future::Future;
 use std::pin::Pin;
