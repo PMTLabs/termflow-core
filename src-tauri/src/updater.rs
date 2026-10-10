@@ -511,7 +511,7 @@ mod mcp_handover_census_tests {
 /// `update_and_restart`; each negative case edits it and must fail.
 #[cfg(test)]
 mod mcp_parallel_path_census_tests {
-    use crate::state::live_call_census::{find_calls, word_uses, Kind, Src, Sub};
+    use crate::state::live_call_census::{find_calls, is_return, word_uses, Kind, Src, Sub};
     use crate::state::mcp_hold_census_tests::mutate;
 
     const SOURCE: &str = include_str!("updater.rs");
@@ -559,8 +559,12 @@ mod mcp_parallel_path_census_tests {
                 }
                 continue;
             }
-            let returns = text.starts_with("return")
-                || arm.block.as_ref().is_some_and(|b| b.stmts.iter().any(|s| src.norm(&s.span).starts_with("return")));
+            // The keyword, on the masked text (`returned_info` is not a return), as the arm's
+            // expression or as a statement that runs in the arm's block.
+            let returns = match &arm.block {
+                None => is_return(&src.masked[arm.body.clone()]),
+                Some(b) => b.live_position(|s| is_return(&src.masked[s.span.clone()])).is_some(),
+            };
             if !returns {
                 return Err(format!("the `{pattern}` arm does not return from the function"));
             }
@@ -623,6 +627,16 @@ mod mcp_parallel_path_census_tests {
             (
                 "the needs-confirmation arm falls through",
                 mutate(SOURCE, "FullRun::NeedsConfirmation(needed) => return Ok(UpdateRestart::NeedsConfirmation(needed)),", "FullRun::NeedsConfirmation(needed) => { log::info!(\"x\"); }"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "an expression arm that names a `returned…` value instead of returning",
+                mutate(SOURCE, "FullRun::NeedsConfirmation(needed) => return Ok(UpdateRestart::NeedsConfirmation(needed)),", "FullRun::NeedsConfirmation(_needed) => returned_info,"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "a block arm whose statement merely starts with `return…`",
+                mutate(SOURCE, "FullRun::Exited => return Ok(UpdateRestart::Started),", "FullRun::Exited => { returned_count += 1; returned_info }"),
                 UPDATE_FULL.into(),
             ),
             (

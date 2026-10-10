@@ -166,15 +166,18 @@ fn check(main_rs: &str, dial_rs: &str) -> Result<(), String> {
     if m[block_close + 1..].trim_start().starts_with("else") {
         return Err("the dial-out branch has an `else`".into());
     }
+    // A statement of the branch's own block: at its depth, and starting a statement (not the body
+    // of a brace-less `if`).
+    let starts_statement = |at: usize| m[..at].trim_end().ends_with([';', '{', '}']);
     let run = occurrences(&m[block_open..block_close], "run_dial_out_mode(dial_args).await;")
         .into_iter()
         .map(|at| block_open + at)
-        .find(|&at| depth_in(&m, block_open, at) == 0)
+        .find(|&at| depth_in(&m, block_open, at) == 0 && starts_statement(at))
         .ok_or("the dial-out branch does not run the mode unconditionally")?;
     let ret = occurrences(&m[block_open..block_close], "return;")
         .into_iter()
         .map(|at| block_open + at)
-        .find(|&at| depth_in(&m, block_open, at) == 0)
+        .find(|&at| depth_in(&m, block_open, at) == 0 && starts_statement(at))
         .ok_or("the dial-out branch does not return unconditionally")?;
     if ret < run {
         return Err("the dial-out branch returns before it runs the mode".into());
@@ -241,6 +244,8 @@ fn the_dial_out_census_kills_each_planted_mutation() {
         ("the return removed", mutate(MAIN_RS, "        log::logger().flush();\n        return;\n    }\n", "        log::logger().flush();\n    }\n")),
         ("the return only in a comment", mutate(MAIN_RS, "        return;\n    }\n\n    // If we cannot outlive", "        // return;\n    }\n\n    // If we cannot outlive")),
         ("the return under a condition", mutate(MAIN_RS, "        return;\n    }\n\n    // If we cannot outlive", "        if cfg!(debug_assertions) { return; }\n    }\n\n    // If we cannot outlive")),
+        ("the return under a brace-less condition", mutate(MAIN_RS, "        return;\n    }\n\n    // If we cannot outlive", "        if cfg!(debug_assertions) return;\n    }\n\n    // If we cannot outlive")),
+        ("the mode run under a brace-less condition", mutate(MAIN_RS, "        run_dial_out_mode(dial_args).await;", "        if cfg!(debug_assertions) run_dial_out_mode(dial_args).await;")),
         ("the return before the mode runs", mutate(MAIN_RS, "        run_dial_out_mode(dial_args).await;\n        log::logger().flush();\n        return;", "        return;\n        run_dial_out_mode(dial_args).await;")),
         ("an else branch", mutate(MAIN_RS, "        return;\n    }\n\n    // If we cannot outlive", "        return;\n    } else {\n        log::info!(\"serving\");\n    }\n\n    // If we cannot outlive")),
         ("the branch moved after the record is published", mutate(&without, publish_at, &format!("{branch}{publish_at}"))),

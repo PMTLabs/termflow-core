@@ -72,7 +72,13 @@ fn check_record_reader(client: &str) -> Result<(), String> {
         return Err(format!("read_advertised_record's body changed: {body}"));
     }
     let spawned = src.try_function("pub fn spawned_host_advertises(")?;
-    if !spawned.stmts.iter().any(|s| src.norm(&s.span).contains("read_advertised_record()")) {
+    // The read must run: a live statement whose own text (not a closure inside it) makes the call.
+    let reads = spawned.live_position(|s| {
+        find_calls(&src.masked[s.span.clone()], "read_advertised_record()")
+            .iter()
+            .any(|at| spawned.constructs_at(s.span.start + at).is_empty())
+    });
+    if reads.is_none() {
         return Err("spawned_host_advertises no longer reads the record through read_advertised_record".into());
     }
     let cursor = src.try_function("pub fn spawned_host_inherits_cursor(")?;
@@ -171,6 +177,8 @@ fn the_record_reader_census_kills_its_mutations() {
         ("a reader that is no longer visible to the connection site", mutate(CLIENT, "pub(crate) fn read_advertised_record(", "fn read_advertised_record(")),
         ("a spawned helper that no longer re-reads the record", mutate(CLIENT, "host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "host_advertises_served_by(None, server_pid, bit)")),
         ("a cursor wrapper that stops sharing the resolver", mutate(CLIENT, "spawned_host_advertises(server_pid, termflow_pty_protocol::CAP_INHERIT_CURSOR)", "true")),
+        ("a return before the spawned helper's read", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    return false;\n    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)")),
+        ("the read only inside a closure nobody calls", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    let _f = || read_advertised_record();\n    host_advertises_served_by(None, server_pid, bit)")),
     ];
     for (name, source) in cases {
         assert!(check_record_reader(&source).is_err(), "the census let this mutation through: {name}");

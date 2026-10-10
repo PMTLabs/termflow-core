@@ -104,6 +104,9 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
     if !(spawn_idx < process_idx && process_idx < install_idx) {
         return Err("the process must be built after the spawn and before the slot-lock match".into());
     }
+    if !body.is_unconditional(at(install_idx)) {
+        return Err("the slot-lock match does not run (it is conditional or after a return)".into());
+    }
     // And that same local is installed in the Ok arm, shut down in the Err arm.
     let Some(Sub::Match { arms, .. }) = body.stmts[install_idx].subs.iter().find(|s| matches!(s, Sub::Match { .. }))
     else {
@@ -114,8 +117,10 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
         return Err(format!("the Ok arm must be exactly `{INSTALL_PROCESS}`, found `{}`", src.norm(&ok_arm.body)));
     }
     let err_arm = arms.iter().find(|a| a.pattern.starts_with("Err(")).ok_or("no Err arm")?;
-    let shuts =
-        err_arm.block.as_ref().is_some_and(|b| b.stmts.iter().any(|s| src.norm(&s.span) == norm(SHUTDOWN_PROCESS)));
+    let shuts = err_arm
+        .block
+        .as_ref()
+        .is_some_and(|b| b.live_position(|s| src.norm(&s.span) == norm(SHUTDOWN_PROCESS)).is_some());
     if !shuts {
         return Err(format!("the Err arm must shut the process down with `{SHUTDOWN_PROCESS}`"));
     }
@@ -232,6 +237,8 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_sidecar_path() {
         ("the wrapper built inside if false", in_sidecar(LET_PROCESS, &format!("if false {{ {LET_PROCESS} }}"))),
         ("an early return before the env loop", in_sidecar(SIDECAR_LOOP_SRC, &format!("return Ok(false);\n    {SIDECAR_LOOP}"))),
         ("an early return before the wrapper", in_sidecar(LET_PROCESS, &format!("return Ok(false);\n    {LET_PROCESS}"))),
+        ("an early return between the wrapper and the install", in_sidecar(LET_PROCESS, &format!("{LET_PROCESS}\n    return Ok(false);"))),
+        ("a return before the poisoned-lock shutdown", in_sidecar(SHUTDOWN_PROCESS, &format!("return Err(\"skip shutdown\".into());\n            {SHUTDOWN_PROCESS}"))),
     ];
     for (name, source) in cases {
         assert!(check_spawn_provenance(&source, SIDECAR_FN, false).is_err(), "the census let this sidecar mutation through: {name}");
@@ -256,6 +263,8 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_legacy_path() {
         ("the Err arm no longer shuts the process down", in_legacy(SHUTDOWN_PROCESS, "drop(process);")),
         ("an early return before the launch let", in_legacy(LET_LAUNCH, &format!("return Ok(false);\n    {LET_LAUNCH}"))),
         ("an early return before the wrapper", in_legacy(LET_PROCESS, &format!("return Ok(false);\n    {LET_PROCESS}"))),
+        ("an early return between the wrapper and the install", in_legacy(LET_PROCESS, &format!("{LET_PROCESS}\n    return Ok(false);"))),
+        ("a return before the poisoned-lock shutdown", in_legacy(SHUTDOWN_PROCESS, &format!("return Err(\"skip shutdown\".into());\n            {SHUTDOWN_PROCESS}"))),
     ];
     for (name, source) in cases {
         assert!(check_spawn_provenance(&source, LEGACY_FN, true).is_err(), "the census let this legacy mutation through: {name}");

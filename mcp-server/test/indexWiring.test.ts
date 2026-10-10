@@ -25,6 +25,15 @@ function findAll(masked: string, pattern: RegExp): Hit[] {
     return hits;
 }
 
+/**
+ * Whether the code at `at` begins a statement of its own: nothing but a `;`, `{` or `}` (or the
+ * start of the file) precedes it, so it is not the body of a brace-less `if`, loop or expression.
+ */
+function startsStatement(masked: string, at: number): boolean {
+    const before = masked.slice(0, at).trimEnd();
+    return before.length === 0 || ["{", ";", "}"].includes(before[before.length - 1]);
+}
+
 /** Every departure of `source` from the T8 wiring; empty when it is exactly as the plan prescribes. */
 export function checkIndexWiring(source: string): string[] {
     const masked = mask(source);
@@ -41,6 +50,7 @@ export function checkIndexWiring(source: string): string[] {
     });
     for (const s of statements) {
         if (s.depth !== 0) problems.push(`an app.use statement is not at module level: ${s.text.slice(0, 60)}`);
+        if (!startsStatement(masked, s.at)) problems.push(`an app.use call is not a statement of its own: ${s.text.slice(0, 60)}`);
     }
     const expected = ["app.use(cors());", "app.use(express.json());", MOUNT, GATE].map(norm);
     if (JSON.stringify(statements.map((s) => s.text)) !== JSON.stringify(expected)) {
@@ -67,6 +77,7 @@ export function checkIndexWiring(source: string): string[] {
     if (declarations.length !== 1) problems.push("`const drain = new DrainState();` is not present exactly once");
     else {
         if (depthAt(masked, declarations[0].at) !== 0) problems.push("`const drain = new DrainState();` is not at module level");
+        if (!startsStatement(masked, declarations[0].at)) problems.push("`const drain = new DrainState();` is not a statement of its own");
         const firstMount = statements.find((s) => s.text === norm(MOUNT));
         if (firstMount && declarations[0].at > firstMount.at) problems.push("the drain state is declared after the mount");
     }
@@ -113,8 +124,7 @@ export function checkIndexWiring(source: string): string[] {
         const depth = depthAt(masked, h.at);
         const inBody = h.at > bodyOpen && h.at < tryOpen && depth === bodyDepth;
         const inTry = h.at > tryOpen && h.at < q.at && depth === bodyDepth + 1;
-        const prev = masked.slice(0, h.at).trimEnd();
-        return (inBody || inTry) && ["{", ";", "}"].includes(prev[prev.length - 1]);
+        return (inBody || inTry) && startsStatement(masked, h.at);
     });
     if (leaves.length > 0) problems.push("`await quiesce(` follows a return or throw that always runs first");
     const args = callArguments(source, masked, q.end - 1);
@@ -143,6 +153,8 @@ describe("index.ts drain wiring census", () => {
         ["the drain mounted before express.json()", () => mutate(mutate(INDEX, MOUNT, ""), "app.use(express.json());", `${MOUNT}\napp.use(express.json());`)],
         ["the mount inside if (false)", () => mutate(INDEX, MOUNT, `if (false) { ${MOUNT} }`)],
         ["the mount only in a comment", () => mutate(INDEX, MOUNT, `// ${MOUNT}`)],
+        ["the mount under a brace-less if (false)", () => mutate(INDEX, MOUNT, `if (false) ${MOUNT}`)],
+        ["the gate under a brace-less if (false)", () => mutate(INDEX, GATE, `if (false) ${GATE}`)],
         ["the gate mounted twice", () => mutate(INDEX, GATE, `${GATE}\n${GATE}`)],
         ["the old acceptingSessions variable back", () => mutate(INDEX, "const drain = new DrainState();", "const drain = new DrainState();\nlet acceptingSessions = true;")],
         ["another middleware answering 503", () => mutate(INDEX, GATE, `${GATE}\napp.use((_req: Request, res: Response) => { res.status(503).end(); });`)],

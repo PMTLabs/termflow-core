@@ -43,7 +43,11 @@ fn check_sibling_arm(text: &str) -> Result<(), String> {
     if !word_uses(&src.masked, region.clone(), "Local").is_empty() {
         return Err("`sibling_arm` mentions the Local purpose".into());
     }
-    let kept = arm.stmts.iter().filter(|s| src.norm(&s.span) == "slot.keep(arm,hold);").count();
+    let kept = arm
+        .stmts
+        .iter()
+        .filter(|s| src.norm(&s.span) == "slot.keep(arm,hold);" && arm.is_unconditional(&s.span))
+        .count();
     if kept != 1 {
         return Err(format!("`sibling_arm` must keep the hold for the sibling's disarm with `slot.keep(arm, hold);`, found {kept}"));
     }
@@ -134,6 +138,10 @@ fn the_sibling_census_kills_each_planted_mutation() {
         (
             "the sibling arm keeps the hold only conditionally",
             mutate(LIFECYCLE_RS, "    slot.keep(arm, hold);\n", "    if armed > 0 { slot.keep(arm, hold); }\n"),
+        ),
+        (
+            "the sibling arm returns before it keeps the hold",
+            mutate(LIFECYCLE_RS, "    slot.keep(arm, hold);\n", "    return SiblingArm::Armed(armed);\n    slot.keep(arm, hold);\n"),
         ),
         (
             "a handover sent from the sibling disarm",

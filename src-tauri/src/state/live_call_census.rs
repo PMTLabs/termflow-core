@@ -649,11 +649,26 @@ impl Src {
 /// or with a call that never returns.
 fn diverges(statement: &str) -> bool {
     let text = statement.trim_start();
-    let starts_word = |word: &str| text.strip_prefix(word).is_some_and(|rest| rest.chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_')));
-    starts_word("return")
+    is_return(text)
         || ["panic!", "unreachable!", "todo!", "unimplemented!", "std::process::exit(", "process::exit("]
             .iter()
             .any(|prefix| text.starts_with(prefix))
+}
+
+/// Whether a statement or arm expression (masked, not whitespace-collapsed text) is a `return`: the
+/// keyword itself, not an identifier that starts with it (`returned_info`).
+pub(crate) fn is_return(text: &str) -> bool {
+    text.trim_start()
+        .strip_prefix("return")
+        .is_some_and(|rest| rest.chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_')))
+}
+
+impl Block {
+    /// The first top-level statement of this block that `matches` and that runs: unconditional and
+    /// not after one of the block's own `return`s. The one way a census finds a subject by content.
+    pub fn live_position(&self, matches: impl Fn(&Stmt) -> bool) -> Option<usize> {
+        self.stmts.iter().position(|s| matches(s) && self.is_unconditional(&s.span))
+    }
 }
 
 /// Whether the statement that has just closed a `{ ... }` at `i` is over. `.`/`?`/`;`/`else`/`as`
@@ -985,6 +1000,16 @@ mod scanner_tests {
         assert!(!h.is_unconditional(&(at("after_panic();")..at("after_panic();") + 1)));
         let k = src.function("fn k(");
         assert!(k.is_unconditional(&(at("next();")..at("next();") + 1)), "`returned` is not `return`");
+    }
+
+    #[test]
+    fn a_return_is_the_keyword_not_a_prefix() {
+        for text in ["return;", "return Ok(())", "  return\n x", "return(1)"] {
+            assert!(is_return(text), "{text:?}");
+        }
+        for text in ["returned_info", "returns", "return_value;", "let r = return_value;", "{ return 1; }"] {
+            assert!(!is_return(text), "{text:?}");
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! Each negative case edits the real source text, asserts the edit took effect, and requires the
 //! census to fail.
 
-use super::live_call_census::{find_calls, word_uses, Block, Kind, Src, Sub};
+use super::live_call_census::{find_calls, is_return, word_uses, Block, Kind, Src, Sub};
 use super::mcp_hold_census_tests::{mutate, mutate_in, norm};
 
 const UPDATE_RS: &str = include_str!("../commands/update.rs");
@@ -140,8 +140,8 @@ pub(crate) fn check_exit_path(text: &str, path: &ExitPath) -> Result<(), String>
     if let Some(head) = path.failure_head {
         let failing = body.stmts[index + 1..]
             .iter()
-            .find(|s| src.masked[s.span.clone()].contains(head))
-            .ok_or_else(|| format!("no statement after the handover contains `{head}`"))?;
+            .find(|s| src.masked[s.span.clone()].contains(head) && body.is_unconditional(&s.span))
+            .ok_or_else(|| format!("no statement that runs after the handover contains `{head}`"))?;
         let arm = failure_block(failing).ok_or("the failing step has no failure arm")?;
         let release = format!("{handed}.release().await;");
         if occurrences(&src, &body, &release) != 1 {
@@ -151,7 +151,7 @@ pub(crate) fn check_exit_path(text: &str, path: &ExitPath) -> Result<(), String>
         let returns = arm
             .stmts
             .iter()
-            .position(|s| src.norm(&s.span).starts_with("returnErr(") || src.norm(&s.span).starts_with("return"))
+            .position(|s| is_return(&src.masked[s.span.clone()]))
             .ok_or("the failure arm does not return")?;
         if at > returns {
             return Err("the release comes after the arm's return".into());
@@ -322,10 +322,8 @@ fn check_handover_wiring(text: &str) -> Result<(), String> {
     }
     let stored = top_position(&src, &txn, "parts.op=Some(guard);").ok_or("the guard is not stored in the bundle")?;
     let read = txn
-        .stmts
-        .iter()
-        .position(|s| src.masked[s.span.clone()].contains("read_inputs("))
-        .ok_or("handover_txn never reads the inputs")?;
+        .live_position(|s| src.masked[s.span.clone()].contains("read_inputs("))
+        .ok_or("handover_txn never reads the inputs where it runs")?;
     if read <= stored {
         return Err("the inputs are read before the guard is stored".into());
     }
@@ -388,6 +386,14 @@ fn the_wiring_census_kills_each_planted_mutation() {
         (
             "the inputs read before the guard is stored",
             mutate(HANDOVER_RS, "    parts.op = Some(guard);\n    let inputs = port.read_inputs();", "    let inputs = port.read_inputs();\n    parts.op = Some(guard);"),
+        ),
+        (
+            "a return before the guard is stored",
+            mutate(HANDOVER_RS, "    parts.op = Some(guard);\n", "    return handed;\n    parts.op = Some(guard);\n"),
+        ),
+        (
+            "a return between the guard and the read",
+            mutate(HANDOVER_RS, "    let inputs = port.read_inputs();", "    return handed;\n    let inputs = port.read_inputs();"),
         ),
     ];
     for (name, source) in cases {
