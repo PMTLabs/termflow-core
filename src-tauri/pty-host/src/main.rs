@@ -5,6 +5,7 @@
 //! See docs/plan/002 for the full design.
 
 mod detach;
+mod logging;
 mod manager;
 mod mcp_hold;
 mod ring;
@@ -148,6 +149,12 @@ async fn run_dial_out_mode(_args: DialArgs) {
 
 #[tokio::main]
 async fn main() {
+    // First, so the `log::` lines of everything below (ConPTY preload, the MCP
+    // hold, token rejections) are written rather than dropped (plan 054 review 295 F2).
+    if let Err(e) = logging::init_logging() {
+        eprintln!("termflow-pty-host: could not install the logger: {e}");
+    }
+
     // Must run BEFORE any session spawns: children inherit this process's
     // ignore-vs-process CTRL+C attribute at creation time.
     restore_ctrl_c_processing();
@@ -282,6 +289,21 @@ mod tests {
         assert_eq!(host_capabilities(true), base | CAP_INHERIT_CURSOR);
         assert_eq!(host_capabilities(false) & CAP_DRAIN, 0);
         assert_eq!(host_capabilities(true) & CAP_DRAIN, 0);
+    }
+
+    /// `init_logging` is tested in `logging.rs`; this pins that `main` calls it,
+    /// and before the first thing that can log (the ConPTY preload). Source-pinned,
+    /// CRLF-normalised.
+    #[test]
+    fn main_installs_the_logger_before_anything_can_log() {
+        let source = include_str!("main.rs").replace("
+", "
+");
+        let body = source.split("async fn main() {").nth(1).expect("main()");
+        let init = body.find("logging::init_logging()").expect("main must call logging::init_logging()");
+        let first_log = body.find("init_for_current_exe").expect("the ConPTY preload in main()");
+        assert!(init < first_log, "init_logging must run before the ConPTY preload logs");
+        assert!(init < body.find("transport::serve(").expect("serve in main()"));
     }
 
     /// The record builder must take its bits from `host_capabilities`, or the
