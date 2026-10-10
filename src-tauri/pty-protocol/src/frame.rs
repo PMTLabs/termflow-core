@@ -71,6 +71,57 @@ pub enum Control {
     /// send it only when the capability was advertised so the ack wait is never
     /// spent on a host that will not answer.
     Shutdown { req: u64, token: String },
+    /// Hold this MCP port during the coming absence. Valid only while a Local
+    /// ArmDetach is in force; the holder starts when the GUI is gone.
+    /// COMPATIBILITY: send ONLY to a host whose discovery record advertises
+    /// `CAP_MCP_HOLD` — a legacy host fails to decode this variant and drops the
+    /// connection. (Trailing additive variant; shipped indices are unchanged.)
+    HoldMcp { req: u64, token: String, spec: McpHoldSpec },
+    /// A relaunched GUI adopting this host and announcing it will take the MCP
+    /// port back. An authenticated lifecycle frame: it adopts like
+    /// `ListSessions`, but a running holder keeps serving until `ReleaseMcp` or
+    /// its grace ends. Same `CAP_MCP_HOLD` gate as [`Control::HoldMcp`].
+    ClaimMcp { req: u64, token: String },
+    /// Stop holding. Acked at once; the holder closes within its stop bound.
+    /// Same `CAP_MCP_HOLD` gate as [`Control::HoldMcp`].
+    ReleaseMcp { req: u64, token: String },
+}
+
+/// Why the GUI asked the host to hold its MCP port; selects the wording of the
+/// message the holder serves to agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum McpHoldReason {
+    Offload,
+    OffloadUpdate,
+    Relaunch,
+}
+
+/// Everything the host needs to stand in for the MCP sidecar while the GUI is
+/// away. The two snapshot results travel as raw JSON strings so the wire types
+/// need no JSON value type and the host serves the bytes it was handed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpHoldSpec {
+    /// The effective port the sidecar listened on.
+    pub port: u16,
+    /// The network config's port at offload (provenance).
+    pub configured_port: u16,
+    /// The sidecar's `MCP_HOST`: an IP literal, never a name.
+    pub bind_host: String,
+    /// The sidecar's bearer token; `None` or empty means open.
+    pub auth_token: Option<String>,
+    pub reason: McpHoldReason,
+    /// Raw JSON `result` of the sidecar's `initialize`.
+    pub initialize_result: Option<String>,
+    /// Raw JSON `result` of the sidecar's `tools/list`.
+    pub tools_list_result: Option<String>,
+}
+
+/// What a host reports it is holding, in reply to [`Control::ClaimMcp`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpHeld {
+    pub port: u16,
+    pub configured_port: u16,
+    pub bind_host: String,
 }
 
 /// Sidecar → GUI replies to a `req`-bearing [`Control`].
@@ -90,6 +141,13 @@ pub enum Response {
     /// Reply to [`Control::Shutdown`]: the host has latched teardown and will
     /// kill every session as soon as this connection closes.
     ShutdownAck { req: u64 },
+    /// Reply to [`Control::HoldMcp`] ONLY, and only from a host advertising
+    /// `CAP_MCP_HOLD`. `reason` explains a rejection.
+    McpHoldAck { req: u64, accepted: bool, reason: Option<String> },
+    /// Reply to [`Control::ClaimMcp`]: what the host is holding, if anything.
+    McpClaimAck { req: u64, held: Option<McpHeld> },
+    /// Reply to [`Control::ReleaseMcp`]: stop has been ORDERED (not completed).
+    McpReleaseAck { req: u64, was_holding: bool },
 }
 
 /// One surviving session as reported by `ListSessions`.
@@ -284,6 +342,209 @@ mod tests {
             let encoded = encode(&frame);
             assert_eq!(decode(encoded[0], &encoded[5..]).unwrap(), frame);
         }
+    }
+
+    fn mcp_roundtrip(frame: Frame) {
+        let encoded = encode(&frame);
+        assert_eq!(decode(encoded[0], &encoded[5..]).unwrap(), frame);
+    }
+
+    /// Every new MCP-hold frame, with non-default values in every field, is
+    /// encoded, decoded and compared (`==`) with an independently built value.
+    #[test]
+    fn mcp_hold_frames_roundtrip() {
+        let initialize = "{ \"protocolVersion\":\"2025-03-26\" ,\"capabilities\":{\"tools\":{ }},\n\t\"serverInfo\":{\"name\":\"\u{e9}x\\u00e9\"} }";
+        let tools = "{\"tools\":[ {\"name\":\"b\",\"inputSchema\":{}} ,\n{\"name\":\"a\"}],  \"z\":null}";
+
+        // HoldMcp: IPv6 host, port != configured_port, each reason, snapshots
+        // both present (unusual JSON) and absent, token present / empty / absent.
+        let hold = |req, token: &str, spec| Frame::Ctrl(Control::HoldMcp { req, token: token.into(), spec });
+        let full = hold(
+            7,
+            "launch-token",
+            McpHoldSpec {
+                port: 40123,
+                configured_port: 40120,
+                bind_host: "::1".into(),
+                auth_token: Some("bearer-secret".into()),
+                reason: McpHoldReason::Offload,
+                initialize_result: Some(initialize.into()),
+                tools_list_result: Some(tools.into()),
+            },
+        );
+        let update_open = hold(
+            7,
+            "launch-token",
+            McpHoldSpec {
+                port: 65535,
+                configured_port: 1,
+                bind_host: "fe80::1ff:fe23:4567:890a".into(),
+                auth_token: None,
+                reason: McpHoldReason::OffloadUpdate,
+                initialize_result: None,
+                tools_list_result: Some(tools.into()),
+            },
+        );
+        let relaunch_empty_token = hold(
+            7,
+            "launch-token",
+            McpHoldSpec {
+                port: 42190,
+                configured_port: 42191,
+                bind_host: "0.0.0.0".into(),
+                auth_token: Some(String::new()),
+                reason: McpHoldReason::Relaunch,
+                initialize_result: Some(initialize.into()),
+                tools_list_result: None,
+            },
+        );
+        for frame in [full.clone(), update_open, relaunch_empty_token] {
+            mcp_roundtrip(frame);
+        }
+        // The decoded value is the independently built one, field by field.
+        let encoded = encode(&full);
+        match decode(encoded[0], &encoded[5..]).unwrap() {
+            Frame::Ctrl(Control::HoldMcp { req, token, spec }) => {
+                assert_eq!(req, 7);
+                assert_eq!(token, "launch-token");
+                assert_eq!(spec.port, 40123);
+                assert_eq!(spec.configured_port, 40120);
+                assert_eq!(spec.bind_host, "::1");
+                assert_eq!(spec.auth_token.as_deref(), Some("bearer-secret"));
+                assert_eq!(spec.reason, McpHoldReason::Offload);
+                assert_eq!(spec.initialize_result.as_deref(), Some(initialize));
+                assert_eq!(spec.tools_list_result.as_deref(), Some(tools));
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+
+        mcp_roundtrip(Frame::Ctrl(Control::ClaimMcp { req: 8, token: "launch-token".into() }));
+        mcp_roundtrip(Frame::Ctrl(Control::ReleaseMcp { req: 9, token: "launch-token".into() }));
+
+        mcp_roundtrip(Frame::Resp(Response::McpHoldAck { req: 7, accepted: true, reason: None }));
+        mcp_roundtrip(Frame::Resp(Response::McpHoldAck {
+            req: 7,
+            accepted: false,
+            reason: Some("already holding".into()),
+        }));
+        mcp_roundtrip(Frame::Resp(Response::McpClaimAck {
+            req: 8,
+            held: Some(McpHeld { port: 40123, configured_port: 40120, bind_host: "::1".into() }),
+        }));
+        mcp_roundtrip(Frame::Resp(Response::McpClaimAck { req: 8, held: None }));
+        mcp_roundtrip(Frame::Resp(Response::McpReleaseAck { req: 9, was_holding: true }));
+        mcp_roundtrip(Frame::Resp(Response::McpReleaseAck { req: 9, was_holding: false }));
+
+        // The reply `req` is the request's, not a constant: a different value
+        // must survive too.
+        let encoded = encode(&Frame::Resp(Response::McpReleaseAck { req: 0x0102_0304_0506_0708, was_holding: true }));
+        assert_eq!(
+            decode(encoded[0], &encoded[5..]).unwrap(),
+            Frame::Resp(Response::McpReleaseAck { req: 0x0102_0304_0506_0708, was_holding: true })
+        );
+    }
+
+    /// First 8 payload bytes: the `Frame` variant index then the inner enum's
+    /// variant index, each a bincode `u32` LE.
+    fn tags(frame: &Frame) -> (u32, u32) {
+        let encoded = encode(frame);
+        let p = &encoded[5..];
+        (
+            u32::from_le_bytes(p[0..4].try_into().unwrap()),
+            u32::from_le_bytes(p[4..8].try_into().unwrap()),
+        )
+    }
+
+    /// The error serde raises for a variant index past the last variant names
+    /// the variant COUNT, so this pins "exactly N variants" without a derive.
+    fn variant_count_error(frame_tag: u32, inner_tag: u32) -> String {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&frame_tag.to_le_bytes());
+        payload.extend_from_slice(&inner_tag.to_le_bytes());
+        bincode::deserialize::<Frame>(&payload).unwrap_err().to_string()
+    }
+
+    /// Every shipped wire tag is pinned, and the three MCP variants of each of
+    /// `Control` and `Response` are the LAST three (trailing, additive).
+    #[test]
+    fn existing_variant_indices_unchanged() {
+        let spec = || SpawnSpec {
+            shell: "sh".into(),
+            args: vec![],
+            env: vec![],
+            env_remove: vec![],
+            cwd: None,
+            cols: 80,
+            rows: 24,
+            initial_cursor_row: None,
+        };
+        let hold_spec = McpHoldSpec {
+            port: 1,
+            configured_port: 2,
+            bind_host: "127.0.0.1".into(),
+            auth_token: None,
+            reason: McpHoldReason::Offload,
+            initialize_result: None,
+            tools_list_result: None,
+        };
+        let t = || "t".to_string();
+        let ctrl: Vec<(Control, u32)> = vec![
+            (Control::Spawn { req: 1, tab_id: t(), spec: spec() }, 0),
+            (Control::Resize { tab_id: t(), cols: 1, rows: 1 }, 1),
+            (Control::Close { tab_id: t() }, 2),
+            (Control::ListSessions { req: 1, token: None }, 3),
+            (Control::Attach { req: 1, tab_id: t(), from_offset: 0 }, 4),
+            (Control::ArmDetach { req: 1, timeout_secs: 1, token: t(), purpose: None }, 5),
+            (Control::Disarm { req: 1 }, 6),
+            (Control::AttachAcked { req: 1, tab_id: t(), from_offset: 0 }, 7),
+            (Control::Shutdown { req: 1, token: t() }, 8),
+            (Control::HoldMcp { req: 1, token: t(), spec: hold_spec }, 9),
+            (Control::ClaimMcp { req: 1, token: t() }, 10),
+            (Control::ReleaseMcp { req: 1, token: t() }, 11),
+        ];
+        for (control, index) in ctrl {
+            assert_eq!(tags(&Frame::Ctrl(control.clone())), (0, index), "{control:?}");
+        }
+        let resp: Vec<(Response, u32)> = vec![
+            (Response::Spawned { req: 1, tab_id: t(), pid: 1 }, 0),
+            (Response::SpawnFailed { req: 1, tab_id: t(), error: t() }, 1),
+            (Response::SessionList { req: 1, sessions: vec![] }, 2),
+            (Response::ArmAck { req: 1, deadline_ms: 1 }, 3),
+            (Response::DisarmAck { req: 1 }, 4),
+            (Response::AttachAck { req: 1, tab_id: t(), alive: true, tail_offset: 0 }, 5),
+            (Response::ShutdownAck { req: 1 }, 6),
+            (Response::McpHoldAck { req: 1, accepted: true, reason: None }, 7),
+            (Response::McpClaimAck { req: 1, held: None }, 8),
+            (Response::McpReleaseAck { req: 1, was_holding: true }, 9),
+        ];
+        for (response, index) in resp {
+            assert_eq!(tags(&Frame::Resp(response.clone())), (1, index), "{response:?}");
+        }
+        let data: Vec<(Data, u32)> = vec![
+            (Data::Stdin { tab_id: t(), bytes: vec![] }, 0),
+            (Data::Stdout { tab_id: t(), offset: 0, bytes: vec![] }, 1),
+            (Data::Gap { tab_id: t(), at_offset: 0 }, 2),
+            (Data::Exit { tab_id: t(), exit_cwd: None }, 3),
+        ];
+        for (d, index) in data {
+            assert_eq!(tags(&Frame::Data(d.clone())), (2, index), "{d:?}");
+        }
+
+        // "Last three": the enums have exactly 12 / 10 variants, so index 11 /
+        // 9 is the last and the next index is refused as out of range.
+        assert!(variant_count_error(0, 12).contains("0 <= i < 12"), "{}", variant_count_error(0, 12));
+        assert!(variant_count_error(1, 10).contains("0 <= i < 10"), "{}", variant_count_error(1, 10));
+        assert!(variant_count_error(2, 4).contains("0 <= i < 4"), "{}", variant_count_error(2, 4));
+        assert!(variant_count_error(3, 0).contains("0 <= i < 3"), "{}", variant_count_error(3, 0));
+
+        // Exact wire bytes of one new reply: Resp tag, McpReleaseAck tag, req, bool.
+        let encoded = encode(&Frame::Resp(Response::McpReleaseAck { req: 9, was_holding: true }));
+        let mut want = vec![PROTOCOL_VERSION, 17, 0, 0, 0];
+        want.extend_from_slice(&1u32.to_le_bytes());
+        want.extend_from_slice(&9u32.to_le_bytes());
+        want.extend_from_slice(&9u64.to_le_bytes());
+        want.push(1);
+        assert_eq!(encoded, want);
     }
 
     #[test]

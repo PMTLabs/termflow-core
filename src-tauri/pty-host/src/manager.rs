@@ -300,6 +300,13 @@ impl SessionManager {
                 self.generation = self.generation.wrapping_add(1);
                 let _ = self.responses.try_send(Response::ShutdownAck { req });
             }
+            // 054 T1 placeholders: the frames exist on the wire but nothing acts on
+            // them yet (T2 implements the state machine). Log only; no reply.
+            Control::HoldMcp { req, .. }
+            | Control::ClaimMcp { req, .. }
+            | Control::ReleaseMcp { req, .. } => {
+                log::info!("[MCP-HOLD] control req {req} ignored: not implemented yet");
+            }
         }
     }
 

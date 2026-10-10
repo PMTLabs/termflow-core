@@ -1996,7 +1996,10 @@ fn resp_req(r: &Response) -> u64 {
         | Response::ArmAck { req, .. }
         | Response::DisarmAck { req }
         | Response::ShutdownAck { req }
-        | Response::AttachAck { req, .. } => *req,
+        | Response::AttachAck { req, .. }
+        | Response::McpHoldAck { req, .. }
+        | Response::McpClaimAck { req, .. }
+        | Response::McpReleaseAck { req, .. } => *req,
     }
 }
 
@@ -2027,6 +2030,20 @@ mod tests {
             resolve_process: Arc::new(|k: &str| Some(k.to_string())),
         };
         (deps, rx, produced)
+    }
+
+    /// The MCP-hold replies are demultiplexed by `req` like every other reply.
+    /// Windows-only: this module is `cfg(all(test, windows))`.
+    #[test]
+    fn resp_req_correlates_mcp_replies() {
+        assert_eq!(
+            resp_req(&Response::McpHoldAck { req: 41, accepted: false, reason: Some("no".into()) }),
+            41
+        );
+        assert_eq!(resp_req(&Response::McpClaimAck { req: 42, held: None }), 42);
+        assert_eq!(resp_req(&Response::McpReleaseAck { req: 43, was_holding: true }), 43);
+        // An existing variant still correlates (the arms were extended, not replaced).
+        assert_eq!(resp_req(&Response::DisarmAck { req: 44 }), 44);
     }
 
     /// Design 014 §A3: the host speaks its own id space and every inbound frame

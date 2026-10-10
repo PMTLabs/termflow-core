@@ -330,6 +330,9 @@ fn control_label(c: &termflow_pty_protocol::Control) -> &'static str {
         ArmDetach { .. } => "ArmDetach",
         Disarm { .. } => "Disarm",
         Shutdown { .. } => "Shutdown",
+        HoldMcp { .. } => "HoldMcp",
+        ClaimMcp { .. } => "ClaimMcp",
+        ReleaseMcp { .. } => "ReleaseMcp",
     }
 }
 
