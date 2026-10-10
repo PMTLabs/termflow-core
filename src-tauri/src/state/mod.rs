@@ -49,6 +49,8 @@ mod mcp_launch_census_tests;
 #[cfg(test)]
 pub(crate) mod mcp_exit_census_tests;
 #[cfg(test)]
+mod mcp_sibling_census_tests;
+#[cfg(test)]
 mod wiring_tests;
 #[cfg(test)]
 mod owner_wiring_tests;

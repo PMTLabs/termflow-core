@@ -14,7 +14,9 @@ fn ensure_mcp_sidecar() {
   let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
   let project_root = manifest_dir.parent().expect("src-tauri must have a parent directory");
   println!("cargo:rerun-if-changed={}", project_root.join("scripts/build-mcp-sidecar.mjs").display());
-  println!("cargo:rerun-if-changed={}", project_root.join("mcp-server/src/index.ts").display());
+  // The whole source directory (cargo scans it recursively): the sidecar is bundled from every
+  // module `index.ts` imports (drain.ts, shutdown.ts, ...), not just the entry file.
+  println!("cargo:rerun-if-changed={}", project_root.join("mcp-server/src").display());
   println!("cargo:rerun-if-changed={}", project_root.join("mcp-server/package.json").display());
 
   let status = Command::new("bun")
