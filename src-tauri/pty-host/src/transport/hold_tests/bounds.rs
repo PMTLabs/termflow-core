@@ -132,10 +132,15 @@ async fn sse_stream_pings_until_stop() {
     assert!(head.contains("Content-Type: text/event-stream\r\n"));
     assert!(head.contains("mcp-session-id: sess-xyz\r\n"), "the session id is echoed");
 
+    // Exactly one ping per 5 s: none a tenth of a second early, one a tenth late.
+    let pings = |sse: &Sse| sse.text().matches(": ping\n\n").count();
     for n in 1..=3usize {
-        advance(Duration::from_secs(5)).await;
+        advance(Duration::from_millis(if n == 1 { 4900 } else { 4800 })).await;
         while matches!(sse.read_some(Duration::from_millis(30)).await, Read::Data) {}
-        assert_eq!(sse.text().matches(": ping\n\n").count(), n, "one ping per 5 s: {:?}", sse.text());
+        assert_eq!(pings(&sse), n - 1, "no ping before {} s: {:?}", 5 * n, sse.text());
+        advance(Duration::from_millis(200)).await;
+        while matches!(sse.read_some(Duration::from_millis(30)).await, Read::Data) {}
+        assert_eq!(pings(&sse), n, "one ping per 5 s: {:?}", sse.text());
     }
 
     let mut old_gui = host.gui().await;
