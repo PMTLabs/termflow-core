@@ -191,17 +191,7 @@ async fn main() {
             proto_min: termflow_pty_protocol::PROTOCOL_MIN,
             proto_max: termflow_pty_protocol::PROTOCOL_MAX,
             endpoint: endpoint.0.clone(),
-            // Drain/takeover is NOT implemented yet — do not advertise CAP_DRAIN.
-            capabilities: termflow_pty_protocol::CAP_ATTACH_ACK
-                | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
-                | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
-                // Only once the bundled ConPTY is loaded (`init_for_current_exe` above): the
-                // inbox one is not measured to honour an inherited cursor.
-                | if termflow_pty_protocol::da1::inherit_cursor_supported() {
-                    termflow_pty_protocol::CAP_INHERIT_CURSOR
-                } else {
-                    0
-                },
+            capabilities: host_capabilities(termflow_pty_protocol::da1::inherit_cursor_supported()),
             // The bound applies to an authenticated, purpose-labelled LOCAL
             // hold and to the crash hold an unannounced disconnect opens
             // (`SessionManager::on_gui_disconnect`). Legacy/unlabelled sibling
@@ -233,6 +223,24 @@ async fn main() {
     }
 }
 
+/// The capability bits this host advertises in its discovery record.
+///
+/// Drain/takeover is NOT implemented yet — `CAP_DRAIN` is deliberately absent.
+/// `inherit_cursor` is true only once the bundled ConPTY is loaded
+/// (`init_for_current_exe`): the inbox one is not measured to honour an
+/// inherited cursor. `CAP_MCP_HOLD` is the plan 054 rollback switch: drop that
+/// one line and no GUI sends the MCP-hold frames.
+///
+/// The elevated dial-out host returns before the record is built, so it never
+/// advertises any of these.
+fn host_capabilities(inherit_cursor: bool) -> u32 {
+    termflow_pty_protocol::CAP_ATTACH_ACK
+        | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
+        | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
+        | termflow_pty_protocol::CAP_MCP_HOLD
+        | if inherit_cursor { termflow_pty_protocol::CAP_INHERIT_CURSOR } else { 0 }
+}
+
 /// Unique-enough identity for this host process (no uuid dep in the sidecar):
 /// pid in the high bits, wall-clock nanos in the low bits.
 fn host_instance_id() -> u128 {
@@ -257,5 +265,38 @@ fn resolve_endpoint() -> transport::Endpoint {
     #[cfg(unix)]
     {
         transport::default_endpoint(cfg!(debug_assertions))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use termflow_pty_protocol::{
+        CAP_ATTACH_ACK, CAP_DRAIN, CAP_INHERIT_CURSOR, CAP_LIFECYCLE_CONTRACT, CAP_MCP_HOLD, CAP_SHUTDOWN_CONTROL,
+    };
+
+    #[test]
+    fn host_capabilities_include_mcp_hold() {
+        let base = CAP_ATTACH_ACK | CAP_LIFECYCLE_CONTRACT | CAP_SHUTDOWN_CONTROL | CAP_MCP_HOLD;
+        assert_eq!(host_capabilities(false), base);
+        assert_eq!(host_capabilities(true), base | CAP_INHERIT_CURSOR);
+        assert_eq!(host_capabilities(false) & CAP_DRAIN, 0);
+        assert_eq!(host_capabilities(true) & CAP_DRAIN, 0);
+    }
+
+    /// The record builder must take its bits from `host_capabilities`, or the
+    /// tests above pin a function nobody calls. Source-pinned, CRLF-normalised.
+    #[test]
+    fn the_record_builder_calls_host_capabilities() {
+        let source = include_str!("main.rs").replace("\r\n", "\n");
+        let builder = source
+            .split("let rec = termflow_pty_protocol::HostRecord {")
+            .nth(1)
+            .and_then(|rest| rest.split("build_id:").next())
+            .expect("the record builder in main()");
+        assert!(
+            builder.contains("capabilities: host_capabilities(termflow_pty_protocol::da1::inherit_cursor_supported()),"),
+            "the record's capabilities must come from host_capabilities: {builder}"
+        );
     }
 }
