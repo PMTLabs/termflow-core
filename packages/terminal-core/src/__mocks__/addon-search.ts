@@ -58,22 +58,39 @@ export class SearchAddon {
     this.disposed = true;
   }
 
+  // Index of the match the (modelled) selection sits on, and the term the real
+  // addon would have cached. The real 0.16 addon IGNORES `incremental`: a findNext
+  // for the cached term starts at the END of the selection, i.e. advances one
+  // match; a changed/cleared cached term starts at the selection START, i.e. stays.
+  // Modelling that is what lets a test tell "refresh in place" from "refresh by
+  // stepping to the next match".
+  selectedIndex = -1;
+  cachedTerm: string | undefined;
+
+  // Third argument of findPrevious — the real addon's internal `{ noScroll }`.
+  findPreviousInternal: Array<{ noScroll?: boolean } | undefined> = [];
+
   findNext(term: string, options?: ISearchOptions): boolean {
     this.findNextCalls.push({ term, options });
     // Real findNext scrolls the viewport to the active match and selects it.
-    // Reproduce both so tests exercise refreshSearch's scroll-preservation AND
-    // its "skip when the user cleared the selection" guard.
+    // Reproduce both so tests exercise the "skip when the user cleared the
+    // selection" guard AND prove a refresh does not move the viewport.
     if (term && this.terminal) {
+      this.selectedIndex = this.cachedTerm === term ? this.selectedIndex + 1 : Math.max(this.selectedIndex, 0);
+      this.cachedTerm = term;
       this.terminal.buffer.active.viewportY = this.matchViewportY;
       this.terminal.selection = term;
     }
     return this.nextReturn;
   }
 
-  findPrevious(term: string, options?: ISearchOptions): boolean {
+  findPrevious(term: string, options?: ISearchOptions, internal?: { noScroll?: boolean }): boolean {
     this.findPreviousCalls.push({ term, options });
+    this.findPreviousInternal.push(internal);
     if (term && this.terminal) {
-      this.terminal.buffer.active.viewportY = this.matchViewportY;
+      this.selectedIndex = this.cachedTerm === term ? this.selectedIndex - 1 : Math.max(this.selectedIndex, 0);
+      this.cachedTerm = term;
+      if (!internal?.noScroll) this.terminal.buffer.active.viewportY = this.matchViewportY;
       this.terminal.selection = term;
     }
     return this.previousReturn;
@@ -81,6 +98,7 @@ export class SearchAddon {
 
   clearDecorations(): void {
     this.clearDecorationsCount += 1;
+    this.cachedTerm = undefined;
   }
 
   clearActiveDecoration(): void {
