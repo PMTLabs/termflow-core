@@ -63,15 +63,22 @@ export class SearchAddon {
   // for the cached term starts at the END of the selection, i.e. advances one
   // match; a changed/cleared cached term starts at the selection START, i.e. stays.
   // Modelling that is what lets a test tell "refresh in place" from "refresh by
-  // stepping to the next match".
+  // stepping to the next match". It is an INDEX model, not positions: findPrevious
+  // with a changed/cleared cached term keeps the index (the real addon re-finds the
+  // match at the selection start), and with the cached term steps back one.
   selectedIndex = -1;
   cachedTerm: string | undefined;
+
+  // Order of the calls that matter to a refresh ('clear' = clearDecorations,
+  // 'previous' = findPrevious, 'next' = findNext), so a test can pin sequencing.
+  callOrder: Array<'clear' | 'previous' | 'next'> = [];
 
   // Third argument of findPrevious — the real addon's internal `{ noScroll }`.
   findPreviousInternal: Array<{ noScroll?: boolean } | undefined> = [];
 
   findNext(term: string, options?: ISearchOptions): boolean {
     this.findNextCalls.push({ term, options });
+    this.callOrder.push('next');
     // Real findNext scrolls the viewport to the active match and selects it.
     // Reproduce both so tests exercise the "skip when the user cleared the
     // selection" guard AND prove a refresh does not move the viewport.
@@ -87,6 +94,7 @@ export class SearchAddon {
   findPrevious(term: string, options?: ISearchOptions, internal?: { noScroll?: boolean }): boolean {
     this.findPreviousCalls.push({ term, options });
     this.findPreviousInternal.push(internal);
+    this.callOrder.push('previous');
     if (term && this.terminal) {
       this.selectedIndex = this.cachedTerm === term ? this.selectedIndex - 1 : Math.max(this.selectedIndex, 0);
       this.cachedTerm = term;
@@ -98,6 +106,7 @@ export class SearchAddon {
 
   clearDecorations(): void {
     this.clearDecorationsCount += 1;
+    this.callOrder.push('clear');
     this.cachedTerm = undefined;
   }
 

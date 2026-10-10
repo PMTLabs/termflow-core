@@ -1272,7 +1272,7 @@ export class TerminalEngine {
   // terminal's PTY). Static so one event quiets all engines.
   static suppressHealUntil = 0;
 
-  // Debounce for the live search refresh (see SEARCH_REFRESH_DEBOUNCE_MS).
+  // Throttle timer for the live search refresh (see SEARCH_REFRESH_INTERVAL_MS).
   // Cleared on unmount so a refresh can't fire against a torn-down mount.
   private searchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   // Last match count from the addon. Lets refreshSearch tell "user dismissed an
@@ -5171,12 +5171,18 @@ export class TerminalEngine {
   // changes, the "N of M" was never recomputed either — so row indices in its
   // result list also went stale once the scrollback trimmed.
   //
-  // Instead, do what the addon's own (debounced, hence starved-by-streaming)
-  // onWriteParsed refresh does: drop the cached term + decorations so the next
-  // search re-highlights and recounts, then findPrevious with a changed cached
-  // term, which "expands the selection to the right" — re-selecting the SAME match.
+  // Instead, mirror the addon's own onWriteParsed refresh (debounced, hence starved
+  // by a stream that never goes quiet): forget the cached term, then findPrevious.
+  // With a changed cached term, findPrevious re-highlights and recounts, and
+  // "expands the selection to the right" — re-selecting the SAME match. The addon
+  // clears the term through a private method; the only public call with that effect
+  // is clearDecorations(), which is why it is used here (it also drops the
+  // highlights, which findPrevious rebuilds synchronously in the same call).
   // `noScroll` (an internal option, absent from the typings) keeps the viewport
   // where it is, so only an explicit Next/Prev ever moves it.
+  //
+  // With NO selection (count was 0), findPrevious searches from the bottom, so the
+  // match that first appears is the NEWEST one (counter "N of N", not "1 of N").
   refreshSearch(): void {
     if (!this.activeSearch || !this.searchAddon || !this.term) return;
     // If the user dismissed an EXISTING match (had results, then cleared the

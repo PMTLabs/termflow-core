@@ -126,19 +126,22 @@ describe('TerminalEngine search', () => {
     engine.searchNext('foo', {}, true); // as-you-type: first match
     engine.searchNext('foo', {}); // user presses Next: second match
     expect(addon.selectedIndex).toBe(1);
+    addon.findPreviousCalls.length = 0;
     for (let i = 0; i < 5; i++) engine.refreshSearch(); // five streaming ticks
     expect(addon.selectedIndex).toBe(1);
+    // Presence before absence: the index only stayed put because the refresh RAN.
+    expect(addon.findPreviousCalls).toHaveLength(5);
   });
 
   it('refreshSearch forces the addon to recount (drops its cached term first)', () => {
     const { engine } = mountEngine();
     const addon = (engine as any).searchAddon as MockSearchAddon;
     engine.searchNext('foo', {});
-    const before = addon.clearDecorationsCount;
+    addon.callOrder.length = 0;
     engine.refreshSearch();
     // The real addon recounts only when the cached term differs from the query;
     // clearDecorations() is what resets it, and it must precede the re-search.
-    expect(addon.clearDecorationsCount).toBe(before + 1);
+    expect(addon.callOrder).toEqual(['clear', 'previous']);
   });
 
   it('refreshSearch never moves the viewport, whether following output or scrolled up', () => {
@@ -153,7 +156,9 @@ describe('TerminalEngine search', () => {
       term.buffer.active.viewportY = viewportY;
       term.scrollToBottomCount = 0;
       term.scrollToLineCalls.length = 0;
+      const ran = addon.findPreviousCalls.length;
       engine.refreshSearch();
+      expect(addon.findPreviousCalls).toHaveLength(ran + 1); // it ran, and still didn't scroll
       expect(term.buffer.active.viewportY).toBe(viewportY);
       expect(term.scrollToBottomCount).toBe(0);
       expect(term.scrollToLineCalls).toHaveLength(0);
@@ -208,6 +213,10 @@ describe('TerminalEngine search', () => {
     engine.searchNext('foo', {}); // selects the first match (term.selection set)
     addon.emitResults(0, 3); // 3 matches exist
     expect(term.hasSelection()).toBe(true);
+    // Positive control: with the selection still there, the same call DOES refresh.
+    addon.findPreviousCalls.length = 0;
+    engine.refreshSearch();
+    expect(addon.findPreviousCalls).toHaveLength(1);
     term.clearSelection(); // user clicks in the terminal, dropping the selection
     addon.findNextCalls.length = 0;
     addon.findPreviousCalls.length = 0;
