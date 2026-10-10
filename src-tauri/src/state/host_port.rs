@@ -12,7 +12,8 @@ use super::host_table::HostTable;
 use super::types::{AppState, FrozenHost};
 use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::{
-    ConnectPlan, HostCandidate, HostConnectionOrigin, HostRole, PtyHostClient, PtyHostDeps, SessionListing,
+    connection_mcp_hold, ConnectPlan, HostCandidate, HostConnectionOrigin, HostRole, PtyHostClient, PtyHostDeps,
+    SessionListing,
 };
 use std::sync::Arc;
 use tauri::{Emitter, Runtime};
@@ -34,24 +35,29 @@ struct HostFlags {
     /// The host can start a child on a requested cursor row (`CAP_INHERIT_CURSOR`). False for
     /// no record: a restore then keeps the child on row 1 rather than asking for a row.
     inherit_cursor: bool,
+    /// The host answers `HoldMcp`/`ReleaseMcp` (`CAP_MCP_HOLD`). Unlike `shutdown_control`, a
+    /// record-less host is a "no": an MCP frame it cannot decode drops its connection, and
+    /// nothing is lost by not sending one.
+    mcp_hold: bool,
 }
 
 fn host_flags(plan: &ConnectPlan, record_less_endpoint: &str) -> Result<HostFlags, String> {
     match plan {
         ConnectPlan::LegacyOrNone => {
             log::info!("[HOTSWAP] no host discovery record — legacy/none; using {record_less_endpoint}");
-            Ok(HostFlags { endpoint: record_less_endpoint.to_owned(), attach_acks: false, shutdown_control: true, inherit_cursor: false })
+            Ok(HostFlags { endpoint: record_less_endpoint.to_owned(), attach_acks: false, shutdown_control: true, inherit_cursor: false, mcp_hold: false })
         }
         ConnectPlan::Bootstrap { endpoint, version, instance_id, host_caps, lifecycle: _ } => {
             let attach_acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
             let shutdown_control = host_caps & termflow_pty_protocol::CAP_SHUTDOWN_CONTROL != 0;
             let inherit_cursor = host_caps & termflow_pty_protocol::CAP_INHERIT_CURSOR != 0;
+            let mcp_hold = host_caps & termflow_pty_protocol::CAP_MCP_HOLD != 0;
             log::info!(
                 "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
                  caps={host_caps:#x} endpoint={endpoint} (attach_acks={attach_acks}, \
-                 shutdown_control={shutdown_control}, inherit_cursor={inherit_cursor})"
+                 shutdown_control={shutdown_control}, inherit_cursor={inherit_cursor}, mcp_hold={mcp_hold})"
             );
-            Ok(HostFlags { endpoint: endpoint.clone(), attach_acks, shutdown_control, inherit_cursor })
+            Ok(HostFlags { endpoint: endpoint.clone(), attach_acks, shutdown_control, inherit_cursor, mcp_hold })
         }
         ConnectPlan::Incompatible { instance_id } => {
             // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
@@ -155,6 +161,8 @@ impl<R: Runtime> AppState<R> {
         })
     }
 
+    // The census pins the installer statement's exact text, closure included.
+    #[allow(clippy::redundant_closure)]
     async fn connect_current(&self, candidate: &HostCandidate) -> Result<Opened, String> {
         // RP-1: install the host into the update-stable runtime dir and run it
         // from there (outside the swapped app payload) so it survives an update.
@@ -209,6 +217,8 @@ impl<R: Runtime> AppState<R> {
             crate::pty_host_client::adopted_host_inherits_cursor(flags.inherit_cursor, candidate.pid, client.server_pid()),
             || crate::pty_host_client::spawned_host_inherits_cursor(client.server_pid()),
         ));
+        // The same rule for the MCP-hold bit, through the one installer both connection sites use.
+        client.set_mcp_hold(connection_mcp_hold(origin, flags.mcp_hold, candidate.pid, client.server_pid(), || crate::pty_host_client::read_advertised_record()));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })
@@ -237,6 +247,7 @@ impl<R: Runtime> AppState<R> {
             candidate.pid,
             client.server_pid(),
         ));
+        client.set_mcp_hold(connection_mcp_hold(HostConnectionOrigin::Adopted, flags.mcp_hold, candidate.pid, client.server_pid(), || None));
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
         let build_id = candidate.record.as_ref().and_then(|r| r.build_id.clone());
         client.set_advertised_build_id(build_id.clone());
@@ -389,5 +400,46 @@ fn host_label(channel: HostChannel) -> String {
     match channel {
         HostChannel::Frozen(id) => format!("frozen#{}", id.0),
         other => format!("{other:?}").to_lowercase(),
+    }
+}
+
+#[cfg(test)]
+mod flag_tests {
+    use super::host_flags;
+    use crate::pty_host_client::{plan_connection, ConnectPlan};
+    use termflow_pty_protocol::{HostRecord, CAP_ATTACH_ACK, CAP_MCP_HOLD, CAP_SHUTDOWN_CONTROL, PROTOCOL_MAX, PROTOCOL_MIN};
+
+    fn record(capabilities: u32) -> HostRecord {
+        HostRecord {
+            format: 1,
+            instance_id: 3,
+            pid: 11,
+            proto_min: PROTOCOL_MIN,
+            proto_max: PROTOCOL_MAX,
+            endpoint: "ep-flags".into(),
+            capabilities,
+            lifecycle: None,
+            build_id: None,
+        }
+    }
+
+    #[test]
+    fn mcp_hold_follows_the_records_bit() {
+        let with = plan_connection(Some(record(CAP_ATTACH_ACK | CAP_MCP_HOLD)));
+        assert!(host_flags(&with, "fallback").unwrap().mcp_hold, "the bit in the record");
+        let without = plan_connection(Some(record(CAP_ATTACH_ACK | CAP_SHUTDOWN_CONTROL)));
+        assert!(!host_flags(&without, "fallback").unwrap().mcp_hold, "a record without the bit");
+        let only = plan_connection(Some(record(CAP_MCP_HOLD)));
+        assert!(host_flags(&only, "fallback").unwrap().mcp_hold, "independent of every other capability");
+    }
+
+    /// `LegacyOrNone` defaults `shutdown_control` to TRUE (announcing costs one dropped frame); an
+    /// MCP frame must not copy that: a host with no record cannot decode it.
+    #[test]
+    fn a_record_less_host_is_never_mcp_capable_though_it_is_shutdown_capable() {
+        let flags = host_flags(&ConnectPlan::LegacyOrNone, "fallback").unwrap();
+        assert!(flags.shutdown_control, "the premise: this plan defaults shutdown_control on");
+        assert!(!flags.mcp_hold);
+        assert_eq!(flags.endpoint, "fallback");
     }
 }

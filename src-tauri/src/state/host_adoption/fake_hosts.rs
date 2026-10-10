@@ -72,6 +72,11 @@ impl EventGate {
 
     pub fn release(&self) { self.release.notify_one(); }
 
+    /// Lets every delivery that is waiting now go, and stores nothing: for the arrivals that came
+    /// before a test began (adoption disarms its hosts), so a later `release` reaches the one the
+    /// test is about.
+    pub fn release_waiting(&self) { self.release.notify_waiters(); }
+
     pub(super) async fn hold(&self) {
         self.reached.fetch_add(1, Ordering::SeqCst);
         self.changed.notify_waiters();
@@ -108,6 +113,65 @@ pub(super) struct HostSpec {
     /// the three MCP-hold frames. `false` is a host WITHOUT the bit: it decodes
     /// none of them, so like a shipped host it drops the connection on one.
     pub mcp_hold: bool,
+    /// How the MCP hold model answers `HoldMcp` (see [`McpHoldReply`]).
+    pub mcp_hold_reply: McpHoldReply,
+    /// Applies a `Disarm` when it is received but delivers the ack only when the test opens
+    /// this gate, which also counts the arrivals.
+    pub gate_disarm_ack: Option<Arc<EventGate>>,
+    /// The same for `ReleaseMcp`: applied when received, acknowledged when the gate opens.
+    pub gate_release_ack: Option<Arc<EventGate>>,
+    /// Keeps the connection open but answers no MCP frame and changes no MCP state.
+    pub mcp_silent: bool,
+}
+
+/// What the fake host says to `HoldMcp`. The `Withhold*` variants apply the state change and
+/// then send no reply; the gated one applies it and delivers the accept when the gate opens.
+#[derive(Clone)]
+pub(super) enum McpHoldReply {
+    Accept,
+    Reject(String),
+    WithholdAfterAccept,
+    WithholdAfterReject,
+    GatedAccept(Arc<EventGate>),
+}
+
+/// The subset of the host's MCP hold state machine these tests need: no retiring holder and no
+/// disconnect transitions (the real ones are pinned by the host crate's own tests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum McpState {
+    Idle,
+    Pending,
+    Running(McpRunning),
+}
+
+/// What a running holder is: `Handback` survives a `Disarm`, `Absent` does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum McpRunning {
+    Absent,
+    Handback,
+}
+
+type McpStates = Arc<Mutex<HashMap<String, McpState>>>;
+
+/// MCP behaviours a test switches on after the hosts were adopted (adoption itself disarms a host,
+/// so a gate set in the spec would also catch that).
+#[derive(Default)]
+struct McpKnobs {
+    silent: std::collections::HashSet<String>,
+    disarm_gate: HashMap<String, Arc<EventGate>>,
+    release_gate: HashMap<String, Arc<EventGate>>,
+}
+
+type SharedKnobs = Arc<Mutex<McpKnobs>>;
+
+/// Everything `serve` is given for one connection.
+struct Wire {
+    stream: DuplexStream,
+    injections: InjectionReceiver,
+    /// Queues a reply on the independent event writer, so a gated reply never stops the read loop.
+    queue: InjectionSender,
+    mcp: McpStates,
+    knobs: SharedKnobs,
 }
 
 impl Default for HostSpec {
@@ -125,6 +189,10 @@ impl Default for HostSpec {
             close_lag: Duration::ZERO,
             no_release_ack: false,
             mcp_hold: false,
+            mcp_hold_reply: McpHoldReply::Accept,
+            gate_disarm_ack: None,
+            gate_release_ack: None,
+            mcp_silent: false,
         }
     }
 }
@@ -196,6 +264,9 @@ pub(super) struct World {
     ended: Arc<Mutex<Vec<Ended>>>,
     /// Sessions that began on their host after the world did: `(host, session)`.
     begun: Arc<Mutex<Vec<(String, SessionMeta)>>>,
+    /// The MCP hold state of each host, by endpoint (absent = idle).
+    mcp: McpStates,
+    knobs: SharedKnobs,
     /// Endpoints a host process was started for, in order.
     pub started_processes: Mutex<Vec<String>>,
     pub spawn_fails: AtomicBool,
@@ -212,6 +283,8 @@ impl World {
             log: Arc::new(Mutex::new(Vec::new())),
             ended: Arc::new(Mutex::new(Vec::new())),
             begun: Arc::new(Mutex::new(Vec::new())),
+            mcp: Arc::new(Mutex::new(HashMap::new())),
+            knobs: Arc::new(Mutex::new(McpKnobs::default())),
             started_processes: Mutex::new(Vec::new()),
             spawn_fails: AtomicBool::new(false),
             connect_panics: AtomicBool::new(false),
@@ -264,7 +337,9 @@ impl World {
         let (client, server) = duplex(64 * 1024);
         let connection = self.connections.lock().unwrap().keys().filter(|(host, _)| host == endpoint).count();
         let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel();
+        let inject_queue = inject_tx.clone();
         self.connections.lock().unwrap().insert((endpoint.to_owned(), connection), inject_tx);
+        let wire = Wire { stream: server, injections: inject_rx, queue: inject_queue, mcp: self.mcp.clone(), knobs: self.knobs.clone() };
         let task = tokio::spawn(serve(
             endpoint.to_owned(),
             spec.clone(),
@@ -272,7 +347,7 @@ impl World {
             self.log.clone(),
             self.ended.clone(),
             self.begun.clone(),
-            (server, inject_rx),
+            wire,
         ));
         tasks.push(task.abort_handle());
         Some(client)
@@ -343,6 +418,31 @@ impl World {
             .map(|r| r.frame.clone()).collect()
     }
 
+    /// The MCP hold state of `host`.
+    pub fn mcp_state(&self, host: &str) -> McpState {
+        self.mcp.lock().unwrap().get(host).copied().unwrap_or(McpState::Idle)
+    }
+
+    /// From now on `host` keeps its connection open and answers no MCP frame.
+    pub fn silence_mcp(&self, host: &str) {
+        self.knobs.lock().unwrap().silent.insert(host.to_owned());
+    }
+
+    /// From now on `host` applies a `Disarm` when it is received and acknowledges it when `gate` opens.
+    pub fn gate_disarm_acks(&self, host: &str, gate: &Arc<EventGate>) {
+        self.knobs.lock().unwrap().disarm_gate.insert(host.to_owned(), gate.clone());
+    }
+
+    /// The same for `ReleaseMcp`.
+    pub fn gate_release_acks(&self, host: &str, gate: &Arc<EventGate>) {
+        self.knobs.lock().unwrap().release_gate.insert(host.to_owned(), gate.clone());
+    }
+
+    /// `host` is serving as a holder, as after a hold whose sidecar stand-in came up.
+    pub fn set_mcp_running(&self, host: &str, running: McpRunning) {
+        self.mcp.lock().unwrap().insert(host.to_owned(), McpState::Running(running));
+    }
+
     pub fn first_at(&self, host: &str, kind: &str) -> Option<Instant> {
         self.frames(host).into_iter().find(|(_, k)| *k == kind).map(|(at, _)| at)
     }
@@ -355,9 +455,9 @@ async fn serve(
     log: Arc<Mutex<Vec<Recorded>>>,
     ended: Arc<Mutex<Vec<Ended>>>,
     begun: Arc<Mutex<Vec<(String, SessionMeta)>>>,
-    connection: (DuplexStream, InjectionReceiver),
+    wire: Wire,
 ) {
-    let (server, mut injections) = connection;
+    let Wire { stream: server, mut injections, queue, mcp, knobs } = wire;
     let (mut rd, wr) = tokio::io::split(server);
     let wr = Arc::new(tokio::sync::Mutex::new(wr));
     let event_writer = wr.clone();
@@ -383,8 +483,31 @@ async fn serve(
     while let Ok(Some(frame)) = read_frame(&mut rd).await {
         log.lock().unwrap().push(Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() });
         let kind = Recorded { host: host.clone(), at: Instant::now(), frame: frame.clone() }.kind();
+        if matches!(frame, Frame::Ctrl(Control::Disarm { .. })) {
+            // A Disarm releases a Pending hold or an absent holder; one that is running as a
+            // handback is left alone.
+            let mut states = mcp.lock().unwrap();
+            if let Some(state) = states.get_mut(&host) {
+                if matches!(state, McpState::Pending | McpState::Running(McpRunning::Absent)) {
+                    *state = McpState::Idle;
+                }
+            }
+        }
+        let (silent, disarm_gate, release_gate) = {
+            let knobs = knobs.lock().unwrap();
+            (
+                spec.mcp_silent || knobs.silent.contains(&host),
+                spec.gate_disarm_ack.clone().or_else(|| knobs.disarm_gate.get(&host).cloned()),
+                spec.gate_release_ack.clone().or_else(|| knobs.release_gate.get(&host).cloned()),
+            )
+        };
         let reply = match frame {
             Frame::Ctrl(Control::Disarm { .. } | Control::Shutdown { .. }) if spec.no_release_ack => None,
+            Frame::Ctrl(Control::Disarm { req }) if disarm_gate.is_some() => {
+                // Applied above; only the ack waits for the test, on the event writer.
+                let _ = queue.send((Frame::Resp(Response::DisarmAck { req }), disarm_gate.clone()));
+                None
+            }
             Frame::Ctrl(Control::Disarm { req }) => Some(Response::DisarmAck { req }),
             Frame::Ctrl(Control::ListSessions { req, .. }) => {
                 listings += 1;
@@ -425,9 +548,53 @@ async fn serve(
             // the frame is recorded, then the connection drops, as a shipped host's does.
             Frame::Ctrl(Control::HoldMcp { .. } | Control::ClaimMcp { .. } | Control::ReleaseMcp { .. })
                 if !spec.mcp_hold => break,
-            Frame::Ctrl(Control::HoldMcp { req, .. }) => Some(Response::McpHoldAck { req, accepted: true, reason: None }),
+            Frame::Ctrl(Control::HoldMcp { .. } | Control::ClaimMcp { .. } | Control::ReleaseMcp { .. })
+                if silent => None,
+            Frame::Ctrl(Control::HoldMcp { req, .. }) => {
+                let mut states = mcp.lock().unwrap();
+                let state = states.entry(host.clone()).or_insert(McpState::Idle);
+                let ack = |accepted, reason: Option<&str>| Response::McpHoldAck { req, accepted, reason: reason.map(str::to_owned) };
+                if matches!(state, McpState::Running(_)) {
+                    // A running holder refuses; the refusal itself can be the lost reply.
+                    match &spec.mcp_hold_reply {
+                        McpHoldReply::WithholdAfterReject => None,
+                        _ => Some(ack(false, Some("already holding"))),
+                    }
+                } else {
+                    match &spec.mcp_hold_reply {
+                        McpHoldReply::Reject(reason) => Some(ack(false, Some(reason))),
+                        McpHoldReply::WithholdAfterReject => None,
+                        McpHoldReply::Accept => {
+                            *state = McpState::Pending;
+                            Some(ack(true, None))
+                        }
+                        McpHoldReply::WithholdAfterAccept => {
+                            *state = McpState::Pending;
+                            None
+                        }
+                        McpHoldReply::GatedAccept(gate) => {
+                            *state = McpState::Pending;
+                            let _ = queue.send((Frame::Resp(ack(true, None)), Some(gate.clone())));
+                            None
+                        }
+                    }
+                }
+            }
             Frame::Ctrl(Control::ClaimMcp { req, .. }) => Some(Response::McpClaimAck { req, held: None }),
-            Frame::Ctrl(Control::ReleaseMcp { req, .. }) => Some(Response::McpReleaseAck { req, was_holding: false }),
+            Frame::Ctrl(Control::ReleaseMcp { req, .. }) => {
+                let mut states = mcp.lock().unwrap();
+                let state = states.entry(host.clone()).or_insert(McpState::Idle);
+                let was_holding = matches!(state, McpState::Running(_));
+                *state = McpState::Idle;
+                let ack = Response::McpReleaseAck { req, was_holding };
+                match &release_gate {
+                    Some(gate) => {
+                        let _ = queue.send((Frame::Resp(ack), Some(gate.clone())));
+                        None
+                    }
+                    None => Some(ack),
+                }
+            }
             _ => None,
         };
         if let Some(gate) = spec.reply_gates.get(kind) { gate.hold().await; }
@@ -944,6 +1111,8 @@ impl AdoptionPort for FakePort {
         let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));
         let client = wire_client(rd, wr, self.deps(channel, epoch, on_disconnect));
         client.set_attach_acks(true);
+        // The bit a discovery record would have carried, as the host's spec says.
+        client.set_mcp_hold(world.spec(endpoint).is_some_and(|s| s.mcp_hold));
         client.inject_exe_image(Self::installed_host_image());
         if let Some(verdict) = self.0.exe_origins.lock().unwrap().get(endpoint) {
             client.inject_exe_verdict(*verdict);

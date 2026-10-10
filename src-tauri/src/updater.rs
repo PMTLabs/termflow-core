@@ -19,7 +19,8 @@
 #![cfg(feature = "velopack-updates")]
 
 use crate::commands::UpdateRestart;
-use crate::state::{ConfirmToken, FullRun, Target};
+use crate::state::{send_mcp_hold, ConfirmToken, FullRun, Target};
+use termflow_pty_protocol::McpHoldReason;
 use velopack::{sources::GithubSource, UpdateCheck, UpdateInfo, UpdateManager, VelopackApp};
 
 /// The GitHub repository the Velopack release feed is published to.
@@ -236,6 +237,10 @@ pub async fn update_and_restart(
         return Err(e);
     }
 
+    // Hand the MCP port to a pty-host so agents get a timed wait while the update applies. Best
+    // effort; the failure arm below takes it back.
+    let handed = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;
+
     // Launch the updater (it waits for our exit), then quit — the relaunched app
     // reattaches sessions by `tab_id`. If the updater fails to launch AFTER we
     // armed, DISARM synchronously — otherwise the host stays armed and a later
@@ -250,7 +255,7 @@ pub async fn update_and_restart(
         // Every host that was armed is disarmed again; one that does not
         // acknowledge is logged by name and may still hold its detach window until
         // a later quit releases it.
-        hold.release().await;
+        handed.release().await;
         // Same obligation for the siblings we armed. Disarming ourselves and
         // leaving them armed would be the asymmetry this rollback exists to
         // avoid — they armed for OUR update, and it is not happening.
@@ -283,7 +288,7 @@ pub async fn update_and_restart(
     state.elevated_host.shutdown().await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     // Admission stays closed until the process is gone.
-    hold.commit();
+    handed.commit();
     state.app_handle.exit(0);
     Ok(UpdateRestart::Started)
 }
@@ -412,5 +417,89 @@ mod arm_lifecycle_wiring_tests {
             shutdown_at < exit_at,
             "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{body}"
         );
+    }
+}
+
+/// The census of the MCP handover on this path (plan 055 T6): the handover is live, awaited, carries
+/// `OffloadUpdate`, comes after the Local arm's whole error block and before the apply, is released
+/// on the apply-failure arm and committed before the exit. Each negative case edits the real text.
+#[cfg(test)]
+mod mcp_handover_census_tests {
+    use crate::state::mcp_exit_census_tests::{check_exit_path, UPDATE_AND_RESTART};
+    use crate::state::mcp_hold_census_tests::mutate;
+
+    const SOURCE: &str = include_str!("updater.rs");
+    const HANDOVER: &str = "let handed = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;";
+
+    #[test]
+    fn update_and_restart_hands_over_releases_on_a_failed_apply_and_commits_before_it_exits() {
+        // The full-update `apply(` that precedes the Local arm is valid and ignored.
+        check_exit_path(SOURCE, &UPDATE_AND_RESTART).unwrap();
+    }
+
+    #[test]
+    fn the_updater_census_kills_each_planted_mutation() {
+        let cases: Vec<(&str, String)> = vec![
+            ("an unawaited call bound to `_`", mutate(SOURCE, HANDOVER, "let _ = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate);")),
+            ("the handover dropped at once", mutate(SOURCE, HANDOVER, "let _ = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;")),
+            ("a duplicated call", mutate(SOURCE, HANDOVER, &format!("{HANDOVER}
+    {}", HANDOVER.replace("handed", "again")))),
+            ("the wrong reason", mutate(SOURCE, "McpHoldReason::OffloadUpdate).await", "McpHoldReason::Offload).await")),
+            ("a substituted state operand", mutate(SOURCE, "send_mcp_hold(state, hold", "send_mcp_hold(other, hold")),
+            ("the call inside a block comment", mutate(SOURCE, HANDOVER, &format!("/* {HANDOVER} */"))),
+            ("the call inside a string literal", mutate(SOURCE, HANDOVER, "let _s = \"send_mcp_hold(state, hold)\";")),
+            ("the call inside `if false`", mutate(SOURCE, HANDOVER, &format!("if false {{ {HANDOVER} }}"))),
+            ("the call inside a closure", mutate(SOURCE, HANDOVER, &format!("let _f = || {{ {HANDOVER} }};"))),
+            ("the call inside the Local arm's own error block", {
+                let cut = mutate(SOURCE, HANDOVER, "");
+                mutate(&cut, "        return Err(e);
+    }
+
+    // Hand the MCP", &format!("        {HANDOVER}
+        return Err(e);
+    }}
+
+    // Hand the MCP"))
+            }),
+            ("the call after the apply", {
+                let cut = mutate(SOURCE, HANDOVER, "");
+                mutate(&cut, "    // `apply` only started the updater", &format!("    {HANDOVER}
+    // `apply` only started the updater"))
+            }),
+            ("the call after flush_all_windows", {
+                let cut = mutate(SOURCE, HANDOVER, "");
+                mutate(&cut, "crate::commands::flush_all_windows(&state.app_handle).await;", &format!("crate::commands::flush_all_windows(&state.app_handle).await;
+    {HANDOVER}"))
+            }),
+            ("a hold still released after the handover", mutate(SOURCE, HANDOVER, &format!("{HANDOVER}
+    hold.release().await;"))),
+            ("an unawaited release", mutate(SOURCE, "handed.release().await;", "handed.release();")),
+            ("the release inside `if false`", mutate(SOURCE, "handed.release().await;", "if false { handed.release().await; }")),
+            ("the release in a closure", mutate(SOURCE, "handed.release().await;", "let _f = || { handed.release() };")),
+            ("the release in an async block", mutate(SOURCE, "handed.release().await;", "let _f = async { handed.release().await; };")),
+            ("the release after the arm's return", {
+                let cut = mutate(SOURCE, "handed.release().await;", "");
+                mutate(&cut, "        return Err(e);
+    }
+    // `apply` only started", "        return Err(e);
+        handed.release().await;
+    }
+    // `apply` only started")
+            }),
+            ("the release on a different binding", mutate(SOURCE, "handed.release().await;", "other.release().await;")),
+            ("a missing release", mutate(SOURCE, "handed.release().await;", "")),
+            ("a missing commit", mutate(SOURCE, "handed.commit();", "")),
+            ("the commit inside `if false`", mutate(SOURCE, "handed.commit();", "if false { handed.commit(); }")),
+            ("the commit after the exit", {
+                let cut = mutate(SOURCE, "handed.commit();", "");
+                mutate(&cut, "state.app_handle.exit(0);", "state.app_handle.exit(0);
+    handed.commit();")
+            }),
+        ];
+        for (name, source) in cases {
+            let verdict = check_exit_path(&source, &UPDATE_AND_RESTART);
+            eprintln!("{name} => {verdict:?}");
+            assert!(verdict.is_err(), "the census let this mutation through: {name}");
+        }
     }
 }

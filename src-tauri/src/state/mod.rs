@@ -15,6 +15,10 @@ mod host_table;
 mod host_adoption;
 mod host_connect;
 mod host_lifecycle;
+mod mcp_handover;
+mod mcp_snapshot;
+#[cfg(test)]
+pub(crate) mod mcp_snapshot_tests;
 mod host_port;
 mod host_routing;
 pub(crate) use host_routing::prepare_elevated_process;
@@ -36,6 +40,14 @@ mod engine_host;
 mod reattach;
 #[cfg(test)]
 pub(crate) mod source_scan;
+#[cfg(test)]
+pub(crate) mod live_call_census;
+#[cfg(test)]
+pub(crate) mod mcp_hold_census_tests;
+#[cfg(test)]
+mod mcp_launch_census_tests;
+#[cfg(test)]
+pub(crate) mod mcp_exit_census_tests;
 #[cfg(test)]
 mod wiring_tests;
 #[cfg(test)]
@@ -59,8 +71,9 @@ pub use restore_frame::{plan_restore, CursorFrame, RestorePlan};
 pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_lines, strip_cursor_state_tail, tail_text_with};
 pub use reattach::{ReattachAction, ReattachPlan, plan_reattach};
 pub use host_table::{Admission, Busy, DrainGuard, DrainRefusal, HostTable, QuiesceGuard, QuiesceReason, Ticket, LIFECYCLE_BUSY};
+pub use mcp_handover::{send_mcp_hold, Cleanup, HandedOver};
 pub use host_adoption::{Barrier, Resolution, UnresolvedHost};
-pub use host_lifecycle::{offload_refusal, update_refusal, CloseBounds, ExitReport, Hold, HostExit, OwnedHost, SiblingArm};
+pub use host_lifecycle::{offload_refusal, update_refusal, AckedHost, CloseBounds, ExitReport, Hold, HostExit, OwnedHost, SiblingArm};
 pub use update_survival::{describe_reasons, effective_mode, FullReason, HostOrigin, UpdateMode};
 pub use update_full::{Availability, ConfirmToken, Confirmation, FullRun, Target};
 pub use host_routing::{Placement, HOST_OWNERSHIP_PENDING};

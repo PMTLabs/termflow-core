@@ -320,6 +320,14 @@ pub(super) fn connected_retention<P: LifecyclePort>(port: &P) -> HostRetention {
 
 type Named = (String, PtyHostClient);
 
+/// One armed host, as [`Hold::acked_hosts`] reports it.
+#[derive(Clone)]
+pub struct AckedHost {
+    pub name: String,
+    pub channel: Option<HostChannel>,
+    pub client: PtyHostClient,
+}
+
 async fn disarm_hosts(hosts: &[Named]) -> bool {
     let acked = join_all(hosts.iter().map(|(name, client)| async move {
         let acknowledged = client.disarm().await;
@@ -386,6 +394,21 @@ impl Hold {
     /// The hosts this hold looked at when it closed admission.
     pub fn hosts(&self) -> &[OwnedHost] {
         &self.hosts
+    }
+
+    /// The hosts that acknowledged the arm, each with the armed client itself (never a
+    /// re-discovered one) and the channel it is registered under. A relaunch host that
+    /// failed its tolerated arm is not among them. Read while the hold is alive:
+    /// `commit` and `release` consume it.
+    pub fn acked_hosts(&self) -> Vec<AckedHost> {
+        self.armed
+            .iter()
+            .map(|(name, client)| AckedHost {
+                name: name.clone(),
+                channel: self.hosts.iter().find(|h| &h.name() == name).and_then(|h| h.channel),
+                client: client.clone(),
+            })
+            .collect()
     }
 
     /// The mode an update would have to run in, given where the hosts run from.

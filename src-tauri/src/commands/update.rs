@@ -2,7 +2,8 @@
 //! seed. Split out of the former `commands.rs`.
 
 use super::window::flush_all_windows;
-use crate::state::{Availability, AppState, ConfirmToken, Confirmation};
+use crate::state::{send_mcp_hold, Availability, AppState, ConfirmToken, Confirmation};
+use termflow_pty_protocol::McpHoldReason;
 use tauri::State;
 
 /// Lifecycle retention reported by the hosts this app is currently connected to:
@@ -302,6 +303,9 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
         Some(termflow_pty_protocol::ArmDetachPurpose::Local),
     )
     .await?;
+    // Hand the MCP port to a pty-host, so agents get a timed wait instead of a dead port while
+    // the app is away. Best effort: it never stops the offload.
+    let handed = send_mcp_hold(&state, hold, McpHoldReason::Offload).await;
     // Let every window persist its state (cwd snapshot included) before we drop
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
@@ -311,7 +315,7 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // across the offload. No-op if no admin tab was ever opened this run.
     state.elevated_host.shutdown().await;
     log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
-    hold.commit();
+    handed.commit();
     state.app_handle.exit(0);
     Ok(())
 }
@@ -382,6 +386,7 @@ pub async fn restart_keeping_terminals(
     )
     .await?;
     log::info!("[RECOVERY] armed the hot-swap hold on every connected host");
+    let handed = send_mcp_hold(&state, hold, McpHoldReason::Relaunch).await;
 
     let flushed_by_us = if flush == FlushPolicy::Renderer {
         flush_all_windows(&app).await
@@ -402,7 +407,7 @@ pub async fn restart_keeping_terminals(
             // Disarms every host that was armed (an unacknowledged one is logged by
             // name: it may keep holding its detach window while this GUI is still
             // connected) and lets creates through again.
-            hold.release().await;
+            handed.release().await;
             return Err(e);
         }
     };
@@ -411,7 +416,7 @@ pub async fn restart_keeping_terminals(
     // elevated across a relaunch.
     state.elevated_host.shutdown().await;
     in_flight.keep = true;
-    hold.commit();
+    handed.commit();
     app.exit(0);
     Ok(())
 }

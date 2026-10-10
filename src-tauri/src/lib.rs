@@ -62,7 +62,7 @@ mod startup_failure;
 use tauri::{Manager, Emitter, RunEvent, WindowEvent};
 
 use tokio::sync::broadcast;
-use crate::state::{AppState, McpProcessHandle};
+use crate::state::{AppState, McpProcess, McpProcessHandle};
 use std::io::Write;
 use std::time::Duration;
 
@@ -152,8 +152,8 @@ fn should_force_kill_after_graceful_wait(completed: bool) -> bool {
 pub(crate) fn shutdown_mcp_server(state: &AppState) {
     match state.mcp_process.lock() {
         Ok(mut slot) => {
-            if let Some(child) = slot.take() {
-                shutdown_mcp_handle(child);
+            if let Some(process) = slot.take() {
+                shutdown_mcp_handle(process);
             }
         }
         Err(_) => log::error!("[MCP] process slot lock poisoned during shutdown; unable to inspect ownership"),
@@ -164,16 +164,16 @@ pub(crate) fn shutdown_mcp_server(state: &AppState) {
 pub(crate) fn shutdown_mcp_generation(state: &AppState, generation: u64) {
     match state.mcp_process.lock() {
         Ok(mut slot) => {
-            if let Some(child) = slot.take_if_current(generation) {
-                shutdown_mcp_handle(child);
+            if let Some(process) = slot.take_if_current(generation) {
+                shutdown_mcp_handle(process);
             }
         }
         Err(_) => log::error!("[MCP] process slot lock poisoned during generation shutdown; unable to inspect ownership"),
     }
 }
 
-fn shutdown_mcp_handle(child: McpProcessHandle) {
-            match child {
+fn shutdown_mcp_handle(process: McpProcess) {
+            match process.handle {
                 McpProcessHandle::Legacy(mut handle) => {
                     log::info!("[MCP] Gracefully shutting down MCP Server (PID: {})...", handle.id());
                     let wrote = handle.stdin.as_mut().map(|stdin| stdin.write_all(MCP_SHUTDOWN_COMMAND)).transpose();

@@ -131,6 +131,7 @@ fn every_frozen_channel_expression_is_classified() {
         ("state/host_routing.rs", "client_of"),
         ("state/host_routing.rs", "spawn_target"),
         ("state/host_routing.rs", "spawn_target"),
+        ("state/mcp_handover.rs", "choose_holder"), // routed: one MCP holder, Primary first
         ("state/terminals.rs", "client_for_channel"),
         ("state/terminals.rs", "forget_host_terminal"),
     ]);

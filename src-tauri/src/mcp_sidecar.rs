@@ -1,5 +1,5 @@
 use crate::app_config;
-use crate::state::{AppState, McpProcessHandle};
+use crate::state::{AppState, McpLaunch, McpProcess, McpProcessHandle};
 use crate::{shutdown_mcp_generation, shutdown_mcp_server};
 use tauri::Emitter;
 use tauri_plugin_shell::ShellExt;
@@ -137,31 +137,49 @@ pub(crate) fn resolved_tauri_sidecar(name: &str) -> std::io::Result<(std::path::
     Ok((path, format!("{:x}", Sha256::digest(bytes))))
 }
 
-/// The environment the MCP server is launched with, derived from the current
-fn mcp_env_with_integrity(
+/// What the MCP server is launched with, derived from the current config: the facts a stand-in
+/// holder must reproduce (`McpLaunch`) and the environment, both from the same locals so the
+/// record cannot drift from the process.
+///
+/// The environment sets BOTH token variables to the same value (the token, or empty). The sidecar
+/// reads `AUTO_TERMINAL_TOKEN || AUTO_TERMINAL_API_TOKEN`, so an `AUTO_TERMINAL_API_TOKEN`
+/// inherited from the parent's environment would otherwise authenticate a sidecar the record says
+/// is open. `auth_token` is `None` exactly when that value is empty.
+pub(crate) fn mcp_launch_env(
     cfg: &app_config::NetworkConfig,
     integrity: crate::profile::Integrity,
-) -> Vec<(String, String)> {
+) -> (McpLaunch, Vec<(String, String)>) {
     let host = if cfg.expose_on_network { "0.0.0.0" } else { "127.0.0.1" };
     let token = if crate::api_server::auth_required(integrity, cfg.expose_on_network) {
         cfg.auth_token.clone()
     } else {
         String::new()
     };
-    vec![
+    let launch = McpLaunch {
+        port: cfg.mcp_port,
+        bind_host: host.into(),
+        auth_token: (!token.is_empty()).then(|| token.clone()),
+    };
+    let env = vec![
         ("AUTO_TERMINAL_API_URL".into(), format!("http://localhost:{}", cfg.api_port)),
         ("MCP_PORT".into(), cfg.mcp_port.to_string()),
         ("MCP_HOST".into(), host.into()),
-        ("AUTO_TERMINAL_TOKEN".into(), token),
+        ("AUTO_TERMINAL_TOKEN".into(), token.clone()),
+        ("AUTO_TERMINAL_API_TOKEN".into(), token),
         // Tie the sidecar's lifetime to this app process. If the app is killed
         // abruptly (e.g. Ctrl+C in `tauri dev`), the graceful RunEvent::Exit
         // shutdown never runs, so the sidecar self-exits when this PID is gone.
         ("MCP_PARENT_PID".into(), std::process::id().to_string()),
-    ]
+    ];
+    (launch, env)
 }
 
-fn mcp_env(cfg: &app_config::NetworkConfig) -> Vec<(String, String)> {
-    mcp_env_with_integrity(cfg, crate::profile::current().integrity)
+/// The environment the MCP server is launched with, derived from the current
+fn mcp_env_with_integrity(
+    cfg: &app_config::NetworkConfig,
+    integrity: crate::profile::Integrity,
+) -> Vec<(String, String)> {
+    mcp_launch_env(cfg, integrity).1
 }
 
 pub(crate) fn mcp_respawn_needed_with_integrity(
@@ -189,6 +207,7 @@ async fn start_mcp_sidecar(
     state: AppState,
     cfg: &app_config::NetworkConfig,
 ) -> Result<bool, String> {
+    let (launch, env) = mcp_launch_env(cfg, crate::profile::current().integrity);
     log::info!("[MCP] Starting MCP Server sidecar...");
 
     let (launch_path, build_id) = resolved_tauri_sidecar("termflow-mcp-server").map_err(|e| format!("MCP build identity unavailable: {e}"))?;
@@ -196,7 +215,7 @@ async fn start_mcp_sidecar(
         .shell()
         .sidecar("termflow-mcp-server")
         .map_err(|e| e.to_string())?;
-    for (k, v) in mcp_env(cfg) {
+    for (k, v) in env {
         sidecar_command = sidecar_command.env(k, v);
     }
     // P0b: let the sidecar echo our identity on /health so the Settings health check
@@ -216,10 +235,11 @@ async fn start_mcp_sidecar(
             child,
             terminated: terminated_rx,
         };
+    let process = McpProcess { handle, launch };
     let installed = match state.mcp_process.lock() {
-        Ok(mut slot) => slot.install_if_current(generation, handle),
+        Ok(mut slot) => slot.install_if_current(generation, process),
         Err(_) => {
-            crate::shutdown_mcp_handle(handle);
+            crate::shutdown_mcp_handle(process);
             return Err("MCP process slot lock poisoned after spawn; stopped uninstalled child".to_string());
         }
     };
@@ -280,6 +300,7 @@ async fn start_mcp_legacy(
     state: AppState,
     cfg: &app_config::NetworkConfig,
 ) -> Result<bool, String> {
+    let (launch, env) = mcp_launch_env(cfg, crate::profile::current().integrity);
     log::info!("[MCP] Starting MCP Server via legacy node fallback...");
 
     let possible_paths = [
@@ -297,7 +318,7 @@ async fn start_mcp_legacy(
 
     let mut cmd = std::process::Command::new("node");
     cmd.arg(&mcp_path)
-        .envs(mcp_env(cfg))
+        .envs(env)
         // P0b: identity for owner-aware MCP health (see start_mcp_sidecar).
         .env("AUTO_TERMINAL_INSTANCE_ID", &state.instance_id)
         // Private parent-to-child control protocol: exactly `TERMFLOW_SHUTDOWN\n`
@@ -323,10 +344,11 @@ async fn start_mcp_legacy(
     log::info!("[MCP] MCP Server spawned with PID: {}", pid);
 
     let handle = McpProcessHandle::Legacy(child);
+    let process = McpProcess { handle, launch };
     let installed = match state.mcp_process.lock() {
-        Ok(mut slot) => slot.install_if_current(generation, handle),
+        Ok(mut slot) => slot.install_if_current(generation, process),
         Err(_) => {
-            crate::shutdown_mcp_handle(handle);
+            crate::shutdown_mcp_handle(process);
             return Err("MCP process slot lock poisoned after spawn; stopped uninstalled child".to_string());
         }
     };
@@ -523,6 +545,86 @@ mod respawn_tests {
             token_entry,
             Some(&("AUTO_TERMINAL_TOKEN".to_string(), "secret-token-123".to_string()))
         );
+    }
+
+    #[test]
+    fn the_launch_record_and_the_environment_come_from_the_same_locals() {
+        use super::mcp_launch_env;
+        use crate::profile::Integrity;
+        for token in ["", "tok-secret"] {
+            for expose in [false, true] {
+                for integrity in [Integrity::Medium, Integrity::High] {
+                    let mut cfg = base();
+                    cfg.auth_token = token.into();
+                    cfg.expose_on_network = expose;
+                    let (launch, env) = mcp_launch_env(&cfg, integrity);
+                    let get = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()).unwrap();
+                    // Loopback at medium integrity runs the sidecar open, whatever token is stored.
+                    let enforced = expose || integrity == Integrity::High;
+                    let expected = if enforced { token } else { "" };
+                    let label = format!("token={token:?} expose={expose} integrity={integrity:?}");
+                    assert_eq!(get("AUTO_TERMINAL_TOKEN"), expected, "{label}");
+                    assert_eq!(get("AUTO_TERMINAL_API_TOKEN"), get("AUTO_TERMINAL_TOKEN"), "both variables carry one value: {label}");
+                    assert_eq!(launch.auth_token.is_none(), get("AUTO_TERMINAL_TOKEN").is_empty(), "{label}");
+                    assert_eq!(launch.auth_token.as_deref(), (!expected.is_empty()).then_some(expected), "{label}");
+                    assert_eq!(get("MCP_PORT"), launch.port.to_string(), "{label}");
+                    assert_eq!(launch.port, 42032, "{label}");
+                    assert_eq!(get("MCP_HOST"), launch.bind_host, "{label}");
+                    assert_eq!(launch.bind_host, if expose { "0.0.0.0" } else { "127.0.0.1" }, "{label}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_launch_record_never_prints_its_token() {
+        let (launch, _) = super::mcp_launch_env(
+            &NetworkConfig { auth_token: "tok-visible-in-no-log".into(), expose_on_network: true, ..base() },
+            crate::profile::Integrity::Medium,
+        );
+        assert!(launch.auth_token.is_some());
+        assert!(!format!("{launch:?}").contains("tok-visible-in-no-log"));
+    }
+
+    /// What a child prints for `AUTO_TERMINAL_API_TOKEN` when the parent's environment carries
+    /// `inherited` and the builder's entries are applied over it, the order both spawn paths use
+    /// (the inherited environment first, then `.env`/`.envs`). The runner's own environment is
+    /// never touched: the inherited value is set on the child's command.
+    fn child_view_of_the_fallback_token(inherited: &str, builder_env: &[(String, String)]) -> String {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/c", "echo [%AUTO_TERMINAL_API_TOKEN%]"]);
+            c
+        };
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut c = std::process::Command::new("sh");
+            c.args(["-c", "printf '[%s]' \"$AUTO_TERMINAL_API_TOKEN\""]);
+            c
+        };
+        cmd.env("AUTO_TERMINAL_API_TOKEN", inherited).envs(builder_env.iter().cloned());
+        String::from_utf8(cmd.output().expect("run the probe child").stdout).unwrap().trim().to_string()
+    }
+
+    /// The claim is precedence, not literal inheritance: whatever fallback token the parent's
+    /// environment carries, the sidecar sees the value the builder chose for it, and an open
+    /// launch (empty) is not turned into an authenticated one by an inherited fallback.
+    #[test]
+    fn the_builders_fallback_token_overrides_an_inherited_one() {
+        use super::mcp_launch_env;
+        use crate::profile::Integrity;
+        let sentinel = "SENTINEL_7c1e";
+        let mut networked = base();
+        networked.expose_on_network = true;
+        networked.auth_token = "tok-networked".into();
+        let (_, env) = mcp_launch_env(&networked, Integrity::Medium);
+        assert_eq!(child_view_of_the_fallback_token(sentinel, &env), "[tok-networked]");
+
+        let (open, env) = mcp_launch_env(&base(), Integrity::Medium);
+        assert!(open.auth_token.is_none());
+        let seen = child_view_of_the_fallback_token(sentinel, &env);
+        assert!(!seen.contains(sentinel), "an inherited fallback token survived into an open launch: {seen}");
     }
 
     #[test]

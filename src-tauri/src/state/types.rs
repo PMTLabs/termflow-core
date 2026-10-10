@@ -282,6 +282,38 @@ pub enum McpProcessHandle {
     },
 }
 
+/// What the MCP sidecar was launched with: the facts a stand-in holder must reproduce. Derived
+/// from the same locals as the environment the process was spawned with (`mcp_launch_env`), so it
+/// describes what is actually listening, not what the config says now.
+#[derive(Clone, PartialEq, Eq)]
+pub struct McpLaunch {
+    /// The effective `MCP_PORT`.
+    pub port: u16,
+    /// `MCP_HOST`: `0.0.0.0` or `127.0.0.1`.
+    pub bind_host: String,
+    /// The bearer token the sidecar enforces; `None` exactly when it runs open.
+    pub auth_token: Option<String>,
+}
+
+// Written by hand: a derived `Debug` would print the token into any log that formats it.
+impl std::fmt::Debug for McpLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpLaunch")
+            .field("port", &self.port)
+            .field("bind_host", &self.bind_host)
+            .field("auth_token", &self.auth_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+/// A running MCP sidecar and the launch it came from. They live in one slot cell, so install,
+/// stale-generation and removal rules apply to both and there is no second field to keep in step.
+#[derive(Debug)]
+pub struct McpProcess {
+    pub handle: McpProcessHandle,
+    pub launch: McpLaunch,
+}
+
 use std::sync::Mutex;
 use std::collections::VecDeque;
 
@@ -334,6 +366,99 @@ mod generation_slot_tests {
         let in_flight = slot.claim_generation().unwrap();
         assert_eq!(slot.take(), Some("replacement-child"));
         assert_eq!(slot.install_if_current(in_flight, "late-child"), Err("late-child"));
+    }
+
+    // ---- GenerationSlot<McpProcess>: the launch record travels with its process ----
+
+    use super::{McpLaunch, McpProcess, McpProcessHandle};
+
+    /// A process that has already exited, carrying a launch record only `port` identifies.
+    fn process(port: u16) -> McpProcess {
+        #[cfg(windows)]
+        let child = std::process::Command::new("cmd").args(["/c", "exit", "0"]).spawn().expect("spawn a trivial child");
+        #[cfg(not(windows))]
+        let child = std::process::Command::new("sh").args(["-c", "true"]).spawn().expect("spawn a trivial child");
+        McpProcess {
+            handle: McpProcessHandle::Legacy(child),
+            launch: McpLaunch { port, bind_host: "127.0.0.1".into(), auth_token: Some(format!("tok-{port}")) },
+        }
+    }
+
+    #[test]
+    fn the_handover_projection_reads_the_installed_launch_and_the_configured_port() {
+        use crate::app_config::NetworkConfig;
+        use crate::state::mcp_handover::{handover_inputs, HandoverInputs};
+        let network = NetworkConfig { mcp_port: 4300, ..NetworkConfig::defaults() };
+        let mut slot = GenerationSlot::new();
+
+        assert_eq!(
+            handover_inputs(&slot, &network),
+            HandoverInputs { launch: None, configured_port: 4300 },
+            "an empty slot has no launch, and the configured port still comes from the config"
+        );
+
+        let generation = slot.claim_generation().unwrap();
+        let installed = process(4311);
+        let expected = installed.launch.clone();
+        assert!(slot.install_if_current(generation, installed).is_ok(), "the generation is current");
+        let inputs = handover_inputs(&slot, &network);
+        assert_eq!(inputs.launch, Some(expected.clone()), "the installed launch, field by field");
+        assert_eq!((expected.port, expected.bind_host.as_str(), expected.auth_token.as_deref()), (4311, "127.0.0.1", Some("tok-4311")));
+        assert_eq!(inputs.configured_port, 4300);
+        assert_ne!(inputs.configured_port, expected.port, "the effective port is not the configured one");
+
+        slot.take();
+        assert_eq!(handover_inputs(&slot, &network).launch, None, "a removed process takes its launch with it");
+    }
+
+    fn current_port(slot: &GenerationSlot<McpProcess>) -> Option<u16> {
+        slot.current().map(|p| p.launch.port)
+    }
+
+    #[test]
+    fn a_stale_spawns_install_is_refused_and_its_launch_never_becomes_current() {
+        let mut slot = GenerationSlot::new();
+        let old = slot.claim_generation().unwrap();
+        let new = slot.claim_generation().unwrap();
+        let refused = slot.install_if_current(old, process(1001)).expect_err("the stale generation is refused");
+        assert_eq!(refused.launch.port, 1001, "the refused process comes back with its own launch");
+        assert_eq!(current_port(&slot), None, "nothing is current after a refusal");
+        assert!(slot.install_if_current(new, process(1002)).unwrap().is_none());
+        assert_eq!(current_port(&slot), Some(1002));
+        // and a stale install after the newer one is installed still changes nothing
+        let again = slot.install_if_current(old, process(1003)).expect_err("still stale");
+        assert_eq!(again.launch.port, 1003);
+        assert_eq!(current_port(&slot), Some(1002));
+    }
+
+    #[test]
+    fn take_and_take_if_current_remove_the_launch_with_the_process() {
+        let mut slot = GenerationSlot::new();
+        let g = slot.claim_generation().unwrap();
+        slot.install_if_current(g, process(2001)).unwrap();
+        assert_eq!(slot.take().map(|p| p.launch.port), Some(2001));
+        assert_eq!(current_port(&slot), None, "take removed the launch");
+
+        let g = slot.claim_generation().unwrap();
+        slot.install_if_current(g, process(2002)).unwrap();
+        assert!(slot.take_if_current(g + 1).is_none(), "another generation takes nothing");
+        assert_eq!(current_port(&slot), Some(2002), "and leaves the launch in place");
+        assert_eq!(slot.take_if_current(g).map(|p| p.launch.port), Some(2002));
+        assert_eq!(current_port(&slot), None, "take_if_current removed the launch");
+    }
+
+    #[test]
+    fn a_stale_clear_leaves_the_newer_launch_and_a_current_clear_removes_it() {
+        let mut slot = GenerationSlot::new();
+        let old = slot.claim_generation().unwrap();
+        slot.install_if_current(old, process(3001)).unwrap();
+        let new = slot.claim_generation().unwrap();
+        let displaced = slot.install_if_current(new, process(3002)).unwrap().expect("the first process is displaced");
+        assert_eq!(displaced.launch.port, 3001, "a replacement returns the displaced process with its launch");
+        assert!(!slot.clear_if_current(old), "the stale termination clears nothing");
+        assert_eq!(current_port(&slot), Some(3002));
+        assert!(slot.clear_if_current(new));
+        assert_eq!(current_port(&slot), None);
     }
 }
 
@@ -396,6 +521,11 @@ impl<T> GenerationSlot<T> {
 
     pub fn is_present(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// The installed value, whichever generation installed it.
+    pub fn current(&self) -> Option<&T> {
+        self.current.as_ref().map(|(_, value)| value)
     }
 }
 
@@ -476,7 +606,7 @@ pub struct AppState<R: Runtime = Wry> {
     pub tmux_sessions: Arc<DashMap<String, Mutex<TmuxSession>>>,
     // MCP process handle and generation are one atomic ownership slot. A stale
     // lifecycle operation may only take the generation it installed.
-    pub mcp_process: Arc<Mutex<GenerationSlot<McpProcessHandle>>>,
+    pub mcp_process: Arc<Mutex<GenerationSlot<McpProcess>>>,
     // termflow-fabric peering sidecar handle for graceful shutdown. `None` when
     // the fabric binary is absent (open-core builds run fine without it).
     pub fabric_process: Arc<Mutex<GenerationSlot<tauri_plugin_shell::process::CommandChild>>>,

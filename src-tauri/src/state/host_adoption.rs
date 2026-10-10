@@ -970,4 +970,8 @@ mod retire_real_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 #[cfg(test)]
+mod mcp_handover_tests;
+#[cfg(test)]
+mod mcp_handover_txn_tests;
+#[cfg(test)]
 mod update_full_tests;
