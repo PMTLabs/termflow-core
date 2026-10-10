@@ -95,3 +95,47 @@ async fn unsolicited_frames_can_be_held_and_delivered_after_close_on_an_exact_co
         assert_eq!(receive(&mut old).await, frame);
     }
 }
+
+/// 054: the fake host WITHOUT the MCP bit is what the 055/056 sender tests send
+/// nothing to. Its record lacks the bit, and if a frame did reach it the
+/// connection would drop, as a shipped host's does on an unknown variant. A host
+/// WITH the bit answers all three.
+#[tokio::test]
+async fn a_host_without_the_mcp_bit_drops_the_connection_on_an_mcp_frame() {
+    use super::fake_hosts::{record, record_with_mcp_hold};
+    use termflow_pty_protocol::{CAP_MCP_HOLD, PROTOCOL_MAX, PROTOCOL_MIN};
+    assert_eq!(record("h", PROTOCOL_MIN, PROTOCOL_MAX).capabilities & CAP_MCP_HOLD, 0);
+    assert_eq!(record_with_mcp_hold("h", PROTOCOL_MIN, PROTOCOL_MAX).capabilities & CAP_MCP_HOLD, CAP_MCP_HOLD);
+
+    let hold = || Control::HoldMcp {
+        req: 7,
+        token: "t".into(),
+        spec: termflow_pty_protocol::McpHoldSpec {
+            port: 1,
+            configured_port: 1,
+            bind_host: "127.0.0.1".into(),
+            auth_token: None,
+            reason: termflow_pty_protocol::McpHoldReason::Offload,
+            initialize_result: None,
+            tools_list_result: None,
+        },
+    };
+    let world = World::new();
+    world.add_host("old", HostSpec::default());
+    world.add_host("new", HostSpec { mcp_hold: true, ..HostSpec::default() });
+
+    let mut old = world.open("old").unwrap();
+    write_frame(&mut old, &Frame::Ctrl(hold())).await.unwrap();
+    let ended = tokio::time::timeout(Duration::from_secs(3), read_frame(&mut old)).await.expect("the host reacts");
+    assert!(matches!(ended, Ok(None) | Err(_)), "no reply, the connection is gone: {ended:?}");
+    assert_eq!(world.count("old", "HoldMcp"), 1, "the frame is recorded before the drop");
+
+    let mut new = world.open("new").unwrap();
+    write_frame(&mut new, &Frame::Ctrl(hold())).await.unwrap();
+    assert_eq!(receive(&mut new).await, Frame::Resp(Response::McpHoldAck { req: 7, accepted: true, reason: None }));
+    write_frame(&mut new, &Frame::Ctrl(Control::ClaimMcp { req: 8, token: "t".into() })).await.unwrap();
+    assert_eq!(receive(&mut new).await, Frame::Resp(Response::McpClaimAck { req: 8, held: None }));
+    write_frame(&mut new, &Frame::Ctrl(Control::ReleaseMcp { req: 9, token: "t".into() })).await.unwrap();
+    assert_eq!(receive(&mut new).await, Frame::Resp(Response::McpReleaseAck { req: 9, was_holding: false }));
+    assert_eq!(world.kinds("new"), vec!["HoldMcp", "ClaimMcp", "ReleaseMcp"]);
+}

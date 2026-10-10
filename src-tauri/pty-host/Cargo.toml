@@ -19,6 +19,8 @@ serde_json = { version = "1.0.151", features = ["raw_value"] }
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["test-util"] }
+# The pre-054 frame codec, mirrored by the compatibility test (same locked version as the protocol crate).
+bincode = "1.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

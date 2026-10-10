@@ -11,7 +11,7 @@
 //! never idle, and time moves only when a test calls `tokio::time::advance`.
 
 mod bounds;
-// mod compat; (T7)
+mod compat;
 mod lifecycle;
 mod limits;
 

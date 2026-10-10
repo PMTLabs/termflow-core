@@ -198,6 +198,50 @@ mod tests {
         assert_eq!(r.build_id, None, "missing build id is unknown, not current");
     }
 
+    /// The record shape as shipped before `CAP_MCP_HOLD` (`34e13ce`): the same
+    /// fields, and `capabilities` is a bare `u32` it never inspects bit by bit.
+    /// A record advertising the new bit must still parse for it, and every bit
+    /// it knew about must read back unchanged.
+    #[test]
+    fn record_with_mcp_hold_parses_as_old_shape() {
+        use crate::bootstrap::{
+            CAP_ATTACH_ACK, CAP_INHERIT_CURSOR, CAP_LIFECYCLE_CONTRACT, CAP_MCP_HOLD, CAP_SHUTDOWN_CONTROL,
+        };
+        #[derive(Deserialize)]
+        struct OldRecord {
+            #[serde(default)]
+            format: u32,
+            instance_id: u128,
+            pid: u32,
+            proto_min: u16,
+            proto_max: u16,
+            endpoint: String,
+            #[serde(default)]
+            capabilities: u32,
+            #[serde(default)]
+            lifecycle: Option<LifecycleContract>,
+            #[serde(default)]
+            build_id: Option<String>,
+        }
+
+        let known = CAP_ATTACH_ACK | CAP_LIFECYCLE_CONTRACT | CAP_SHUTDOWN_CONTROL | CAP_INHERIT_CURSOR;
+        let mut new = rec();
+        new.capabilities = known | CAP_MCP_HOLD;
+        let old: OldRecord = serde_json::from_str(&new.to_json()).expect("an old reader parses the new record");
+        assert_eq!(old.format, new.format);
+        assert_eq!(old.instance_id, new.instance_id);
+        assert_eq!((old.pid, old.proto_min, old.proto_max), (new.pid, new.proto_min, new.proto_max));
+        assert_eq!(old.endpoint, new.endpoint);
+        assert_eq!(old.lifecycle, new.lifecycle);
+        assert_eq!(old.build_id, new.build_id);
+        assert_eq!(old.capabilities & known, known, "every bit the old reader knew is intact");
+        assert_eq!(old.capabilities & !known, CAP_MCP_HOLD, "the new bit is the only addition");
+        // And the other way: a record without the bit never advertises it.
+        let mut plain = rec();
+        plain.capabilities = known;
+        assert_eq!(HostRecord::from_json(&plain.to_json()).unwrap().capabilities & CAP_MCP_HOLD, 0);
+    }
+
     #[test]
     fn remove_only_when_owned() {
         let dir = scratch();
