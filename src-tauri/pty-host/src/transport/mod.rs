@@ -451,7 +451,9 @@ where
                     break ConnectionResult::Expired(d.hold);
                 }
             }
-            mgr.on_gui_connect();
+            if let Frame::Ctrl(by) = &frame {
+                mgr.on_gui_connect(by);
+            }
             adopted = true;
         }
         // This loop is strictly sequential: the next frame is not even READ
@@ -726,7 +728,7 @@ mod tests {
             Some(hold),
             "active 900 seconds expires the local hold"
         );
-        mgr.on_gui_connect();
+        mgr.on_gui_connect(&Control::ListSessions { req: 1, token: Some("tok".into()) });
         assert!(
             deadline_expired(&mgr, &mut deadline, &clock).is_none(),
             "a reconnecting lifecycle frame cancels the old generation"

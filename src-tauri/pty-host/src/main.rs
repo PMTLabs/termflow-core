@@ -6,6 +6,7 @@
 
 mod detach;
 mod manager;
+mod mcp_hold;
 mod ring;
 mod session;
 mod transport;

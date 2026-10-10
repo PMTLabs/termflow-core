@@ -18,10 +18,12 @@
 //! - `Attach` replay/live-enable/exit-reemit is fully delegated to
 //!   `Session::attach`, which does it atomically under the ring lock.
 
+use crate::mcp_hold::{self, McpHold, SpawnHolder};
 use crate::session::Session;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use termflow_pty_protocol::{ArmDetachPurpose, Control, Data, Response, SessionMeta};
+use termflow_pty_protocol::{ArmDetachPurpose, Control, Data, McpHoldSpec, Response, SessionMeta};
 use tokio::sync::mpsc::Sender;
 
 /// Upper bound on an armed hold (24h). Prevents overflow and unbounded holds.
@@ -93,7 +95,17 @@ pub struct SessionManager {
     /// host machine's `taskkill` happens to be — see `TEARDOWN_KILL_GRACE`,
     /// which is measured in seconds, not milliseconds.
     teardown_grace: Duration,
+    /// MCP-hold state (plan 054 §4.3). Driven only by control frames and the
+    /// lifecycle calls below; never awaited.
+    mcp: McpHold,
 }
+
+/// Reasons a `HoldMcp` is refused by the arm checks (the holder-state reasons
+/// live in `mcp_hold`).
+const REASON_NOT_ARMED: &str = "not armed";
+const REASON_ARM_NOT_LOCAL: &str = "arm is not a local offload";
+const REASON_NO_DEADLINE: &str = "local arm has no deadline";
+const REASON_BAD_BIND_HOST: &str = "bind_host is not an IP literal";
 
 impl SessionManager {
     pub fn new(
@@ -101,6 +113,25 @@ impl SessionManager {
         responses: Sender<Response>,
         expected_token: Option<String>,
         survivable: bool,
+    ) -> Self {
+        Self::new_with_holder_spawn(
+            events,
+            responses,
+            expected_token,
+            survivable,
+            Box::new(mcp_hold::placeholder_spawn),
+        )
+    }
+
+    /// Like [`SessionManager::new`] with the holder's spawn function injected.
+    /// Tests pass a stub; production uses `mcp_hold::placeholder_spawn` until
+    /// the real holder lands (054 T5).
+    pub fn new_with_holder_spawn(
+        events: Sender<Data>,
+        responses: Sender<Response>,
+        expected_token: Option<String>,
+        survivable: bool,
+        spawn_holder: SpawnHolder,
     ) -> Self {
         Self {
             sessions: HashMap::new(),
@@ -116,6 +147,7 @@ impl SessionManager {
             events,
             responses,
             teardown_grace: TEARDOWN_KILL_GRACE,
+            mcp: McpHold::new(spawn_holder),
         }
     }
 
@@ -253,6 +285,10 @@ impl SessionManager {
                 }
                 let capped = timeout_secs.min(MAX_ARM_SECS);
                 self.armed_purpose = purpose;
+                if purpose != Some(ArmDetachPurpose::Local) {
+                    // A pending MCP hold is only valid under a Local arm.
+                    self.mcp.clear_pending();
+                }
                 self.armed_at = Some(Instant::now());
                 self.absence_started_at = None;
                 self.generation = self.generation.wrapping_add(1);
@@ -272,6 +308,7 @@ impl SessionManager {
                     .try_send(Response::ArmAck { req, deadline_ms });
             }
             Control::Disarm { req } => {
+                self.mcp.on_disarm();
                 self.armed_deadline = None;
                 self.armed_deadline_ms = None;
                 self.armed_purpose = None;
@@ -292,6 +329,7 @@ impl SessionManager {
                 // An explicit quit also ends any hold that was armed earlier:
                 // the user said "exit everything", and that wins.
                 self.shutdown_requested = true;
+                self.mcp.stop();
                 self.armed_deadline = None;
                 self.armed_deadline_ms = None;
                 self.armed_purpose = None;
@@ -300,14 +338,75 @@ impl SessionManager {
                 self.generation = self.generation.wrapping_add(1);
                 let _ = self.responses.try_send(Response::ShutdownAck { req });
             }
-            // 054 T1 placeholders: the frames exist on the wire but nothing acts on
-            // them yet (T2 implements the state machine). Log only; no reply.
-            Control::HoldMcp { req, .. }
-            | Control::ClaimMcp { req, .. }
-            | Control::ReleaseMcp { req, .. } => {
-                log::info!("[MCP-HOLD] control req {req} ignored: not implemented yet");
+            Control::HoldMcp { req, token, spec } => {
+                if self.expected_token.as_deref() != Some(token.as_str()) {
+                    log::warn!("[MCP-HOLD] HoldMcp rejected: token mismatch");
+                    return;
+                }
+                let refusal = self.hold_refusal(&spec);
+                match &refusal {
+                    None => {
+                        log::info!(
+                            "[MCP-HOLD] hold accepted: port {} (configured {}), reason {:?}",
+                            spec.port,
+                            spec.configured_port,
+                            spec.reason
+                        );
+                        self.mcp.set_pending(spec);
+                    }
+                    Some(reason) => log::warn!("[MCP-HOLD] hold rejected: {reason}"),
+                }
+                let _ = self.responses.try_send(Response::McpHoldAck {
+                    req,
+                    accepted: refusal.is_none(),
+                    reason: refusal.map(str::to_owned),
+                });
+            }
+            Control::ClaimMcp { req, token } => {
+                if self.expected_token.as_deref() != Some(token.as_str()) {
+                    log::warn!("[MCP-HOLD] ClaimMcp rejected: token mismatch");
+                    return;
+                }
+                let held = self.mcp.claim();
+                let _ = self.responses.try_send(Response::McpClaimAck { req, held });
+            }
+            Control::ReleaseMcp { req, token } => {
+                if self.expected_token.as_deref() != Some(token.as_str()) {
+                    log::warn!("[MCP-HOLD] ReleaseMcp rejected: token mismatch");
+                    return;
+                }
+                // The ack means "stop has been ordered", enqueued here, in the
+                // handler of the frame it answers (plan 054 §4.3).
+                let was_holding = self.mcp.stop();
+                let _ = self
+                    .responses
+                    .try_send(Response::McpReleaseAck { req, was_holding });
             }
         }
+    }
+
+    /// Why a `HoldMcp` (token already checked) cannot be taken now, if so. A
+    /// hold is valid only while a Local ArmDetach with a deadline is in force
+    /// (not a crash hold, not a sibling arm) and the bind host is an IP
+    /// literal.
+    fn hold_refusal(&mut self, spec: &McpHoldSpec) -> Option<&'static str> {
+        if let Some(reason) = self.mcp.hold_blocker() {
+            return Some(reason);
+        }
+        if self.armed_purpose != Some(ArmDetachPurpose::Local) {
+            return Some(if self.armed_deadline.is_none() {
+                REASON_NOT_ARMED
+            } else {
+                REASON_ARM_NOT_LOCAL
+            });
+        }
+        if self.armed_deadline.is_none() {
+            return Some(REASON_NO_DEADLINE);
+        }
+        if spec.bind_host.parse::<IpAddr>().is_err() {
+            return Some(REASON_BAD_BIND_HOST);
+        }
+        None
     }
 
     pub fn handle_stdin(&mut self, tab_id: &str, bytes: &[u8]) {
@@ -339,7 +438,13 @@ impl SessionManager {
     /// The GUI also disarms explicitly on connect, but that call is lazy (it
     /// rides on the first terminal spawn, so a session that restores nothing
     /// never makes it) and unacknowledged, so it cannot be the only guarantee.
-    pub fn on_gui_connect(&mut self) {
+    ///
+    /// `by` is the frame that adopted. It decides the MCP hold's fate: a
+    /// running holder in Absent stops for any lifecycle frame except
+    /// `ClaimMcp`, which keeps it serving for the hand-back; a pending hold is
+    /// spent either way.
+    pub fn on_gui_connect(&mut self, by: &Control) {
+        self.mcp.on_adopted(matches!(by, Control::ClaimMcp { .. }));
         if self.armed_deadline.is_some() {
             eprintln!("termflow-pty-host: GUI connected; releasing a pre-existing detach arm");
         }
@@ -372,6 +477,8 @@ impl SessionManager {
             // these sessions: it must adopt (clearing any stale hold) before its
             // Shutdown is applied, or the latch is reset by the adoption.
             Control::Shutdown { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
+            // The relaunched GUI's first word to a host holding its MCP port.
+            Control::ClaimMcp { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
             _ => false,
         }
     }
@@ -381,10 +488,14 @@ impl SessionManager {
     /// ordinary pipe drop into immediate teardown.
     pub fn begin_local_absence(&mut self) -> Option<LocalHold> {
         if self.armed_purpose != Some(ArmDetachPurpose::Local) {
+            self.mcp.stop();
             return None;
         }
         self.absence_started_at = Some(Instant::now());
         self.generation = self.generation.wrapping_add(1);
+        // The GUI is confirmed gone under a Local hold: a pending MCP hold
+        // starts its holder (a running one keeps serving, see `on_absence_begun`).
+        self.mcp.on_absence_begun();
         Some(LocalHold {
             generation: self.generation,
         })
@@ -399,6 +510,9 @@ impl SessionManager {
     /// Expiry is destructive: use the same bounded kill primitive as normal
     /// teardown, then let `serve` return so `main` retracts only its own record.
     pub fn expire_local_hold(&mut self, hold: LocalHold) {
+        // Stop is ordered BEFORE the blocking teardown below (up to 30 s), so
+        // the holder starts closing while the shells are being killed.
+        self.mcp.stop();
         if self.local_hold_is_current(hold) {
             self.tear_down_sessions();
         }
@@ -427,6 +541,7 @@ impl SessionManager {
     /// Issuing the kill is the part that dies with the process, so it is the
     /// part worth waiting for.
     fn tear_down_sessions(&mut self) {
+        self.mcp.stop();
         let kills: Vec<_> = self.sessions.values().filter_map(|s| s.kill()).collect();
         // Dropping the sessions now reaches `Session::drop` → `kill()`, which
         // no-ops: every kill above latched `killing`.
@@ -462,6 +577,9 @@ impl SessionManager {
     /// moment a GUI adopts. Labelled Local so `begin_local_absence` establishes
     /// the deadline; the arm fields stay `None` because nothing armed it.
     pub fn on_gui_disconnect(&mut self) -> Disposition {
+        // The claiming GUI is gone: its hand-back is over. (A holder in Absent
+        // survives a silent connect-and-drop; the Hold branch re-enters it.)
+        self.mcp.on_disconnect();
         if self.armed_deadline.is_some() {
             self.detach_all();
             return Disposition::Hold;
@@ -495,6 +613,8 @@ mod tests {
     use std::sync::atomic::Ordering;
     use tokio::sync::mpsc::channel;
 
+    mod mcp;
+
     fn mgr() -> (
         SessionManager,
         tokio::sync::mpsc::Receiver<Data>,
@@ -522,6 +642,12 @@ mod tests {
             erx,
             rrx,
         )
+    }
+
+    /// The frame the pre-MCP tests modelled as the adopting one: a lifecycle
+    /// probe carrying the matching token.
+    fn list_sessions_with_token() -> Control {
+        Control::ListSessions { req: 1, token: Some("tok".into()) }
     }
 
     #[test]
@@ -708,7 +834,7 @@ mod tests {
         });
         assert!(m.is_armed(), "precondition: armed");
 
-        m.on_gui_connect();
+        m.on_gui_connect(&list_sessions_with_token());
 
         assert!(!m.is_armed(), "a new GUI connection must clear the arm");
     }
@@ -724,7 +850,7 @@ mod tests {
             token: "tok".into(),
             purpose: None,
         });
-        m.on_gui_connect();
+        m.on_gui_connect(&list_sessions_with_token());
         assert!(matches!(m.on_gui_disconnect(), Disposition::TearDown));
     }
 
@@ -735,7 +861,7 @@ mod tests {
     #[test]
     fn arming_after_connect_still_holds() {
         let (mut m, _e, _r) = mgr();
-        m.on_gui_connect();
+        m.on_gui_connect(&list_sessions_with_token());
         m.handle_control(Control::ArmDetach {
             req: 1,
             timeout_secs: 600,
@@ -966,7 +1092,7 @@ mod tests {
         assert!(m.local_hold_is_current(hold));
 
         // A relaunched GUI adopts → the hold is retired, nothing is killed.
-        m.on_gui_connect();
+        m.on_gui_connect(&list_sessions_with_token());
         assert!(!m.local_hold_is_current(hold), "adoption must retire the crash hold");
         assert!(pid_is_alive(pid));
         m.sessions.clear(); // drop → kill; keep the test box clean
@@ -1046,7 +1172,7 @@ mod tests {
         let (mut m, _e, _r) = mgr();
         let pid = insert_live_child(&mut m, "tab-latch");
         shutdown(&mut m);
-        m.on_gui_connect();
+        m.on_gui_connect(&list_sessions_with_token());
         assert!(!m.shutdown_requested());
         assert!(matches!(m.on_gui_disconnect(), Disposition::Hold));
         assert!(pid_is_alive(pid));
