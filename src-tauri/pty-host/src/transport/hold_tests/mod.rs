@@ -203,6 +203,24 @@ fn runtime_is_paused() -> bool {
     tokio::time::Instant::now() == before
 }
 
+/// The holder's state sampled by the spawned wrapper in the same poll in which
+/// `serve_with_clock` resolved: nothing, not even the test's own waiter, ran in
+/// between (review 295 F4).
+#[derive(Debug)]
+pub(super) struct AtReturn {
+    pub live_tasks: usize,
+    pub task_ends: Vec<&'static str>,
+}
+
+thread_local! {
+    static AT_RETURN: std::cell::RefCell<Option<AtReturn>> = const { std::cell::RefCell::new(None) };
+}
+
+/// What was sampled when the last `serve_with_clock` of this test resolved.
+pub(super) fn at_return() -> AtReturn {
+    AT_RETURN.with(|c| c.borrow_mut().take()).expect("serve_with_clock has not returned yet")
+}
+
 pub(super) struct Host {
     pub ep: Endpoint,
     pub srv: tokio::task::JoinHandle<io::Result<()>>,
@@ -213,13 +231,14 @@ impl Host {
         capture_logs();
         PAUSED.with(|p| p.set(runtime_is_paused()));
         let ep = unique_endpoint(tag);
-        let srv = tokio::spawn(serve_with_clock(
-            ep.clone(),
-            Some(HOST_TOKEN.into()),
-            true,
-            None,
-            Arc::new(clock.clone()),
-        ));
+        let served = serve_with_clock(ep.clone(), Some(HOST_TOKEN.into()), true, None, Arc::new(clock.clone()));
+        let srv = tokio::spawn(async move {
+            let result = served.await;
+            AT_RETURN.with(|c| {
+                *c.borrow_mut() = Some(AtReturn { live_tasks: gauges::live_tasks(), task_ends: gauges::task_ends() });
+            });
+            result
+        });
         Self { ep, srv }
     }
 

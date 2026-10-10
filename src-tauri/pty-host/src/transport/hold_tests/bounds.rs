@@ -86,9 +86,21 @@ async fn serve_returns_only_after_holder_cleanup() {
     pump(Duration::from_millis(100)).await;
     assert!(gauges::live_tasks() >= 4, "the root plus three connections: {}", gauges::live_tasks());
 
+    // Only the ends caused by the stop: the earlier request's connection ended long ago.
+    gauges::TASK_ENDS.with(|e| e.borrow_mut().clear());
     clock.set(900);
     (&mut host.srv).await.unwrap().unwrap();
-    assert_eq!(gauges::live_tasks(), 0, "at the instant serve resolved, every holder task was already gone");
+    // Sampled by the wrapper in the poll that resolved `serve_with_clock`, not here
+    // after this waiter was scheduled. The ends are an ORDER, so a root that
+    // returned before its children (abort without awaiting) cannot hide behind
+    // the scheduler running the children first.
+    let at = at_return();
+    assert_eq!(at.live_tasks, 0, "at the instant serve resolved, every holder task was already gone");
+    assert_eq!(
+        at.task_ends,
+        ["conn-dropped", "conn-dropped", "conn-dropped", "root-end"],
+        "every connection task ended before the root did, and before serve returned"
+    );
     for (name, c) in [("stream one", &mut s1), ("stream two", &mut s2), ("mid-body POST", &mut mid)] {
         assert!(c.ends_within(Duration::from_millis(200)).await, "{name} reads EOF");
     }

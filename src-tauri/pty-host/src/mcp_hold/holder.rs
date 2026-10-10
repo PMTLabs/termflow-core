@@ -146,6 +146,11 @@ pub mod gauges {
         pub static BOUND: RefCell<Vec<std::net::SocketAddr>> = const { RefCell::new(Vec::new()) };
         /// Ordered events across the manager and the holder.
         pub static ORDER: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+        /// Every started holder task as it ends (`"conn-dropped"` per connection
+        /// task, `"root-end"` for the root), in the order the ends happened. A
+        /// root that returns before its children are gone shows as `"root-end"`
+        /// ahead of a `"conn-dropped"`, whatever the scheduler does afterwards.
+        pub static TASK_ENDS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
     }
 
     pub fn add(g: &'static std::thread::LocalKey<Cell<Gauge>>, n: usize) {
@@ -202,6 +207,10 @@ pub mod gauges {
 
     pub fn order() -> Vec<&'static str> {
         ORDER.with(|o| o.borrow().clone())
+    }
+
+    pub fn task_ends() -> Vec<&'static str> {
+        TASK_ENDS.with(|o| o.borrow().clone())
     }
 }
 
@@ -272,8 +281,12 @@ impl Drop for TaskGuard {
             Kind::Root => {
                 gauges::sub(&gauges::ROOT, 1);
                 gauges::sub(&gauges::SPEC_BYTES, self.bytes);
+                gauges::TASK_ENDS.with(|e| e.borrow_mut().push("root-end"));
             }
-            Kind::Conn => gauges::sub(&gauges::CONN, 1),
+            Kind::Conn => {
+                gauges::sub(&gauges::CONN, 1);
+                gauges::TASK_ENDS.with(|e| e.borrow_mut().push("conn-dropped"));
+            }
         }
     }
 }

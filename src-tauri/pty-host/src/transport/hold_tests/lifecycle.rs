@@ -229,11 +229,15 @@ async fn expiry_is_not_lingered() {
     let pids = offload(&host, spec(port, "127.0.0.1"), &["t1", "t2"]).await;
     assert!(wait_answers(port, Duration::from_secs(10)).await);
     assert!(pids.iter().all(|p| pid_is_alive(*p)));
-
     clock.set(900);
     assert!(host.wait_finished(Duration::from_secs(90)).await, "serve returns at the deadline");
     (&mut host.srv).await.unwrap().unwrap();
-    assert_eq!(gauges::live_tasks(), 0, "no holder task or connection outlives serve");
+    let at = at_return();
+    assert_eq!(at.live_tasks, 0, "no holder task or connection outlives serve (sampled as it returned)");
+    // No straggler connection here, so this cannot tell `shutdown().await` from an abort
+    // without awaiting; `serve_returns_only_after_holder_cleanup` does (it holds a
+    // mid-body POST). It still pins that the root is the last task to end.
+    assert_eq!(at.task_ends.last(), Some(&"root-end"), "the root ended last: {:?}", at.task_ends);
     assert!(dead_within(&pids, Duration::from_secs(20)), "every shell is gone");
     assert_eq!(
         gauges::order(),
