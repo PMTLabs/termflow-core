@@ -421,6 +421,12 @@ async fn serve_loop(
         // on change, so a Stop ordered before this task first ran ends it here,
         // before any bind.
         let current = *mode.borrow_and_update();
+        // A dropped sender is a Stop too, and is seen here, before any bind, not
+        // only by `changed()` after one: a holder spawned and then orphaned
+        // before its first poll still has its last stored mode.
+        if mode.has_changed().is_err() && !ignores_stop() {
+            return "sender dropped";
+        }
         match current {
             Mode::Stop if !ignores_stop() => return "stop ordered",
             Mode::Handback if grace_at.is_none() => {
@@ -639,6 +645,40 @@ mod tests {
 
     fn open() -> SseOpen {
         SseOpen { session_id: Some("s".into()) }
+    }
+
+    struct FixedClock;
+
+    impl ActiveClock for FixedClock {
+        fn now(&self) -> Option<Duration> {
+            Some(Duration::ZERO)
+        }
+    }
+
+    /// Review 295 F5. The manager (or `serve`) is dropped before the spawned
+    /// holder is first polled: the stored mode is still `Absent`, but nobody can
+    /// ever change it again, and a dropped sender is a Stop. The holder must end
+    /// without binding even once, whatever mode it was left with.
+    #[tokio::test]
+    async fn a_sender_dropped_before_the_first_poll_means_no_bind() {
+        for left_with in [Mode::Absent, Mode::Handback] {
+            let (env, _deadline) = HolderEnv::new(Arc::new(FixedClock));
+            let spec = McpHoldSpec {
+                port: 0,
+                configured_port: 0,
+                bind_host: "127.0.0.1".into(),
+                auth_token: None,
+                reason: McpHoldReason::Relaunch,
+                initialize_result: None,
+                tools_list_result: None,
+            };
+            let (tx, rx) = watch::channel(left_with);
+            let task = production_spawn(env)(spec, rx);
+            drop(tx);
+            task.await.expect("the holder ends cleanly");
+            assert_eq!(gauges::bind_attempts(), 0, "bound although its sender was gone ({left_with:?})");
+            assert!(gauges::bound().is_empty(), "a listener was opened ({left_with:?})");
+        }
     }
 
     /// A reader that never reads: the stream is dropped once `WRITE_DEADLINE`
