@@ -166,6 +166,7 @@ async fn main() {
 
     if let Some(dial_args) = parse_dial_args() {
         run_dial_out_mode(dial_args).await;
+        log::logger().flush();
         return;
     }
 
@@ -228,6 +229,8 @@ async fn main() {
     if let Some((path, rec)) = record {
         let _ = termflow_pty_protocol::remove_record_if_owned(&path, rec.instance_id);
     }
+    // The writer thread is detached: give the lines queued so far their bounded chance.
+    log::logger().flush();
 }
 
 /// The capability bits this host advertises in its discovery record.
@@ -296,9 +299,7 @@ mod tests {
     /// CRLF-normalised.
     #[test]
     fn main_installs_the_logger_before_anything_can_log() {
-        let source = include_str!("main.rs").replace("
-", "
-");
+        let source = include_str!("main.rs").replace("\r\n", "\n");
         let body = source.split("async fn main() {").nth(1).expect("main()");
         let init = body.find("logging::init_logging()").expect("main must call logging::init_logging()");
         let first_log = body.find("init_for_current_exe").expect("the ConPTY preload in main()");
