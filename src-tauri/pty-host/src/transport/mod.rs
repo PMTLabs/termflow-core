@@ -94,7 +94,7 @@ impl ActiveClock for SystemActiveClock {
     fn now(&self) -> Option<Duration> {
         #[cfg(windows)]
         {
-            return self.elapsed_from_ticks(unbiased_interrupt_ticks());
+            self.elapsed_from_ticks(unbiased_interrupt_ticks())
         }
         #[cfg(not(windows))]
         {

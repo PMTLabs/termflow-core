@@ -245,7 +245,7 @@ impl Session {
                     pixel_width: 0,
                     pixel_height: 0,
                 })
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+                .map_err(|e| std::io::Error::other(e.to_string())),
             None => Ok(()), // already exited
         }
     }
