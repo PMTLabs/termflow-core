@@ -18,10 +18,13 @@
 //! - `Attach` replay/live-enable/exit-reemit is fully delegated to
 //!   `Session::attach`, which does it atomically under the ring lock.
 
+use crate::mcp_hold::holder::{self, DeadlineSink, HolderEnv};
 use crate::mcp_hold::{self, McpHold, SpawnHolder};
 use crate::session::Session;
+use crate::transport::SystemActiveClock;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termflow_pty_protocol::{ArmDetachPurpose, Control, Data, McpHoldSpec, Response, SessionMeta};
 use tokio::sync::mpsc::Sender;
@@ -98,6 +101,9 @@ pub struct SessionManager {
     /// MCP-hold state (plan 054 §4.3). Driven only by control frames and the
     /// lifecycle calls below; never awaited.
     mcp: McpHold,
+    /// Where the transport publishes this host's Local deadline for the holder
+    /// (`None` until `serve` installs one).
+    mcp_deadline: Option<DeadlineSink>,
 }
 
 /// Reasons a `HoldMcp` is refused by the arm checks (the holder-state reasons
@@ -114,18 +120,20 @@ impl SessionManager {
         expected_token: Option<String>,
         survivable: bool,
     ) -> Self {
+        // `serve` builds its own environment on its injected clock and replaces
+        // this one; this default serves the paths that never publish a deadline.
+        let (env, _sink) = HolderEnv::new(Arc::new(SystemActiveClock::new()));
         Self::new_with_holder_spawn(
             events,
             responses,
             expected_token,
             survivable,
-            Box::new(mcp_hold::placeholder_spawn),
+            holder::production_spawn(env),
         )
     }
 
     /// Like [`SessionManager::new`] with the holder's spawn function injected.
-    /// Tests pass a stub; production uses `mcp_hold::placeholder_spawn` until
-    /// the real holder lands (054 T5).
+    /// Tests pass a stub; production passes [`holder::production_spawn`].
     pub fn new_with_holder_spawn(
         events: Sender<Data>,
         responses: Sender<Response>,
@@ -148,7 +156,33 @@ impl SessionManager {
             responses,
             teardown_grace: TEARDOWN_KILL_GRACE,
             mcp: McpHold::new(spawn_holder),
+            mcp_deadline: None,
         }
+    }
+
+    /// Install where this host's Local deadline is published for the holder.
+    pub fn set_mcp_deadline_sink(&mut self, sink: DeadlineSink) {
+        self.mcp_deadline = Some(sink);
+    }
+
+    /// Publish the host's current Local deadline (active-clock time) for the
+    /// holder's wait message; `None` while none is established.
+    pub fn publish_hold_deadline(&self, at: Option<Duration>) {
+        if let Some(sink) = &self.mcp_deadline {
+            sink.send_replace(at);
+        }
+    }
+
+    /// Whether a holder task is running (and has not ended on its own). While
+    /// one is, a shell-less host keeps waiting for its Local deadline.
+    pub fn mcp_holder_running(&self) -> bool {
+        self.mcp.is_running()
+    }
+
+    /// Order every holder to stop and hand over their join handles; `serve`
+    /// awaits them with `mcp_hold::finish` on its way out.
+    pub fn stop_mcp_holders(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
+        self.mcp.take_for_shutdown()
     }
 
     /// Override the teardown kill-wait budget. Tests only: production always
@@ -542,6 +576,7 @@ impl SessionManager {
     /// part worth waiting for.
     fn tear_down_sessions(&mut self) {
         self.mcp.stop();
+        mcp_hold::note_order("teardown-begin");
         let kills: Vec<_> = self.sessions.values().filter_map(|s| s.kill()).collect();
         // Dropping the sessions now reaches `Session::drop` → `kill()`, which
         // no-ops: every kill above latched `killing`.

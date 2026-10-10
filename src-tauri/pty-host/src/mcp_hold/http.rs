@@ -38,7 +38,8 @@ pub struct HoldCtx<'a> {
     pub snapshot: &'a Snapshot,
     pub reason: McpHoldReason,
     /// Sampled once per POST: mode, elapsed and remaining for the wait message.
-    pub wait: &'a dyn Fn() -> Wait,
+    /// `Sync`, so the connection future that holds the context is `Send`.
+    pub wait: &'a (dyn Fn() -> Wait + Sync),
     /// The fresh session id for `initialize` (a seam; production passes
     /// [`rpc::default_session_id`]).
     pub new_session_id: fn() -> [u8; 16],
@@ -520,12 +521,27 @@ mod tests {
         Some(resp)
     }
 
+    /// A `Cell` that is `Sync`, because the wait closure must be.
+    struct SyncCell<T>(std::sync::Mutex<T>);
+
+    impl<T: Copy> SyncCell<T> {
+        fn new(v: T) -> Self {
+            Self(std::sync::Mutex::new(v))
+        }
+        fn get(&self) -> T {
+            *self.0.lock().unwrap()
+        }
+        fn set(&self, v: T) {
+            *self.0.lock().unwrap() = v;
+        }
+    }
+
     struct Fx {
         snapshot: Snapshot,
         token: Option<&'static str>,
-        mode: Cell<Mode>,
-        elapsed: Cell<u64>,
-        remaining: Cell<Option<u64>>,
+        mode: SyncCell<Mode>,
+        elapsed: SyncCell<u64>,
+        remaining: SyncCell<Option<u64>>,
         id_fn: fn() -> [u8; 16],
     }
 
@@ -534,9 +550,9 @@ mod tests {
             Self {
                 snapshot: Snapshot::new(Some(INIT.to_string()), Some(TOOLS.to_string())),
                 token: None,
-                mode: Cell::new(Mode::Absent),
-                elapsed: Cell::new(130),
-                remaining: Cell::new(Some(770)),
+                mode: SyncCell::new(Mode::Absent),
+                elapsed: SyncCell::new(130),
+                remaining: SyncCell::new(Some(770)),
                 id_fn: fixed_id,
             }
         }

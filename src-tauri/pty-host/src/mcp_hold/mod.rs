@@ -8,23 +8,24 @@
 //! synchronous and every reply is enqueued by the handler of the frame it
 //! answers (plan 054 §3, §4.3).
 //!
-//! The real holder (bind retry, HTTP, timers) is 054 T5. Until then the
-//! production spawn function is [`placeholder_spawn`], which binds nothing.
+//! The real holder (bind retry, HTTP, timers) lives in [`holder`]; the
+//! production spawn function is [`holder::production_spawn`].
 
-// Wired into the real holder by 054 T5; until then only the tests reach them.
-#[allow(dead_code)]
+pub mod holder;
 mod http;
-#[allow(dead_code)]
 mod message;
-#[allow(dead_code)]
 mod rpc;
 
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 use termflow_pty_protocol::{McpHeld, McpHoldSpec};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::{timeout, timeout_at, Instant};
+
+pub use holder::note_order;
 
 /// What the manager tells the holder task to do. `Stop` is terminal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,12 +156,27 @@ impl McpHold {
         match std::mem::replace(&mut self.state, State::Idle) {
             State::Running(h) => {
                 h.order_stop();
+                note_order("holder-stop-ordered");
                 log::info!("[MCP-HOLD] stop ordered");
                 self.retiring = Some(h);
                 true
             }
             State::Pending(_) | State::Idle => false,
         }
+    }
+
+    /// Whether a holder task is running and has not ended on its own. Read-only
+    /// (it does not reap), so the transport can ask it between awaits.
+    pub fn is_running(&self) -> bool {
+        matches!(&self.state, State::Running(h) if !h.finished())
+    }
+
+    /// Orders every holder to stop and hands over their join handles, so
+    /// `serve` can await the cleanup on its way out (see [`finish`]).
+    pub fn take_for_shutdown(&mut self) -> Vec<JoinHandle<()>> {
+        self.stop();
+        self.state = State::Idle;
+        self.retiring.take().into_iter().map(|h| h.join).collect()
     }
 
     /// `ClaimMcp` from an authenticated GUI. Running (Absent) moves to Handback;
@@ -279,22 +295,27 @@ fn reap(handle: HolderHandle) {
     }
 }
 
-/// PLACEHOLDER production spawn (054 T2). 054 T5 replaces it with the real
-/// holder. It binds nothing: it only waits for `Stop` (or a dropped sender), so
-/// the state machine is exercised end to end while the feature ships inert (no
-/// GUI sends the frames until 055/056, and the host does not advertise
-/// `CAP_MCP_HOLD` until T6).
-pub fn placeholder_spawn(spec: McpHoldSpec, mut mode: watch::Receiver<Mode>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        log::info!("[MCP-HOLD] placeholder holder for port {} (real holder is 054 T5)", spec.port);
-        drop(spec);
-        loop {
-            if *mode.borrow_and_update() == Mode::Stop {
-                break;
+/// Awaits the holders' root tasks on `serve`'s way out. On the cooperative path
+/// a root resolves only after its listener and every connection are gone. The
+/// forced abort is a safety net for a bug: it guarantees completion shortly
+/// after, not exactly at, the return (plan 054 §4.3 "Bounds").
+pub async fn finish(handles: Vec<JoinHandle<()>>) {
+    let deadline = Instant::now() + holder::STOP_BOUND + Duration::from_secs(1);
+    for mut handle in handles {
+        match timeout_at(deadline, &mut handle).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if e.is_panic() {
+                    log::error!("[MCP-HOLD] holder task panicked: {e}");
+                }
             }
-            if mode.changed().await.is_err() {
-                break;
+            Err(_) => {
+                log::error!("[MCP-HOLD] holder did not stop within its bound; aborting it");
+                handle.abort();
+                if timeout(Duration::from_millis(500), &mut handle).await.is_err() {
+                    log::error!("[MCP-HOLD] aborted holder still not finished");
+                }
             }
         }
-    })
+    }
 }
