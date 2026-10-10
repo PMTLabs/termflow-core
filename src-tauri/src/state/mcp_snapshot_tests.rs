@@ -35,7 +35,54 @@ pub(crate) struct Config {
     slow_delete: Duration,
     notify_status: Option<u16>,
     wrong_id_on_list: bool,
+    init_result: Option<String>,
     list_result: Option<String>,
+}
+
+/// What a `tools/list` error carries in its message and its `data`: response body, never logged.
+const ERROR_MESSAGE_SENTINEL: &str = "ERRMSG_SENTINEL_41b7";
+const ERROR_DATA_SENTINEL: &str = "ERRDATA_SENTINEL_9d02";
+
+/// An open-or-bearer fixture whose two results are as big as a reply may be: each body is exactly
+/// [`BODY_CAP`] bytes, so each part is accepted alone. Returns the config and both results.
+pub(crate) fn config_at_the_body_cap(token: &str) -> (Config, String, String) {
+    // The fixture's JSON envelope around a result (`rpc`), ids 1 and 2 are the same width.
+    let envelope = r#"{ "result" : , "jsonrpc":"2.0", "id": 1 }"#.len();
+    let fill = |head: &str| {
+        let shell = format!(r#"{{{head}"pad":""}}"#).len();
+        format!(r#"{{{head}"pad":"{}"}}"#, "p".repeat(BODY_CAP - envelope - shell))
+    };
+    let init = fill(&format!(r#""protocolVersion":"{NEGOTIATED}","#));
+    let list = fill(r#""tools":[],"#);
+    let config = Config { token: Some(token.into()), init_result: Some(init.clone()), list_result: Some(list.clone()), ..open() };
+    (config, init, list)
+}
+
+// ---- captured logs (one logger per test binary; every test that reads logs installs this one) ----
+
+static CAPTURED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+struct Capture;
+
+impl log::Log for Capture {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+    fn log(&self, record: &log::Record) {
+        CAPTURED.lock().unwrap().push(record.args().to_string());
+    }
+    fn flush(&self) {}
+}
+
+/// Route every log line of this test binary into [`captured_logs`].
+pub(crate) fn capture_logs() {
+    static CAPTURE: Capture = Capture;
+    let _ = log::set_logger(&CAPTURE);
+    log::set_max_level(log::LevelFilter::Info);
+}
+
+pub(crate) fn captured_logs() -> Vec<String> {
+    CAPTURED.lock().unwrap().clone()
 }
 
 #[derive(Debug, Clone)]
@@ -157,7 +204,8 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request) -> Response
         if ["protocolVersion", "capabilities", "clientInfo"].iter().any(|k| params.get(k).is_none()) {
             return reply(400).body(Body::empty()).unwrap();
         }
-        return rpc(config, id.unwrap(), INIT_RESULT, Some(SESSION));
+        let result = config.init_result.clone().unwrap_or_else(|| INIT_RESULT.to_owned());
+        return rpc(config, id.unwrap(), &result, Some(SESSION));
     }
     if let Err(status) = session_ok(&seen) {
         return reply(status).body(Body::empty()).unwrap();
@@ -176,7 +224,11 @@ async fn handle(State(shared): State<Arc<Shared>>, request: Request) -> Response
         // Stricter than the SDK: a list before the client said it is initialized is refused.
         "tools/list" if !*shared.initialized.lock().unwrap() => reply(400).body(Body::empty()).unwrap(),
         "tools/list" if config.list_error => {
-            let error = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32603, "message": "boom" } }).to_string();
+            let error = json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32603, "message": ERROR_MESSAGE_SENTINEL, "data": { "token": ERROR_DATA_SENTINEL } },
+            })
+            .to_string();
             Response::builder().header("content-type", "application/json").body(Body::from(error)).unwrap()
         }
         "tools/list" => {
@@ -341,6 +393,21 @@ async fn the_session_is_closed_after_a_list_error_too() {
     assert_eq!(both(&snapshot), (Some(INIT_RESULT), None), "the error fails that step, keeps the other");
     assert!(fixture.closed());
     assert_eq!(fixture.seen().last().unwrap().method, "DELETE");
+}
+
+#[tokio::test]
+async fn a_sidecar_error_is_logged_by_its_code_and_never_by_its_body() {
+    capture_logs();
+    let fixture = Fixture::start(Config { list_error: true, ..open() }).await;
+    let (snapshot, _) = snapshot_of(&fixture).await;
+    assert_eq!(both(&snapshot), (Some(INIT_RESULT), None), "the snapshot still degrades normally");
+    assert!(fixture.closed(), "and the session is closed");
+
+    let lines = captured_logs();
+    assert!(lines.iter().any(|l| l.contains("snapshot incomplete: tools/list: the sidecar answered error code -32603")), "{lines:?}");
+    for sentinel in [ERROR_MESSAGE_SENTINEL, ERROR_DATA_SENTINEL] {
+        assert!(lines.iter().all(|l| !l.contains(sentinel)), "the error body reached the log: {sentinel}");
+    }
 }
 
 #[tokio::test]

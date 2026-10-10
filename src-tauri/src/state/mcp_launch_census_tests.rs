@@ -230,6 +230,8 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_sidecar_path() {
         ("a different process installed", in_sidecar(INSTALL_PROCESS, "slot.install_if_current(generation, other)")),
         ("the Err arm no longer shuts the process down", in_sidecar(SHUTDOWN_PROCESS, "drop(process);")),
         ("the wrapper built inside if false", in_sidecar(LET_PROCESS, &format!("if false {{ {LET_PROCESS} }}"))),
+        ("an early return before the env loop", in_sidecar(SIDECAR_LOOP_SRC, &format!("return Ok(false);\n    {SIDECAR_LOOP}"))),
+        ("an early return before the wrapper", in_sidecar(LET_PROCESS, &format!("return Ok(false);\n    {LET_PROCESS}"))),
     ];
     for (name, source) in cases {
         assert!(check_spawn_provenance(&source, SIDECAR_FN, false).is_err(), "the census let this sidecar mutation through: {name}");
@@ -252,6 +254,8 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_legacy_path() {
             .replacen("    // CREATE_NO_WINDOW so the node", "    if false { cmd.envs(env); }\n    // CREATE_NO_WINDOW so the node", 1)),
         ("a different process installed", in_legacy(INSTALL_PROCESS, "slot.install_if_current(generation, other)")),
         ("the Err arm no longer shuts the process down", in_legacy(SHUTDOWN_PROCESS, "drop(process);")),
+        ("an early return before the launch let", in_legacy(LET_LAUNCH, &format!("return Ok(false);\n    {LET_LAUNCH}"))),
+        ("an early return before the wrapper", in_legacy(LET_PROCESS, &format!("return Ok(false);\n    {LET_PROCESS}"))),
     ];
     for (name, source) in cases {
         assert!(check_spawn_provenance(&source, LEGACY_FN, true).is_err(), "the census let this legacy mutation through: {name}");

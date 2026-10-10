@@ -193,7 +193,12 @@ fn result_of(content_type: &str, body: &str, id: u64) -> Result<String, String> 
 
 fn response_result(message: &Value, text: &str) -> Result<String, String> {
     if let Some(error) = message.get("error") {
-        return Err(format!("the sidecar answered an error: {error}"));
+        // Only the numeric code: the message and `data` are response body and may carry anything
+        // (this text is logged).
+        return Err(match error.get("code").and_then(Value::as_i64) {
+            Some(code) => format!("the sidecar answered error code {code}"),
+            None => "the sidecar answered an error".to_string(),
+        });
     }
     raw_member(text, "result").map(str::to_owned).ok_or_else(|| "the response has no result".to_string())
 }

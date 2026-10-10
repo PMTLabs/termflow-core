@@ -11,10 +11,12 @@ use super::*;
 use crate::state::host_lifecycle::{begin_offload, Hold};
 use crate::state::host_table::Busy;
 use crate::state::mcp_handover::{handover_txn, Cleanup, HandedOver, HandoverInputs, HandoverPort, SentState};
-use crate::state::mcp_snapshot_tests::{config_with_token, Fixture, INIT_RESULT, LIST_RESULT};
+use crate::state::mcp_snapshot_tests::{
+    capture_logs, captured_logs, config_at_the_body_cap, config_with_token, Fixture, INIT_RESULT, LIST_RESULT,
+};
 use crate::state::types::McpLaunch;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use termflow_pty_protocol::{ArmDetachPurpose, Control, Frame, McpHoldReason, McpHoldSpec};
+use termflow_pty_protocol::{encode, ArmDetachPurpose, Control, Frame, McpHoldReason, McpHoldSpec, MAX_FRAME_LEN};
 use tokio::task::JoinHandle;
 
 /// The credential the hold is authenticated with: not the sidecar's bearer token, and not any
@@ -145,6 +147,14 @@ impl Rig {
     fn admission_closed(&self) -> bool {
         matches!(self.port.table().begin(HostChannel::Primary), Err(Busy::Lifecycle(_)))
             && matches!(self.port.table().begin_adoption(), Err(Busy::Lifecycle(_)))
+    }
+
+    /// The quiesce is over: a create and an adoption are each admitted (their tickets are dropped
+    /// at once). Not the negation of `admission_closed`, which either one reopening would satisfy.
+    fn admission_open(&self) -> bool {
+        let creates = self.port.table().begin(HostChannel::Primary).is_ok();
+        let adoption = self.port.table().begin_adoption().is_ok();
+        creates && adoption
     }
 }
 
@@ -300,6 +310,45 @@ async fn a_hold_is_sent_only_to_armed_hosts() {
     assert_eq!(handed.sent(), SentState::Accepted);
     assert_eq!(hold_frames(&world, CURRENT).len(), 1);
     assert_eq!(world.count("old", "HoldMcp"), 0);
+    handed.release().await;
+}
+
+/// The frame cap is enforced on the frame the production handover sends, measured with the final
+/// spec and the host credential: two results that each fit a reply but not one frame together.
+#[tokio::test]
+async fn a_snapshot_too_big_for_one_frame_reaches_the_host_without_its_tool_list() {
+    // A long sidecar bearer widens the margin: it travels in the frame too.
+    let sidecar_token = "b".repeat(512);
+    let (config, init, list) = config_at_the_body_cap(&sidecar_token);
+    let (world, port) = machine_with_current(capable(), &[]);
+    rediscover_hosts(&port).await.unwrap();
+    let fixture = Fixture::start(config).await;
+    let tp = TestPort::new(Some(fixture.launch()));
+    let mut hold = begin_offload(&port).await.unwrap();
+    hold.arm_detach(600, "tok", Some(ArmDetachPurpose::Local)).await.unwrap();
+    let whole = McpHoldSpec {
+        port: fixture.launch().port,
+        configured_port: CONFIGURED,
+        bind_host: "127.0.0.1".into(),
+        auth_token: Some(sidecar_token.clone()),
+        reason: McpHoldReason::Offload,
+        initialize_result: Some(init),
+        tools_list_result: Some(list),
+    };
+    let payload = |spec: &McpHoldSpec| {
+        encode(&Frame::Ctrl(Control::HoldMcp { req: u64::MAX, token: HOST_TOK.into(), spec: spec.clone() })).len() - 5
+    };
+    assert!(payload(&whole) > MAX_FRAME_LEN, "the premise: together the parts do not fit one frame");
+
+    let handed = handover_txn(&*tp, hold, McpHoldReason::Offload).await;
+
+    assert_eq!(handed.sent(), SentState::Accepted, "the host read the frame and accepted");
+    let holds = hold_frames(&world, CURRENT);
+    assert_eq!(holds.len(), 1);
+    let (_, token, spec) = &holds[0];
+    assert_eq!(token, HOST_TOK);
+    assert_eq!(*spec, McpHoldSpec { tools_list_result: None, ..whole }, "the tool list went first; everything else is whole");
+    assert!(payload(spec) <= MAX_FRAME_LEN);
     handed.release().await;
 }
 
@@ -466,7 +515,7 @@ async fn dropping_the_handover_keeps_the_lock_until_the_disarm_is_acknowledged()
     assert!(rig.admission_closed(), "and terminal admission stays closed with it");
     gate.release();
     acquired(competitor, "the Disarm was acknowledged").await;
-    until("admission to reopen", || !rig.admission_closed()).await;
+    until("admission to reopen", || rig.admission_open()).await;
     assert_eq!(rig.since(CURRENT), ["HoldMcp", "ReleaseMcp", "Disarm"], "one cleanup sequence, no second Disarm");
     assert_eq!(rig.since("f1"), ["Disarm"]);
 }
@@ -562,7 +611,7 @@ async fn a_cancelled_release_still_completes_its_cleanup(case: &str) {
     assert!(rig.admission_closed(), "{case}: terminal admission is still closed");
     gate.release();
     acquired(competitor, case).await;
-    until("admission to reopen", || !rig.admission_closed()).await;
+    until("admission to reopen", || rig.admission_open()).await;
     for host in ["cur", "f1", "f2"] {
         assert_eq!(rig.count_since(host, "Disarm"), 1, "{case}: exactly one Disarm on {host}");
     }
@@ -593,7 +642,7 @@ async fn a_release_polled_once_by_hand_and_dropped_still_finishes() {
     assert!(rig.admission_closed(), "the cleanup has not run, and admission is still closed");
 
     acquired(competitor, "the spawned cleanup ran to the end").await;
-    until("admission to reopen", || !rig.admission_closed()).await;
+    until("admission to reopen", || rig.admission_open()).await;
     for host in ["cur", "f1", "f2"] {
         assert_eq!(rig.count_since(host, "Disarm"), 1, "exactly one Disarm on {host}");
     }
@@ -636,25 +685,9 @@ async fn a_commit_sends_nothing_and_keeps_the_lock() {
 
 // ---- no runtime ---------------------------------------------------------------------------------------
 
-static CAPTURED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-struct Capture;
-
-impl log::Log for Capture {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
-    }
-    fn log(&self, record: &log::Record) {
-        CAPTURED.lock().unwrap().push(record.args().to_string());
-    }
-    fn flush(&self) {}
-}
-
 #[tokio::test]
 async fn a_handover_dropped_where_there_is_no_runtime_neither_panics_nor_sends() {
-    static CAPTURE: Capture = Capture;
-    let _ = log::set_logger(&CAPTURE);
-    log::set_max_level(log::LevelFilter::Info);
+    capture_logs();
     let mut rig = rig(capable(), &[]).await;
     let handed = rig.hand().await;
     assert_eq!(handed.sent(), SentState::Accepted);
@@ -665,7 +698,7 @@ async fn a_handover_dropped_where_there_is_no_runtime_neither_panics_nor_sends()
 
     assert_eq!(rig.world.kinds(CURRENT).len(), before, "no frame was sent");
     assert!(
-        CAPTURED.lock().unwrap().iter().any(|line| line.contains("no runtime; cleanup unconfirmed")),
+        captured_logs().iter().any(|line| line.contains("no runtime; cleanup unconfirmed")),
         "the unconfirmed cleanup is logged"
     );
 }

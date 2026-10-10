@@ -107,6 +107,16 @@ export function checkIndexWiring(source: string): string[] {
     if (!(lastToken === "{" || lastToken === ";" || lastToken === "}")) {
         problems.push("`await quiesce(` is the body of a condition or expression, not an unconditional statement");
     }
+    // Reachable: no `return`/`throw` that is itself a statement (not the body of an `if`) of the
+    // function body before the try, or of the try block before the call.
+    const leaves = findAll(masked, /\b(return|throw)\b/).filter((h) => {
+        const depth = depthAt(masked, h.at);
+        const inBody = h.at > bodyOpen && h.at < tryOpen && depth === bodyDepth;
+        const inTry = h.at > tryOpen && h.at < q.at && depth === bodyDepth + 1;
+        const prev = masked.slice(0, h.at).trimEnd();
+        return (inBody || inTry) && ["{", ";", "}"].includes(prev[prev.length - 1]);
+    });
+    if (leaves.length > 0) problems.push("`await quiesce(` follows a return or throw that always runs first");
     const args = callArguments(source, masked, q.end - 1);
     if (args.length !== 3) problems.push(`quiesce takes three arguments, found ${args.length}`);
     if (norm(args[0] ?? "") !== norm(FIRST_CALLBACK)) {
@@ -143,6 +153,9 @@ describe("index.ts drain wiring census", () => {
         ["begin in a string instead of a call", () => mutate(INDEX, QUIESCE_FIRST, '            () => { "drain.begin(Date.now());"; },\n')],
         ["a different clock for begin", () => mutate(INDEX, QUIESCE_FIRST, "            () => { drain.begin(0); },\n")],
         ["begin called a second time inside the callback", () => mutate(INDEX, QUIESCE_FIRST, "            () => { drain.begin(Date.now()); drain.begin(Date.now()); },\n")],
+        ["a return in the try before quiesce", () => mutate(INDEX, "        await quiesce(", "        return;\n        await quiesce(")],
+        ["a throw in the try before quiesce", () => mutate(INDEX, "        await quiesce(", '        throw new Error("x");\n        await quiesce(')],
+        ["a return in the function body before the try", () => mutate(INDEX, "    exiting = true;\n", "    exiting = true;\n    return;\n")],
     ];
 
     for (const [name, build] of CASES) {

@@ -156,6 +156,8 @@ fn the_connection_site_census_kills_each_planted_mutation() {
         ("the current statement inside a comment", mutate(HOST_PORT, CURRENT_STATEMENT, &format!("/* {CURRENT_STATEMENT} */"))),
         ("the current statement inside a string", mutate(HOST_PORT, CURRENT_STATEMENT, &format!("let _s = \"{}\";", CURRENT_STATEMENT.replace('"', "'")))),
         ("the current statement inside a closure", mutate(HOST_PORT, CURRENT_STATEMENT, &format!("let _f = || {{ {CURRENT_STATEMENT} }};"))),
+        ("an early return before the current statement", mutate(HOST_PORT, CURRENT_STATEMENT, &format!("return Err(String::new());\n        {CURRENT_STATEMENT}"))),
+        ("an early return before the frozen statement", mutate(HOST_PORT, FROZEN_STATEMENT, &format!("return Err(String::new());\n        {FROZEN_STATEMENT}"))),
     ];
     for (name, source) in cases {
         assert!(check_connection_sites(&source).is_err(), "the census let this mutation through: {name}");

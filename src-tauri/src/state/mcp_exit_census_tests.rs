@@ -49,9 +49,10 @@ fn is_ident(text: &str) -> bool {
     !text.is_empty() && text != "_" && text.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// The statement of `block` whose normalised text is `want`, among its own top-level statements.
+/// The statement of `block` whose normalised text is `want`, among its own top-level statements,
+/// when it runs: a statement after one of the block's own `return`s does not count.
 fn top_position(src: &Src, block: &Block, want: &str) -> Option<usize> {
-    block.stmts.iter().position(|s| src.norm(&s.span) == want)
+    block.stmts.iter().position(|s| src.norm(&s.span) == want).filter(|i| block.is_unconditional(&block.stmts[*i].span))
 }
 
 fn occurrences(src: &Src, block: &Block, want: &str) -> usize {
@@ -208,6 +209,7 @@ fn handover_mutations(source: &str, handover: &str, reason: &str) -> Vec<(&'stat
         ("the call inside an async block", call(handover, &format!("let _f = async {{ {handover} }};"))),
         ("a hold still released after the handover", call(handover, &format!("{handover}\n    hold.release().await;"))),
         ("a hold still committed after the handover", call(handover, &format!("{handover}\n    hold.commit();"))),
+        ("an early return before the handover", call(handover, &format!("return Ok(());\n    {handover}"))),
     ]
 }
 
@@ -232,6 +234,7 @@ fn the_handover_census_kills_each_planted_mutation_on_restart_for_update() {
         }),
         ("the commit on a different binding", mutate_in(UPDATE_RS, "pub async fn restart_for_update(", "handed.commit();", "other.commit();")),
         ("a release where there is no failure arm", mutate_in(UPDATE_RS, "pub async fn restart_for_update(", "handed.commit();", "handed.release().await;\n    handed.commit();")),
+        ("an early return before the commit", mutate_in(UPDATE_RS, "pub async fn restart_for_update(", "handed.commit();", "return Ok(());\n    handed.commit();")),
     ]);
     for (name, source) in cases {
         let verdict = check_exit_path(&source, &RESTART_FOR_UPDATE);
@@ -266,6 +269,7 @@ fn the_handover_census_kills_each_planted_mutation_on_restart_keeping_terminals(
             let cut = mutate_in(UPDATE_RS, sig, "handed.commit();", "");
             mutate_in(&cut, sig, "app.exit(0);", "app.exit(0);\n    handed.commit();")
         }),
+        ("an early return before the commit", mutate_in(UPDATE_RS, sig, "handed.commit();", "return Ok(());\n    handed.commit();")),
     ]);
     for (name, source) in cases {
         let verdict = check_exit_path(&source, &RESTART_KEEPING_TERMINALS);

@@ -495,6 +495,8 @@ mod mcp_handover_census_tests {
                 mutate(&cut, "state.app_handle.exit(0);", "state.app_handle.exit(0);
     handed.commit();")
             }),
+            ("an early return before the handover", mutate(SOURCE, HANDOVER, &format!("return Ok(());\n    {HANDOVER}"))),
+            ("an early return before the commit", mutate(SOURCE, "handed.commit();", "return Ok(());\n    handed.commit();")),
         ];
         for (name, source) in cases {
             let verdict = check_exit_path(&source, &UPDATE_AND_RESTART);

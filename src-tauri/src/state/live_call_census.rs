@@ -226,6 +226,9 @@ pub(crate) enum Kind {
     Async,
     /// One arm of a `match`; the arm's pattern.
     MatchArm(String),
+    /// Not a block: the subject follows a statement of the same block that returns (or panics),
+    /// so it never runs.
+    AfterReturn,
 }
 
 impl Kind {
@@ -250,6 +253,9 @@ pub(crate) struct Stmt {
     pub subs: Vec<Sub>,
     /// Brace-less closure bodies that are part of this statement, outside every sub-block.
     closures: Vec<Range<usize>>,
+    /// The statement itself leaves the block (`return ..`, `panic!(..)` and the like), so nothing
+    /// after it in the same block runs.
+    pub diverges: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -285,7 +291,13 @@ impl Block {
     /// of a top-level statement).
     pub fn constructs_at(&self, at: usize) -> Vec<Kind> {
         let mut out = Vec::new();
-        let Some(stmt) = self.stmts.iter().find(|s| s.span.contains(&at)) else { return out };
+        let Some(index) = self.top_index(at) else { return out };
+        // A statement after this block's own `return` never runs: that is as conditional as an
+        // `if false`. A `return` nested in an earlier statement's branch does not count.
+        if self.stmts[..index].iter().any(|s| s.diverges) {
+            out.push(Kind::AfterReturn);
+        }
+        let stmt = &self.stmts[index];
         for sub in &stmt.subs {
             if !sub.span().contains(&at) {
                 continue;
@@ -489,7 +501,8 @@ impl Src {
         };
         let span = start..end;
         let closures = self.closures(&span, &subs);
-        Stmt { span, subs, closures }
+        let diverges = diverges(&self.masked[span.clone()]);
+        Stmt { span, subs, closures, diverges }
     }
 
     /// The text just before the `{` at `open`, back to the nearest boundary of the construct it
@@ -630,6 +643,17 @@ impl Src {
         }
         out
     }
+}
+
+/// Whether a statement (masked text) unconditionally leaves its block: it starts with `return`,
+/// or with a call that never returns.
+fn diverges(statement: &str) -> bool {
+    let text = statement.trim_start();
+    let starts_word = |word: &str| text.strip_prefix(word).is_some_and(|rest| rest.chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_')));
+    starts_word("return")
+        || ["panic!", "unreachable!", "todo!", "unimplemented!", "std::process::exit(", "process::exit("]
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
 }
 
 /// Whether the statement that has just closed a `{ ... }` at `i` is over. `.`/`?`/`;`/`else`/`as`
@@ -939,6 +963,28 @@ mod scanner_tests {
         let (src, body) = body_of("fn f() { if a { return 1; } work(); return 2; }", "fn f(");
         assert_eq!(texts(&src, &body), ["ifa{return1;}", "work();", "return2;"]);
         assert_eq!(top_statement_starting(&src, &body, "return"), Some(2));
+    }
+
+    #[test]
+    fn a_statement_after_its_blocks_own_return_is_not_live() {
+        let text = "fn f() { if a { return 1; } early(); return 2; late(); { inner(); } }\n\
+                    fn g() { match x { Err(e) => { cleanup(); return Err(e); dead(); } Ok(v) => v } }\n\
+                    fn h() { panic!(\"stop\"); after_panic(); }\n\
+                    fn k() { let returned = 1; next(); }";
+        let src = Src::new(text);
+        let at = |needle: &str| src.masked.find(needle).unwrap();
+        let f = src.function("fn f(");
+        assert!(f.is_unconditional(&(at("early();")..at("early();") + 1)), "a nested return does not kill what follows");
+        assert!(!f.is_unconditional(&(at("late();")..at("late();") + 1)));
+        assert!(f.constructs_at(at("inner();")).contains(&Kind::AfterReturn), "nor anything nested after it");
+        assert_eq!(require_top_statement(&src, &f, "late();").unwrap_err(), "`late();` is not unconditional in the function body");
+        let g = src.function("fn g(");
+        assert_eq!(g.constructs_at(at("cleanup();")), [Kind::MatchArm("Err(e)".into())]);
+        assert_eq!(g.constructs_at(at("dead();")), [Kind::MatchArm("Err(e)".into()), Kind::AfterReturn]);
+        let h = src.function("fn h(");
+        assert!(!h.is_unconditional(&(at("after_panic();")..at("after_panic();") + 1)));
+        let k = src.function("fn k(");
+        assert!(k.is_unconditional(&(at("next();")..at("next();") + 1)), "`returned` is not `return`");
     }
 
     #[test]
