@@ -104,6 +104,10 @@ pub(super) struct HostSpec {
     /// Never acknowledges a disarm or a shutdown: the frames are received and
     /// ignored, as by a host that is wedged when the app quits.
     pub no_release_ack: bool,
+    /// The host advertises `CAP_MCP_HOLD` (see [`record_with_mcp_hold`]) and answers
+    /// the three MCP-hold frames. `false` is a host WITHOUT the bit: it decodes
+    /// none of them, so like a shipped host it drops the connection on one.
+    pub mcp_hold: bool,
 }
 
 impl Default for HostSpec {
@@ -120,6 +124,7 @@ impl Default for HostSpec {
             arm_delay: Duration::ZERO,
             close_lag: Duration::ZERO,
             no_release_ack: false,
+            mcp_hold: false,
         }
     }
 }
@@ -142,6 +147,9 @@ impl Recorded {
             Frame::Ctrl(Control::Attach { .. } | Control::AttachAcked { .. }) => "Attach",
             Frame::Ctrl(Control::ArmDetach { .. }) => "Arm",
             Frame::Ctrl(Control::Shutdown { .. }) => "Shutdown",
+            Frame::Ctrl(Control::HoldMcp { .. }) => "HoldMcp",
+            Frame::Ctrl(Control::ClaimMcp { .. }) => "ClaimMcp",
+            Frame::Ctrl(Control::ReleaseMcp { .. }) => "ReleaseMcp",
             Frame::Ctrl(Control::Close { tab_id }) if tab_id == EOF_MARK => "Eof",
             Frame::Ctrl(Control::Close { .. }) => "Close",
             Frame::Ctrl(Control::Resize { .. }) => "Resize",
@@ -413,6 +421,13 @@ async fn serve(
                 Some(Response::ArmAck { req, deadline_ms: 0 })
             }
             Frame::Ctrl(Control::Shutdown { req, .. }) => Some(Response::ShutdownAck { req }),
+            // A host without the bit cannot decode these (an unknown enum index):
+            // the frame is recorded, then the connection drops, as a shipped host's does.
+            Frame::Ctrl(Control::HoldMcp { .. } | Control::ClaimMcp { .. } | Control::ReleaseMcp { .. })
+                if !spec.mcp_hold => break,
+            Frame::Ctrl(Control::HoldMcp { req, .. }) => Some(Response::McpHoldAck { req, accepted: true, reason: None }),
+            Frame::Ctrl(Control::ClaimMcp { req, .. }) => Some(Response::McpClaimAck { req, held: None }),
+            Frame::Ctrl(Control::ReleaseMcp { req, .. }) => Some(Response::McpReleaseAck { req, was_holding: false }),
             _ => None,
         };
         if let Some(gate) = spec.reply_gates.get(kind) { gate.hold().await; }
@@ -507,6 +522,13 @@ pub(super) fn record(endpoint: &str, proto_min: u16, proto_max: u16) -> HostReco
         lifecycle: None,
         build_id: None,
     }
+}
+
+/// The record of a host that advertises `CAP_MCP_HOLD`. [`record`] is the host
+/// WITHOUT the bit, the one a sender must send no MCP-hold frame to.
+pub(super) fn record_with_mcp_hold(endpoint: &str, proto_min: u16, proto_max: u16) -> HostRecord {
+    HostRecord { capabilities: record(endpoint, proto_min, proto_max).capabilities | termflow_pty_protocol::CAP_MCP_HOLD,
+        ..record(endpoint, proto_min, proto_max) }
 }
 
 type StorageEffect = Arc<dyn Fn(&str, &str, crate::state::EndKind) + Send + Sync>;

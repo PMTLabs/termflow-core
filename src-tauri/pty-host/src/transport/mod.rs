@@ -22,6 +22,7 @@
 //!   bounded ring, so Hold retains only the rings (no unbounded queue).
 
 use crate::manager::{Disposition, LocalHold, SessionManager};
+use crate::mcp_hold::{self, holder};
 use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,11 +38,11 @@ use tokio::sync::oneshot;
 /// counter, which excludes suspend.  On non-Windows `Instant` is the best
 /// portable monotonic source; tests inject a clock.  A Windows read failure is
 /// `None`, and is conservative: it can delay expiry but never authorizes it.
-trait ActiveClock: Send + Sync {
+pub(crate) trait ActiveClock: Send + Sync {
     fn now(&self) -> Option<Duration>;
 }
 
-struct SystemActiveClock {
+pub(crate) struct SystemActiveClock {
     #[cfg(not(windows))]
     origin: Instant,
     #[cfg(windows)]
@@ -52,7 +53,7 @@ impl SystemActiveClock {
     #[cfg(windows)]
     const NO_ORIGIN: u64 = u64::MAX;
 
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         #[cfg(windows)]
         let origin_ticks = unbiased_interrupt_ticks();
         Self {
@@ -94,7 +95,7 @@ impl ActiveClock for SystemActiveClock {
     fn now(&self) -> Option<Duration> {
         #[cfg(windows)]
         {
-            return self.elapsed_from_ticks(unbiased_interrupt_ticks());
+            self.elapsed_from_ticks(unbiased_interrupt_ticks())
         }
         #[cfg(not(windows))]
         {
@@ -149,6 +150,7 @@ fn deadline_expired(
                 at: now + Duration::from_secs(termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS),
             };
             *deadline = Some(PendingDeadline::Established(d));
+            mgr.publish_hold_deadline(Some(d.at));
             d
         }
     };
@@ -194,11 +196,47 @@ pub async fn serve(
     survivable: bool,
     record: Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
 ) -> std::io::Result<()> {
-    let clock: Arc<dyn ActiveClock> = Arc::new(SystemActiveClock::new());
-    let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
-    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
-    let mut mgr = SessionManager::new(events_tx, resp_tx, token, survivable);
+    serve_with_clock(endpoint, token, survivable, record, Arc::new(SystemActiveClock::new())).await
+}
 
+/// [`serve`] on an injected active-time clock, shared with the MCP holder so a
+/// test drives the host's deadline and the holder's timers from one place.
+///
+/// Every return path orders the MCP holder to stop and then awaits it (bounded)
+/// before returning. That happens here, at the asynchronous boundary, never
+/// inside a control handler.
+pub(crate) async fn serve_with_clock(
+    endpoint: Endpoint,
+    token: Option<String>,
+    survivable: bool,
+    record: Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
+    clock: Arc<dyn ActiveClock>,
+) -> std::io::Result<()> {
+    let (events_tx, events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
+    let (resp_tx, resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
+    let (holder_env, deadline_sink) = holder::HolderEnv::new(clock.clone());
+    let mut mgr = SessionManager::new_with_holder_spawn(
+        events_tx,
+        resp_tx,
+        token,
+        survivable,
+        holder::production_spawn(holder_env),
+    );
+    mgr.set_mcp_deadline_sink(deadline_sink);
+
+    let result = serve_loop(&mut mgr, endpoint, record, &*clock, events_rx, resp_rx).await;
+    mcp_hold::finish(mgr.stop_mcp_holders()).await;
+    result
+}
+
+async fn serve_loop(
+    mgr: &mut SessionManager,
+    endpoint: Endpoint,
+    record: Option<(std::path::PathBuf, termflow_pty_protocol::HostRecord)>,
+    clock: &dyn ActiveClock,
+    mut events_rx: Receiver<Data>,
+    mut resp_rx: Receiver<Response>,
+) -> std::io::Result<()> {
     let mut listener = Listener::bind(&endpoint)?;
     // Advertise before the FIRST accept too — a client deciding whether it may
     // spawn must see us during the whole window in which we are acceptable.
@@ -209,12 +247,12 @@ pub async fn serve(
     loop {
         heal_record(&record);
         let (erx, rrx, connection) = run_connection(
-            &mut mgr,
+            mgr,
             stream,
             events_rx,
             resp_rx,
             pending_deadline,
-            &*clock,
+            clock,
         )
         .await;
         events_rx = erx;
@@ -235,6 +273,8 @@ pub async fn serve(
                 // Sibling/hotswap arms are unbounded while any child is live.
                 // A Local-purpose arm is deliberately bounded: after 900 seconds
                 // of active time its expiry tears down even live sessions.
+                // `begin_local_absence` also starts the MCP holder, or keeps the
+                // one already running across a silent-reconnect re-entry.
                 let deadline = mgr.begin_local_absence().map(|hold| match clock.now() {
                     Some(now) => PendingDeadline::Established(HoldDeadline {
                         hold,
@@ -248,7 +288,12 @@ pub async fn serve(
                         PendingDeadline::AwaitingClock(hold)
                     }
                 });
-                match wait_for_reconnect(&mut listener, &mgr, &record, deadline, &*clock).await {
+                // The holder's wait message reads the host's CURRENT deadline.
+                mgr.publish_hold_deadline(match deadline {
+                    Some(PendingDeadline::Established(d)) => Some(d.at),
+                    _ => None,
+                });
+                match wait_for_reconnect(&mut listener, mgr, &record, deadline, clock).await {
                     WaitResult::Accepted(s, deadline) => {
                         // Keep the generation-owned timer through the first
                         // read; accept alone never proves lifecycle adoption.
@@ -273,6 +318,13 @@ pub async fn serve(
 /// it returns `Expired` after its active-time bound even if children remain live.
 /// Liveness is re-checked on a short interval, and transient accept errors retry
 /// so a flaky reconnect does not drop held sessions.
+///
+/// Empty-linger rule (plan 054 §4.2): while an MCP holder is running AND the
+/// Local deadline is established, a host with no live child does not return
+/// `Empty`. It keeps accepting and healing its record until the deadline passes
+/// (`Expired`, a no-op teardown) or the holder stops, so agents on the other
+/// hosts armed by the same offload stay covered for as long as their terminals
+/// can exist.
 async fn wait_for_reconnect(
     listener: &mut Listener,
     mgr: &SessionManager,
@@ -282,7 +334,9 @@ async fn wait_for_reconnect(
 ) -> WaitResult {
     const RECHECK: Duration = Duration::from_millis(500);
     loop {
-        if mgr.live_session_count() == 0 {
+        if mgr.live_session_count() == 0
+            && !(mgr.mcp_holder_running() && matches!(deadline, Some(PendingDeadline::Established(_))))
+        {
             return WaitResult::Empty;
         }
         // Re-read active time after every short wakeup. A suspend/resume wakeup
@@ -330,6 +384,9 @@ fn control_label(c: &termflow_pty_protocol::Control) -> &'static str {
         ArmDetach { .. } => "ArmDetach",
         Disarm { .. } => "Disarm",
         Shutdown { .. } => "Shutdown",
+        HoldMcp { .. } => "HoldMcp",
+        ClaimMcp { .. } => "ClaimMcp",
+        ReleaseMcp { .. } => "ReleaseMcp",
     }
 }
 
@@ -448,7 +505,9 @@ where
                     break ConnectionResult::Expired(d.hold);
                 }
             }
-            mgr.on_gui_connect();
+            if let Frame::Ctrl(by) = &frame {
+                mgr.on_gui_connect(by);
+            }
             adopted = true;
         }
         // This loop is strictly sequential: the next frame is not even READ
@@ -484,6 +543,9 @@ where
     });
     (events_rx, resp_rx, result)
 }
+
+#[cfg(test)]
+mod hold_tests;
 
 #[cfg(test)]
 mod tests {
@@ -723,7 +785,7 @@ mod tests {
             Some(hold),
             "active 900 seconds expires the local hold"
         );
-        mgr.on_gui_connect();
+        mgr.on_gui_connect(&Control::ListSessions { req: 1, token: Some("tok".into()) });
         assert!(
             deadline_expired(&mgr, &mut deadline, &clock).is_none(),
             "a reconnecting lifecycle frame cancels the old generation"
