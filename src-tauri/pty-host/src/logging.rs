@@ -238,9 +238,11 @@ mod tests {
         assert!(lines.len() <= 8 + 2 + 1, "the queue is bounded, so most lines were dropped: {} written", lines.len());
         assert_eq!(lines.first(), Some(&"line 0"), "queued lines are written in order");
         let last = lines.last().unwrap();
-        assert!(last.starts_with("after (") && last.ends_with(" earlier log lines dropped)"), "the drop count rides on the next line: {last}");
-        // A count can also ride on an earlier line, if the writer started late
-        // and freed a slot partway through: add up every count.
+        assert!(last == &"after" || last.starts_with("after ("), "the line submitted after the drain is written: {last}");
+        // A pending count rides on the next line that gets in. That is usually
+        // "after", but if the writer started late and freed a slot partway
+        // through, an earlier line can carry some or all of it (review 297 R6):
+        // add up every count.
         let dropped: usize = lines
             .iter()
             .filter_map(|l| l.strip_suffix(" earlier log lines dropped)"))
