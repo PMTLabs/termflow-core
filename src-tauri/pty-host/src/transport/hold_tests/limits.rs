@@ -71,7 +71,9 @@ async fn overload_is_bounded() {
 }
 
 /// Review 295 F1. Several threads keep the listener's backlog full of clients
-/// that each send a complete `/health` request and leave, so the accept branch
+/// that each send a complete `/health` request and leave without reading the
+/// reply (review 296 R5: the CRLFs are escapes, since a physical line break in a
+/// literal is a bare LF and never completes the head), so the accept branch
 /// of the holder's `biased` select is ready again whenever it looks. Every
 /// connection task finishes at once and releases its permit; the retained
 /// `JoinSet` entries must stay bounded by the permits all the same, not grow
@@ -101,10 +103,7 @@ async fn accept_churn_does_not_retain_finished_connection_tasks() {
                     let Ok(mut c) = std::net::TcpStream::connect_timeout(&probe_addr(port), Duration::from_millis(200)) else {
                         continue;
                     };
-                    if c.write_all(b"GET /health HTTP/1.1
-Host: x
-
-").is_ok() {
+                    if c.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").is_ok() {
                         sent += 1;
                         connected.fetch_add(1, Ordering::SeqCst);
                     }
@@ -112,7 +111,7 @@ Host: x
             })
         })
         .collect();
-    let all_served = pump_until(Duration::from_secs(40), || {
+    let all_accepted = pump_until(Duration::from_secs(40), || {
         let sent = connected.load(Ordering::SeqCst);
         feeders.iter().all(|f| f.is_finished())
             && gauges::accepted() - before.0 >= sent
@@ -120,7 +119,8 @@ Host: x
     })
     .await;
     let sent = connected.load(Ordering::SeqCst);
-    assert!(all_served, "accepted {} of {sent} connections", gauges::accepted() - before.0);
+    assert_eq!(sent, (FEEDERS * PER_FEEDER) as u64, "every feeder must deliver its whole workload");
+    assert!(all_accepted, "accepted {} of {sent} connections", gauges::accepted() - before.0);
     for f in feeders {
         f.join().unwrap();
     }

@@ -495,9 +495,13 @@ async fn serve_loop(
                     gauges::ACCEPTED.with(|c| c.set(c.get() + 1));
                     // Under sustained accept readiness this `biased` arm always beats
                     // the `join_next` arm below, so finished tasks (their permits are
-                    // already free) are joined here, right before the next spawn: the
-                    // entries retained never exceed the permits, however many
-                    // connections have been served.
+                    // already free) are joined here, right before the next spawn, so
+                    // retained entries track the live tasks instead of growing with the
+                    // connections served. On a current-thread runtime they never exceed
+                    // the permits. On the multi-thread runtime a task can free its permit
+                    // on another worker just before its handle reads as finished, so a
+                    // reap can miss it and the set briefly holds a few more entries than
+                    // there are permits; the next reap joins them (review 296 R4).
                     reap_finished(set);
                     match env.limits.conn.clone().try_acquire_owned() {
                         Ok(permit) => {
