@@ -1,7 +1,7 @@
 //! Plan 054 T5: overload bounds (R1) and the token never leaving host memory (R2).
 
 use super::*;
-use crate::mcp_hold::holder::{gauges, HOLDER_MAX};
+use crate::mcp_hold::holder::{gauges, HOLDER_MAX, MAX_CONNECTIONS};
 
 /// Claim first (so the pipe's `ListSessions` does not stop the holder), then
 /// fill the event-stream slots, overrun the connection permits with slow
@@ -68,6 +68,77 @@ async fn overload_is_bounded() {
     // The slow connections get their 250 ms (virtual) to finish, then are aborted.
     advance(Duration::from_millis(300)).await;
     assert!(pump_until(STOP_BOUND, || gauges::live_tasks() == 0).await, "tasks left: {}", gauges::live_tasks());
+}
+
+/// Review 295 F1. Several threads keep the listener's backlog full of clients
+/// that each send a complete `/health` request and leave, so the accept branch
+/// of the holder's `biased` select is ready again whenever it looks. Every
+/// connection task finishes at once and releases its permit; the retained
+/// `JoinSet` entries must stay bounded by the permits all the same, not grow
+/// with the number of connections served.
+#[tokio::test]
+async fn accept_churn_does_not_retain_finished_connection_tasks() {
+    use std::io::Write;
+    use std::sync::atomic::AtomicU64;
+    const FEEDERS: usize = 4;
+    const PER_FEEDER: usize = 500;
+    let clock = Clock::new(0);
+    let host = Host::start("churn", &clock);
+    let port = free_port("127.0.0.1");
+    offload(&host, spec(port, "127.0.0.1"), &["t1"]).await;
+    assert!(wait_answers(port, Duration::from_secs(10)).await);
+    let before = (gauges::accepted(), gauges::spawned());
+
+    let connected = Arc::new(AtomicU64::new(0));
+    let feeders: Vec<_> = (0..FEEDERS)
+        .map(|_| {
+            let connected = connected.clone();
+            std::thread::spawn(move || {
+                let give_up = std::time::Instant::now() + Duration::from_secs(30);
+                let mut sent = 0;
+                while sent < PER_FEEDER && std::time::Instant::now() < give_up {
+                    // A full backlog makes the connect fail or time out: try again.
+                    let Ok(mut c) = std::net::TcpStream::connect_timeout(&probe_addr(port), Duration::from_millis(200)) else {
+                        continue;
+                    };
+                    if c.write_all(b"GET /health HTTP/1.1
+Host: x
+
+").is_ok() {
+                        sent += 1;
+                        connected.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+        })
+        .collect();
+    let all_served = pump_until(Duration::from_secs(40), || {
+        let sent = connected.load(Ordering::SeqCst);
+        feeders.iter().all(|f| f.is_finished())
+            && gauges::accepted() - before.0 >= sent
+            && gauges::get(&gauges::CONN).cur == 0
+    })
+    .await;
+    let sent = connected.load(Ordering::SeqCst);
+    assert!(all_served, "accepted {} of {sent} connections", gauges::accepted() - before.0);
+    for f in feeders {
+        f.join().unwrap();
+    }
+
+    let spawned = gauges::spawned() - before.1;
+    assert!(spawned > 4 * MAX_CONNECTIONS as u64, "the churn must outrun the permits: {spawned} tasks spawned");
+    assert!(gauges::get(&gauges::CONN).peak <= MAX_CONNECTIONS, "live connection tasks are bounded by the permits");
+    let retained = gauges::get(&gauges::RETAINED);
+    assert!(
+        retained.peak <= MAX_CONNECTIONS,
+        "retained JoinSet entries peaked at {} (permits: {MAX_CONNECTIONS}) after {spawned} tasks",
+        retained.peak
+    );
+    assert!(
+        pump_until(Duration::from_secs(5), || gauges::get(&gauges::RETAINED).cur == 0).await,
+        "finished entries are reaped once the churn ends"
+    );
+    assert!(wait_answers(port, Duration::from_secs(5)).await, "the permits came back: the holder still serves");
 }
 
 fn push(seen: &mut Vec<String>, raw: Option<Vec<u8>>) {

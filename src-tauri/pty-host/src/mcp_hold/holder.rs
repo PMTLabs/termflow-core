@@ -135,6 +135,13 @@ pub mod gauges {
         pub static CONN: Cell<Gauge> = const { Cell::new(Gauge { cur: 0, peak: 0 }) };
         pub static SPEC_BYTES: Cell<Gauge> = const { Cell::new(Gauge { cur: 0, peak: 0 }) };
         pub static BIND_ATTEMPTS: Cell<u64> = const { Cell::new(0) };
+        /// `JoinSet` entries the accept loop retains, finished-but-unjoined included
+        /// (`cur` is the last sample, `peak` the maximum ever sampled).
+        pub static RETAINED: Cell<Gauge> = const { Cell::new(Gauge { cur: 0, peak: 0 }) };
+        /// Connections the accept loop took off the listener (permit or not).
+        pub static ACCEPTED: Cell<u64> = const { Cell::new(0) };
+        /// Connection tasks it spawned (it had a permit).
+        pub static SPAWNED: Cell<u64> = const { Cell::new(0) };
         /// The local address of every listener the holder bound.
         pub static BOUND: RefCell<Vec<std::net::SocketAddr>> = const { RefCell::new(Vec::new()) };
         /// Ordered events across the manager and the holder.
@@ -173,6 +180,24 @@ pub mod gauges {
 
     pub fn bind_attempts() -> u64 {
         BIND_ATTEMPTS.with(Cell::get)
+    }
+
+    /// Records how many `JoinSet` entries are retained right now.
+    pub fn sample_retained(entries: usize) {
+        RETAINED.with(|c| {
+            let mut v = c.get();
+            v.cur = entries;
+            v.peak = v.peak.max(entries);
+            c.set(v);
+        });
+    }
+
+    pub fn accepted() -> u64 {
+        ACCEPTED.with(Cell::get)
+    }
+
+    pub fn spawned() -> u64 {
+        SPAWNED.with(Cell::get)
     }
 
     pub fn order() -> Vec<&'static str> {
@@ -346,6 +371,15 @@ async fn drain(set: &mut JoinSet<()>) {
     }
 }
 
+/// Joins every connection task that has already finished, without waiting.
+fn reap_finished(set: &mut JoinSet<()>) {
+    while let Some(res) = set.try_join_next() {
+        reap(res);
+    }
+    #[cfg(test)]
+    gauges::sample_retained(set.len());
+}
+
 fn reap(res: Result<(), tokio::task::JoinError>) {
     if let Err(e) = res {
         if e.is_panic() {
@@ -437,13 +471,28 @@ async fn serve_loop(
                 }
             }
             accepted = accept_on(&listener) => match accepted {
-                Ok((stream, _peer)) => match env.limits.conn.clone().try_acquire_owned() {
-                    Ok(permit) => {
-                        set.spawn(connection(stream, permit, shared.clone(), mode.clone()));
+                Ok((stream, _peer)) => {
+                    #[cfg(test)]
+                    gauges::ACCEPTED.with(|c| c.set(c.get() + 1));
+                    // Under sustained accept readiness this `biased` arm always beats
+                    // the `join_next` arm below, so finished tasks (their permits are
+                    // already free) are joined here, right before the next spawn: the
+                    // entries retained never exceed the permits, however many
+                    // connections have been served.
+                    reap_finished(set);
+                    match env.limits.conn.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                            set.spawn(connection(stream, permit, shared.clone(), mode.clone()));
+                            #[cfg(test)]
+                            {
+                                gauges::SPAWNED.with(|c| c.set(c.get() + 1));
+                                gauges::sample_retained(set.len());
+                            }
+                        }
+                        // No free permit: closed at once, unread and unanswered.
+                        Err(_) => drop(stream),
                     }
-                    // No free permit: closed at once, unread and unanswered.
-                    Err(_) => drop(stream),
-                },
+                }
                 Err(e) => {
                     log::warn!("[MCP-HOLD] accept failed: {e}");
                     tokio::select! {
@@ -452,7 +501,11 @@ async fn serve_loop(
                     }
                 }
             },
-            Some(res) = set.join_next(), if !set.is_empty() => reap(res),
+            Some(res) = set.join_next(), if !set.is_empty() => {
+                reap(res);
+                #[cfg(test)]
+                gauges::sample_retained(set.len());
+            }
             _ = until(grace_at) => {}
             _ = until(listener.is_none().then_some(next_bind)) => {}
             _ = sleep(CAP_POLL) => {}
