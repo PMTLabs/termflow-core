@@ -67,7 +67,9 @@ pub enum Handled {
 
 #[cfg(test)]
 thread_local! {
-    /// Peak bytes buffered for one connection's input (head buffer plus body).
+    /// Peak bytes buffered for one connection's INPUT only (head buffer plus
+    /// body). It does not see the parser, the reply or anything else the
+    /// handler allocates: that bound is `alloc_gauge` (review 295 F3).
     /// Thread-local: exact under `#[tokio::test]`'s current-thread runtime.
     pub static BUFFERED_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -426,8 +428,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp_hold::Mode;
+    use crate::mcp_hold::{alloc_gauge, Mode};
     use std::cell::Cell;
+
+    /// The buffer of the test pipe between the handler and the client.
+    const DUPLEX: usize = 64 * 1024;
+    /// What one connection may own at once: the largest request (head and
+    /// body), the test pipe's buffer, and 16 KiB for everything else. A reply
+    /// of any size adds nothing, because it is written as borrowed pieces.
+    const HANDLER_BUDGET: usize = MAX_HEAD + MAX_BODY + DUPLEX + 16 * 1024;
 
     const TOKEN: &str = "s3cr3t-bearer-0123456789";
     // Unusual key order and whitespace on purpose: the holder must serve these bytes verbatim.
@@ -572,7 +581,8 @@ mod tests {
         /// server's reads land on arbitrary boundaries.
         async fn exchange_with(&self, request: Vec<u8>, half_close: bool, piece: usize) -> (Handled, Vec<u8>) {
             BUFFERED_PEAK.with(|c| c.set(0));
-            let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+            alloc_gauge::reset();
+            let (mut client, mut server) = tokio::io::duplex(DUPLEX);
             let wait = || Wait {
                 mode: self.mode.get(),
                 elapsed: Some(Duration::from_secs(self.elapsed.get())),
@@ -586,7 +596,7 @@ mod tests {
                 new_session_id: self.id_fn,
             };
             let serve = async {
-                let handled = handle_connection(&mut server, &ctx).await;
+                let handled = alloc_gauge::measured(handle_connection(&mut server, &ctx)).await;
                 if let Handled::Sse(open) = &handled {
                     write_sse_open(&mut server, open).await.unwrap();
                 }
@@ -609,8 +619,12 @@ mod tests {
                 out
             };
             let (handled, out) = tokio::join!(serve, talk);
-            let peak = BUFFERED_PEAK.with(Cell::get);
-            assert!(peak < 300 * 1024, "buffered {peak} bytes for one connection");
+            let input = BUFFERED_PEAK.with(Cell::get);
+            assert!(input < 300 * 1024, "buffered {input} input bytes for one connection");
+            // Everything the handler allocated, reply path included: its largest
+            // possible input, the test pipe's buffer, and a few KiB.
+            let live = alloc_gauge::peak_live();
+            assert!(live <= HANDLER_BUDGET, "the handler held {live} bytes at once (budget {HANDLER_BUDGET})");
             (handled, out)
         }
 
@@ -1325,11 +1339,23 @@ mod tests {
         let expected: Vec<String> = (1..=20).map(|i| ok(&i.to_string(), &snap)).collect();
         assert_eq!(r.text(), format!("[{}]", expected.join(",")));
         assert!(r.body.len() < rpc::MAX_RESPONSE);
+        assert_reply_is_borrowed_pieces(&fx, &batch_lists(20)).await;
         // A single reply over the budget carries the request's id.
         fx.snapshot = Snapshot::new(Some("\"".to_string() + &"y".repeat(rpc::MAX_RESPONSE) + "\""), None);
         let r = fx.post(r#"{"jsonrpc":"2.0","id":"big","method":"initialize"}"#, None).await;
         assert_eq!(r.text(), err(r#""big""#, -32603, "response too large"));
         assert_eq!(r.header("mcp-session-id"), None);
+    }
+
+    /// Review 295 F3. A multi-megabyte reply made of the shared snapshot,
+    /// repeated: the handler must own almost nothing for it. The input is a
+    /// couple of KiB, the pipe is `DUPLEX`; a reply concatenated into one owned
+    /// buffer would hold the whole 4 MB on top.
+    async fn assert_reply_is_borrowed_pieces(fx: &Fx, request: &str) {
+        let r = fx.post(request, None).await;
+        assert!(r.body.len() > 3 * 1024 * 1024, "the reply under test is {} bytes", r.body.len());
+        let live = alloc_gauge::peak_live();
+        assert!(live < DUPLEX + 32 * 1024, "a {} byte reply cost the handler {live} bytes at once", r.body.len());
     }
 
     #[tokio::test(start_paused = true)]

@@ -11,6 +11,8 @@
 //! The real holder (bind retry, HTTP, timers) lives in [`holder`]; the
 //! production spawn function is [`holder::production_spawn`].
 
+#[cfg(test)]
+pub mod alloc_gauge;
 pub mod holder;
 mod http;
 mod message;
