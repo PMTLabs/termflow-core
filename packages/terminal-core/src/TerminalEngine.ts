@@ -140,12 +140,13 @@ const HEAL_MAX_CONSECUTIVE_MISMATCH = 5; // give up re-pushing if the backend ne
 // Task 7 sets TerminalEngine.suppressHealUntil = Date.now() + REPAINT_SETTLE_MS.
 const REPAINT_SETTLE_MS = 600;
 
-// Debounce the live in-place search refresh (the onWriteParsed → refreshSearch
-// path). refreshSearch runs findNext over the whole scrollback to keep the
+// Minimum gap between live in-place search refreshes (the onWriteParsed →
+// refreshSearch path). refreshSearch re-searches the whole scrollback to keep the
 // N-of-M counter + highlights fresh; firing it on every parsed write would burn
-// CPU during heavy streaming (build logs, cat of a big file). Coalescing to a
-// trailing refresh keeps the counter responsive without per-chunk re-searches.
-const SEARCH_REFRESH_DEBOUNCE_MS = 150;
+// CPU during heavy streaming (build logs, cat of a big file). Throttling to one
+// refresh per interval keeps the counter moving DURING a stream without
+// per-chunk re-searches.
+const SEARCH_REFRESH_INTERVAL_MS = 250;
 
 // Debounce-coalesce live PTY output into one xterm write per burst. A TUI redraw can
 // arrive as several chunks AND span more than one "frame": codex draws (leaving the
@@ -1271,7 +1272,7 @@ export class TerminalEngine {
   // terminal's PTY). Static so one event quiets all engines.
   static suppressHealUntil = 0;
 
-  // Debounce for the live search refresh (see SEARCH_REFRESH_DEBOUNCE_MS).
+  // Throttle timer for the live search refresh (see SEARCH_REFRESH_INTERVAL_MS).
   // Cleared on unmount so a refresh can't fire against a torn-down mount.
   private searchRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   // Last match count from the addon. Lets refreshSearch tell "user dismissed an
@@ -5142,28 +5143,46 @@ export class TerminalEngine {
   }
 
   // Coalesce the live refresh: onWriteParsed fires per parsed chunk, so during
-  // heavy streaming we debounce to a single trailing refreshSearch instead of
+  // heavy streaming we throttle to one refreshSearch per interval instead of
   // re-searching the whole scrollback on every write. Cheap no-op when no search
   // is active, so we don't arm a timer for the common (no-search) case.
+  //
+  // THROTTLE, not trailing-debounce: restarting the timer on every write means a
+  // stream that never pauses for SEARCH_REFRESH_INTERVAL_MS (an agent printing
+  // continuously) starves the refresh, and the counter freezes until it stops.
   private scheduleSearchRefresh(): void {
     if (!this.activeSearch) return;
-    if (this.searchRefreshTimer) clearTimeout(this.searchRefreshTimer);
+    if (this.searchRefreshTimer) return;
     this.searchRefreshTimer = setTimeout(() => {
       this.searchRefreshTimer = null;
       this.refreshSearch();
-    }, SEARCH_REFRESH_DEBOUNCE_MS);
+    }, SEARCH_REFRESH_INTERVAL_MS);
   }
 
   // Re-run the active query in place (incremental) — driven by onWriteParsed so
   // live output keeps the counter/highlights fresh without moving the selection.
   // No-op when no search is active.
   //
-  // findNext re-selects the active match and scrolls it into view as a side
-  // effect. On live output (agent still printing) that yanks the viewport back
-  // up to the first match every write. So we snapshot the viewport before the
-  // re-search and restore it after: stay pinned to the bottom if we were
-  // following output, otherwise hold the exact scroll position. Only an explicit
-  // Next/Prev (searchNext/searchPrevious) should move the viewport.
+  // This must NOT be findNext. In @xterm/addon-search 0.16 `incremental` is
+  // ignored: a findNext for the term it already has cached starts from the END of
+  // the current selection, i.e. it ADVANCES to the next match. Used as a refresh
+  // it walked the selection one match per tick while output streamed (the "jumps
+  // incorrectly" symptom), and because the addon only recounts when the term
+  // changes, the "N of M" was never recomputed either — so row indices in its
+  // result list also went stale once the scrollback trimmed.
+  //
+  // Instead, mirror the addon's own onWriteParsed refresh (debounced, hence starved
+  // by a stream that never goes quiet): forget the cached term, then findPrevious.
+  // With a changed cached term, findPrevious re-highlights and recounts, and
+  // "expands the selection to the right" — re-selecting the SAME match. The addon
+  // clears the term through a private method; the only public call with that effect
+  // is clearDecorations(), which is why it is used here (it also drops the
+  // highlights, which findPrevious rebuilds synchronously in the same call).
+  // `noScroll` (an internal option, absent from the typings) keeps the viewport
+  // where it is, so only an explicit Next/Prev ever moves it.
+  //
+  // With NO selection (count was 0), findPrevious searches from the bottom, so the
+  // match that first appears is the NEWEST one (counter "N of N", not "1 of N").
   refreshSearch(): void {
     if (!this.activeSearch || !this.searchAddon || !this.term) return;
     // If the user dismissed an EXISTING match (had results, then cleared the
@@ -5172,13 +5191,13 @@ export class TerminalEngine {
     // keep refreshing so a match that scrolls into view from new output still
     // gets highlighted. A fresh type / Next / Prev re-arms via searchNext.
     if (this.lastSearchResultCount > 0 && !this.term.hasSelection()) return;
-    const buffer = this.term.buffer.active;
-    const prevViewportY = buffer.viewportY;
-    const wasAtBottom = prevViewportY >= buffer.baseY;
     const { query, opts } = this.activeSearch;
-    this.searchAddon.findNext(query, this.toSearchOptions(opts, true));
-    if (wasAtBottom) this.term.scrollToBottom();
-    else this.term.scrollToLine(prevViewportY);
+    this.searchAddon.clearDecorations();
+    (
+      this.searchAddon as unknown as {
+        findPrevious(t: string, o: ISearchOptions, internal: { noScroll: boolean }): boolean;
+      }
+    ).findPrevious(query, this.toSearchOptions(opts, true), { noScroll: true });
   }
 
   // Subscribe to result-count changes (the "N of M" feed). Forwards the addon's
