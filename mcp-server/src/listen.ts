@@ -11,7 +11,10 @@ export interface ListenOptions {
 export interface Listening {
     /** Resolves with the bound server, or rejects with the error that ended the attempts. */
     ready: Promise<Server>;
-    /** Stops trying. Idempotent. After it, `ready` never settles and no server is left bound. */
+    /**
+     * Stops trying. Idempotent. Before `ready` has resolved: `ready` then never settles and no attempt is
+     * left bound. A server `ready` already handed over belongs to its caller, who closes it.
+     */
     cancel(): void;
 }
 

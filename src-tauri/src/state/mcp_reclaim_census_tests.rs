@@ -196,6 +196,8 @@ const BIND: &str = "let picked = crate::net_ports::bind_api_listener(host, api_n
 const API_PUBLISH: &str = "api_state.effective_endpoints.write().api_port = Some(api_port);";
 const START: &str = "let mcp_effective_port = crate::state::mcp_reclaim::start_mcp(prepared, api_port, &mcp_io).await;";
 const MCP_PUBLISH: &str = "api_state.effective_endpoints.write().mcp_port = mcp_effective_port;";
+/// The instance record, published with the effective ports the boot task computed.
+const RECORD: &str = "if let Err(e) = crate::net_ports::publish(&crate::net_ports::InstanceRecord { profile: crate::profile::current().key(), pid: std::process::id(), api_port: Some(api_port), mcp_port: mcp_effective_port, token: (crate::profile::current().integrity == crate::profile::Integrity::High).then(|| api_net.auth_token.clone()), }, crate::profile::current().integrity == crate::profile::Integrity::High,) { log::warn!(\"[NET] could not republish the instance record: {e}\"); }";
 const SERVE: &str = "crate::api_server::start_api_server(api_state, listener, api_net.expose_on_network, api_sd_rx,).await;";
 const DROP_PREPARED: &str = "drop(prepared);";
 
@@ -223,6 +225,7 @@ fn check_boot_task(text: &str) -> Result<(), String> {
         (API_PUBLISH, true),
         (START, true),
         (MCP_PUBLISH, true),
+        (RECORD, true),
         (SERVE, true),
     ] {
         let stmt = find(statement)?;
@@ -241,17 +244,6 @@ fn check_boot_task(text: &str) -> Result<(), String> {
             return Err(format!("`{statement}` is out of order in the boot task"));
         }
         previous = stmt.span.start;
-    }
-    // The record publishes the effective ports, from the values the boot task computed.
-    let publish: Vec<_> =
-        all.iter().filter(|s| src.norm(&s.span).starts_with("ifletErr(e)=crate::net_ports::publish(&crate::net_ports::InstanceRecord{")).collect();
-    let [publish] = &publish[..] else { return Err("the instance record publication is not one statement".into()) };
-    let published = src.norm(&publish.span);
-    if !published.contains("api_port:Some(api_port),mcp_port:mcp_effective_port,") || published.contains("api_net.mcp_port") {
-        return Err(format!("the instance record is not built from the effective ports: {published}"));
-    }
-    if publish.span.start < find(MCP_PUBLISH)?.span.start || publish.span.start > find(SERVE)?.span.start {
-        return Err("the instance record is not published between the MCP publication and serving".into());
     }
     // The failed-bind arm hands the claim back before anything else.
     let none_arm = all.iter().filter(|s| src.norm(&s.span) == norm(DROP_PREPARED)).count();
@@ -280,6 +272,14 @@ fn the_boot_task_runs_the_reclaim_phases_around_the_api_bind_in_order() {
     check_boot_task(LIB).unwrap();
 }
 
+/// `lib.rs` with the instance record publication, otherwise unchanged, enclosed in `before … after`.
+fn wrap_record(before: &str, after: &str) -> String {
+    let head = "if let Err(e) = crate::net_ports::publish(\n                        &crate::net_ports::InstanceRecord {";
+    let tail = "could not republish the instance record: {e}\");\n                    }";
+    let wrapped = mutate(LIB, head, &format!("{before}{head}"));
+    mutate(&wrapped, tail, &format!("{tail}{after}"))
+}
+
 #[test]
 fn the_boot_task_census_kills_each_planted_mutation() {
     let swap = |a: &str, b: &str| {
@@ -304,6 +304,9 @@ fn the_boot_task_census_kills_each_planted_mutation() {
         ("prepare skipped", mutate(LIB, "let prepared = crate::state::mcp_reclaim::prepare_reclaim(", "let prepared = crate::state::mcp_reclaim::prepare_nothing(")),
         ("the failed-bind arm keeps the claim", mutate(LIB, "                    drop(prepared);\n", "")),
         ("the API publication behind an `if false`", mutate(LIB, API_PUBLISH, &format!("if false {{ {API_PUBLISH} }}"))),
+        ("the record published only on a network launch", wrap_record("if api_net.expose_on_network { ", " }")),
+        ("the record published only from an uncalled closure", wrap_record("let _later = || { ", " };")),
+        ("the record with another token", mutate(LIB, ".then(|| api_net.auth_token.clone()),", ".then(String::new),")),
         ("the MCP publication from the configuration", mutate(LIB, MCP_PUBLISH, "api_state.effective_endpoints.write().mcp_port = Some(api_net.mcp_port);")),
     ];
     for (name, source) in cases {

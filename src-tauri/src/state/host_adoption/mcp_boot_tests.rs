@@ -56,12 +56,16 @@ type RoundStarter = Box<dyn FnOnce() -> tokio::task::JoinHandle<()> + Send>;
 struct FakeIo {
     world: Arc<World>,
     events: Mutex<Vec<(String, usize)>>,
+    /// When each event happened, on the paused clock.
+    times: Mutex<Vec<(String, tokio::time::Instant)>>,
     round: Mutex<Option<RoundStarter>>,
     quiet: Arc<AtomicBool>,
     /// When set, quietness is the real barrier's, as in production.
     barrier: Option<Barrier>,
     spawn_ok: Box<dyn Fn(u16) -> bool + Send + Sync>,
     owner: Box<dyn Fn(u16) -> PortOwner + Send + Sync>,
+    /// How long each identity probe takes before it answers.
+    probe: Duration,
     pick: Option<u16>,
 }
 
@@ -70,11 +74,13 @@ impl FakeIo {
         Self {
             world: world.clone(),
             events: Mutex::new(Vec::new()),
+            times: Mutex::new(Vec::new()),
             round: Mutex::new(None),
             quiet: Arc::new(AtomicBool::new(true)),
             barrier: None,
             spawn_ok: Box::new(|_| true),
             owner: Box::new(|_| PortOwner::OwnedBySelf),
+            probe: Duration::ZERO,
             pick: Some(PICK),
         }
     }
@@ -93,7 +99,15 @@ impl FakeIo {
 
     fn note(&self, what: impl Into<String>) {
         let releases = self.world.count(HOLDER, "ReleaseMcp");
-        self.events.lock().unwrap().push((what.into(), releases));
+        let what = what.into();
+        self.times.lock().unwrap().push((what.clone(), tokio::time::Instant::now()));
+        self.events.lock().unwrap().push((what, releases));
+    }
+
+    /// When `what` first happened.
+    fn at(&self, what: &str) -> tokio::time::Instant {
+        let times = self.times.lock().unwrap();
+        times.iter().find(|(name, _)| name == what).unwrap_or_else(|| panic!("{what} never happened")).1
     }
 
     fn events(&self) -> Vec<(String, usize)> {
@@ -133,6 +147,7 @@ impl McpBootIo for FakeIo {
 
     async fn owns(&self, _own_id: &str, port: u16) -> PortOwner {
         self.note(format!("owns:{port}"));
+        tokio::time::sleep(self.probe).await;
         (self.owner)(port)
     }
 
@@ -328,6 +343,48 @@ async fn identity_failure_stops_and_searches() {
     let pick = names.iter().position(|n| n == "pick_mcp").expect("and the search ran");
     assert!(spawn_p < stop && stop < pick, "{names:?}");
     assert!(names.iter().filter(|n| n.starts_with("owns:")).count() > 1, "the identity was polled: {names:?}");
+}
+
+/// An identity probe that answers as another instance until `after` past the start (the first probe
+/// answers one `probe` delay after it, 200 ms in these fixtures), then as this one.
+fn owned_after(after: Duration) -> Box<dyn Fn(u16) -> PortOwner + Send + Sync> {
+    let first = Mutex::new(None::<tokio::time::Instant>);
+    Box::new(move |_| {
+        let now = tokio::time::Instant::now();
+        let start = *first.lock().unwrap().get_or_insert(now) - millis(200);
+        if now - start >= after { PortOwner::OwnedBySelf } else { PortOwner::OwnedByOther }
+    })
+}
+
+/// The identity wait is bounded as a whole, probes included (review 317 R1): with slow probes, a
+/// persistent mismatch gives up by `IDENTITY_WAIT` after the start, an own answer that only arrives past
+/// that bound is not accepted, and one that arrives in time is.
+#[tokio::test(start_paused = true)]
+async fn identity_wait_bounds_slow_probes() {
+    // A persistent mismatch: the poll ends no later than the bound.
+    let (_world, port, mut io) = world_with_holder(holding_p());
+    io.owner = Box::new(|_| PortOwner::OwnedByOther);
+    io.probe = millis(200);
+    let prepared = prepare_reclaim(&io, inputs(&port, cfg())).await;
+    assert_eq!(start_mcp(prepared, API, &io).await, Some(PICK));
+    let waited = io.at("stop") - io.at(&format!("spawn:{P}"));
+    assert!(waited <= IDENTITY_WAIT, "the identity check overran its bound: {waited:?}");
+
+    // Our own answer, but only past the bound: never accepted.
+    let (_world, port, mut io) = world_with_holder(holding_p());
+    io.probe = millis(200);
+    let prepared = prepare_reclaim(&io, inputs(&port, cfg())).await;
+    io.owner = owned_after(IDENTITY_WAIT + millis(100));
+    assert_eq!(start_mcp(prepared, API, &io).await, Some(PICK), "an identity proven too late is no proof");
+    assert!(io.names().contains(&"stop".to_string()), "{:?}", io.names());
+
+    // Our own answer within the bound: the held port is kept.
+    let (_world, port, mut io) = world_with_holder(holding_p());
+    io.probe = millis(200);
+    let prepared = prepare_reclaim(&io, inputs(&port, cfg())).await;
+    io.owner = owned_after(secs(1));
+    assert_eq!(start_mcp(prepared, API, &io).await, Some(P));
+    assert!(!io.names().contains(&"stop".to_string()), "{:?}", io.names());
 }
 
 #[tokio::test(start_paused = true)]

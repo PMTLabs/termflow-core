@@ -78,6 +78,18 @@ async fn claim_mcp_from_a_host_with_nothing_held_is_held_none() {
     assert_eq!(client.claim_mcp(TOKEN).await, Ok(McpClaimOutcome::Held(None)));
 }
 
+/// As the real host's `claim` (`pty-host/src/mcp_hold/mod.rs`): a pending hold is spent and nothing is
+/// reported held.
+#[tokio::test(start_paused = true)]
+async fn a_claim_spends_a_pending_hold() {
+    let (world, port) = adopted_with(holder()).await;
+    let client = port.current_client().expect("the current host is adopted");
+    world.set_mcp_pending(CURRENT);
+
+    assert_eq!(client.claim_mcp(TOKEN).await, Ok(McpClaimOutcome::Held(None)));
+    assert_eq!(world.mcp_state(CURRENT), McpState::Idle, "the pending hold is spent by the claim");
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_repeated_claim_stays_in_handback_and_answers_the_same() {
     let (world, port) = adopted_with(holder()).await;

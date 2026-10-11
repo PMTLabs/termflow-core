@@ -478,6 +478,11 @@ impl World {
         self.mcp.lock().unwrap().insert(host.to_owned(), McpState::Running(running));
     }
 
+    /// `host` has accepted a hold whose sidecar stand-in has not come up yet.
+    pub fn set_mcp_pending(&self, host: &str) {
+        self.mcp.lock().unwrap().insert(host.to_owned(), McpState::Pending);
+    }
+
     pub fn first_at(&self, host: &str, kind: &str) -> Option<Instant> {
         self.frames(host).into_iter().find(|(_, k)| *k == kind).map(|(at, _)| at)
     }
@@ -618,11 +623,14 @@ async fn serve(
             }
             Frame::Ctrl(Control::ClaimMcp { req, .. }) => {
                 // An adopting claim hands an absent holder back to the GUI (it survives a later
-                // `Disarm`); a repeat stays in handback and answers the same.
+                // `Disarm`); a repeat stays in handback and answers the same. A pending hold is spent,
+                // as the real host's `claim` does (review 317 I1).
                 let mut states = mcp.lock().unwrap();
                 let state = states.entry(host.clone()).or_insert(McpState::Idle);
-                if matches!(state, McpState::Running(McpRunning::Absent)) {
-                    *state = McpState::Running(McpRunning::Handback);
+                match state {
+                    McpState::Running(McpRunning::Absent) => *state = McpState::Running(McpRunning::Handback),
+                    McpState::Pending => *state = McpState::Idle,
+                    _ => {}
                 }
                 let held = if matches!(state, McpState::Running(_)) { spec.mcp_held.clone() } else { None };
                 let ack = Response::McpClaimAck { req, held };

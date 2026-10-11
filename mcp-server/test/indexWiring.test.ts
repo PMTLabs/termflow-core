@@ -14,6 +14,7 @@ const MOUNT = "app.use(createDrainMiddleware({ drain, token: ACCESS_TOKEN, now: 
 const GATE = "app.use(createAuthGate(ACCESS_TOKEN));";
 const FIRST_CALLBACK = "() => { drain.begin(Date.now()); }";
 const LISTEN_STATEMENT = "const listening = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });";
+const LISTEN_ARGS = ["app", "MCP_PORT", "MCP_HOST", "{ retryMs: 100, limitMs: 5000 }"];
 const CANCEL_LINE = "        listening.cancel();\n";
 const REJECT_HANDLER = "    (err) => {\n        console.error(`[MCP] Could not listen on ${MCP_HOST}:${MCP_PORT}:`, err);\n        void gracefulExit(1);\n    },\n";
 
@@ -178,8 +179,11 @@ export function checkIndexWiring(source: string): string[] {
         const why = whyNotLive(masked, startDecls[0].at, -1);
         if (why) problems.push(`\`const listening = startListening(\` ${why}`);
         const startArgs = callArguments(source, masked, startDecls[0].end - 1).map(norm);
-        if (startArgs.slice(0, 3).join(",") !== "app,MCP_PORT,MCP_HOST") {
-            problems.push(`startListening is not called with app, MCP_PORT, MCP_HOST: ${startArgs.join(",")}`);
+        // Every operand, the retry options included (review 317 R2): a short limit would give up on the
+        // port a releasing holder is about to free.
+        const expected = LISTEN_ARGS.map(norm);
+        if (startArgs.length !== expected.length || startArgs.some((arg, i) => arg !== expected[i])) {
+            problems.push(`startListening is not called with exactly ${LISTEN_ARGS.join(", ")}: ${startArgs.join(",")}`);
         }
     }
     // 5c. `listening.cancel()` is live in gracefulExit's try, before the quiesce.
@@ -268,6 +272,11 @@ describe("index.ts drain wiring census", () => {
         ["app.listen instead of startListening", () => mutate(INDEX, LISTEN_STATEMENT, "const listening = app.listen(MCP_PORT, MCP_HOST);")],
         ["startListening on the wrong port", () => mutate(INDEX, "startListening(app, MCP_PORT,", "startListening(app, 0,")],
         ["startListening on the wrong host", () => mutate(INDEX, "MCP_PORT, MCP_HOST, {", 'MCP_PORT, "0.0.0.0", {')],
+        ["startListening with no retry limit left", () => mutate(INDEX, "limitMs: 5000 }", "limitMs: 0 }")],
+        ["startListening with a short retry limit", () => mutate(INDEX, "limitMs: 5000 }", "limitMs: 500 }")],
+        ["startListening with a changed retry interval", () => mutate(INDEX, "retryMs: 100,", "retryMs: 1000,")],
+        ["startListening without its options", () => mutate(INDEX, ", { retryMs: 100, limitMs: 5000 });", ");")],
+        ["startListening with an extra argument", () => mutate(INDEX, "limitMs: 5000 });", "limitMs: 5000 }, 1);")],
         ["startListening under if (false)", () => mutate(INDEX, LISTEN_STATEMENT, `if (false) ${LISTEN_STATEMENT}`)],
         ["startListening only in a comment", () => mutate(INDEX, LISTEN_STATEMENT, `// ${LISTEN_STATEMENT}`)],
         ["a second startListening", () => mutate(INDEX, LISTEN_STATEMENT, `${LISTEN_STATEMENT}\nconst again = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });`)],
