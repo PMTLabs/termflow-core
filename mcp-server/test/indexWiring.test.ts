@@ -13,6 +13,11 @@ const INDEX = readFileSync(`${import.meta.dir}/../src/index.ts`, "utf8").replace
 const MOUNT = "app.use(createDrainMiddleware({ drain, token: ACCESS_TOKEN, now: Date.now }));";
 const GATE = "app.use(createAuthGate(ACCESS_TOKEN));";
 const FIRST_CALLBACK = "() => { drain.begin(Date.now()); }";
+const LISTEN_STATEMENT = "const listening = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });";
+const LISTEN_LOG = "console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);";
+const LISTEN_ARGS = ["app", "MCP_PORT", "MCP_HOST", "{ retryMs: 100, limitMs: 5000 }"];
+const CANCEL_LINE = "        listening.cancel();\n";
+const REJECT_HANDLER = "    (err) => {\n        console.error(`[MCP] Could not listen on ${MCP_HOST}:${MCP_PORT}:`, err);\n        void gracefulExit(1);\n    },\n";
 
 interface Hit {
     at: number;
@@ -53,6 +58,25 @@ function whyNotLive(masked: string, at: number, scopeOpen: number): string | nul
     );
     if (leaves.length > 0) return "follows a return, throw or exit that always runs first";
     return null;
+}
+
+/** The `[start, end)` source range of each top-level argument of the call whose `(` is at `open`. */
+function argumentRanges(masked: string, open: number): Array<[number, number]> {
+    const end = closeOf(masked, open);
+    const ranges: Array<[number, number]> = [];
+    let depth = 0;
+    let start = open + 1;
+    for (let i = open + 1; i < end - 1; i++) {
+        const c = masked[i];
+        if (c === "(" || c === "{" || c === "[") depth++;
+        else if (c === ")" || c === "}" || c === "]") depth--;
+        else if (c === "," && depth === 0) {
+            ranges.push([start, i]);
+            start = i + 1;
+        }
+    }
+    if (masked.slice(start, end - 1).trim() !== "") ranges.push([start, end - 1]); // a trailing comma adds no argument
+    return ranges;
 }
 
 /** Every departure of `source` from the T8 wiring; empty when it is exactly as the plan prescribes. */
@@ -143,6 +167,80 @@ export function checkIndexWiring(source: string): string[] {
     if (norm(args[0] ?? "") !== norm(FIRST_CALLBACK)) {
         problems.push(`the first quiesce argument is not exactly ${FIRST_CALLBACK}: ${norm(args[0] ?? "")}`);
     }
+
+    // 5. Plan 056 T6: the listen is `startListening`, cancelled first on every exit, and `server` comes from `ready`.
+    // 5a. No bare `.listen(` anywhere in index.ts.
+    if (findAll(masked, /\.\s*listen\s*\(/).length > 0) problems.push("a bare .listen( call remains; the only listen is startListening");
+    // 5b. Exactly one `const listening = startListening(app, MCP_PORT, MCP_HOST, ...)` at module level.
+    const starts = findAll(masked, /\bstartListening\s*\(/);
+    const startDecls = findAll(masked, /\bconst\s+listening\s*=\s*startListening\s*\(/);
+    if (starts.length !== 1 || startDecls.length !== 1) {
+        problems.push(`expected exactly one \`const listening = startListening(\`, found ${startDecls.length} of ${starts.length} startListening calls`);
+    } else {
+        const why = whyNotLive(masked, startDecls[0].at, -1);
+        if (why) problems.push(`\`const listening = startListening(\` ${why}`);
+        const startArgs = callArguments(source, masked, startDecls[0].end - 1).map(norm);
+        // Every operand, the retry options included (review 317 R2): a short limit would give up on the
+        // port a releasing holder is about to free.
+        const expected = LISTEN_ARGS.map(norm);
+        if (startArgs.length !== expected.length || startArgs.some((arg, i) => arg !== expected[i])) {
+            problems.push(`startListening is not called with exactly ${LISTEN_ARGS.join(", ")}: ${startArgs.join(",")}`);
+        }
+    }
+    // 5c. `listening.cancel()` is live in gracefulExit's try, before the quiesce.
+    const cancels = findAll(masked, /\blistening\s*\.\s*cancel\s*\(\s*\)\s*;/).filter((h) => h.at > tryOpen && h.at < tryEnd);
+    if (cancels.length !== 1) problems.push(`expected exactly one listening.cancel() in gracefulExit's try, found ${cancels.length}`);
+    else {
+        const why = whyNotLive(masked, cancels[0].at, tryOpen);
+        if (why) problems.push(`listening.cancel() ${why}`);
+        if (cancels[0].at > q.at) problems.push("listening.cancel() comes after the quiesce");
+    }
+    if (findAll(masked, /\blistening\s*\.\s*cancel\s*\(/).length !== 1) problems.push("listening.cancel() is called other than once, in gracefulExit");
+    // 5d. `server` is assigned once, from `ready`'s resolution; a rejection leads to gracefulExit(1).
+    const assignments = findAll(masked, /\bserver\s*=(?!=)/).filter((h) => !/\b(?:const|let|var)\s+$/.test(masked.slice(0, h.at)));
+    const thens = findAll(masked, /\blistening\s*\.\s*ready\s*\.\s*then\s*\(/);
+    if (thens.length !== 1) problems.push(`expected exactly one listening.ready.then(, found ${thens.length}`);
+    else {
+        const open = thens[0].end - 1;
+        const ranges = argumentRanges(masked, open);
+        const whyThen = whyNotLive(masked, thens[0].at, -1);
+        if (whyThen) problems.push(`listening.ready.then( ${whyThen}`);
+        if (ranges.length !== 2) problems.push(`ready.then takes a resolve and a reject handler, found ${ranges.length} arguments`);
+        else {
+            const [resolveArg, rejectArg] = ranges;
+            const resolveText = norm(source.slice(resolveArg[0], resolveArg[1]));
+            if (!/^\((\w+)\)=>\{server=\1;/.test(resolveText)) problems.push(`the resolve handler does not begin by assigning server from its parameter: ${resolveText.slice(0, 60)}`);
+            const inResolve = assignments.filter((h) => h.at >= resolveArg[0] && h.at < resolveArg[1]);
+            if (assignments.length !== 1 || inResolve.length !== 1) problems.push(`server must be assigned exactly once, inside the resolve handler; found ${assignments.length}`);
+            else {
+                const resolveBody = masked.indexOf("{", resolveArg[0]);
+                const why = whyNotLive(masked, inResolve[0].at, resolveBody);
+                if (why) problems.push(`the server assignment ${why}`);
+            }
+            // The success log: the exact statement, once, live in the resolve handler (review 318 I4).
+            const logs: number[] = [];
+            for (let at = source.indexOf(LISTEN_LOG); at >= 0; at = source.indexOf(LISTEN_LOG, at + 1)) logs.push(at);
+            const resolveOpen = masked.indexOf("{", resolveArg[0]);
+            if (logs.length !== 1) problems.push(`expected exactly one \`${LISTEN_LOG}\`, found ${logs.length}`);
+            else if (!masked.startsWith("console.log(", logs[0])) problems.push("the success log is not code (a comment or a string)");
+            else if (logs[0] < resolveArg[0] || logs[0] >= resolveArg[1]) problems.push("the success log is not in the resolve handler");
+            else {
+                const why = whyNotLive(masked, logs[0], resolveOpen);
+                if (why) problems.push(`the success log ${why}`);
+            }
+            // The reject handler is pinned whole: a direct `(err) => { .. }` whose body logs and then exits 1.
+            // Its first brace alone could be an inner, uncalled closure's (review 319 R1).
+            const rejectText = norm(source.slice(rejectArg[0], rejectArg[1]));
+            if (rejectText !== norm(REJECT_HANDLER.trim().replace(/,$/, ""))) problems.push(`the reject handler is not exactly the pinned one: ${rejectText.slice(0, 80)}`);
+            const rejectBody = masked.indexOf("{", rejectArg[0]);
+            const exits = findAll(masked.slice(0, rejectArg[1]), /\bvoid\s+gracefulExit\s*\(\s*1\s*\)\s*;/).filter((h) => h.at > rejectBody);
+            if (exits.length !== 1) problems.push(`expected exactly one \`void gracefulExit(1);\` in the reject handler, found ${exits.length}`);
+            else {
+                const why = whyNotLive(masked, exits[0].at, rejectBody);
+                if (why) problems.push(`the reject handler's gracefulExit(1) ${why}`);
+            }
+        }
+    }
     return problems;
 }
 
@@ -184,6 +282,42 @@ describe("index.ts drain wiring census", () => {
         ["a module-level throw before the drain state", () => mutate(INDEX, "const drain = new DrainState();", 'throw new Error("skip wiring");\nconst drain = new DrainState();')],
         ["a module-level throw before the mount", () => mutate(INDEX, MOUNT, `throw new Error("skip wiring");\n${MOUNT}`)],
         ["a module-level throw before the gate", () => mutate(INDEX, GATE, `throw new Error("skip wiring");\n${GATE}`)],
+        // Plan 056 T6: one mutation per pin of the listen wiring.
+        ["a bare app.listen back beside startListening", () => mutate(INDEX, LISTEN_STATEMENT, `${LISTEN_STATEMENT}\napp.listen(MCP_PORT, MCP_HOST);`)],
+        ["app.listen instead of startListening", () => mutate(INDEX, LISTEN_STATEMENT, "const listening = app.listen(MCP_PORT, MCP_HOST);")],
+        ["startListening on the wrong port", () => mutate(INDEX, "startListening(app, MCP_PORT,", "startListening(app, 0,")],
+        ["startListening on the wrong host", () => mutate(INDEX, "MCP_PORT, MCP_HOST, {", 'MCP_PORT, "0.0.0.0", {')],
+        ["startListening with no retry limit left", () => mutate(INDEX, "limitMs: 5000 }", "limitMs: 0 }")],
+        ["startListening with a short retry limit", () => mutate(INDEX, "limitMs: 5000 }", "limitMs: 500 }")],
+        ["startListening with a changed retry interval", () => mutate(INDEX, "retryMs: 100,", "retryMs: 1000,")],
+        ["startListening without its options", () => mutate(INDEX, ", { retryMs: 100, limitMs: 5000 });", ");")],
+        ["startListening with an extra argument", () => mutate(INDEX, "limitMs: 5000 });", "limitMs: 5000 }, 1);")],
+        ["the reject handler returning an uncalled closure", () => mutate(INDEX, "    (err) => {\n        console.error(", "    (err) => () => {\n        console.error(")],
+        ["the reject handler exiting only under a condition", () => mutate(INDEX, "        void gracefulExit(1);\n    },\n);", "        if (exiting) void gracefulExit(1);\n    },\n);")],
+        ["the success log under a condition", () => mutate(INDEX, LISTEN_LOG, `if (exiting) { ${LISTEN_LOG} }`)],
+        ["the success log in an uncalled closure", () => mutate(INDEX, LISTEN_LOG, `const later = () => { ${LISTEN_LOG} };`)],
+        ["the success log after a return", () => mutate(INDEX, "        server = listener;\n", "        server = listener;\n        return;\n")],
+        ["the success log only in a comment", () => mutate(INDEX, LISTEN_LOG, `// ${LISTEN_LOG}`)],
+        ["the success log only in a string", () => mutate(INDEX, LISTEN_LOG, `const note = "Listening on";`)],
+        ["the success log with another address", () => mutate(INDEX, LISTEN_LOG, "console.log(`[MCP] Listening on http://127.0.0.1:${MCP_PORT}`);")],
+        ["startListening under if (false)", () => mutate(INDEX, LISTEN_STATEMENT, `if (false) ${LISTEN_STATEMENT}`)],
+        ["startListening only in a comment", () => mutate(INDEX, LISTEN_STATEMENT, `// ${LISTEN_STATEMENT}`)],
+        ["a second startListening", () => mutate(INDEX, LISTEN_STATEMENT, `${LISTEN_STATEMENT}\nconst again = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });`)],
+        ["server assigned outside ready", () => mutate(INDEX, "let server: Server | undefined;", "let server: Server | undefined;\nserver = undefined;")],
+        ["server assigned from something other than ready's value", () => mutate(INDEX, "server = listener;", "server = undefined;")],
+        ["server assigned under if (false) in the resolve handler", () => mutate(INDEX, "        server = listener;\n", "        if (false) server = listener;\n")],
+        ["server assigned after a return in the resolve handler", () => mutate(INDEX, "        server = listener;\n", "        server = listener;\n        return;\n        server = listener;\n")],
+        ["the success log outside the resolve handler", () => mutate(mutate(INDEX, "        console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);\n", ""), "let server: Server | undefined;", "let server: Server | undefined;\nconsole.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);")],
+        ["no reject handler", () => mutate(INDEX, REJECT_HANDLER, "")],
+        ["a rejection exits 0", () => mutate(INDEX, "void gracefulExit(1);\n    },\n);", "void gracefulExit(0);\n    },\n);")],
+        ["a rejection only logged", () => mutate(INDEX, "        void gracefulExit(1);\n    },\n);", "    },\n);")],
+        ["the rejection exit under if (false)", () => mutate(INDEX, "        void gracefulExit(1);\n    },\n);", "        if (false) void gracefulExit(1);\n    },\n);")],
+        ["listening.cancel() never called", () => mutate(INDEX, CANCEL_LINE, "")],
+        ["listening.cancel() after the quiesce", () => mutate(mutate(INDEX, CANCEL_LINE, ""), "    } catch {\n        /* ignore */", "        listening.cancel();\n    } catch {\n        /* ignore */")],
+        ["listening.cancel() under if (false)", () => mutate(INDEX, CANCEL_LINE, "        if (false) listening.cancel();\n")],
+        ["listening.cancel() in a nested block", () => mutate(INDEX, CANCEL_LINE, "        if (true) { listening.cancel(); }\n")],
+        ["listening.cancel() after a return", () => mutate(INDEX, CANCEL_LINE, "        return;\n        listening.cancel();\n")],
+        ["listening.cancel() called a second time", () => mutate(INDEX, CANCEL_LINE, `${CANCEL_LINE}        listening.cancel();\n`)],
     ];
 
     for (const [name, build] of CASES) {

@@ -263,6 +263,7 @@ pub async fn restart_api_server(state: AppState, cfg: &NetworkConfig) -> Result<
                     cfg.api_port,
                     crate::net_ports::DEFAULT_SPAN,
                     &state.instance_id,
+                    &[],
                 )
                 .await
             };

@@ -16,9 +16,10 @@
 //! so the ordering and timing rules are testable without a Tauri `AppHandle`.
 
 use super::host_table::{Admission, HostTable, QuiesceReason, LIFECYCLE_BUSY};
+use super::mcp_reclaim::{Claimed, McpReclaim};
 use super::types::FrozenHost;
 use crate::elevated_host::{FrozenId, HostChannel};
-use crate::pty_host_client::{HostCandidate, HostRole, PtyHostClient};
+use crate::pty_host_client::{HostCandidate, HostRole, McpClaimOutcome, PtyHostClient};
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -183,6 +184,12 @@ impl Barrier {
         self.lock()
             .iter()
             .any(|e| e.resolution != Resolution::Resolved && !e.retry_pending)
+    }
+
+    /// Is an attempt in flight on any host (or a dropped connection awaiting its reconnect)?
+    /// Read-only: it claims nothing.
+    pub fn any_in_flight(&self) -> bool {
+        self.lock().iter().any(|e| e.retry_pending)
     }
 
     /// Claim the right to attempt `key`. False when an attempt is already in
@@ -446,6 +453,11 @@ pub(super) trait AdoptionPort: Clone + Send + Sync + 'static {
     /// Snapshot of the registered frozen hosts.
     fn frozen_hosts(&self) -> Vec<FrozenHost>;
     fn next_frozen_id(&self) -> Result<FrozenId, String>;
+    /// The credential a host's lifecycle frames are authenticated with, the one `HoldMcp` used.
+    /// Never the MCP sidecar's bearer token.
+    fn host_token(&self) -> String;
+    /// What the hosts report holding of the MCP port.
+    fn reclaim(&self) -> &McpReclaim;
     /// Connect to `candidate`. The current role also starts its host when none is
     /// running; a frozen host is only ever connected to. `frozen` carries the id
     /// and epoch the connection's callbacks must capture.
@@ -480,11 +492,47 @@ fn connected_keys<P: AdoptionPort>(port: &P) -> Vec<String> {
         .collect()
 }
 
-/// Ask the host to hold nothing against us, then list what it has. The lifecycle
-/// frame goes first so that a host whose absence clock is about to expire is
-/// revoked before a slow listing is waited on. `None` = never answered.
-async fn settle(client: &PtyHostClient, deadline: Instant) -> Option<SessionListing> {
+/// What `settle` knows about the connection it runs on: which one it is, and what a claim made on it
+/// is recorded against.
+struct SettleCtx {
+    channel: HostChannel,
+    /// A frozen host's reserved epoch, which is not yet published.
+    epoch: u64,
+    endpoint: String,
+    /// The host lifecycle token (`AdoptionPort::host_token`).
+    token: String,
+    reclaim: McpReclaim,
+}
+
+fn settle_ctx<P: AdoptionPort>(port: &P, channel: HostChannel, epoch: u64, endpoint: &str) -> SettleCtx {
+    SettleCtx { channel, epoch, endpoint: endpoint.to_owned(), token: port.host_token(), reclaim: port.reclaim().clone() }
+}
+
+/// Announce to a host that holds the MCP port that this app is taking it back, and record what it
+/// says is held. Anything but a `held` leaves the registry as it was: the `Disarm` and listing that
+/// follow are today's.
+async fn reclaim_claim(client: &PtyHostClient, ctx: &SettleCtx) {
+    match client.claim_mcp(&ctx.token).await {
+        Ok(McpClaimOutcome::Held(Some(held))) => {
+            log::info!(
+                "[MCP] {} holds port {} (configured {}, bind {})",
+                ctx.endpoint, held.port, held.configured_port, held.bind_host
+            );
+            ctx.reclaim.offer(Claimed::new(held, client.clone(), ctx.channel, ctx.epoch, ctx.endpoint.clone(), ctx.token.clone()));
+        }
+        Ok(McpClaimOutcome::Held(None)) => log::info!("[MCP] {} holds nothing", ctx.endpoint),
+        Ok(McpClaimOutcome::NotCapable) => {}
+        Err(e) => log::warn!("[MCP] {} did not answer the claim ({e:?}); no claim recorded", ctx.endpoint),
+    }
+}
+
+/// Ask the host to hold nothing against us, then list what it has. A host that holds the MCP port
+/// is first told it is being claimed: the claim must precede the `Disarm`, which would stop an
+/// unclaimed holder. The lifecycle frame goes before the listing so that a host whose absence clock
+/// is about to expire is revoked before a slow listing is waited on. `None` = never answered.
+async fn settle(client: &PtyHostClient, ctx: &SettleCtx, deadline: Instant) -> Option<SessionListing> {
     let work = async {
+        if client.mcp_hold() { reclaim_claim(client, ctx).await; }
         if !client.disarm().await {
             log::warn!("[GEN] host did not acknowledge the disarm");
         }
@@ -581,7 +629,7 @@ async fn adopt<P: AdoptionPort>(
     if let Some((channel, client)) = existing {
         // Already connected; only its listing is missing.
         let epoch = port.table().epoch(channel).unwrap_or(0);
-        let listing = settle(&client, deadline).await;
+        let listing = settle(&client, &settle_ctx(port, channel, epoch, &candidate.endpoint), deadline).await;
         apply_validated_listing(port, channel, epoch, &client, listing.as_ref())?;
         return Ok(Adopted { resolution: resolution_of(&listing), channel, epoch });
     }
@@ -600,7 +648,8 @@ async fn adopt<P: AdoptionPort>(
     let client = opened.client;
     let channel = frozen.map_or(HostChannel::Primary, |(id, _)| HostChannel::Frozen(id));
     client.bind_sessions(port.table().keys(), channel, opened.epoch);
-    let listing = settle(&client, deadline).await;
+    let reserved = frozen.map_or(opened.epoch, |(_, epoch)| epoch);
+    let listing = settle(&client, &settle_ctx(port, channel, reserved, &candidate.endpoint), deadline).await;
     let (channel, epoch) = match (role, frozen) {
         (HostRole::Frozen, Some((id, epoch))) => {
             let channel = HostChannel::Frozen(id);
@@ -744,6 +793,16 @@ async fn attempt<P: AdoptionPort>(
     outcome.map(|_| ()).map_err(Failure::into_message)
 }
 
+/// Whether a round starts the current host when discovery found none.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Synthesize {
+    /// Yes: the current host is connected (or started) on its own endpoint. What every round that
+    /// serves a pane or a reconnect wants.
+    Yes,
+    /// No: only hosts that were discovered are tried, so a cold boot starts nothing.
+    No,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Wait {
     /// Return once the current host has been dealt with; frozen hosts finish in
@@ -830,6 +889,19 @@ pub(super) async fn reconnect_current<P: AdoptionPort>(port: &P, backoff_ms: &[u
 }
 
 async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
+    round_with(port, wait, Synthesize::Yes).await
+}
+
+/// Adopt every host that survived, starting nothing: for the boot that must learn what the hosts
+/// hold before it chooses the MCP port. A cold boot discovers no host, so its round is discovery
+/// alone and the current host is started later, by the first pane, as ever. A discovered current
+/// host is connected like any other (if its process vanished meanwhile it may be started, as a pane
+/// create would).
+pub(super) async fn adopt_survivors<P: AdoptionPort>(port: &P) -> Result<(), String> {
+    round_with(port, Wait::All, Synthesize::No).await
+}
+
+async fn round_with<P: AdoptionPort>(port: &P, wait: Wait, synthesize: Synthesize) -> Result<(), String> {
     let deadline = Instant::now() + ADOPTION_DEADLINE;
     let (current, background) = {
         let _start = port.single_flight().lock().await;
@@ -855,15 +927,19 @@ async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
             }
         }
         // The current host may not exist yet: it is then started on its own endpoint.
-        let current = current.unwrap_or_else(|| HostCandidate {
-            generation: None,
-            endpoint: port.current_endpoint(),
-            record: None,
-            record_path: None,
-            pid: None,
-            mtime: std::time::SystemTime::UNIX_EPOCH,
-            role: HostRole::Current,
-        });
+        let current = match (current, synthesize) {
+            (Some(found), _) => Some(found),
+            (None, Synthesize::Yes) => Some(HostCandidate {
+                generation: None,
+                endpoint: port.current_endpoint(),
+                record: None,
+                record_path: None,
+                pid: None,
+                mtime: std::time::SystemTime::UNIX_EPOCH,
+                role: HostRole::Current,
+            }),
+            (None, Synthesize::No) => None,
+        };
 
         let mut background: Vec<JoinHandle<Result<(), String>>> = Vec::new();
         for (candidate, role) in frozen {
@@ -884,17 +960,22 @@ async fn round<P: AdoptionPort>(port: &P, wait: Wait) -> Result<(), String> {
         // lock, so concurrent creates share one connect; the tasks above run beside
         // it. One that is up but never answered its listing is only re-listed, in
         // the background like the rest: a fresh tab does not wait for that.
-        let key = barrier_key(&current.endpoint);
-        let current_result = if port.current_client().is_none() {
-            // Serialised by the start lock, so a stale re-list of the connection
-            // that just dropped cannot make this skip the reconnect.
-            port.barrier().begin_attempt(&key);
-            Some(attempt(port.clone(), current, HostRole::Current, deadline).await)
-        } else {
-            if port.barrier().needs_attempt_for(&key) && port.barrier().begin_attempt(&key) {
-                background.push(tokio::spawn(attempt(port.clone(), current, HostRole::Current, deadline)));
+        let current_result = match current {
+            None => None,
+            Some(current) => {
+                let key = barrier_key(&current.endpoint);
+                if port.current_client().is_none() {
+                    // Serialised by the start lock, so a stale re-list of the connection
+                    // that just dropped cannot make this skip the reconnect.
+                    port.barrier().begin_attempt(&key);
+                    Some(attempt(port.clone(), current, HostRole::Current, deadline).await)
+                } else {
+                    if port.barrier().needs_attempt_for(&key) && port.barrier().begin_attempt(&key) {
+                        background.push(tokio::spawn(attempt(port.clone(), current, HostRole::Current, deadline)));
+                    }
+                    None
+                }
             }
-            None
         };
         (current_result, background)
     };
@@ -971,6 +1052,14 @@ mod retire_real_tests;
 mod lifecycle_tests;
 #[cfg(test)]
 mod mcp_handover_tests;
+#[cfg(test)]
+mod mcp_claim_tests;
+#[cfg(test)]
+mod mcp_reclaim_tests;
+#[cfg(test)]
+mod retire_lease_tests;
+#[cfg(test)]
+mod mcp_boot_tests;
 #[cfg(test)]
 mod mcp_handover_txn_tests;
 #[cfg(test)]

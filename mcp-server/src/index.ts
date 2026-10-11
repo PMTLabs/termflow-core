@@ -10,6 +10,7 @@ import { createApiClient } from "./apiClient.js";
 import { createMcpServer } from "./server.js";
 import { readTerminalIdHeader } from "./identity.js";
 import { startSseHeartbeat } from "./heartbeat.js";
+import { startListening } from "./listen.js";
 import { closeHttpServer, isShutdownCommand, quiesce } from "./shutdown.js";
 import { createAuthGate, createDrainMiddleware, DrainState } from "./drain.js";
 
@@ -230,7 +231,11 @@ app.delete("/mcp", async (req: Request, res: Response) => {
     }
 });
 
-// Captured at app.listen() so graceful shutdown can stop accepting connections.
+// Bind the port, retrying while a previous holder releases it. Every route into gracefulExit
+// cancels this first, so an attempt still in flight can never bind after shutdown began.
+const listening = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });
+
+// Assigned from `listening.ready` so graceful shutdown can stop accepting connections.
 let server: Server | undefined;
 
 /**
@@ -245,6 +250,7 @@ async function gracefulExit(code: number): Promise<void> {
     if (exiting) return;
     exiting = true;
     try {
+        listening.cancel();
         await quiesce(
             () => { drain.begin(Date.now()); },
             () => Promise.all(Object.values(transports).map((t) => t.close().catch(() => {}))).then(() => {}),
@@ -314,12 +320,20 @@ process.stdin.on("data", (chunk: string) => {
 });
 process.stdin.resume();
 
-// Start the HTTP server
-server = app.listen(MCP_PORT, MCP_HOST, () => {
-    console.log(`[MCP] Auto-Terminal MCP Server started`);
-    console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);
-    console.log(`[MCP] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
-    console.log(`[MCP] MCP endpoint: http://${MCP_HOST}:${MCP_PORT}/mcp`);
-    console.log(`[MCP] Auth: ${ACCESS_TOKEN ? "required (token)" : "open (localhost)"}`);
-    console.log(`[MCP] Backend API: ${API_BASE}`);
-});
+// Report the bind. A port that stays occupied past the retry limit is fatal: exit so the desktop
+// app respawns us, rather than idling as a sidecar that serves nothing.
+listening.ready.then(
+    (listener) => {
+        server = listener;
+        console.log(`[MCP] Auto-Terminal MCP Server started`);
+        console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);
+        console.log(`[MCP] Health check: http://${MCP_HOST}:${MCP_PORT}/health`);
+        console.log(`[MCP] MCP endpoint: http://${MCP_HOST}:${MCP_PORT}/mcp`);
+        console.log(`[MCP] Auth: ${ACCESS_TOKEN ? "required (token)" : "open (localhost)"}`);
+        console.log(`[MCP] Backend API: ${API_BASE}`);
+    },
+    (err) => {
+        console.error(`[MCP] Could not listen on ${MCP_HOST}:${MCP_PORT}:`, err);
+        void gracefulExit(1);
+    },
+);

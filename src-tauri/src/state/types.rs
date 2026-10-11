@@ -733,6 +733,8 @@ pub struct AppState<R: Runtime = Wry> {
     pub host_table: super::host_table::HostTable,
     /// What each surviving host answered; unanswered hosts hold restoring panes.
     pub host_barrier: super::host_adoption::Barrier,
+    /// What the surviving hosts reported holding of the MCP port, for MCP startup to reclaim.
+    pub mcp_reclaim: super::mcp_reclaim::McpReclaim,
     /// The hold a sibling's arm request keeps until its disarm.
     pub sibling_hold: Arc<super::host_lifecycle::SiblingSlot>,
     /// The elevated ("Open admin Tab") sidecar's connection manager (plan
@@ -861,6 +863,7 @@ impl<R: Runtime> Clone for AppState<R> {
             frozen_host_seq: self.frozen_host_seq.clone(),
             host_table: self.host_table.clone(),
             host_barrier: self.host_barrier.clone(),
+            mcp_reclaim: self.mcp_reclaim.clone(),
             sibling_hold: self.sibling_hold.clone(),
             elevated_host: self.elevated_host.clone(),
             identity: self.identity.clone(),

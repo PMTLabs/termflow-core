@@ -756,6 +756,19 @@ pub fn run() {
             // with any concurrent set_network_config / rotate_auth_token / stop_network.
             let _op = api_state.network_op_lock.lock().await;
             let host = if api_net.expose_on_network { [0, 0, 0, 0] } else { [127, 0, 0, 1] };
+            // Adopt the surviving pty-hosts and learn whether one holds the MCP port for the agents
+            // (plan 056). The wait is bounded, and the holder keeps serving until the sidecar takes
+            // the port over below.
+            let mcp_io = crate::state::mcp_reclaim::AppBootIo { app: mcp_app_handle, state: api_state.clone() };
+            let prepared = crate::state::mcp_reclaim::prepare_reclaim(
+                &mcp_io,
+                crate::state::mcp_reclaim::BootInputs {
+                    own_id: api_state.instance_id.clone(),
+                    cfg: mcp_net,
+                    reclaim: api_state.mcp_reclaim.clone(),
+                },
+            )
+            .await;
             // Bind-and-RETAIN, walking forward from the configured port. A probe
             // followed by a separate bind leaves a window in which a sibling can
             // take the port, and `SO_REUSEADDR` (needed for the hot-restart
@@ -771,6 +784,7 @@ pub fn run() {
                 api_net.api_port,
                 crate::net_ports::DEFAULT_SPAN,
                 &api_state.instance_id,
+                prepared.reserved(),
             )
             .await;
             match picked {
@@ -782,39 +796,12 @@ pub fn run() {
                     // API. Same for the fabric and the renderer.
                     api_state.effective_endpoints.write().api_port = Some(api_port);
 
-                    let mcp_port = crate::net_ports::pick_mcp_port(
-                        api_net.mcp_port,
-                        crate::net_ports::DEFAULT_SPAN,
-                        &api_state.instance_id,
-                        &[api_port],
-                    )
-                    .await;
-
                     // Only start the MCP sidecar (which forwards every tool call
                     // to this API) after binding the API, so a bind failure can never
                     // leave a sidecar advertising our instanceId while pointing at a port
-                    // we don't own. It is launched with the EFFECTIVE ports.
-                    let mut mcp_net = mcp_net;
-                    mcp_net.api_port = api_port;
-                    let mcp_effective_port = match mcp_port {
-                        Some(p) => {
-                            mcp_net.mcp_port = p;
-                            let started = respawn_mcp(mcp_app_handle, api_state.clone(), &mcp_net).await;
-                            if started {
-                                Some(p)
-                            } else {
-                                log::error!("[MCP] boot startup was rejected or failed; endpoint unpublished");
-                                None
-                            }
-                        }
-                        None => {
-                            log::error!(
-                                "[MCP] no free MCP port near {} — the MCP server is NOT running",
-                                api_net.mcp_port
-                            );
-                            None
-                        }
-                    };
+                    // we don't own. It is launched with the EFFECTIVE ports, on the port the
+                    // pty-host held when one did and the configuration still asks for it.
+                    let mcp_effective_port = crate::state::mcp_reclaim::start_mcp(prepared, api_port, &mcp_io).await;
 
                     api_state.effective_endpoints.write().mcp_port = mcp_effective_port;
                     log::info!(
@@ -878,6 +865,8 @@ pub fn run() {
                 }
                 None => {
                     drop(_op);
+                    // MCP is not started; a claim boot still holds goes back to its host.
+                    drop(prepared);
                     let _ = api_state.app_handle.emit("server-status:changed", ());
                     log::error!(
                         "API could not bind any port near {} — the REST/WebSocket API and MCP are \

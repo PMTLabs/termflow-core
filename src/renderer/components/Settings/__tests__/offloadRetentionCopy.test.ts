@@ -13,6 +13,10 @@ const DIALOG_END = SETTINGS.indexOf('/>', DIALOG_START);
 const PANEL = SETTINGS.slice(PANEL_START, DIALOG_START);
 const DIALOG = SETTINGS.slice(DIALOG_START, DIALOG_END);
 
+const MCP_HELD_SENTENCE =
+  'MCP agents such as Claude Code stay connected and get a "TermFlow is restarting — wait and retry" reply until TermFlow is back, on hosts that support it; plain API clients still drop';
+const MCP_DROP_SENTENCE = 'MCP/API clients drop when TermFlow closes and may need to reconnect or reinitialize';
+
 describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
   it('gets policy from the connected client, not a mutable discovery record', () => {
     const command = UPDATE_COMMANDS.slice(
@@ -35,8 +39,8 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
     expect(copy).toContain('5 minutes');
     expect(copy).toContain('within that grace period to reclaim everything');
     expect(copy).toContain('after it, the shells are closed');
-    expect(copy).toContain('MCP/API clients drop');
-    expect(copy).toContain('may need to reconnect or reinitialize');
+    expect(copy).toContain(MCP_HELD_SENTENCE);
+    expect(copy).not.toContain(MCP_DROP_SENTENCE);
     expect(PANEL).toContain('offloadRetentionCopy(hostRetention)');
     expect(DIALOG).toContain('message={offloadRetentionCopy(hostRetention)}');
   });
@@ -47,6 +51,8 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
     expect(copy).toContain('retention policy is unavailable (legacy host) — no bound promised');
     expect(copy).not.toMatch(/\d/);
     expect(copy).not.toContain('no time limit');
+    expect(copy).toContain(MCP_DROP_SENTENCE);
+    expect(copy).not.toContain(MCP_HELD_SENTENCE);
     expect(PANEL).toContain('offloadRetentionCopy(hostRetention)');
     expect(DIALOG).toContain('message={offloadRetentionCopy(hostRetention)}');
   });
@@ -56,7 +62,7 @@ describe('Offload & Close retention copy (plan 036 item 1.5)', () => {
 
     expect(copy).toContain('promises no time limit');
     expect(copy).toContain('does not mean TermFlow will still be there');
-    expect(copy).toContain('MCP/API clients drop');
-    expect(copy).toContain('may need to reconnect or reinitialize');
+    expect(copy).toContain(MCP_HELD_SENTENCE);
+    expect(copy).not.toContain(MCP_DROP_SENTENCE);
   });
 });

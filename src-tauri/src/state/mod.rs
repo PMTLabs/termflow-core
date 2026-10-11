@@ -16,6 +16,7 @@ mod host_adoption;
 mod host_connect;
 mod host_lifecycle;
 mod mcp_handover;
+pub(crate) mod mcp_reclaim;
 mod mcp_snapshot;
 #[cfg(test)]
 pub(crate) mod mcp_snapshot_tests;
@@ -51,6 +52,8 @@ pub(crate) mod mcp_exit_census_tests;
 #[cfg(test)]
 mod mcp_sibling_census_tests;
 #[cfg(test)]
+mod mcp_reclaim_census_tests;
+#[cfg(test)]
 mod wiring_tests;
 #[cfg(test)]
 mod owner_wiring_tests;
@@ -74,6 +77,7 @@ pub use render::{FocusReportingTracker, render_full_scrollback, render_tail_line
 pub use reattach::{ReattachAction, ReattachPlan, plan_reattach};
 pub use host_table::{Admission, Busy, DrainGuard, DrainRefusal, HostTable, QuiesceGuard, QuiesceReason, Ticket, LIFECYCLE_BUSY};
 pub use mcp_handover::{send_mcp_hold, Cleanup, HandedOver};
+pub use mcp_reclaim::McpReclaim;
 pub use host_adoption::{Barrier, Resolution, UnresolvedHost};
 pub use host_lifecycle::{offload_refusal, update_refusal, AckedHost, CloseBounds, ExitReport, Hold, HostExit, OwnedHost, SiblingArm};
 pub use update_survival::{describe_reasons, effective_mode, FullReason, HostOrigin, UpdateMode};
