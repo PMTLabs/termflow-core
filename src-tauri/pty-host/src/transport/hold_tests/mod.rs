@@ -14,6 +14,7 @@ mod bounds;
 mod compat;
 mod lifecycle;
 mod limits;
+mod staggered;
 
 use super::*;
 use crate::mcp_hold::holder::{gauges, STOP_BOUND};
