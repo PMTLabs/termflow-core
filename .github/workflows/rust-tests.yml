@@ -43,6 +43,9 @@ jobs:
             # compiled by the release build. Unit suite only, same as Windows.
             runs-on: macos-latest
             test-args: ""
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/src-tauri/target
     steps:
       - uses: actions/checkout@v4
 
@@ -100,8 +103,48 @@ jobs:
         working-directory: mcp-server
         run: bun install --frozen-lockfile
 
+      # cargo test does not build the normal host executable needed by Layer A.
+      - name: Build real PTY host for MCP hold Layer A
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        run: cargo build --manifest-path src-tauri/pty-host/Cargo.toml
+
+      - name: Require MCP hold real processes (Linux and Windows only)
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          suffix=''
+          if [ "$RUNNER_OS" = 'Windows' ]; then suffix='.exe'; fi
+          echo "TERMFLOW_PTY_HOST_BIN=$GITHUB_WORKSPACE/src-tauri/target/debug/termflow-pty-host$suffix" >> "$GITHUB_ENV"
+          echo 'TERMFLOW_E2E_REQUIRED=1' >> "$GITHUB_ENV"
+
+      - name: Measure Bun bind failures and test MCP sidecar (Linux)
+        if: runner.os == 'Linux'
+        working-directory: mcp-server
+        run: bun test
+
       # Linux: unit + integration (--features integration-tests).
       # Windows/macOS: unit suite only (test-args empty).
       - name: Run Rust tests
+        if: runner.os != 'Windows'
         working-directory: src-tauri
         run: cargo test ${{ matrix.test-args }}
+
+      # Cargo itself puts Windows tests in a non-breakaway kill-on-close job.
+      # Build through Cargo, then run its exact test artifact outside Cargo's job;
+      # otherwise the real host correctly refuses ArmDetach. No after-setup skip.
+      - name: Run Windows Rust tests including real MCP hold processes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: src-tauri
+        run: |
+          $artifacts = cargo test --lib --no-run --message-format=json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $executables = @($artifacts | ForEach-Object {
+            try { $item = $_ | ConvertFrom-Json } catch { return }
+            if ($item.reason -eq 'compiler-artifact' -and $item.profile.test -and $item.executable) {
+              $item.executable
+            }
+          })
+          if ($executables.Count -ne 1) { throw "Expected one library test executable, got $($executables.Count)" }
+          & $executables[0] --nocapture
+          exit $LASTEXITCODE
