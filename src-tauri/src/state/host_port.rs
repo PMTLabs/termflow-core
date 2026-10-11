@@ -177,15 +177,6 @@ impl<R: Runtime> AppState<R> {
         // sessions we can't control (design 003 §10.3, C3). No record ⇒ legacy
         // host (or none) on the current endpoint — v1 as today.
         let record = candidate.record.clone();
-        match crate::pty_host_client::host_build_disposition(record.as_ref(), launch.build_id.as_deref()) {
-            crate::pty_host_client::HostBuildDisposition::Current => {}
-            crate::pty_host_client::HostBuildDisposition::Stale { observed, expected } => log::warn!(
-                "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
-            ),
-            crate::pty_host_client::HostBuildDisposition::Unknown => log::warn!(
-                "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow"
-            ),
-        }
         let plan = crate::pty_host_client::plan_connection(record);
         let flags = host_flags(&plan, &candidate.endpoint)?;
 
@@ -205,6 +196,14 @@ impl<R: Runtime> AppState<R> {
         )
         .await
         .map_err(|e| e.to_string())?;
+        // Only now is it known whether the host was adopted or spawned by us.
+        if let Some(warning) = crate::pty_host_client::adopted_host_build_warning(
+            origin,
+            candidate.record.as_ref(),
+            launch.build_id.as_deref(),
+        ) {
+            log::warn!("{warning}");
+        }
         client.set_attach_acks(flags.attach_acks);
         // A host we spawned ourselves (this build's bundled sidecar, installed
         // under its own content hash by `resolve_host_launch`) announces too.

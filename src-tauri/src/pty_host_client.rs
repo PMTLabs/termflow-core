@@ -1982,6 +1982,29 @@ pub enum HostRetention {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostBuildDisposition { Current, Stale { observed: String, expected: String }, Unknown }
 
+/// The "close these terminals" warning for a host this connection ADOPTED.
+/// A host spawned here is this build's own sidecar, so there is nothing to
+/// warn about — judging it by the pre-spawn record (absent) said "no build
+/// identity" on every fresh start.
+pub fn adopted_host_build_warning(
+    origin: HostConnectionOrigin,
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    expected: Option<&str>,
+) -> Option<String> {
+    if origin == HostConnectionOrigin::SpawnedHere {
+        return None;
+    }
+    match host_build_disposition(record, expected) {
+        HostBuildDisposition::Current => None,
+        HostBuildDisposition::Stale { observed, expected } => Some(format!(
+            "[HOTSWAP] adopting stale pty-host build {observed} (expected {expected}); close these terminals, then restart TermFlow"
+        )),
+        HostBuildDisposition::Unknown => Some(
+            "[HOTSWAP] adopting pty-host with no build identity; close these terminals, then restart TermFlow".to_string(),
+        ),
+    }
+}
+
 pub fn host_build_disposition(record: Option<&termflow_pty_protocol::HostRecord>, expected: Option<&str>) -> HostBuildDisposition {
     match (record.and_then(|r| r.build_id.as_deref()), expected) {
         (_, None) => HostBuildDisposition::Unknown,
