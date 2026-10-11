@@ -32,8 +32,8 @@ function closeQuietly(server: Server): void {
  * reused. Only `EADDRINUSE` is retried; any other error rejects at once. The helper owns every
  * attempt until `ready` hands one over.
  * Measured on Windows with Bun 1.3.14: non-local addresses report EADDRINUSE with the same
- * fields as occupied ports, so these also wait out the ~5s production retry limit.
- * Linux is not yet measured. See test/listen.test.ts for the real-runtime measurements (plan 057).
+ * fields as occupied ports, so these also wait out the ~5s production retry limit. On Linux
+ * (Bun 1.4.3) they report EADDRNOTAVAIL and fail at once. See test/listen.test.ts (plan 057).
  */
 export function startListening(app: RequestListener, port: number, host: string, options: ListenOptions): Listening {
     const deadline = Date.now() + options.limitMs;

@@ -106,17 +106,28 @@ describe("startListening", () => {
             errors.push(err);
         }
         expect(errors[0]?.code).toBe("EADDRINUSE");
-        // Bun reports the SAME code/errno/syscall for non-local and occupied addresses.
-        expect(errors[1]?.code).toBe("EADDRINUSE");
-        expect(errors[1]?.errno).toBe(errors[0]?.errno);
-        expect(errors[1]?.syscall).toBe(errors[0]?.syscall);
         expect(errors[2]?.code).not.toBe("EADDRINUSE");
+        // Windows (Bun 1.3.14): a non-local address reports the SAME code/errno/syscall as an
+        // occupied port, so it is retried up to the limit. Linux (Bun 1.4.3, CI): EADDRNOTAVAIL,
+        // errno -99, so it is not retried and fails at once.
+        const windows = process.platform === "win32";
+        if (windows) {
+            expect(errors[1]?.code).toBe("EADDRINUSE");
+            expect(errors[1]?.errno).toBe(errors[0]?.errno);
+            expect(errors[1]?.syscall).toBe(errors[0]?.syscall);
+        } else {
+            expect(errors[1]?.code).toBe("EADDRNOTAVAIL");
+        }
         const started = Date.now();
         const listening = track(startListening(buildApp(), port, "203.0.113.1", { retryMs: 20, limitMs: 300 }));
         const outcome = await settlesWithin(listening.ready, 2000);
         expect(outcome).not.toBe("pending");
-        expect((outcome as { error: NodeJS.ErrnoException }).error.code).toBe("EADDRINUSE");
-        expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+        expect((outcome as { error: NodeJS.ErrnoException }).error.code).toBe(errors[1]?.code);
+        if (windows) {
+            expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+        } else {
+            expect(Date.now() - started).toBeLessThan(250);
+        }
         expect(Date.now() - started).toBeLessThan(2000);
     });
 
