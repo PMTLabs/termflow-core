@@ -122,8 +122,10 @@ impl Rig {
         self.since(host).into_iter().filter(|k| *k == kind).count()
     }
 
+    /// MCP frames any host received since the hosts were armed: what the handover sent. The claims
+    /// adoption made before the arm are not the handover's.
     fn mcp_frames_anywhere(&self) -> usize {
-        ["HoldMcp", "ClaimMcp", "ReleaseMcp"].iter().map(|k| self.world.count_everywhere(k)).sum()
+        self.hosts.iter().map(|h| ["HoldMcp", "ClaimMcp", "ReleaseMcp"].iter().map(|k| self.count_since(h, k)).sum::<usize>()).sum()
     }
 
     fn client(&self) -> PtyHostClient {

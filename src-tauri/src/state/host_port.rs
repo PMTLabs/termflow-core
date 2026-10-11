@@ -9,6 +9,7 @@ use super::host_adoption::{
 use super::host_connect::{connect_existing, endpoint_is_gone, GRACE_ENDPOINT_ONLY, GRACE_LIVE_HOST};
 use super::host_registry;
 use super::host_table::HostTable;
+use super::mcp_reclaim::McpReclaim;
 use super::types::{AppState, FrozenHost};
 use crate::elevated_host::{FrozenId, HostChannel};
 use crate::pty_host_client::{
@@ -292,6 +293,14 @@ impl<R: Runtime> AdoptionPort for AppState<R> {
 
     fn next_frozen_id(&self) -> Result<FrozenId, String> {
         AppState::next_frozen_id(self)
+    }
+
+    fn host_token(&self) -> String {
+        crate::pty_host_client::resolve_token()
+    }
+
+    fn reclaim(&self) -> &McpReclaim {
+        &self.mcp_reclaim
     }
 
     async fn connect(

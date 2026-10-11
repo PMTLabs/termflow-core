@@ -12,6 +12,7 @@ fn retirable() -> RetireFacts {
         panes: 0,
         unfinished_claims: 0,
         ticket_in_flight: false,
+        mcp_lease: false,
         empty_for: EMPTY_FOR,
     }
 }
@@ -32,7 +33,7 @@ fn current_unavailable() {
     // Older hosts are where new terminals go while the current one is down.
     let facts = RetireFacts { current_usable: false, ..retirable() };
     assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::CurrentUnavailable));
-    assert!(!observation_is_empty(Sample::Answered { alive: 0 }, 0, 0, false), "and the clock does not run");
+    assert!(!observation_is_empty(Sample::Answered { alive: 0 }, 0, 0, false, false), "and the clock does not run");
 }
 
 #[test]
@@ -55,6 +56,30 @@ fn in_flight_ticket() {
 }
 
 #[test]
+fn a_leased_empty_host_is_kept_for_its_mcp_lease() {
+    let facts = RetireFacts { mcp_lease: true, ..retirable() };
+    assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::McpLease));
+    // Named before the emptiness clock, which a leased look does not start.
+    let young = RetireFacts { mcp_lease: true, empty_for: Duration::ZERO, ..retirable() };
+    assert_eq!(retire_decision(&young), Verdict::Keep(Keep::McpLease));
+    assert_eq!(retire_decision(&RetireFacts { mcp_lease: false, ..facts }), Verdict::Retire, "and nothing else differs");
+}
+
+#[test]
+fn leased_look_is_not_empty() {
+    let answered = Sample::Answered { alive: 0 };
+    assert!(observation_is_empty(answered, 0, 0, true, false));
+    assert!(!observation_is_empty(answered, 0, 0, true, true), "a leased look does not count towards emptiness");
+    let mut emptiness = Emptiness::default();
+    let t0 = Instant::now();
+    assert_eq!(emptiness.observe(t0, observation_is_empty(answered, 0, 0, true, false)), Duration::ZERO);
+    let later = t0 + Duration::from_secs(8);
+    assert_eq!(emptiness.observe(later, observation_is_empty(answered, 0, 0, true, true)), Duration::ZERO, "a leased look starts the clock over");
+    let after = later + Duration::from_secs(5);
+    assert_eq!(emptiness.observe(after, observation_is_empty(answered, 0, 0, true, false)), Duration::ZERO, "the first unleased look starts a fresh interval");
+}
+
+#[test]
 fn role_not_frozen() {
     let facts = RetireFacts { frozen: false, ..retirable() };
     assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::NotFrozen));
@@ -64,7 +89,7 @@ fn role_not_frozen() {
 fn an_unanswered_sample_is_never_empty() {
     let facts = RetireFacts { sample: Sample::Unanswered, ..retirable() };
     assert_eq!(retire_decision(&facts), Verdict::Keep(Keep::Unanswered));
-    assert!(!observation_is_empty(Sample::Unanswered, 0, 0, true));
+    assert!(!observation_is_empty(Sample::Unanswered, 0, 0, true, false));
 }
 
 #[test]
@@ -78,10 +103,10 @@ fn emptiness_must_last_the_whole_period() {
 #[test]
 fn only_a_quiet_answered_listing_counts_as_empty() {
     let answered = Sample::Answered { alive: 0 };
-    assert!(observation_is_empty(answered, 0, 0, true));
-    assert!(!observation_is_empty(Sample::Answered { alive: 1 }, 0, 0, true));
-    assert!(!observation_is_empty(answered, 1, 0, true));
-    assert!(!observation_is_empty(answered, 0, 1, true));
+    assert!(observation_is_empty(answered, 0, 0, true, false));
+    assert!(!observation_is_empty(Sample::Answered { alive: 1 }, 0, 0, true, false));
+    assert!(!observation_is_empty(answered, 1, 0, true, false));
+    assert!(!observation_is_empty(answered, 0, 1, true, false));
 }
 
 #[test]
@@ -94,7 +119,7 @@ fn unanswered_sample_resets_emptiness() {
     assert_eq!(emptiness.observe(at(5), true), Duration::from_secs(5));
     // The host stops answering. The five seconds already seen do not carry over,
     // and neither does the time it was silent.
-    assert_eq!(emptiness.observe(at(10), observation_is_empty(Sample::Unanswered, 0, 0, true)), Duration::ZERO);
+    assert_eq!(emptiness.observe(at(10), observation_is_empty(Sample::Unanswered, 0, 0, true, false)), Duration::ZERO);
     assert_eq!(emptiness.observe(at(15), true), Duration::ZERO, "the clock starts again at the first answer");
     assert_eq!(emptiness.observe(at(20), true), Duration::from_secs(5));
     assert_eq!(emptiness.observe(at(25), true), Duration::from_secs(10));
@@ -106,7 +131,7 @@ fn a_session_appearing_restarts_the_clock() {
     let at = |secs: u64| start + Duration::from_secs(secs);
     let mut emptiness = Emptiness::default();
     emptiness.observe(at(0), true);
-    emptiness.observe(at(5), observation_is_empty(Sample::Answered { alive: 1 }, 0, 0, true));
+    emptiness.observe(at(5), observation_is_empty(Sample::Answered { alive: 1 }, 0, 0, true, false));
     assert_eq!(emptiness.observe(at(10), true), Duration::ZERO);
 }
 

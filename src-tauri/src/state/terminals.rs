@@ -279,6 +279,7 @@ impl<R: Runtime> AppState<R> {
             frozen_host_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             host_table: super::host_table::HostTable::new(),
             host_barrier: super::host_adoption::Barrier::new(),
+            mcp_reclaim: super::mcp_reclaim::McpReclaim::new(),
             sibling_hold: Arc::default(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),
             identity: crate::identity_index::IdentityIndex::new(),
@@ -620,6 +621,16 @@ impl<R: Runtime> AppState<R> {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
     {
         Box::pin(super::host_adoption::ensure_hosts(self))
+    }
+
+    /// Adopt the hosts that survived, without starting a current host when none was discovered: the
+    /// boot's round, before the MCP port is chosen. Boxed like `ensure_pty_host`, and for the same
+    /// reason.
+    pub fn adopt_survivors(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>>
+    {
+        Box::pin(super::host_adoption::adopt_survivors(self))
     }
 
     /// Re-run adoption for surviving hosts that were skipped, busy or never
@@ -1399,7 +1410,7 @@ mod arm_lifecycle_wiring_tests {
         // connected and only re-listed — go through it.
         let adopt = fn_body(&source, "async fn adopt<");
         assert_eq!(
-            adopt.matches("settle(&client, deadline)").count(),
+            adopt.matches("settle(&client, &settle_ctx(port,").count(),
             2,
             "adopt must disarm-then-list a host on both the connect and the re-list path"
         );

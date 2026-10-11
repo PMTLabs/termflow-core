@@ -109,6 +109,16 @@ pub enum McpReleaseOutcome {
     Released { was_holding: bool },
 }
 
+/// The definite answers to `ClaimMcp`; an unanswered or unsent one is a [`McpSendError`], which
+/// the caller treats as no claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpClaimOutcome {
+    /// The connection did not advertise `CAP_MCP_HOLD`; nothing was written.
+    NotCapable,
+    /// The host's answer: what it is holding, if anything.
+    Held(Option<termflow_pty_protocol::McpHeld>),
+}
+
 /// Map a pty-host session key to the process id our maps are keyed by.
 ///
 /// Returns `None` for an unknown session, and every caller DROPS that frame.
@@ -585,6 +595,24 @@ impl PtyHostClient {
             Some(Response::McpHoldAck { accepted: false, reason, .. }) => {
                 Ok(McpHoldOutcome::Rejected(reason.unwrap_or_default()))
             }
+            _ => Err(McpSendError::Ambiguous),
+        }
+    }
+
+    /// Announce that this GUI is adopting the host and will take the MCP port back. The host's
+    /// answer is what it is holding. Same capability gate as `hold_mcp`: without the bit nothing is
+    /// written. A reply that never comes is `Ambiguous`, which the caller treats as no claim.
+    pub async fn claim_mcp(&self, token: &str) -> Result<McpClaimOutcome, McpSendError> {
+        if !self.mcp_hold() {
+            return Ok(McpClaimOutcome::NotCapable);
+        }
+        let token = token.to_string();
+        let reply = self
+            .request_authorized(MCP_REQUEST_TIMEOUT, move |req| Control::ClaimMcp { req, token }, |enqueue| enqueue())
+            .await
+            .map_err(|_| McpSendError::NotSent)?;
+        match reply {
+            Some(Response::McpClaimAck { held, .. }) => Ok(McpClaimOutcome::Held(held)),
             _ => Err(McpSendError::Ambiguous),
         }
     }

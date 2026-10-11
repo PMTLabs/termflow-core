@@ -14,7 +14,7 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use termflow_pty_protocol::{
-    read_frame, write_frame, Control, Data, Frame, HostRecord, Response, PROTOCOL_MAX, PROTOCOL_MIN,
+    read_frame, write_frame, Control, Data, Frame, HostRecord, McpHeld, Response, PROTOCOL_MAX, PROTOCOL_MIN,
 };
 use tokio::io::{duplex, DuplexStream};
 use tokio::task::AbortHandle;
@@ -122,6 +122,12 @@ pub(super) struct HostSpec {
     pub gate_release_ack: Option<Arc<EventGate>>,
     /// Keeps the connection open but answers no MCP frame and changes no MCP state.
     pub mcp_silent: bool,
+    /// The host starts as an `Absent` MCP holder serving this, and answers `ClaimMcp` with it while
+    /// the holder runs. `None` is a host with nothing to hold.
+    pub mcp_held: Option<McpHeld>,
+    /// The same as `gate_release_ack` for `ClaimMcp`: applied when received, acknowledged when the
+    /// gate opens.
+    pub gate_claim_ack: Option<Arc<EventGate>>,
 }
 
 /// What the fake host says to `HoldMcp`. The `Withhold*` variants apply the state change and
@@ -160,6 +166,7 @@ struct McpKnobs {
     silent: std::collections::HashSet<String>,
     disarm_gate: HashMap<String, Arc<EventGate>>,
     release_gate: HashMap<String, Arc<EventGate>>,
+    claim_gate: HashMap<String, Arc<EventGate>>,
 }
 
 type SharedKnobs = Arc<Mutex<McpKnobs>>;
@@ -193,9 +200,15 @@ impl Default for HostSpec {
             gate_disarm_ack: None,
             gate_release_ack: None,
             mcp_silent: false,
+            mcp_held: None,
+            gate_claim_ack: None,
         }
     }
 }
+
+/// The host lifecycle token the fake port hands out: a sentinel that differs from any sidecar bearer
+/// a test uses, so a frame that carried the wrong credential is told apart from one that did not.
+pub(super) const HOST_TOKEN: &str = "host-token-056";
 
 /// Recorded in place of a frame when a connection ends: the host saw EOF.
 const EOF_MARK: &str = "\0connection closed";
@@ -292,6 +305,9 @@ impl World {
     }
 
     pub fn add_host(&self, endpoint: &str, spec: HostSpec) {
+        if spec.mcp_held.is_some() {
+            self.set_mcp_running(endpoint, McpRunning::Absent);
+        }
         self.hosts.lock().unwrap().insert(endpoint.to_owned(), (spec, Vec::new()));
     }
 
@@ -438,6 +454,25 @@ impl World {
         self.knobs.lock().unwrap().release_gate.insert(host.to_owned(), gate.clone());
     }
 
+    /// The same for `ClaimMcp`.
+    pub fn gate_claim_acks(&self, host: &str, gate: &Arc<EventGate>) {
+        self.knobs.lock().unwrap().claim_gate.insert(host.to_owned(), gate.clone());
+    }
+
+    /// Every MCP frame `host` received, whole (`req` and token included), in order.
+    pub fn mcp_frames(&self, host: &str) -> Vec<Frame> {
+        self.frames_of(host)
+            .into_iter()
+            .filter(|f| matches!(f, Frame::Ctrl(Control::HoldMcp { .. } | Control::ClaimMcp { .. } | Control::ReleaseMcp { .. })))
+            .collect()
+    }
+
+    /// The kinds of the MCP-hold and lifecycle frames `host` received, in order (`Close` and the
+    /// connection-end mark are left out).
+    pub fn lifecycle_kinds(&self, host: &str) -> Vec<&'static str> {
+        self.kinds(host).into_iter().filter(|k| matches!(*k, "ClaimMcp" | "ReleaseMcp" | "HoldMcp" | "Disarm" | "List")).collect()
+    }
+
     /// `host` is serving as a holder, as after a hold whose sidecar stand-in came up.
     pub fn set_mcp_running(&self, host: &str, running: McpRunning) {
         self.mcp.lock().unwrap().insert(host.to_owned(), McpState::Running(running));
@@ -493,12 +528,13 @@ async fn serve(
                 }
             }
         }
-        let (silent, disarm_gate, release_gate) = {
+        let (silent, disarm_gate, release_gate, claim_gate) = {
             let knobs = knobs.lock().unwrap();
             (
                 spec.mcp_silent || knobs.silent.contains(&host),
                 spec.gate_disarm_ack.clone().or_else(|| knobs.disarm_gate.get(&host).cloned()),
                 spec.gate_release_ack.clone().or_else(|| knobs.release_gate.get(&host).cloned()),
+                spec.gate_claim_ack.clone().or_else(|| knobs.claim_gate.get(&host).cloned()),
             )
         };
         let reply = match frame {
@@ -580,7 +616,24 @@ async fn serve(
                     }
                 }
             }
-            Frame::Ctrl(Control::ClaimMcp { req, .. }) => Some(Response::McpClaimAck { req, held: None }),
+            Frame::Ctrl(Control::ClaimMcp { req, .. }) => {
+                // An adopting claim hands an absent holder back to the GUI (it survives a later
+                // `Disarm`); a repeat stays in handback and answers the same.
+                let mut states = mcp.lock().unwrap();
+                let state = states.entry(host.clone()).or_insert(McpState::Idle);
+                if matches!(state, McpState::Running(McpRunning::Absent)) {
+                    *state = McpState::Running(McpRunning::Handback);
+                }
+                let held = if matches!(state, McpState::Running(_)) { spec.mcp_held.clone() } else { None };
+                let ack = Response::McpClaimAck { req, held };
+                match &claim_gate {
+                    Some(gate) => {
+                        let _ = queue.send((Frame::Resp(ack), Some(gate.clone())));
+                        None
+                    }
+                    None => Some(ack),
+                }
+            }
             Frame::Ctrl(Control::ReleaseMcp { req, .. }) => {
                 let mut states = mcp.lock().unwrap();
                 let state = states.entry(host.clone()).or_insert(McpState::Idle);
@@ -712,6 +765,9 @@ pub(super) struct Inner {
     pub deleted: Mutex<Vec<String>>,
     pub offsets: Arc<DashMap<String, u64>>,
     pub barrier: Barrier,
+    pub reclaim: McpReclaim,
+    /// Whether the registry already leased each older host at the moment it was adopted.
+    pub lease_at_adoption: Mutex<Vec<(FrozenId, bool)>>,
     flight: tokio::sync::Mutex<()>,
     candidates: Mutex<Vec<HostCandidate>>,
     current_endpoint: String,
@@ -831,6 +887,8 @@ impl FakePort {
             deleted: Mutex::new(Vec::new()),
             offsets: Arc::new(DashMap::new()),
             barrier: Barrier::new(),
+            reclaim: McpReclaim::new(),
+            lease_at_adoption: Mutex::new(Vec::new()),
             flight: tokio::sync::Mutex::new(()),
             candidates: Mutex::new(Vec::new()),
             current_endpoint: current_endpoint.to_owned(),
@@ -1053,6 +1111,14 @@ impl AdoptionPort for FakePort {
         host_registry::next_frozen_id(&self.0.next_id)
     }
 
+    fn host_token(&self) -> String {
+        HOST_TOKEN.to_owned()
+    }
+
+    fn reclaim(&self) -> &McpReclaim {
+        &self.0.reclaim
+    }
+
     /// Like the real pair: a frozen host is only connected to; the current
     /// role adopts a running host, refuses to start a second one while the
     /// record's process is alive, and otherwise (nothing answers, nothing known
@@ -1148,6 +1214,9 @@ impl AdoptionPort for FakePort {
     }
 
     fn frozen_adopted(&self, id: FrozenId) {
+        let channel = HostChannel::Frozen(id);
+        let leased = self.0.table.epoch(channel).is_some_and(|epoch| self.0.reclaim.lease_on(channel, epoch));
+        self.0.lease_at_adoption.lock().unwrap().push((id, leased));
         if self.0.retirement.load(Ordering::SeqCst) {
             crate::state::host_retire::start_ticker(self, id);
         }

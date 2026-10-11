@@ -183,7 +183,11 @@ async fn a_silent_host_never_answers_release() {
 
     assert!(client.release_mcp(TOKEN).await.is_err());
     assert_eq!(client.hold_mcp(TOKEN, spec()).await, Err(McpSendError::Ambiguous));
-    assert_eq!(mcp_frames(&world, CURRENT), ["ReleaseMcp", "HoldMcp"], "both were sent, neither answered");
+    assert_eq!(
+        mcp_frames(&world, CURRENT),
+        ["ClaimMcp", "ReleaseMcp", "HoldMcp"],
+        "the claim adoption made, then both were sent, none answered"
+    );
     assert_eq!(world.mcp_state(CURRENT), McpState::Idle, "a silent host changes nothing");
     assert!(client.is_alive());
 }

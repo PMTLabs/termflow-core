@@ -63,13 +63,22 @@ pub fn pick_bound_with<T>(
 /// A port answering `/health` with someone else's instance id is skipped without
 /// binding: `SO_REUSEADDR` would let us steal it, and stealing the API port
 /// silently reroutes the other instance's MCP tool calls into this app.
+///
+/// `reserved` ports are never bound: the MCP port a pty-host is holding for this instance is not
+/// free for the API, however the probe answers (it can time out, and `SO_REUSEADDR` would let the
+/// bind succeed over the holder).
 pub async fn bind_api_listener(
     host: [u8; 4],
     start: u16,
     span: u16,
     own_id: &str,
+    reserved: &[u16],
 ) -> Option<Picked<tokio::net::TcpListener>> {
     for port in candidates(start, span) {
+        if reserved.contains(&port) {
+            log::info!("[NET] port {port} is reserved for the held MCP port; trying the next");
+            continue;
+        }
         if probe_port_owner(port, own_id).await == PortOwner::OwnedByOther {
             log::info!("[NET] port {port} is owned by another instance; trying the next");
             continue;
@@ -571,6 +580,35 @@ mod tests {
     #[test]
     fn an_exhausted_range_reports_failure_rather_than_binding_wildly() {
         assert!(pick_bound_with(42031, 3, |_| None::<()>).is_none());
+    }
+
+    /// Two adjacent loopback ports that are free right now.
+    fn adjacent_free_ports() -> u16 {
+        for _ in 0..50 {
+            let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+            let port = first.local_addr().unwrap().port();
+            if port == u16::MAX {
+                continue;
+            }
+            if std::net::TcpListener::bind(("127.0.0.1", port + 1)).is_ok() {
+                return port;
+            }
+        }
+        panic!("no two adjacent free loopback ports");
+    }
+
+    #[tokio::test]
+    async fn api_search_skips_reserved_port() {
+        let start = adjacent_free_ports();
+
+        let without = bind_api_listener([127, 0, 0, 1], start, 2, "own", &[]).await.expect("a free port");
+        assert_eq!(without.port, start, "the contrast: unreserved, the first free port is taken");
+        drop(without);
+
+        let reserved = bind_api_listener([127, 0, 0, 1], start, 2, "own", &[start]).await.expect("the next port");
+        assert_eq!(reserved.port, start + 1, "the reserved port is skipped even though it is free");
+        let only = bind_api_listener([127, 0, 0, 1], start, 1, "own", &[start]).await;
+        assert!(only.is_none(), "and a span of only the reserved port finds nothing");
     }
 
     #[tokio::test]

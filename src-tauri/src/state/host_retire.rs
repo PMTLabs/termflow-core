@@ -60,6 +60,9 @@ pub(super) struct RetireFacts {
     pub unfinished_claims: usize,
     /// An operation holds an admission ticket on the host.
     pub ticket_in_flight: bool,
+    /// A claimed MCP holder is serving through this connection and has not been released: the
+    /// host stays until the app has taken the port back (or the holder's grace is over).
+    pub mcp_lease: bool,
     /// How long the host has been observed empty without a break.
     pub empty_for: Duration,
 }
@@ -73,6 +76,7 @@ pub(super) enum Keep {
     PaneRegistered,
     ClaimHeld,
     TicketInFlight,
+    McpLease,
     NotEmptyLongEnough,
 }
 
@@ -83,16 +87,21 @@ pub(super) enum Verdict {
 }
 
 /// Whether one observation counts towards emptiness. Only an answered listing
-/// with nothing running, no pane on the host and no claim in progress does, and
-/// not while the current host is unusable: the clock then starts over when it is
-/// back.
+/// with nothing running, no pane on the host and no claim in progress does, not
+/// while the current host is unusable, and not while a claimed MCP holder is
+/// leased: the clock then starts over when it is back, or when the lease ends.
 pub(super) fn observation_is_empty(
     sample: Sample,
     panes: usize,
     unfinished_claims: usize,
     current_usable: bool,
+    leased: bool,
 ) -> bool {
-    current_usable && matches!(sample, Sample::Answered { alive: 0 }) && panes == 0 && unfinished_claims == 0
+    current_usable
+        && !leased
+        && matches!(sample, Sample::Answered { alive: 0 })
+        && panes == 0
+        && unfinished_claims == 0
 }
 
 /// May the host be retired now? Each reason to keep it is checked on its own, so
@@ -117,6 +126,9 @@ pub(super) fn retire_decision(facts: &RetireFacts) -> Verdict {
     }
     if facts.ticket_in_flight {
         return Verdict::Keep(Keep::TicketInFlight);
+    }
+    if facts.mcp_lease {
+        return Verdict::Keep(Keep::McpLease);
     }
     if facts.empty_for < EMPTY_FOR {
         return Verdict::Keep(Keep::NotEmptyLongEnough);
@@ -225,6 +237,12 @@ fn current_usable<P: PanePort>(port: &P) -> bool {
         && port.table().admission(HostChannel::Primary) == Some(Admission::Open)
 }
 
+/// Is a claimed MCP holder serving through this connection and not yet released? The one place the
+/// registry's lease is read: the decision's fact and the emptiness clock both ask here.
+fn lease_held<P: PanePort>(port: &P, seen: &Seen) -> bool {
+    port.reclaim().lease_on(seen.channel, seen.epoch)
+}
+
 fn facts<P: PanePort>(port: &P, seen: &Seen, sample: Sample, empty_for: Duration) -> RetireFacts {
     RetireFacts {
         frozen: is_frozen(port, &seen.host),
@@ -233,6 +251,7 @@ fn facts<P: PanePort>(port: &P, seen: &Seen, sample: Sample, empty_for: Duration
         panes: port.panes_on(seen.channel).len(),
         unfinished_claims: port.table().keys().unfinished_on(seen.channel),
         ticket_in_flight: port.table().inflight(seen.channel) > 0,
+        mcp_lease: lease_held(port, seen),
         empty_for,
     }
 }
@@ -272,8 +291,9 @@ async fn look<P: PanePort>(port: &P, id: FrozenId, emptiness: &mut Emptiness) ->
     let answer = sample(port, &seen, Admission::Open).await;
     let panes = port.panes_on(seen.channel).len();
     let claims = port.table().keys().unfinished_on(seen.channel);
+    let leased = lease_held(port, &seen);
     let empty_for =
-        emptiness.observe(Instant::now(), observation_is_empty(answer, panes, claims, current_usable(port)));
+        emptiness.observe(Instant::now(), observation_is_empty(answer, panes, claims, current_usable(port), leased));
     match retire_decision(&facts(port, &seen, answer, empty_for)) {
         Verdict::Keep(why) => {
             log::debug!("[GEN] terminal host {} stays: {why:?}", seen.host.endpoint);
