@@ -120,6 +120,11 @@ pub(super) async fn gap(rig: &mut Rig, bind: &str) -> Gap {
         refusals.len()
     );
     assert_eq!(reply.status, 200);
+    // Live real-holder negative control for the exact bind-host rebind oracle.
+    assert!(
+        std::net::TcpListener::bind((bind, port)).is_err(),
+        "exact bind-host probe must detect the live holder"
+    );
     for text in [
         "restarting",
         "ago",
@@ -180,10 +185,11 @@ pub(super) async fn holder_oracles(rig: &Rig, gap: &Gap) {
     for marker in ["[MCP-HOLD]", "holder started"] {
         assert!(
             log.contains(marker),
-            "real lifecycle log must be populated: {log}"
+            "real lifecycle log must contain {marker} (raw log omitted)"
         );
     }
     assert!(!log.contains(&rig.bearer), "bearer never logged");
+    assert!(!log.contains(&rig.token), "host token never logged");
 }
 
 #[tokio::test]

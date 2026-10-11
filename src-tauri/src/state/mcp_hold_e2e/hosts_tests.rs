@@ -21,7 +21,7 @@ async fn downgrade_disarm_before_claim_stops_holder_and_preserves_shell() {
         McpClaimOutcome::Held(None)
     );
     same_shell(&client, &gap.session_key, gap.pid).await;
-    refuses(gap.port, STOP_BOUND.saturating_sub(disarmed.elapsed())).await;
+    refuses(gap.port, "127.0.0.1", disarmed + STOP_BOUND).await;
     stream
         .eof(
             STOP_BOUND
@@ -73,6 +73,12 @@ async fn accepted_pending_transaction_rollback_cannot_start_a_holder() {
     };
     let handed = handover_txn(&io, hold, McpHoldReason::Offload).await;
     assert_eq!(handed.sent(), SentState::Accepted);
+    // Negative control uses the exact loopback bind host, like this holder.
+    let control = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    assert!(
+        std::net::TcpListener::bind(("127.0.0.1", control.local_addr().unwrap().port())).is_err()
+    );
+    drop(control);
     assert_eq!(
         handed.release().await,
         (Cleanup::Released { was_holding: false }, true)
@@ -83,12 +89,23 @@ async fn accepted_pending_transaction_rollback_cannot_start_a_holder() {
     // Before reconnect (which would mask a Pending cleanup bug): monitor the entire retry window.
     let until = Instant::now() + Duration::from_millis(1200);
     while Instant::now() < until {
+        #[cfg(unix)]
         assert!(
-            tokio::net::TcpStream::connect(("127.0.0.1", p))
+            tokio::time::timeout_at(until, tokio::net::TcpStream::connect(("127.0.0.1", p)))
                 .await
+                .expect("rollback connect timed out: not evidence of refusal")
                 .is_err(),
             "rollback left a holder"
         );
+        #[cfg(windows)]
+        {
+            // Windows refusal delivery exceeds this window. Use the validated exact
+            // loopback bind instead; drop synchronously before every yield so it cannot
+            // occupy P across a holder retry interval (100 ms).
+            let listener = std::net::TcpListener::bind(("127.0.0.1", p))
+                .expect("rollback left a conflicting listener");
+            drop(listener);
+        }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     let client = rig.hosts[h].connect().await;
@@ -127,10 +144,8 @@ async fn generations(empty_holder: bool) {
     // A is CURRENT at the handover. B does not exist yet: choose_holder is not hand-filtered.
     let gap = gap(&mut rig, "127.0.0.1").await;
     if empty_holder {
-        // Kill the owned shell via its input, without adopting (which would spend the holder).
-        // A's shell was closed before relaunch using an owned shell process handle.
-        owned_shell_exit(gap.pid);
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        // End only the fixture's returned shell PID, without adopting/spending the holder.
+        owned_shell_exit(gap.pid).await;
         assert!(gap
             .agent
             .call()
@@ -166,7 +181,18 @@ async fn generations(empty_holder: bool) {
             .unwrap(),
         McpClaimOutcome::Held(None)
     );
-    if !empty_holder {
+    if empty_holder {
+        // Before ReleaseMcp or any Close: this must really be a shell-less holder.
+        assert!(!a.list_sessions().await.unwrap().iter().any(|s| s.alive));
+        assert!(port
+            .0
+            .listings
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(channel, _)| matches!(channel, HostChannel::Frozen(_)))
+            .all(|(_, sessions)| !sessions.iter().any(|s| s.alive)));
+    } else {
         same_shell(&a, &gap.session_key, gap.pid).await;
     }
     assert_eq!(start_mcp(prepared, rig.api_port, &io).await, Some(gap.port));
@@ -199,21 +225,43 @@ async fn empty_current_does_not_hide_live_frozen_holder() {
 }
 
 // This PID came from our owned host's Spawned reply. Never accepts arbitrary/user PIDs.
-fn owned_shell_exit(pid: u32) {
+async fn owned_shell_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(3);
     #[cfg(windows)]
     unsafe {
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_TERMINATE,
         };
-        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        // SYNCHRONIZE allows a PID-specific exit check on this owned process handle.
+        let handle = OpenProcess(PROCESS_TERMINATE | 0x0010_0000, 0, pid);
         assert!(!handle.is_null());
-        assert_ne!(TerminateProcess(handle, 0), 0);
+        let terminated = TerminateProcess(handle, 0);
+        let exited = WaitForSingleObject(
+            handle,
+            deadline
+                .saturating_duration_since(Instant::now())
+                .as_millis() as u32,
+        );
         CloseHandle(handle);
+        assert_ne!(terminated, 0);
+        assert_eq!(exited, 0, "owned shell must exit within bound");
     }
     #[cfg(unix)]
     unsafe {
-        assert_eq!(libc::kill(pid as libc::pid_t, libc::SIGTERM), 0);
+        // Interactive /bin/sh may ignore SIGTERM; SIGKILL cannot be ignored.
+        assert_eq!(libc::kill(pid as libc::pid_t, libc::SIGKILL), 0);
+        loop {
+            if libc::kill(pid as libc::pid_t, 0) == -1 {
+                assert_eq!(
+                    std::io::Error::last_os_error().raw_os_error(),
+                    Some(libc::ESRCH)
+                );
+                break;
+            }
+            assert!(Instant::now() < deadline, "owned shell PID still exists");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
@@ -243,22 +291,33 @@ async fn late_frozen_claim_is_released_by_registry_finalizer() {
         "same holder is live at NoClaim"
     );
     port.0.late_gate.add_permits(1);
-    io.completed().await;
-    let (claimed_at, held) = port
-        .0
-        .claims
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|(_, held)| held.is_some())
-        .cloned()
-        .expect("late non-None claim actually arrived on wire");
+    // Probe as soon as the wire ACK is observed, not after unrelated survivor work.
+    let observation_deadline = Instant::now() + Duration::from_secs(20);
+    let (claimed_at, held) = loop {
+        let claim = port
+            .0
+            .claims
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, held)| held.is_some())
+            .cloned();
+        if let Some(claim) = claim {
+            break claim;
+        }
+        assert!(
+            Instant::now() < observation_deadline,
+            "late non-None claim missing"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    };
     assert_eq!(held.unwrap().port, gap.port);
-    refuses(gap.port, STOP_BOUND.saturating_sub(claimed_at.elapsed())).await;
+    refuses(gap.port, "127.0.0.1", claimed_at + STOP_BOUND).await;
     eprintln!(
-        "MEASURE late-claim ack-to-refusal={:?}",
+        "MEASURE late-claim ack-to-rebind={:?}",
         claimed_at.elapsed()
     );
+    io.completed().await;
     drop(prepared);
     port.close().await;
 }

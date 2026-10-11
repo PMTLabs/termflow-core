@@ -401,14 +401,18 @@ pub(crate) async fn connect_only(
     )
     .await;
     #[cfg(unix)]
-    let outcome = open_with_grace(
-        || tokio::net::UnixStream::connect(endpoint),
-        live_host_probe(Some(pid)),
-        OPEN_GRACE_SHORT,
-        OPEN_GRACE_LONG,
-        OPEN_GRACE_STEP,
+    let outcome = tokio::time::timeout(
+        OPEN_GRACE_LONG + OPEN_GRACE_STEP,
+        open_with_grace(
+            || tokio::net::UnixStream::connect(endpoint),
+            live_host_probe(Some(pid)),
+            OPEN_GRACE_SHORT,
+            OPEN_GRACE_LONG,
+            OPEN_GRACE_STEP,
+        ),
     )
-    .await;
+    .await
+    .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "owned Unix socket open timed out"))?;
     let OpenOutcome::Connected(stream) = outcome else {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotConnected,

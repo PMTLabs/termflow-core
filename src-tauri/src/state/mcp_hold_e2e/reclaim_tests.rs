@@ -100,6 +100,8 @@ async fn foreign_identity_is_stopped_and_normal_search_runs() {
     let prepared = prepare_reclaim(&io, io.inputs(rig.config(gap.configured, "127.0.0.1"))).await;
     assert_eq!(prepared.decision(), &Decision::Use(gap.port));
     io.completed().await;
+    // Keep the configured/search port distinct from the forced held port.
+    // The held provenance remains unchanged; start_mcp's fallback uses this configuration.
     let result = start_mcp(prepared, rig.api_port, &io).await.unwrap();
     assert_eq!(
         io.stops.load(Ordering::SeqCst),
@@ -110,6 +112,23 @@ async fn foreign_identity_is_stopped_and_normal_search_runs() {
         io.spawns.load(Ordering::SeqCst),
         2,
         "identity failure must run normal search"
+    );
+    assert_eq!(
+        io.searches.lock().unwrap().as_slice(),
+        &[Some(result)],
+        "normal search result must be returned"
+    );
+    assert_ne!(
+        gap.configured, gap.port,
+        "fixture search and held ports must differ"
+    );
+    assert_eq!(
+        result, gap.configured,
+        "search selected the configured port"
+    );
+    assert_ne!(
+        result, gap.port,
+        "fallback must not simply retry the held port"
     );
     assert_eq!(health(result).await.unwrap()["instanceId"], io.own_id);
     io.stop();
@@ -134,7 +153,7 @@ async fn changed(change_bind: bool) {
     let prepared = prepare_reclaim(&io, io.inputs(cfg)).await;
     assert!(matches!(prepared.decision(), Decision::Changed(_)));
     assert!(prepared.reserved().is_empty());
-    refuses(gap.port, STOP_BOUND).await;
+    refuses(gap.port, "127.0.0.1", Instant::now() + STOP_BOUND).await;
     io.completed().await;
     assert_eq!(
         start_mcp(prepared, rig.api_port, &io).await,

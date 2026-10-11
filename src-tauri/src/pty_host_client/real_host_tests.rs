@@ -64,10 +64,10 @@ async fn raw_identity_connection(host: &RealHost) -> tokio::net::windows::named_
 
 #[cfg(unix)]
 async fn raw_identity_connection(host: &RealHost) -> tokio::net::UnixStream {
-    match open_with_grace(
+    match tokio::time::timeout(OPEN_GRACE_LONG + OPEN_GRACE_STEP, open_with_grace(
         || tokio::net::UnixStream::connect(&host.endpoint),
         live_host_probe(Some(host.child.id())), OPEN_GRACE_SHORT, OPEN_GRACE_LONG, OPEN_GRACE_STEP,
-    ).await {
+    )).await.expect("bounded owned Unix identity connection") {
         OpenOutcome::Connected(stream) => stream,
         _ => panic!("the isolated host did not open its endpoint"),
     }

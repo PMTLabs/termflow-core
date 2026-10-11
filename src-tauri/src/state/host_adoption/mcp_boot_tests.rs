@@ -233,6 +233,27 @@ async fn use_holds_until_api_bound_then_releases_and_spawns_held_port() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn successful_release_ack_gates_sidecar_spawn() {
+    let (world, port, io) = world_with_holder(holding_p());
+    let prepared = prepare_reclaim(&io, inputs(&port, cfg())).await;
+    assert_eq!(prepared.decision(), &Decision::Use(P));
+    let gate = Arc::new(EventGate::default());
+    world.gate_release_acks(HOLDER, &gate);
+    let startup = start_mcp(prepared, API, &io);
+    tokio::pin!(startup);
+    assert!(futures::poll!(&mut startup).is_pending());
+    gate.wait_reached(1).await;
+    settle_tasks().await;
+    assert!(futures::poll!(&mut startup).is_pending());
+    assert!(!io.names().iter().any(|name| name.starts_with("spawn:")),
+        "no sidecar spawn before successful release ACK: {:?}", io.names());
+    assert_eq!(releases(&world, HOLDER), [HOST_TOKEN]);
+    gate.release();
+    assert_eq!(startup.await, Some(P));
+    assert!(io.names().contains(&format!("spawn:{P}")), "spawn after ACK");
+}
+
+#[tokio::test(start_paused = true)]
 async fn fallback_launch_reuses_held_port() {
     let spec = HostSpec { mcp_held: Some(held_with(PICK, P, "127.0.0.1")), ..holding_p() };
     let (_world, port, io) = world_with_holder(spec);

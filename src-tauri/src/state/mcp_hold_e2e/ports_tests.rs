@@ -275,6 +275,7 @@ pub(super) struct E2eBootIo {
     pub foreign_once: AtomicBool,
     pub stops: AtomicUsize,
     pub spawns: AtomicUsize,
+    pub searches: Mutex<Vec<Option<u16>>>,
 }
 impl E2eBootIo {
     pub fn new(rig: &Rig, port: RealPort) -> Self {
@@ -288,6 +289,7 @@ impl E2eBootIo {
             foreign_once: AtomicBool::new(false),
             stops: AtomicUsize::new(0),
             spawns: AtomicUsize::new(0),
+            searches: Mutex::new(vec![]),
         }
     }
     pub fn inputs(&self, cfg: NetworkConfig) -> BootInputs {
@@ -318,13 +320,15 @@ impl McpBootIo for E2eBootIo {
         !self.port.barrier().any_in_flight()
     }
     async fn pick_mcp(&self, cfg: &NetworkConfig, own_id: &str, api_port: u16) -> Option<u16> {
-        crate::net_ports::pick_mcp_port(
+        let picked = crate::net_ports::pick_mcp_port(
             cfg.mcp_port,
             crate::net_ports::DEFAULT_SPAN,
             own_id,
             &[api_port],
         )
-        .await
+        .await;
+        self.searches.lock().unwrap().push(picked);
+        picked
     }
     async fn spawn(&self, cfg: &NetworkConfig, port: u16) -> bool {
         self.spawns.fetch_add(1, Ordering::SeqCst);

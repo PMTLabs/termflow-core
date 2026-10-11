@@ -161,10 +161,7 @@ impl Sidecar {
                 }
             }
             if self.child.0.try_wait().unwrap().is_some() {
-                return Err(
-                    std::fs::read_to_string(self._dir.path().join("sidecar.log"))
-                        .unwrap_or_default(),
-                );
+                return Err("owned sidecar exited before listening (raw log omitted)".into());
             }
             if Instant::now() >= end {
                 return Err("sidecar listening timeout / foreign identity".into());
@@ -194,19 +191,22 @@ pub(super) async fn health(port: u16) -> Option<Value> {
         .await
         .ok()
 }
-pub(super) async fn refuses(port: u16, within: Duration) {
-    let end = Instant::now() + within;
+pub(super) async fn refuses(port: u16, bind: &str, deadline: Instant) {
     loop {
-        // Windows may delay ECONNREFUSED beyond STOP_BOUND. An exclusive same-address
-        // rebind is a stronger oracle than a connection timeout: no listener still owns P.
-        if let Ok(listener) = std::net::TcpListener::bind(("0.0.0.0", port)) {
+        assert!(
+            Instant::now() < deadline,
+            "port {port} rebind deadline expired"
+        );
+        // Windows may delay ECONNREFUSED beyond STOP_BOUND. Rebind the exact holder
+        // bind host: wildcard and loopback binds can coexist on Windows.
+        if let Ok(listener) = std::net::TcpListener::bind((bind, port)) {
             drop(listener);
+            assert!(
+                Instant::now() < deadline,
+                "port {port} rebound after stop bound"
+            );
             return;
         }
-        assert!(
-            Instant::now() < end,
-            "port {port} still accepts past stop bound"
-        );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }

@@ -31,9 +31,9 @@ function closeQuietly(server: Server): void {
  * mid-release). Each attempt is a fresh `http.createServer`: a server whose listen failed cannot be
  * reused. Only `EADDRINUSE` is retried; any other error rejects at once. The helper owns every
  * attempt until `ready` hands one over.
- * Bun 1.3.14 reports non-local addresses as EADDRINUSE too, with the same errno/syscall as
- * occupied ports. There is no reliable distinguishing field: these also wait out the ~5s
- * production retry limit. See the real-runtime measurements in test/listen.test.ts (plan 057).
+ * Measured on Windows with Bun 1.3.14: non-local addresses report EADDRINUSE with the same
+ * fields as occupied ports, so these also wait out the ~5s production retry limit.
+ * Linux is not yet measured. See test/listen.test.ts for the real-runtime measurements (plan 057).
  */
 export function startListening(app: RequestListener, port: number, host: string, options: ListenOptions): Listening {
     const deadline = Date.now() + options.limitMs;
