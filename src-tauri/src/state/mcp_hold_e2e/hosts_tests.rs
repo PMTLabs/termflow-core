@@ -97,10 +97,10 @@ async fn accepted_pending_transaction_rollback_cannot_start_a_holder() {
         #[cfg(windows)]
         {
             // Windows refusal delivery exceeds this window. Use the validated exact
-            // loopback bind instead, dropped before every yield so it never spans a holder
-            // retry interval (100 ms). A holder bind landing inside that instant is only
-            // delayed to its next retry; the omitted-release mutation shows the probe still
-            // catches a real would-be holder, which is evidence, not a scheduling guarantee.
+            // loopback bind instead, dropped synchronously before the next await to minimise
+            // interference; the host retries in another process, so a retry can still
+            // overlap the probe. The omitted-release mutation caught a would-be holder in the
+            // measured run, which is evidence, not a guarantee under every schedule.
             let listener = std::net::TcpListener::bind(("127.0.0.1", p))
                 .expect("rollback left a conflicting listener");
             drop(listener);
