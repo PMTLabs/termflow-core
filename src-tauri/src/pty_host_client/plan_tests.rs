@@ -1,4 +1,4 @@
-use super::{host_build_disposition, plan_connection, ConnectPlan, HostBuildDisposition, HostConnectionOrigin, HostRetention};
+use super::{adopted_host_build_warning, host_build_disposition,plan_connection, ConnectPlan, HostBuildDisposition, HostConnectionOrigin, HostRetention};
 use termflow_pty_protocol::{HostRecord, LifecycleContract, RetentionPolicy};
 
 fn record(proto_min: u16, proto_max: u16) -> HostRecord {
@@ -148,6 +148,23 @@ fn stale_host_is_adopted_but_reports_its_observed_digest() {
 #[test]
 fn old_record_without_build_id_is_explicitly_unknown() {
     assert_eq!(host_build_disposition(Some(&record(1, 1)), Some("new")), HostBuildDisposition::Unknown);
+}
+
+#[test]
+fn only_an_adopted_host_gets_the_build_warning() {
+    // Fresh start: no host, no record, so the disposition is Unknown, but we spawned it.
+    assert_eq!(adopted_host_build_warning(HostConnectionOrigin::SpawnedHere, None, Some("new")), None);
+    let mut old = record(1, 1);
+    old.build_id = Some("old-digest".into());
+    assert_eq!(adopted_host_build_warning(HostConnectionOrigin::SpawnedHere, Some(&old), Some("new")), None);
+
+    let stale = adopted_host_build_warning(HostConnectionOrigin::Adopted, Some(&old), Some("new")).unwrap();
+    assert!(stale.contains("stale pty-host build old-digest (expected new)"), "{stale}");
+    let legacy = adopted_host_build_warning(HostConnectionOrigin::Adopted, None, Some("new")).unwrap();
+    assert!(legacy.contains("no build identity"), "{legacy}");
+    let mut current = record(1, 1);
+    current.build_id = Some("new".into());
+    assert_eq!(adopted_host_build_warning(HostConnectionOrigin::Adopted, Some(&current), Some("new")), None);
 }
 
 #[test]
