@@ -6,7 +6,7 @@
 //! Each negative case edits the real source text, asserts the edit took effect, and requires the
 //! census to fail.
 
-use super::live_call_census::{find_calls, is_return, word_uses, Block, Kind, Src, Sub};
+use super::live_call_census::{find_calls, is_return, require_live_call, word_uses, Block, Kind, Src, Sub};
 use super::mcp_hold_census_tests::{mutate, mutate_in, norm};
 
 const UPDATE_RS: &str = include_str!("../commands/update.rs");
@@ -313,22 +313,21 @@ fn check_handover_wiring(text: &str) -> Result<(), String> {
     let txn = src.try_function("pub(crate) async fn handover_txn<P: HandoverPort>(")?;
     let in_txn = txn.open..txn.close + 1;
     let first_await = src.masked[in_txn.clone()].find(".await").map(|at| in_txn.start + at).ok_or("handover_txn never awaits")?;
-    let built = word_uses(&src.masked, in_txn.clone(), "HandedOver")
+    // The bundle is constructed once, where it runs (not in a factory closure), before any await.
+    let constructions: Vec<usize> = word_uses(&src.masked, in_txn.clone(), "HandedOver")
         .into_iter()
-        .find(|at| src.masked[at + "HandedOver".len()..].trim_start().starts_with('{'))
-        .ok_or("handover_txn never builds the bundle")?;
+        .filter(|at| src.masked[at + "HandedOver".len()..].trim_start().starts_with('{'))
+        .collect();
+    let built = require_live_call(&txn, &constructions, "the `HandedOver {` construction")?;
     if built > first_await {
         return Err("handover_txn builds the bundle after its first await".into());
     }
     let stored = top_position(&src, &txn, "parts.op=Some(guard);").ok_or("the guard is not stored in the bundle")?;
-    let read = txn
-        .live_position(|s| src.masked[s.span.clone()].contains("read_inputs("))
-        .ok_or("handover_txn never reads the inputs where it runs")?;
-    if read <= stored {
+    // The inputs are read once, where it runs, after the guard is stored.
+    let reads: Vec<usize> = find_calls(&src.masked[in_txn.clone()], "read_inputs(").into_iter().map(|at| in_txn.start + at).collect();
+    let read = require_live_call(&txn, &reads, "`read_inputs(`")?;
+    if txn.top_index(read).is_none_or(|index| index <= stored) {
         return Err("the inputs are read before the guard is stored".into());
-    }
-    if find_calls(&src.masked[in_txn], "read_inputs(").len() != 1 {
-        return Err("the inputs must be read exactly once".into());
     }
     Ok(())
 }
@@ -394,6 +393,18 @@ fn the_wiring_census_kills_each_planted_mutation() {
         (
             "a return between the guard and the read",
             mutate(HANDOVER_RS, "    let inputs = port.read_inputs();", "    return handed;\n    let inputs = port.read_inputs();"),
+        ),
+        (
+            "the read only inside an uncalled closure",
+            mutate(HANDOVER_RS, "    let inputs = port.read_inputs();", "    let inputs = {\n        let _reader = || port.read_inputs();\n        HandoverInputs { launch: None, configured_port: 0 }\n    };"),
+        ),
+        (
+            "the bundle built by a factory closure called after the lock await",
+            mutate(
+                HANDOVER_RS,
+                "    let mut handed = HandedOver {\n        parts: Some(Parts { hold, op: None, target: None, sent: SentState::None, host_token: port.host_token() }),\n    };\n    let lock = port.network_op_lock();\n    let Ok(guard) = tokio::time::timeout(LOCK_WAIT, lock.lock_owned()).await else {\n        log::warn!(\"[MCP-HOLD] a network operation is in progress; no hold sent, the exit continues\");\n        return handed;\n    };",
+                "    let make = move || HandedOver {\n        parts: Some(Parts { hold, op: None, target: None, sent: SentState::None, host_token: port.host_token() }),\n    };\n    let lock = port.network_op_lock();\n    let Ok(guard) = tokio::time::timeout(LOCK_WAIT, lock.lock_owned()).await else {\n        return make();\n    };\n    let mut handed = make();",
+            ),
         ),
     ];
     for (name, source) in cases {

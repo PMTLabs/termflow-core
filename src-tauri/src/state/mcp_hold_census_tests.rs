@@ -3,7 +3,7 @@
 //! mutations it has to kill. A negative case edits the real source text, asserts the edit took
 //! effect, and requires the census to fail.
 
-use super::live_call_census::{find_calls, require_top_statement, top_statement_starting, Src};
+use super::live_call_census::{find_calls, require_live_call, require_top_statement, top_statement_starting, Src};
 
 const HOST_PORT: &str = include_str!("host_port.rs");
 const CLIENT: &str = include_str!("../pty_host_client.rs");
@@ -72,15 +72,12 @@ fn check_record_reader(client: &str) -> Result<(), String> {
         return Err(format!("read_advertised_record's body changed: {body}"));
     }
     let spawned = src.try_function("pub fn spawned_host_advertises(")?;
-    // The read must run: a live statement whose own text (not a closure inside it) makes the call.
-    let reads = spawned.live_position(|s| {
-        find_calls(&src.masked[s.span.clone()], "read_advertised_record()")
-            .iter()
-            .any(|at| spawned.constructs_at(s.span.start + at).is_empty())
-    });
-    if reads.is_none() {
-        return Err("spawned_host_advertises no longer reads the record through read_advertised_record".into());
-    }
+    // The read must run: one live call, not one inside a closure, branch or after a return.
+    let calls: Vec<usize> = find_calls(&src.masked[spawned.open..spawned.close], "read_advertised_record()")
+        .into_iter()
+        .map(|at| spawned.open + at)
+        .collect();
+    require_live_call(&spawned, &calls, "spawned_host_advertises' read_advertised_record()")?;
     let cursor = src.try_function("pub fn spawned_host_inherits_cursor(")?;
     let cursor_body = src.norm(&(cursor.open..cursor.close + 1));
     if cursor_body != "{spawned_host_advertises(server_pid,termflow_pty_protocol::CAP_INHERIT_CURSOR)}" {

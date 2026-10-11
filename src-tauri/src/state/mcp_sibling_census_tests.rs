@@ -7,7 +7,7 @@
 //! - the handover is called from nowhere but the three exit paths (so no sibling-facing handler,
 //!   `sibling_coord` or API route can start one).
 
-use super::live_call_census::{find_calls, word_uses, Src};
+use super::live_call_census::{find_calls, require_live_call, word_uses, Src};
 use super::mcp_hold_census_tests::mutate;
 
 const LIFECYCLE_RS: &str = include_str!("host_lifecycle.rs");
@@ -30,11 +30,11 @@ fn check_sibling_arm(text: &str) -> Result<(), String> {
     // The sibling's arm: one `arm_detach`, with purpose `None`, and the hold is kept for the disarm.
     let arm = src.try_function(SIBLING_ARM)?;
     let region = arm.open..arm.close + 1;
-    let arms = find_calls(&src.masked[region.clone()], "hold.arm_detach(");
-    if arms.len() != 1 {
-        return Err(format!("`sibling_arm` must call `hold.arm_detach(` exactly once, found {}", arms.len()));
-    }
-    let open = region.start + arms[0] + "hold.arm_detach".len();
+    // One live call: the `if let Err(..) = ..` condition runs; a branch or closure around it does not.
+    let arms: Vec<usize> =
+        find_calls(&src.masked[region.clone()], "hold.arm_detach(").into_iter().map(|at| region.start + at).collect();
+    let armed_at = require_live_call(&arm, &arms, "`sibling_arm`'s `hold.arm_detach(`")?;
+    let open = armed_at + "hold.arm_detach".len();
     let close = super::live_call_census::find_close(&src, open);
     let args: String = src.code[open + 1..close].chars().filter(|c| !c.is_whitespace()).collect();
     if args != "timeout_secs,&port.arm_token(),None" {
@@ -142,6 +142,22 @@ fn the_sibling_census_kills_each_planted_mutation() {
         (
             "the sibling arm returns before it keeps the hold",
             mutate(LIFECYCLE_RS, "    slot.keep(arm, hold);\n", "    return SiblingArm::Armed(armed);\n    slot.keep(arm, hold);\n"),
+        ),
+        (
+            "the arm call wrapped in `if false`",
+            mutate(
+                LIFECYCLE_RS,
+                "    if let Err(e) = hold.arm_detach(timeout_secs, &port.arm_token(), None).await {\n        hold.release().await;\n        return SiblingArm::Failed(e);\n    }\n",
+                "    if false {\n        if let Err(e) = hold.arm_detach(timeout_secs, &port.arm_token(), None).await {\n            hold.release().await;\n            return SiblingArm::Failed(e);\n        }\n    }\n",
+            ),
+        ),
+        (
+            "the arm call only inside an uncalled closure",
+            mutate(
+                LIFECYCLE_RS,
+                "    if let Err(e) = hold.arm_detach(timeout_secs, &port.arm_token(), None).await {",
+                "    let _arm = || hold.arm_detach(timeout_secs, &port.arm_token(), None);\n    if let Err(e) = Ok::<(), String>(()) {",
+            ),
         ),
         (
             "a handover sent from the sibling disarm",

@@ -546,8 +546,10 @@ impl Src {
                 }
             };
         }
-        // No keyword introduces it: a bare block has no head, a struct literal is named by a path.
-        let kind = if head.trim().is_empty() { Kind::Plain } else { Kind::Literal };
+        // No keyword introduces it: a struct literal is named by a path (`Foo {`, `a::Foo {`); a
+        // bare block, or a block expression (`let x = {`, `f({`), has no name before it.
+        let named = head.trim_end().ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '>');
+        let kind = if named { Kind::Literal } else { Kind::Plain };
         let block = self.block(kind, open);
         let close = block.close;
         (Sub::Block(block), close)
@@ -871,6 +873,27 @@ pub(crate) fn require_top_statement(src: &Src, body: &Block, expected: &str) -> 
     }
 }
 
+/// Offsets of every `.name(` method call in `src.masked[range]` (the offset of the `.`).
+pub(crate) fn method_calls(src: &Src, range: Range<usize>, name: &str) -> Vec<usize> {
+    let needle = format!(".{name}(");
+    src.masked[range.clone()].match_indices(&needle).map(|(at, _)| range.start + at).collect()
+}
+
+/// The one call among `calls` (offsets of every occurrence in the function `body`), required to
+/// run: no conditional construct (branch, loop, closure, async block, match arm, or an earlier
+/// `return` of any enclosing block) between the body and the call itself. The one way a census
+/// finds a positive call subject: it counts calls, not the statements that contain them, and asks
+/// the call's own offset, not its owning statement.
+pub(crate) fn require_live_call(body: &Block, calls: &[usize], what: &str) -> Result<usize, String> {
+    let [at] = calls[..] else {
+        return Err(format!("{what} must be called exactly once, found {}", calls.len()));
+    };
+    if !body.is_unconditional(&(at..at)) {
+        return Err(format!("{what} does not run (it is conditional, in a closure, or after a return)"));
+    }
+    Ok(at)
+}
+
 /// Index of the first top-level statement of `body` that starts with `prefix` (whitespace-free).
 pub(crate) fn top_statement_starting(src: &Src, body: &Block, prefix: &str) -> Option<usize> {
     body.stmts.iter().position(|s| src.norm(&s.span).starts_with(prefix))
@@ -971,6 +994,21 @@ mod scanner_tests {
         assert!(body.is_unconditional(&at("let p = Pair { x: 1 };")));
         assert!(!body.is_unconditional(&at("in_if();")));
         assert!(!body.is_unconditional(&at("in_closure();")));
+    }
+
+    #[test]
+    fn a_block_expression_is_a_block_not_a_struct_literal() {
+        let text = "fn f() {
+            let v = { let _g = || hidden(); in_value() };
+            g({ in_arg(); });
+            let p = Pair { x: hidden_field() };
+        }";
+        let (src, body) = body_of(text, "fn f(");
+        let at = |needle: &str| src.masked.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        assert_eq!(body.constructs_at(at("hidden()")), [Kind::Plain, Kind::Closure]);
+        assert!(body.is_unconditional(&(at("in_value()")..at("in_value()"))));
+        assert_eq!(body.constructs_at(at("in_arg();")), [Kind::Plain]);
+        assert_eq!(body.constructs_at(at("hidden_field()")), [Kind::Literal]);
     }
 
     #[test]

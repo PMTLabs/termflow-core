@@ -139,6 +139,22 @@ fn function(m: &str, header: &str) -> Result<(usize, usize), String> {
     Ok((open, matching(m, open)))
 }
 
+/// Whether the code at `at` runs whenever the block opened at `open` runs: it is a statement of that
+/// block itself (at its depth, and starting a statement, not the body of a brace-less `if`), and no
+/// statement of the block before it leaves (`return`, `panic!`, a process exit). The one
+/// reachability rule for every positive subject here; a nested subject is checked level by level.
+fn live_in(m: &str, open: usize, at: usize) -> bool {
+    let direct = |p: usize| depth_in(m, open, p) == 0 && m[..p].trim_end().ends_with([';', '{', '}']);
+    let leaves = ["return", "panic!", "std::process::exit(", "process::exit("].iter().any(|word| {
+        occurrences(&m[open..at], word).into_iter().map(|p| open + p).any(|p| {
+            // `return` must be the keyword, not the start of `returned`; the others end in `!`/`(`.
+            let whole = *word != "return" || !m[p + word.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_');
+            whole && direct(p)
+        })
+    });
+    direct(at) && !leaves
+}
+
 fn check(main_rs: &str, dial_rs: &str) -> Result<(), String> {
     let main_rs = main_rs.replace("\r\n", "\n");
     let m = mask(&main_rs, true);
@@ -153,10 +169,11 @@ fn check(main_rs: &str, dial_rs: &str) -> Result<(), String> {
         return Err(format!("`main` must call `parse_dial_args()` exactly once, found {}", calls.len()));
     }
     let call = calls[0];
-    if depth_in(&m, open, call) != 0 {
-        return Err("the dial-out check is not a top-level statement of `main`".into());
-    }
     let head_start = m[..call].rfind([';', '{', '}']).map_or(0, |p| p + 1);
+    let head_at = head_start + (m[head_start..].len() - m[head_start..].trim_start().len());
+    if !live_in(&m, open, head_at) {
+        return Err("the dial-out check is not a live top-level statement of `main`".into());
+    }
     let block_open = call + m[call..].find('{').ok_or("the dial-out branch has no block")?;
     let head = norm(&m[head_start..block_open]);
     if head != "ifletSome(dial_args)=parse_dial_args()" {
@@ -166,21 +183,20 @@ fn check(main_rs: &str, dial_rs: &str) -> Result<(), String> {
     if m[block_close + 1..].trim_start().starts_with("else") {
         return Err("the dial-out branch has an `else`".into());
     }
-    // A statement of the branch's own block: at its depth, and starting a statement (not the body
-    // of a brace-less `if`).
-    let starts_statement = |at: usize| m[..at].trim_end().ends_with([';', '{', '}']);
-    let run = occurrences(&m[block_open..block_close], "run_dial_out_mode(dial_args).await;")
+    // The mode runs whenever the branch is taken, and then the branch returns.
+    let runs: Vec<usize> = occurrences(&m[block_open..block_close], "run_dial_out_mode(dial_args).await;")
         .into_iter()
         .map(|at| block_open + at)
-        .find(|&at| depth_in(&m, block_open, at) == 0 && starts_statement(at))
-        .ok_or("the dial-out branch does not run the mode unconditionally")?;
-    let ret = occurrences(&m[block_open..block_close], "return;")
-        .into_iter()
-        .map(|at| block_open + at)
-        .find(|&at| depth_in(&m, block_open, at) == 0 && starts_statement(at))
-        .ok_or("the dial-out branch does not return unconditionally")?;
-    if ret < run {
-        return Err("the dial-out branch returns before it runs the mode".into());
+        .collect();
+    let [run] = runs[..] else {
+        return Err(format!("the dial-out branch must run the mode exactly once, found {}", runs.len()));
+    };
+    if !live_in(&m, block_open, run) {
+        return Err("the dial-out branch does not run the mode unconditionally".into());
+    }
+    let returns = occurrences(&m[run..block_close], "return;").into_iter().map(|at| run + at);
+    if !returns.into_iter().any(|at| depth_in(&m, block_open, at) == 0 && m[..at].trim_end().ends_with([';', '{', '}'])) {
+        return Err("the dial-out branch does not return unconditionally after it runs the mode".into());
     }
 
     // 2. Everything that publishes the record comes after the branch (and exists: the census must
@@ -258,6 +274,10 @@ fn the_dial_out_census_kills_each_planted_mutation() {
         ("the mode publishing the record", mutate(MAIN_RS, "    let endpoint = transport::Endpoint(args.connect_pipe);\n", "    let endpoint = transport::Endpoint(args.connect_pipe);\n    let _ = std::env::var(\"TERMFLOW_PTY_RECORD\");\n")),
         ("the non-Windows mode publishing the record", mutate(MAIN_RS, "async fn run_dial_out_mode(_args: DialArgs) {\n", "async fn run_dial_out_mode(_args: DialArgs) {\n    let _ = host_capabilities(true);\n")),
         ("the record marker renamed away", mutate(MAIN_RS, "termflow_pty_protocol::write_record(&path, &rec)", "termflow_pty_protocol::publish_record(&path, &rec)")),
+        ("a return in main before the branch", mutate(MAIN_RS, "    if let Some(dial_args) = parse_dial_args() {", "    return;\n    if let Some(dial_args) = parse_dial_args() {")),
+        ("a process exit in main before the branch", mutate(MAIN_RS, "    if let Some(dial_args) = parse_dial_args() {", "    std::process::exit(0);\n    if let Some(dial_args) = parse_dial_args() {")),
+        ("the branch under a brace-less condition", mutate(MAIN_RS, "    if let Some(dial_args) = parse_dial_args() {", "    if cfg!(not(test)) if let Some(dial_args) = parse_dial_args() {")),
+        ("the mode run twice, once dead", mutate(MAIN_RS, "        run_dial_out_mode(dial_args).await;", "        if false { run_dial_out_mode(dial_args).await; }\n        run_dial_out_mode(dial_args).await;")),
     ];
     for (name, main_rs) in main_cases {
         let verdict = check(&main_rs, DIAL_RS);

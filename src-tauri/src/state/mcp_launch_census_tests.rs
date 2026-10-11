@@ -3,7 +3,9 @@
 //! its row of the execution-context table requires (setup before the spawn; the wrapper after it;
 //! install and shutdown in their match arms), and kills the planted mutations.
 
-use super::live_call_census::{chain, find_calls, require_top_statement, word_uses, Src, Sub};
+use super::live_call_census::{
+    chain, find_calls, method_calls, require_live_call, require_top_statement, word_uses, Src, Sub,
+};
 use super::mcp_hold_census_tests::{mutate, mutate_in, norm, production_sources};
 
 const SIDECAR: &str = include_str!("../mcp_sidecar.rs");
@@ -18,8 +20,16 @@ const SIDECAR_LOOP_SRC: &str = "for (k, v) in env {
         sidecar_command = sidecar_command.env(k, v);
     }";
 const LET_PROCESS: &str = "let process = McpProcess { handle, launch };";
+const LET_HANDLE_SIDECAR: &str = "let handle = McpProcessHandle::Sidecar { child, terminated: terminated_rx, };";
+const LET_HANDLE_LEGACY: &str = "let handle = McpProcessHandle::Legacy(child);";
 const SHUTDOWN_PROCESS: &str = "crate::shutdown_mcp_handle(process);";
 const INSTALL_PROCESS: &str = "slot.install_if_current(generation, process)";
+const SIDECAR_SPAWN_CALL: &str = "sidecar_command.spawn().map_err(|e| e.to_string())?";
+const SIDECAR_SPAWN: &str = "let (mut rx, child) = sidecar_command.spawn().map_err(|e| e.to_string())?;";
+const LEGACY_SPAWN: &str = "let child = cmd.spawn().map_err(|e| e.to_string())?;";
+/// A command built afresh, without the launch environment.
+const FRESH_SIDECAR: &str = "app_handle.shell().sidecar(\"termflow-mcp-server\").map_err(|e| e.to_string())?";
+const FRESH_LEGACY: &str = "std::process::Command::new(\"node\").arg(&mcp_path)";
 const FORBIDDEN_ENV: [&str; 4] = ["MCP_PORT", "MCP_HOST", "AUTO_TERMINAL_TOKEN", "AUTO_TERMINAL_API_TOKEN"];
 
 /// One spawn path builds its launch record and its environment from one `mcp_launch_env` call,
@@ -40,16 +50,26 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
     }
     // Setup: unconditional, before the spawn.
     let let_idx = require_top_statement(&src, &body, LET_LAUNCH)?;
-    let spawns: Vec<usize> =
-        (0..body.stmts.len()).filter(|i| src.masked[at(*i).clone()].contains(".spawn(")).collect();
-    let [spawn_idx] = spawns[..] else {
-        return Err(format!("expected one top-level spawn statement, found {}", spawns.len()));
-    };
+    // The spawn is one live call, on the very command the environment is applied to, and its
+    // child is bound by the statement that makes it.
+    let (receiver, spawn_head) = if legacy { ("cmd", "letchild=") } else { ("sidecar_command", "let(mutrx,child)=") };
+    let spawn_at = require_live_call(&body, &method_calls(&src, whole.clone(), "spawn"), "`.spawn(`")?;
+    let spawn_idx = body.top_index(spawn_at).ok_or("the spawn is outside every statement")?;
+    let spawned = src.masked[..spawn_at].trim_end();
+    let receiver_ok = spawned.strip_suffix(receiver).is_some_and(|rest| {
+        !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_' || c == '.' || c == ':')
+    });
+    if !receiver_ok {
+        return Err(format!("the spawn is not called on `{receiver}`, the command the environment is applied to"));
+    }
+    if !src.norm(at(spawn_idx)).starts_with(spawn_head) {
+        return Err(format!("the spawn statement must bind the child: `{spawn_head}...`"));
+    }
     // The owning statement applies exactly that `env`; the receiver and arguments are child spans.
     let (consumer_idx, applied_to) = if legacy {
-        let idx = (0..body.stmts.len())
-            .find(|i| src.norm(at(*i)).starts_with("cmd.arg("))
-            .ok_or("the command builder statement is gone")?;
+        let idx = body
+            .live_position(|s| src.norm(&s.span).starts_with("cmd.arg("))
+            .ok_or("the command builder statement is gone or does not run")?;
         let c = chain(&src, at(idx));
         let envs: Vec<_> = c.calls.iter().filter(|(name, _)| name == "envs").collect();
         let [(_, args)] = envs[..] else {
@@ -69,6 +89,14 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
     };
     if !(let_idx < consumer_idx && consumer_idx < spawn_idx) {
         return Err("the environment must be built, then applied, then the command spawned".into());
+    }
+    // Between the two, the command is only configured further, never replaced.
+    for found in word_uses(&src.masked, at(consumer_idx).end..at(spawn_idx).start, receiver) {
+        let stmt = body.deepest_stmt(found).ok_or("a use outside every statement")?;
+        let text = src.norm(&stmt.span);
+        if !(text.starts_with(&format!("{receiver}.")) || text.starts_with(&format!("{receiver}={receiver}."))) {
+            return Err(format!("`{receiver}` is replaced between the environment and the spawn: `{text}`"));
+        }
     }
     // Nothing overrides a launch fact once the environment is applied.
     for call in [".env(", ".envs("] {
@@ -96,6 +124,20 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
     }
     // The process is wrapped once with that launch, after the spawn and before the slot-lock match.
     let process_idx = require_top_statement(&src, &body, LET_PROCESS)?;
+    // The spawned child is the one wrapped: it reaches the handle and nothing else takes it.
+    let handle_idx = require_top_statement(&src, &body, if legacy { LET_HANDLE_LEGACY } else { LET_HANDLE_SIDECAR })?;
+    if !(spawn_idx < handle_idx && handle_idx < process_idx) {
+        return Err("the handle must wrap the child after the spawn and before the process".into());
+    }
+    for (word, allowed) in [("child", vec![spawn_idx, handle_idx]), ("handle", vec![handle_idx, process_idx])] {
+        for found in word_uses(&src.masked, whole.clone(), word) {
+            let top = body.top_index(found).ok_or("a use outside every statement")?;
+            let read_only = src.norm(&body.deepest_stmt(found).ok_or("a use outside every statement")?.span) == "letpid=child.id();";
+            if !(allowed.contains(&top) || (word == "child" && read_only)) {
+                return Err(format!("`{word}` is used in `{}`", src.norm(at(top))));
+            }
+        }
+    }
     let installs: Vec<usize> =
         (0..body.stmts.len()).filter(|i| src.masked[at(*i).clone()].contains("install_if_current(")).collect();
     let [install_idx] = installs[..] else {
@@ -239,9 +281,15 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_sidecar_path() {
         ("an early return before the wrapper", in_sidecar(LET_PROCESS, &format!("return Ok(false);\n    {LET_PROCESS}"))),
         ("an early return between the wrapper and the install", in_sidecar(LET_PROCESS, &format!("{LET_PROCESS}\n    return Ok(false);"))),
         ("a return before the poisoned-lock shutdown", in_sidecar(SHUTDOWN_PROCESS, &format!("return Err(\"skip shutdown\".into());\n            {SHUTDOWN_PROCESS}"))),
+        ("the configured spawn dead, a fresh command spawned", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = if false {{ {} }} else {{ {FRESH_SIDECAR}.spawn().map_err(|e| e.to_string())? }};", SIDECAR_SPAWN_CALL))),
+        ("a fresh command spawned instead", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = {FRESH_SIDECAR}.spawn().map_err(|e| e.to_string())?;"))),
+        ("the command replaced before the spawn", in_sidecar("    let generation = state", &format!("    sidecar_command = {FRESH_SIDECAR};\n    let generation = state"))),
+        ("a different child wrapped", in_sidecar("McpProcessHandle::Sidecar {\n            child,", "McpProcessHandle::Sidecar {\n            child: other_child,")),
     ];
     for (name, source) in cases {
-        assert!(check_spawn_provenance(&source, SIDECAR_FN, false).is_err(), "the census let this sidecar mutation through: {name}");
+        let verdict = check_spawn_provenance(&source, SIDECAR_FN, false);
+        eprintln!("{name} => {verdict:?}");
+        assert!(verdict.is_err(), "the census let this sidecar mutation through: {name}");
     }
 }
 
@@ -265,8 +313,14 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_legacy_path() {
         ("an early return before the wrapper", in_legacy(LET_PROCESS, &format!("return Ok(false);\n    {LET_PROCESS}"))),
         ("an early return between the wrapper and the install", in_legacy(LET_PROCESS, &format!("{LET_PROCESS}\n    return Ok(false);"))),
         ("a return before the poisoned-lock shutdown", in_legacy(SHUTDOWN_PROCESS, &format!("return Err(\"skip shutdown\".into());\n            {SHUTDOWN_PROCESS}"))),
+        ("the configured spawn dead, a fresh command spawned", in_legacy(LEGACY_SPAWN, &format!("let child = if false {{ cmd.spawn().map_err(|e| e.to_string())? }} else {{ {FRESH_LEGACY}.spawn().map_err(|e| e.to_string())? }};"))),
+        ("a fresh command spawned instead", in_legacy(LEGACY_SPAWN, &format!("let child = {FRESH_LEGACY}.spawn().map_err(|e| e.to_string())?;"))),
+        ("the command replaced before the spawn", in_legacy("    let generation = state", "    cmd = std::process::Command::new(\"node\");\n    let generation = state")),
+        ("a different child wrapped", in_legacy("McpProcessHandle::Legacy(child)", "McpProcessHandle::Legacy(other_child)")),
     ];
     for (name, source) in cases {
-        assert!(check_spawn_provenance(&source, LEGACY_FN, true).is_err(), "the census let this legacy mutation through: {name}");
+        let verdict = check_spawn_provenance(&source, LEGACY_FN, true);
+        eprintln!("{name} => {verdict:?}");
+        assert!(verdict.is_err(), "the census let this legacy mutation through: {name}");
     }
 }

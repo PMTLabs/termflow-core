@@ -34,6 +34,27 @@ function startsStatement(masked: string, at: number): boolean {
     return before.length === 0 || ["{", ";", "}"].includes(before[before.length - 1]);
 }
 
+/** What ends a scope early: a `return`, a `throw`, or a process exit. */
+const DEPARTURE = /\b(?:return|throw)\b|\bprocess\s*\.\s*exit\s*\(/;
+
+/**
+ * Why the code at `at` might not run whenever the scope whose `{` is at `scopeOpen` runs (-1: the
+ * module), or null when it does: it must sit directly in that scope, begin a statement of its own
+ * (not the body of a brace-less `if`, loop or expression), and follow no departure that is itself
+ * a statement of that scope. The one reachability rule every positive subject of this census goes
+ * through; a subject in a nested scope is checked level by level (the try, then the call in it).
+ */
+function whyNotLive(masked: string, at: number, scopeOpen: number): string | null {
+    const depth = scopeOpen < 0 ? 0 : depthAt(masked, scopeOpen) + 1;
+    if (depthAt(masked, at) !== depth) return "is nested inside another construct";
+    if (!startsStatement(masked, at)) return "is not a statement of its own (it is the body of a condition or expression)";
+    const leaves = findAll(masked, DEPARTURE).filter(
+        (h) => h.at > scopeOpen && h.at < at && depthAt(masked, h.at) === depth && startsStatement(masked, h.at),
+    );
+    if (leaves.length > 0) return "follows a return, throw or exit that always runs first";
+    return null;
+}
+
 /** Every departure of `source` from the T8 wiring; empty when it is exactly as the plan prescribes. */
 export function checkIndexWiring(source: string): string[] {
     const masked = mask(source);
@@ -46,11 +67,11 @@ export function checkIndexWiring(source: string): string[] {
         let end = closeOf(masked, open);
         while (/\s/.test(masked[end] ?? "")) end++;
         if (masked[end] === ";") end++;
-        return { at: hit.at, depth: depthAt(masked, hit.at), text: norm(source.slice(hit.at, end)) };
+        return { at: hit.at, text: norm(source.slice(hit.at, end)) };
     });
     for (const s of statements) {
-        if (s.depth !== 0) problems.push(`an app.use statement is not at module level: ${s.text.slice(0, 60)}`);
-        if (!startsStatement(masked, s.at)) problems.push(`an app.use call is not a statement of its own: ${s.text.slice(0, 60)}`);
+        const why = whyNotLive(masked, s.at, -1);
+        if (why) problems.push(`an app.use statement ${why}: ${s.text.slice(0, 60)}`);
     }
     const expected = ["app.use(cors());", "app.use(express.json());", MOUNT, GATE].map(norm);
     if (JSON.stringify(statements.map((s) => s.text)) !== JSON.stringify(expected)) {
@@ -76,8 +97,8 @@ export function checkIndexWiring(source: string): string[] {
     const declarations = findAll(masked, /\bconst\s+drain\s*=\s*new\s+DrainState\s*\(\s*\)\s*;/);
     if (declarations.length !== 1) problems.push("`const drain = new DrainState();` is not present exactly once");
     else {
-        if (depthAt(masked, declarations[0].at) !== 0) problems.push("`const drain = new DrainState();` is not at module level");
-        if (!startsStatement(masked, declarations[0].at)) problems.push("`const drain = new DrainState();` is not a statement of its own");
+        const why = whyNotLive(masked, declarations[0].at, -1);
+        if (why) problems.push(`\`const drain = new DrainState();\` ${why}`);
         const firstMount = statements.find((s) => s.text === norm(MOUNT));
         if (firstMount && declarations[0].at > firstMount.at) problems.push("the drain state is declared after the mount");
     }
@@ -104,6 +125,9 @@ export function checkIndexWiring(source: string): string[] {
         problems.push(`expected exactly one top-level try in gracefulExit, found ${tries.length}`);
         return problems;
     }
+    // The try runs whenever gracefulExit gets past its guard, and the quiesce runs whenever the try does.
+    const tryWhy = whyNotLive(masked, tries[0].at, bodyOpen);
+    if (tryWhy) problems.push(`gracefulExit's try ${tryWhy}`);
     const tryOpen = tries[0].end - 1;
     const tryEnd = closeOf(masked, tryOpen);
     const quiesces = findAll(body.slice(0, tryEnd), /\bawait\s+quiesce\s*\(/).filter((h) => h.at > tryOpen);
@@ -112,21 +136,8 @@ export function checkIndexWiring(source: string): string[] {
         return problems;
     }
     const q = quiesces[0];
-    if (depthAt(masked, q.at) !== bodyDepth + 1) problems.push("`await quiesce(` is nested inside another construct");
-    const before = masked.slice(tryOpen, q.at).trimEnd();
-    const lastToken = before[before.length - 1];
-    if (!(lastToken === "{" || lastToken === ";" || lastToken === "}")) {
-        problems.push("`await quiesce(` is the body of a condition or expression, not an unconditional statement");
-    }
-    // Reachable: no `return`/`throw` that is itself a statement (not the body of an `if`) of the
-    // function body before the try, or of the try block before the call.
-    const leaves = findAll(masked, /\b(return|throw)\b/).filter((h) => {
-        const depth = depthAt(masked, h.at);
-        const inBody = h.at > bodyOpen && h.at < tryOpen && depth === bodyDepth;
-        const inTry = h.at > tryOpen && h.at < q.at && depth === bodyDepth + 1;
-        return (inBody || inTry) && startsStatement(masked, h.at);
-    });
-    if (leaves.length > 0) problems.push("`await quiesce(` follows a return or throw that always runs first");
+    const quiesceWhy = whyNotLive(masked, q.at, tryOpen);
+    if (quiesceWhy) problems.push(`\`await quiesce(\` ${quiesceWhy}`);
     const args = callArguments(source, masked, q.end - 1);
     if (args.length !== 3) problems.push(`quiesce takes three arguments, found ${args.length}`);
     if (norm(args[0] ?? "") !== norm(FIRST_CALLBACK)) {
@@ -168,6 +179,11 @@ describe("index.ts drain wiring census", () => {
         ["a return in the try before quiesce", () => mutate(INDEX, "        await quiesce(", "        return;\n        await quiesce(")],
         ["a throw in the try before quiesce", () => mutate(INDEX, "        await quiesce(", '        throw new Error("x");\n        await quiesce(')],
         ["a return in the function body before the try", () => mutate(INDEX, "    exiting = true;\n", "    exiting = true;\n    return;\n")],
+        ["the try under a brace-less if (false)", () => mutate(INDEX, "    exiting = true;\n    try {", "    exiting = true;\n    if (false) try {")],
+        ["an exit in the function body before the try", () => mutate(INDEX, "    exiting = true;\n", "    exiting = true;\n    process.exit(code);\n")],
+        ["a module-level throw before the drain state", () => mutate(INDEX, "const drain = new DrainState();", 'throw new Error("skip wiring");\nconst drain = new DrainState();')],
+        ["a module-level throw before the mount", () => mutate(INDEX, MOUNT, `throw new Error("skip wiring");\n${MOUNT}`)],
+        ["a module-level throw before the gate", () => mutate(INDEX, GATE, `throw new Error("skip wiring");\n${GATE}`)],
     ];
 
     for (const [name, build] of CASES) {
