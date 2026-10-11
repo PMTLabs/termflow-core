@@ -218,7 +218,10 @@ pub(crate) struct TestDir(PathBuf);
 impl TestDir {
     pub(crate) fn new() -> Self {
         let root = canonical(&std::env::temp_dir());
-        let p = root.join(format!("tf-e2e-057-{}", uuid::Uuid::new_v4()));
+        // Short: a host socket lives here, and macOS's canonical temp dir (/private/var/folders/…)
+        // plus a full uuid overflows the 104-byte sun_path limit.
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let p = root.join(format!("tf57-{}", &id[..16]));
         guard_path(&p, Some(&root)); // Before file creation.
         std::fs::create_dir(&p).expect("private test directory");
         Self(p)
@@ -303,6 +306,8 @@ impl RealHost {
         } else {
             dir.path().join("h.sock").to_string_lossy().into_owned()
         };
+        // Fail on the cause, not as "the host never opened its endpoint" (macOS sun_path is 104).
+        assert!(cfg!(windows) || endpoint.len() < 104, "socket path too long: {} bytes", endpoint.len());
         let record = guard_path(&dir.path().join("record.json"), Some(dir.path()));
         let log = guard_path(&dir.path().join("host.log"), Some(dir.path()));
         let file = std::fs::File::create(&log).expect("private host log");
