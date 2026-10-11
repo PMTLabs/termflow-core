@@ -217,7 +217,8 @@ fn item_end(m: &[u8], from: usize) -> usize {
 pub(crate) enum Kind {
     /// A function body, a bare or `unsafe` block: transparent.
     Plain,
-    /// A struct literal's braces (`Foo { a, b }`): an expression, so it holds no statements.
+    /// A struct literal's braces (`Foo { a, b }`): an expression. Its field initializers are parsed
+    /// only so that a construct inside one is seen; they are not statements of the function.
     Literal,
     If,
     Else,
@@ -338,6 +339,7 @@ impl Block {
             out.push(stmt);
             for sub in &stmt.subs {
                 match sub {
+                    Sub::Block(b) if b.kind == Kind::Literal => {}
                     Sub::Block(b) => out.extend(b.all_stmts()),
                     Sub::Match { arms, .. } => {
                         for arm in arms {
@@ -360,6 +362,7 @@ impl Block {
                 continue;
             }
             match sub {
+                Sub::Block(b) if b.kind == Kind::Literal => {}
                 Sub::Block(b) => {
                     if let Some(inner) = b.deepest_stmt(at) {
                         return Some(inner);
@@ -452,9 +455,8 @@ impl Src {
         let m = self.masked.as_bytes();
         let close = matching(m, open);
         let mut stmts = Vec::new();
-        if kind == Kind::Literal {
-            return Block { kind, open, close, stmts };
-        }
+        // A struct literal's fields are parsed like statements too, so a branch or closure in a field
+        // initializer is seen by `constructs_at`; `all_stmts`/`deepest_stmt` do not descend into them.
         let mut i = open + 1;
         loop {
             i = skip_ws(m, i);
@@ -605,7 +607,7 @@ impl Src {
                 p -= 1;
             }
             let introducer = p == 0
-                || matches!(flat[p - 1], b'(' | b',' | b'=' | b'>' | b'{' | b';')
+                || matches!(flat[p - 1], b'(' | b',' | b'=' | b'>' | b'{' | b';' | b':')
                 || flat[..p].ends_with(b"move")
                 || flat[..p].ends_with(b"return");
             let double = flat.get(i + 1) == Some(&b'|');
@@ -1002,6 +1004,7 @@ mod scanner_tests {
             let v = { let _g = || hidden(); in_value() };
             g({ in_arg(); });
             let p = Pair { x: hidden_field() };
+            let r = Reader { read: || in_field_closure(), pick: if c { in_field_if() } else { 0 } };
         }";
         let (src, body) = body_of(text, "fn f(");
         let at = |needle: &str| src.masked.find(needle).unwrap_or_else(|| panic!("{needle}"));
@@ -1009,6 +1012,12 @@ mod scanner_tests {
         assert!(body.is_unconditional(&(at("in_value()")..at("in_value()"))));
         assert_eq!(body.constructs_at(at("in_arg();")), [Kind::Plain]);
         assert_eq!(body.constructs_at(at("hidden_field()")), [Kind::Literal]);
+        // A construct inside a field initializer is seen; the fields are not function statements.
+        assert_eq!(body.constructs_at(at("in_field_closure()")), [Kind::Literal, Kind::Closure]);
+        assert_eq!(body.constructs_at(at("in_field_if()")), [Kind::Literal, Kind::If]);
+        assert_eq!(body.all_stmts().len(), 7, "the function's statements and the block expression's two");
+        let r = at("let r =");
+        assert_eq!(body.deepest_stmt(at("in_field_closure()")).map(|s| s.span.start), Some(r));
     }
 
     #[test]

@@ -90,8 +90,10 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
     if !(let_idx < consumer_idx && consumer_idx < spawn_idx) {
         return Err("the environment must be built, then applied, then the command spawned".into());
     }
-    // Between the two, the command is only configured further, never replaced.
-    for found in word_uses(&src.masked, at(consumer_idx).end..at(spawn_idx).start, receiver) {
+    // Between the two, the command is only configured further, never replaced: every use up to the
+    // spawn's own receiver, inside the spawn statement (a block initializer) as well as before it.
+    let receiver_at = spawned.len() - receiver.len();
+    for found in word_uses(&src.masked, at(consumer_idx).end..receiver_at, receiver) {
         let stmt = body.deepest_stmt(found).ok_or("a use outside every statement")?;
         let text = src.norm(&stmt.span);
         if !(text.starts_with(&format!("{receiver}.")) || text.starts_with(&format!("{receiver}={receiver}."))) {
@@ -284,6 +286,7 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_sidecar_path() {
         ("the configured spawn dead, a fresh command spawned", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = if false {{ {} }} else {{ {FRESH_SIDECAR}.spawn().map_err(|e| e.to_string())? }};", SIDECAR_SPAWN_CALL))),
         ("a fresh command spawned instead", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = {FRESH_SIDECAR}.spawn().map_err(|e| e.to_string())?;"))),
         ("the command replaced before the spawn", in_sidecar("    let generation = state", &format!("    sidecar_command = {FRESH_SIDECAR};\n    let generation = state"))),
+        ("the command replaced inside the spawn's block initializer", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = {{\n        sidecar_command = {FRESH_SIDECAR};\n        {SIDECAR_SPAWN_CALL}\n    }};"))),
         ("a different child wrapped", in_sidecar("McpProcessHandle::Sidecar {\n            child,", "McpProcessHandle::Sidecar {\n            child: other_child,")),
     ];
     for (name, source) in cases {
@@ -316,6 +319,7 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_legacy_path() {
         ("the configured spawn dead, a fresh command spawned", in_legacy(LEGACY_SPAWN, &format!("let child = if false {{ cmd.spawn().map_err(|e| e.to_string())? }} else {{ {FRESH_LEGACY}.spawn().map_err(|e| e.to_string())? }};"))),
         ("a fresh command spawned instead", in_legacy(LEGACY_SPAWN, &format!("let child = {FRESH_LEGACY}.spawn().map_err(|e| e.to_string())?;"))),
         ("the command replaced before the spawn", in_legacy("    let generation = state", "    cmd = std::process::Command::new(\"node\");\n    let generation = state")),
+        ("the command replaced inside the spawn's block initializer", in_legacy(LEGACY_SPAWN, "let child = {\n        cmd = std::process::Command::new(\"node\");\n        cmd.arg(&mcp_path);\n        cmd.spawn().map_err(|e| e.to_string())?\n    };")),
         ("a different child wrapped", in_legacy("McpProcessHandle::Legacy(child)", "McpProcessHandle::Legacy(other_child)")),
     ];
     for (name, source) in cases {
