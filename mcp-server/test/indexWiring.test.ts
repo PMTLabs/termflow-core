@@ -228,6 +228,10 @@ export function checkIndexWiring(source: string): string[] {
                 const why = whyNotLive(masked, logs[0], resolveOpen);
                 if (why) problems.push(`the success log ${why}`);
             }
+            // The reject handler is pinned whole: a direct `(err) => { .. }` whose body logs and then exits 1.
+            // Its first brace alone could be an inner, uncalled closure's (review 319 R1).
+            const rejectText = norm(source.slice(rejectArg[0], rejectArg[1]));
+            if (rejectText !== norm(REJECT_HANDLER.trim().replace(/,$/, ""))) problems.push(`the reject handler is not exactly the pinned one: ${rejectText.slice(0, 80)}`);
             const rejectBody = masked.indexOf("{", rejectArg[0]);
             const exits = findAll(masked.slice(0, rejectArg[1]), /\bvoid\s+gracefulExit\s*\(\s*1\s*\)\s*;/).filter((h) => h.at > rejectBody);
             if (exits.length !== 1) problems.push(`expected exactly one \`void gracefulExit(1);\` in the reject handler, found ${exits.length}`);
@@ -288,6 +292,8 @@ describe("index.ts drain wiring census", () => {
         ["startListening with a changed retry interval", () => mutate(INDEX, "retryMs: 100,", "retryMs: 1000,")],
         ["startListening without its options", () => mutate(INDEX, ", { retryMs: 100, limitMs: 5000 });", ");")],
         ["startListening with an extra argument", () => mutate(INDEX, "limitMs: 5000 });", "limitMs: 5000 }, 1);")],
+        ["the reject handler returning an uncalled closure", () => mutate(INDEX, "    (err) => {\n        console.error(", "    (err) => () => {\n        console.error(")],
+        ["the reject handler exiting only under a condition", () => mutate(INDEX, "        void gracefulExit(1);\n    },\n);", "        if (exiting) void gracefulExit(1);\n    },\n);")],
         ["the success log under a condition", () => mutate(INDEX, LISTEN_LOG, `if (exiting) { ${LISTEN_LOG} }`)],
         ["the success log in an uncalled closure", () => mutate(INDEX, LISTEN_LOG, `const later = () => { ${LISTEN_LOG} };`)],
         ["the success log after a return", () => mutate(INDEX, "        server = listener;\n", "        server = listener;\n        return;\n")],

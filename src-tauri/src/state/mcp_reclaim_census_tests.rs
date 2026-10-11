@@ -20,6 +20,7 @@ const RECLAIM: &str = include_str!("mcp_reclaim.rs");
 // ---- T3: the claim in settle ------------------------------------------------------------------------
 
 const GATE: &str = "if client.mcp_hold() { reclaim_claim(client, ctx).await; }";
+const DISARM: &str = "if !client.disarm().await { log::warn!(\"[GEN] host did not acknowledge the disarm\"); }";
 const CLAIM_CALL: &str = "client.claim_mcp(&ctx.token)";
 const OFFER: &str = "ctx.reclaim.offer(Claimed::new(held, client.clone(), ctx.channel, ctx.epoch, ctx.endpoint.clone(), ctx.token.clone()));";
 const SETTLE_CTX_BODY: &str = "SettleCtx { channel, epoch, endpoint: endpoint.to_owned(), token: port.host_token(), reclaim: port.reclaim().clone() }";
@@ -50,10 +51,17 @@ fn check_settle(text: &str) -> Result<(), String> {
     let body = src.try_function("async fn settle(")?;
     let work = work_block(&src, &body)?;
 
-    // The work block runs: it is awaited under the deadline, as the function's own result.
-    let tail = body.stmts.last().map(|s| src.norm(&s.span)).unwrap_or_default();
-    if tail != "tokio::time::timeout_at(deadline,work).await.unwrap_or(None)" {
-        return Err(format!("settle no longer awaits its work block under the deadline: {tail}"));
+    // The work block runs: `settle` is exactly its declaration and then its awaited result, so nothing
+    // can depart before either (review 319 I5).
+    let [declaration, tail] = &body.stmts[..] else {
+        return Err(format!("settle must be exactly `let work = async {{ .. }};` and its awaited result, found {} statements", body.stmts.len()));
+    };
+    if !src.norm(&declaration.span).starts_with("letwork=async{") || !body.constructs_at(declaration.span.start).is_empty() {
+        return Err("settle's first statement is not a live `let work = async {`".into());
+    }
+    let tail_text = src.norm(&tail.span);
+    if tail_text != "tokio::time::timeout_at(deadline,work).await.unwrap_or(None)" || !body.constructs_at(tail.span.start).is_empty() {
+        return Err(format!("settle no longer awaits its work block under the deadline: {tail_text}"));
     }
 
     // The gate is the work block's first statement, exactly the pinned text.
@@ -77,14 +85,11 @@ fn check_settle(text: &str) -> Result<(), String> {
         return Err("the gate must hold exactly one unconditional `reclaim_claim(client, ctx).await;`".into());
     }
 
-    // The claim comes before the Disarm, which is a statement of the same block.
-    let disarm = work
-        .stmts
-        .iter()
-        .position(|s| src.norm(&s.span).starts_with("if!client.disarm().await{"))
-        .ok_or("settle's work block lost its `client.disarm()` statement")?;
-    if disarm == 0 {
-        return Err("the Disarm precedes the claim".into());
+    // The Disarm is the work block's second statement, whole: directly after the gate, with nothing that
+    // could depart between them, in the work block itself.
+    let second = work.stmts.get(1).ok_or("settle's work block lost its `client.disarm()` statement")?;
+    if src.norm(&second.span) != norm(DISARM) || body.constructs_at(second.span.start) != [Kind::Async] {
+        return Err(format!("the work block's second statement is not the live Disarm: {}", src.norm(&second.span)));
     }
 
     let function = body.open..body.close + 1;
@@ -207,6 +212,16 @@ fn the_claim_census_kills_each_planted_mutation() {
         ("the reserved epoch after the new site", mutate(HOST_ADOPTION, &format!("    {RESERVED_EPOCH}
 "), "").replacen(NEW_SITE, &format!("{NEW_SITE}
     {RESERVED_EPOCH}"), 1)),
+        ("settle returning before its work is declared", mutate(HOST_ADOPTION, "    let work = async {
+        if client.mcp_hold()", "    if deadline > Instant::now() { return None; }
+    let work = async {
+        if client.mcp_hold()")),
+        ("the work block returning between the claim and the Disarm", mutate(HOST_ADOPTION, &format!("        {GATE}
+"), &format!("        {GATE}
+        return None;
+"))),
+        ("the Disarm under a condition", mutate(HOST_ADOPTION, "        if !client.disarm().await {", "        if false {}
+        if !client.disarm().await {")),
         ("a third settle call in adopt", mutate(HOST_ADOPTION, RESERVED_EPOCH, &format!("{RESERVED_EPOCH}\n    let _extra = settle(&client, &settle_ctx(port, channel, reserved, &candidate.endpoint), deadline).await;"))),
     ];
     for (name, source) in cases {
@@ -237,6 +252,8 @@ const FAILURE_ARM: &str = "None";
 /// Established independently of any statement in it, so that a construct around the whole task (a
 /// condition, an uncalled closure, an earlier `return`) is seen (review 318 N2).
 const BOOT_SCOPE: [Kind; 2] = [Kind::Closure, Kind::Async];
+/// The statement that runs the boot task, a direct statement of the `setup` closure.
+const BOOT_SPAWN: &str = "tauri::async_runtime::spawn(asyncmove{";
 
 /// Where each statement is and how it is guarded, in the order the boot task must run them.
 fn check_boot_task(text: &str) -> Result<(), String> {
@@ -256,7 +273,24 @@ fn check_boot_task(text: &str) -> Result<(), String> {
         chain.push(Kind::MatchArm(pattern.to_owned()));
         chain
     };
+    // The task itself: the one `spawn(async move {` statement directly in the `setup` closure, which every
+    // boot subject below must lie inside (review 319 R2: a scope of the right kinds is not this task).
+    let setup = find_calls(&src.masked[run.open..run.close], ".setup(");
+    let [setup] = &setup[..] else { return Err(format!("run must register exactly one `.setup(`, found {}", setup.len())) };
+    let setup_at = run.open + setup;
+    let spawns: Vec<_> = all
+        .iter()
+        .filter(|s| src.norm(&s.span).starts_with(BOOT_SPAWN) && s.span.start > setup_at)
+        .filter(|s| run.constructs_at(s.span.start) == [Kind::Closure])
+        .collect();
+    let [boot] = &spawns[..] else {
+        return Err(format!("the setup closure must spawn the boot task once, live, found {}", spawns.len()));
+    };
+    let in_task = |stmt: &crate::state::live_call_census::Stmt| boot.span.start < stmt.span.start && stmt.span.end <= boot.span.end;
     let anchor = find(ANCHOR)?;
+    if !in_task(anchor) {
+        return Err(format!("`{ANCHOR}` is not in the spawned boot task"));
+    }
     if run.constructs_at(anchor.span.start) != base {
         return Err(format!("`{ANCHOR}` is not live in the boot task: {:?} (boot task: {base:?})", run.constructs_at(anchor.span.start)));
     }
@@ -266,7 +300,7 @@ fn check_boot_task(text: &str) -> Result<(), String> {
     let [bind_match] = &matches[..] else {
         return Err(format!("the boot task must match the bind's result exactly once (`match picked {{`), found {}", matches.len()));
     };
-    if run.constructs_at(bind_match.span.start) != base {
+    if run.constructs_at(bind_match.span.start) != base || !in_task(bind_match) {
         return Err("`match picked` is not live in the boot task".into());
     }
     let in_match = |stmt: &crate::state::live_call_census::Stmt| {
@@ -286,7 +320,7 @@ fn check_boot_task(text: &str) -> Result<(), String> {
     ] {
         let stmt = find(statement)?;
         let chain = run.constructs_at(stmt.span.start);
-        let live = if after_bind { chain == in_arm(SUCCESS_ARM) && in_match(stmt) } else { chain == base };
+        let live = in_task(stmt) && if after_bind { chain == in_arm(SUCCESS_ARM) && in_match(stmt) } else { chain == base };
         if !live {
             return Err(format!("`{statement}` is not live in the boot task: {chain:?} (boot task: {base:?})"));
         }
@@ -371,6 +405,18 @@ fn the_boot_task_census_kills_each_planted_mutation() {
         ("the record published only on a network launch", wrap_record("if api_net.expose_on_network { ", " }")),
         ("the record published only from an uncalled closure", wrap_record("let _later = || { ", " };")),
         ("the record with another token", mutate(LIB, ".then(|| api_net.auth_token.clone()),", ".then(String::new),")),
+        ("the boot task built but never spawned", mutate(LIB, "        tauri::async_runtime::spawn(async move {
+            // Boot network initialization", "        let _boot = async move {
+            // Boot network initialization")
+            .replacen("                }
+            }
+        });
+
+        // Spawn the PTY Output Listener", "                }
+            }
+        };
+
+        // Spawn the PTY Output Listener", 1)),
         ("the whole boot task under a condition", wrap_boot_task("if api_net.expose_on_network { ", " }")),
         ("the whole boot task in an uncalled closure", wrap_boot_task("let _later = || { ", " };")),
         ("the boot task's body after a return", mutate(LIB, "            let _op = api_state.network_op_lock.lock().await;", "            return;
@@ -468,7 +514,9 @@ fn the_adapter_census_kills_each_planted_mutation() {
 
 // ---- T8: who calls what -------------------------------------------------------------------------------------------
 
-/// `(relative path, live occurrences)` of `needle` in production code.
+/// `(relative path, occurrences)` of `needle` in each production file's code (comments, literals and
+/// test modules masked). A count per file, not a proof of reachability: the sites that must run are
+/// pinned by the checks above or proven by the behaviour tests.
 fn callers(files: &[(String, String)], needle: &str) -> Vec<(String, usize)> {
     let mut out = Vec::new();
     for (name, text) in files {
