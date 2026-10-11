@@ -19,7 +19,8 @@
 #![cfg(feature = "velopack-updates")]
 
 use crate::commands::UpdateRestart;
-use crate::state::{ConfirmToken, FullRun, Target};
+use crate::state::{send_mcp_hold, ConfirmToken, FullRun, Target};
+use termflow_pty_protocol::McpHoldReason;
 use velopack::{sources::GithubSource, UpdateCheck, UpdateInfo, UpdateManager, VelopackApp};
 
 /// The GitHub repository the Velopack release feed is published to.
@@ -236,6 +237,10 @@ pub async fn update_and_restart(
         return Err(e);
     }
 
+    // Hand the MCP port to a pty-host so agents get a timed wait while the update applies. Best
+    // effort; the failure arm below takes it back.
+    let handed = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;
+
     // Launch the updater (it waits for our exit), then quit — the relaunched app
     // reattaches sessions by `tab_id`. If the updater fails to launch AFTER we
     // armed, DISARM synchronously — otherwise the host stays armed and a later
@@ -250,7 +255,7 @@ pub async fn update_and_restart(
         // Every host that was armed is disarmed again; one that does not
         // acknowledge is logged by name and may still hold its detach window until
         // a later quit releases it.
-        hold.release().await;
+        handed.release().await;
         // Same obligation for the siblings we armed. Disarming ourselves and
         // leaving them armed would be the asymmetry this rollback exists to
         // avoid — they armed for OUR update, and it is not happening.
@@ -283,7 +288,7 @@ pub async fn update_and_restart(
     state.elevated_host.shutdown().await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     // Admission stays closed until the process is gone.
-    hold.commit();
+    handed.commit();
     state.app_handle.exit(0);
     Ok(UpdateRestart::Started)
 }
@@ -412,5 +417,300 @@ mod arm_lifecycle_wiring_tests {
             shutdown_at < exit_at,
             "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{body}"
         );
+    }
+}
+
+/// The census of the MCP handover on this path (plan 055 T6): the handover is live, awaited, carries
+/// `OffloadUpdate`, comes after the Local arm's whole error block and before the apply, is released
+/// on the apply-failure arm and committed before the exit. Each negative case edits the real text.
+#[cfg(test)]
+mod mcp_handover_census_tests {
+    use crate::state::mcp_exit_census_tests::{check_exit_path, UPDATE_AND_RESTART};
+    use crate::state::mcp_hold_census_tests::mutate;
+
+    const SOURCE: &str = include_str!("updater.rs");
+    const HANDOVER: &str = "let handed = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;";
+
+    #[test]
+    fn update_and_restart_hands_over_releases_on_a_failed_apply_and_commits_before_it_exits() {
+        // The full-update `apply(` that precedes the Local arm is valid and ignored.
+        check_exit_path(SOURCE, &UPDATE_AND_RESTART).unwrap();
+    }
+
+    #[test]
+    fn the_updater_census_kills_each_planted_mutation() {
+        let cases: Vec<(&str, String)> = vec![
+            ("an unawaited call bound to `_`", mutate(SOURCE, HANDOVER, "let _ = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate);")),
+            ("the handover dropped at once", mutate(SOURCE, HANDOVER, "let _ = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;")),
+            ("a duplicated call", mutate(SOURCE, HANDOVER, &format!("{HANDOVER}
+    {}", HANDOVER.replace("handed", "again")))),
+            ("the wrong reason", mutate(SOURCE, "McpHoldReason::OffloadUpdate).await", "McpHoldReason::Offload).await")),
+            ("a substituted state operand", mutate(SOURCE, "send_mcp_hold(state, hold", "send_mcp_hold(other, hold")),
+            ("the call inside a block comment", mutate(SOURCE, HANDOVER, &format!("/* {HANDOVER} */"))),
+            ("the call inside a string literal", mutate(SOURCE, HANDOVER, "let _s = \"send_mcp_hold(state, hold)\";")),
+            ("the call inside `if false`", mutate(SOURCE, HANDOVER, &format!("if false {{ {HANDOVER} }}"))),
+            ("the call inside a closure", mutate(SOURCE, HANDOVER, &format!("let _f = || {{ {HANDOVER} }};"))),
+            ("the call inside the Local arm's own error block", {
+                let cut = mutate(SOURCE, HANDOVER, "");
+                mutate(&cut, "        return Err(e);
+    }
+
+    // Hand the MCP", &format!("        {HANDOVER}
+        return Err(e);
+    }}
+
+    // Hand the MCP"))
+            }),
+            ("the call after the apply", {
+                let cut = mutate(SOURCE, HANDOVER, "");
+                mutate(&cut, "    // `apply` only started the updater", &format!("    {HANDOVER}
+    // `apply` only started the updater"))
+            }),
+            ("the call after flush_all_windows", {
+                let cut = mutate(SOURCE, HANDOVER, "");
+                mutate(&cut, "crate::commands::flush_all_windows(&state.app_handle).await;", &format!("crate::commands::flush_all_windows(&state.app_handle).await;
+    {HANDOVER}"))
+            }),
+            ("a hold still released after the handover", mutate(SOURCE, HANDOVER, &format!("{HANDOVER}
+    hold.release().await;"))),
+            ("an unawaited release", mutate(SOURCE, "handed.release().await;", "handed.release();")),
+            ("the release inside `if false`", mutate(SOURCE, "handed.release().await;", "if false { handed.release().await; }")),
+            ("the release in a closure", mutate(SOURCE, "handed.release().await;", "let _f = || { handed.release() };")),
+            ("the release in an async block", mutate(SOURCE, "handed.release().await;", "let _f = async { handed.release().await; };")),
+            ("the release after the arm's return", {
+                let cut = mutate(SOURCE, "handed.release().await;", "");
+                mutate(&cut, "        return Err(e);
+    }
+    // `apply` only started", "        return Err(e);
+        handed.release().await;
+    }
+    // `apply` only started")
+            }),
+            ("the release on a different binding", mutate(SOURCE, "handed.release().await;", "other.release().await;")),
+            ("a missing release", mutate(SOURCE, "handed.release().await;", "")),
+            ("a missing commit", mutate(SOURCE, "handed.commit();", "")),
+            ("the commit inside `if false`", mutate(SOURCE, "handed.commit();", "if false { handed.commit(); }")),
+            ("the commit after the exit", {
+                let cut = mutate(SOURCE, "handed.commit();", "");
+                mutate(&cut, "state.app_handle.exit(0);", "state.app_handle.exit(0);
+    handed.commit();")
+            }),
+            ("an early return before the handover", mutate(SOURCE, HANDOVER, &format!("return Ok(());\n    {HANDOVER}"))),
+            ("an early return before the commit", mutate(SOURCE, "handed.commit();", "return Ok(());\n    handed.commit();")),
+        ];
+        for (name, source) in cases {
+            let verdict = check_exit_path(&source, &UPDATE_AND_RESTART);
+            eprintln!("{name} => {verdict:?}");
+            assert!(verdict.is_err(), "the census let this mutation through: {name}");
+        }
+    }
+}
+
+/// Plan 055 T8 (I2), the parallel path on the updater: the full (non-offload) update returns before
+/// the Local arm, so it never reaches the MCP handover. The census reads the real text of
+/// `update_and_restart`; each negative case edits it and must fail.
+#[cfg(test)]
+mod mcp_parallel_path_census_tests {
+    use crate::state::live_call_census::{find_calls, is_return, word_uses, Kind, Src, Sub};
+    use crate::state::mcp_hold_census_tests::mutate;
+
+    const SOURCE: &str = include_str!("updater.rs");
+    const UPDATE_FULL: &str = include_str!("state/update_full.rs");
+    const SIGNATURE: &str = "pub async fn update_and_restart(";
+    const LOCAL: &str = "termflow_pty_protocol::ArmDetachPurpose::Local";
+
+    fn check_full_update_branch(text: &str, update_full: &str) -> Result<(), String> {
+        let src = Src::production(text);
+        let body = src.try_function(SIGNATURE)?;
+        let in_body = body.open..body.close + 1;
+
+        let runs = find_calls(&src.masked[in_body.clone()], "run_full_update");
+        if runs.len() != 1 {
+            return Err(format!("expected exactly one `run_full_update` call in the function, found {}", runs.len()));
+        }
+        let run_at = in_body.start + runs[0];
+        let index = body.top_index(run_at).ok_or("the full update is not a top-level statement")?;
+        if body.constructs_at(run_at).iter().any(Kind::is_conditional) {
+            return Err("the full update sits inside a conditional, closure or async construct".into());
+        }
+        let stmt = &body.stmts[index];
+
+        // Every way out of the match that is not "carry on as an offload" must leave the function.
+        let arms = stmt
+            .subs
+            .iter()
+            .find_map(|sub| match sub {
+                Sub::Match { arms, .. } => Some(arms),
+                _ => None,
+            })
+            .ok_or("the full-update statement does not match on its result")?;
+        if arms.len() != 3 {
+            return Err(format!("the full-update match has {} arms, expected 3", arms.len()));
+        }
+        let mut offloads = 0;
+        for arm in arms {
+            let pattern: String = arm.pattern.chars().filter(|c| !c.is_whitespace()).collect();
+            let text = src.norm(&arm.body);
+            let text = text.trim_end_matches(',');
+            if pattern.starts_with("FullRun::Offload(") {
+                offloads += 1;
+                if text != "info" {
+                    return Err(format!("the offload arm is not `info` but `{text}`"));
+                }
+                continue;
+            }
+            // The keyword, on the masked text (`returned_info` is not a return), as the arm's
+            // expression or as a statement that runs in the arm's block.
+            let returns = match &arm.block {
+                None => is_return(&src.masked[arm.body.clone()]),
+                Some(b) => b.live_position(|s| is_return(&src.masked[s.span.clone()])).is_some(),
+            };
+            if !returns {
+                return Err(format!("the `{pattern}` arm does not return from the function"));
+            }
+        }
+        if offloads != 1 {
+            return Err(format!("expected exactly one offload arm, found {offloads}"));
+        }
+
+        // Before the Local arm, and before every handover.
+        let locals = find_calls(&src.masked[in_body.clone()], LOCAL);
+        if locals.len() != 1 {
+            return Err(format!("expected exactly one Local arm, found {}", locals.len()));
+        }
+        let anchor = body.top_index(in_body.start + locals[0]).ok_or("the Local arm is not a top-level statement")?;
+        if index >= anchor {
+            return Err("the full-update branch comes after the Local arm".into());
+        }
+        for at in find_calls(&src.masked[in_body.clone()], "send_mcp_hold") {
+            let at = in_body.start + at;
+            if at < stmt.span.end {
+                return Err("a handover is sent at or before the full-update branch".into());
+            }
+        }
+
+        // The full-update machinery itself never names the handover.
+        let machinery = Src::production(update_full);
+        for word in ["send_mcp_hold", "McpHoldReason", "HandedOver"] {
+            if !word_uses(&machinery.masked, 0..machinery.masked.len(), word).is_empty() {
+                return Err(format!("update_full.rs uses `{word}`"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The real statement of the full-update branch, from its `let` to its closing `};`.
+    fn full_update_statement(source: &str) -> String {
+        let source = source.replace("\r\n", "\n");
+        let start = source.find("    let info = match state\n").expect("the full-update statement");
+        let end_marker = "FullRun::Exited => return Ok(UpdateRestart::Started),\n    };\n";
+        let end = source[start..].find(end_marker).expect("its end") + start + end_marker.len();
+        source[start..end].to_string()
+    }
+
+    #[test]
+    fn the_full_update_branch_returns_before_the_local_arm_and_sends_no_hold() {
+        check_full_update_branch(SOURCE, UPDATE_FULL).unwrap();
+    }
+
+    #[test]
+    fn the_full_update_census_kills_each_planted_mutation() {
+        let statement = full_update_statement(SOURCE);
+        let no_statement = mutate(SOURCE, &statement, "");
+        let hand = "let _held = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await;";
+        let cases: Vec<(&str, String, String)> = vec![
+            (
+                "the exited arm falls through",
+                mutate(SOURCE, "FullRun::Exited => return Ok(UpdateRestart::Started),", "FullRun::Exited => info_placeholder,"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the needs-confirmation arm falls through",
+                mutate(SOURCE, "FullRun::NeedsConfirmation(needed) => return Ok(UpdateRestart::NeedsConfirmation(needed)),", "FullRun::NeedsConfirmation(needed) => { log::info!(\"x\"); }"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "an expression arm that names a `returned…` value instead of returning",
+                mutate(SOURCE, "FullRun::NeedsConfirmation(needed) => return Ok(UpdateRestart::NeedsConfirmation(needed)),", "FullRun::NeedsConfirmation(_needed) => returned_info,"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "a block arm whose statement merely starts with `return…`",
+                mutate(SOURCE, "FullRun::Exited => return Ok(UpdateRestart::Started),", "FullRun::Exited => { returned_count += 1; returned_info }"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the exited arm only returns under a condition",
+                mutate(SOURCE, "FullRun::Exited => return Ok(UpdateRestart::Started),", "FullRun::Exited => { if keep_going { return Ok(UpdateRestart::Started); } }"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the offload arm yields something other than the info",
+                mutate(SOURCE, "FullRun::Offload(info) => info,", "FullRun::Offload(_) => other_info,"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "an extra arm",
+                mutate(SOURCE, "FullRun::Exited => return Ok(UpdateRestart::Started),", "FullRun::Exited => return Ok(UpdateRestart::Started),\n        FullRun::Other => info,"),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the branch moved after the Local arm",
+                mutate(&no_statement, "    // Hand the MCP port to a pty-host so agents get a timed wait while the update applies.", &format!("{statement}    // Hand the MCP port to a pty-host so agents get a timed wait while the update applies.")),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the branch inside `if false`",
+                mutate(SOURCE, &statement, &format!("if false {{\n{statement}}}\n")),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the branch inside a closure",
+                mutate(SOURCE, &statement, &format!("let _f = || {{\n{statement}}};\n")),
+                UPDATE_FULL.into(),
+            ),
+            ("the branch removed", no_statement.clone(), UPDATE_FULL.into()),
+            (
+                "the branch only in a comment",
+                mutate(SOURCE, &statement, &format!("/*\n{statement}*/\n")),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "a second full-update call",
+                mutate(SOURCE, &statement, &format!("{statement}    let _again = state.run_full_update(&target, confirm, info.clone(), |i| async move {{ Ok(()) }}).await;\n")),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "a handover sent from inside the full-update branch",
+                mutate(SOURCE, "FullRun::Exited => return Ok(UpdateRestart::Started),", &format!("FullRun::Exited => {{ {hand} return Ok(UpdateRestart::Started) }}")),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "a handover sent before the full-update branch",
+                mutate(SOURCE, &statement, &format!("    {hand}\n{statement}")),
+                UPDATE_FULL.into(),
+            ),
+            (
+                "the full-update machinery sends the hold",
+                SOURCE.into(),
+                format!("{UPDATE_FULL}\nasync fn leak(state: &AppState, hold: Hold) {{ let _h = send_mcp_hold(state, hold, McpHoldReason::OffloadUpdate).await; }}\n"),
+            ),
+            (
+                "the full-update machinery names the reason type",
+                SOURCE.into(),
+                format!("{UPDATE_FULL}\nfn leak() -> McpHoldReason {{ McpHoldReason::Offload }}\n"),
+            ),
+        ];
+        for (name, updater, machinery) in cases {
+            let verdict = check_full_update_branch(&updater, &machinery);
+            eprintln!("{name} => {verdict:?}");
+            assert!(verdict.is_err(), "the census let this mutation through: {name}");
+        }
+    }
+
+    #[test]
+    fn a_comment_naming_the_handover_in_the_full_update_machinery_is_fine() {
+        let commented = format!("{UPDATE_FULL}\n// never calls send_mcp_hold: the full update returns before the Local arm\n");
+        check_full_update_branch(SOURCE, &commented).unwrap();
     }
 }

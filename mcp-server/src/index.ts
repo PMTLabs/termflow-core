@@ -1,15 +1,8 @@
 import "dotenv/config";
 import express, { Request, Response } from "express";
 import cors from "cors";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-
-/** Constant-time string equality (guards the terminal-I/O auth surface). */
-function safeEqual(a: string, b: string): boolean {
-    const ab = Buffer.from(a);
-    const bb = Buffer.from(b);
-    return ab.length === bb.length && timingSafeEqual(ab, bb);
-}
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "node:http";
@@ -18,6 +11,7 @@ import { createMcpServer } from "./server.js";
 import { readTerminalIdHeader } from "./identity.js";
 import { startSseHeartbeat } from "./heartbeat.js";
 import { closeHttpServer, isShutdownCommand, quiesce } from "./shutdown.js";
+import { createAuthGate, createDrainMiddleware, DrainState } from "./drain.js";
 
 // Configuration
 const MCP_PORT = parseInt(process.env.MCP_PORT || "42032", 10);
@@ -51,25 +45,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Once shutdown starts, no new MCP session may be initialized. Existing
-// streams are closed by gracefulExit below; this is intentionally before the
-// auth gate so every incoming request gets a deterministic draining response.
-let acceptingSessions = true;
-app.use((_req: Request, res: Response, next) => {
-    if (acceptingSessions) return next();
-    res.status(503).json({ error: "MCP server is shutting down" });
-});
+// Once shutdown starts, `drain` answers every request: a `tools/call` gets a timed wait, the
+// rest a 503. It sits before the auth gate so every incoming request gets a deterministic
+// draining response; the drain branch checks the bearer itself.
+const drain = new DrainState();
+app.use(createDrainMiddleware({ drain, token: ACCESS_TOKEN, now: Date.now }));
 
-// Incoming-request auth gate. Enforced ONLY when ACCESS_TOKEN is set (networked
-// mode or elevated loopback); in unauthenticated localhost mode it is empty and every request passes (back-compat).
-// Health stays open so the app's Settings page can always poll status.
-app.use((req: Request, res: Response, next) => {
-    if (!ACCESS_TOKEN) return next();
-    if (req.path === "/health") return next();
-    const auth = req.header("authorization") || "";
-    if (safeEqual(auth, `Bearer ${ACCESS_TOKEN}`)) return next();
-    res.status(401).json({ error: "unauthorized" });
-});
+// Incoming-request auth gate (enforced only when ACCESS_TOKEN is set; /health stays open).
+app.use(createAuthGate(ACCESS_TOKEN));
 
 // Session management - stores active transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -263,7 +246,7 @@ async function gracefulExit(code: number): Promise<void> {
     exiting = true;
     try {
         await quiesce(
-            () => { acceptingSessions = false; },
+            () => { drain.begin(Date.now()); },
             () => Promise.all(Object.values(transports).map((t) => t.close().catch(() => {}))).then(() => {}),
             () => closeHttpServer(server),
         );

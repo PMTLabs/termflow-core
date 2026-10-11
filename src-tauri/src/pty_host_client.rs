@@ -67,6 +67,48 @@ pub struct PtyHostDeps {
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Response>>>>;
 
+/// Owns one pending-reply entry: dropping it removes `id`, so a request future that is
+/// cancelled, times out or fails to enqueue never leaves its waiter in the map.
+struct PendingReply {
+    id: u64,
+    map: PendingMap,
+}
+
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(&self.id);
+        }
+    }
+}
+
+/// How long `HoldMcp` / `ReleaseMcp` wait for the host's answer.
+const MCP_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The definite answers to `HoldMcp`; an unanswered or unsent one is a [`McpSendError`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpHoldOutcome {
+    /// The connection did not advertise `CAP_MCP_HOLD`; nothing was written.
+    NotCapable,
+    Accepted,
+    Rejected(String),
+}
+
+/// Why a `HoldMcp` has no definite answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpSendError {
+    /// The frame was not enqueued: the host cannot have seen it.
+    NotSent,
+    /// The frame was enqueued and no usable answer came: the host may be holding.
+    Ambiguous,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpReleaseOutcome {
+    NotCapable,
+    Released { was_holding: bool },
+}
+
 /// Map a pty-host session key to the process id our maps are keyed by.
 ///
 /// Returns `None` for an unknown session, and every caller DROPS that frame.
@@ -180,6 +222,10 @@ pub struct PtyHostClient {
     /// `state::restore_frame`). False for a legacy host, an elevated host, and one whose
     /// record says no: the restore then keeps the child on row 1 instead.
     inherit_cursor: Arc<std::sync::atomic::AtomicBool>,
+    /// True when the connected host's serving process advertised `CAP_MCP_HOLD`, so
+    /// `HoldMcp`/`ReleaseMcp` may be sent to it. A legacy host fails to decode those
+    /// variants and drops the connection, so the senders refuse without this bit.
+    mcp_hold: Arc<std::sync::atomic::AtomicBool>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -275,6 +321,17 @@ impl PtyHostClient {
     /// Whether a `Spawn` to this host may carry `initial_cursor_row` (see field doc).
     pub fn inherit_cursor(&self) -> bool {
         self.inherit_cursor.load(Ordering::Acquire)
+    }
+
+    /// Mark that the connected host may be sent the MCP-hold frames (`CAP_MCP_HOLD`; see
+    /// field doc). Set only through [`connection_mcp_hold`].
+    pub fn set_mcp_hold(&self, v: bool) {
+        self.mcp_hold.store(v, Ordering::Release);
+    }
+
+    /// Whether this connection may be sent `HoldMcp`/`ReleaseMcp` (see field doc).
+    pub fn mcp_hold(&self) -> bool {
+        self.mcp_hold.load(Ordering::Acquire)
     }
 
     /// The process id serving this connection, asked of the live connection (Windows). `None`
@@ -492,20 +549,55 @@ impl PtyHostClient {
         let req = self.next_req().ok_or("terminal host request identity exhausted")?;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(req, tx);
+        // The lease removes the entry on every way out, including this future being dropped
+        // while it waits: a cancelled request leaves no waiter behind.
+        let _lease = PendingReply { id: req, map: self.pending.clone() };
         let frame = Frame::Ctrl(make(req));
         let mut frame = Some(frame);
         // `alive` is cleared before the pending map is drained, so a request that
         // slipped in after the drain sees it here instead of waiting out `timeout`.
         if !authorize(&mut || self.is_alive() && self.outbound.send(frame.take().unwrap()).is_ok()) {
-            self.pending.lock().unwrap().remove(&req);
             return Err("host-ownership-pending: terminal host request was not enqueued; retry".into());
         }
         match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(resp)) => Ok(Some(resp)),
-            _ => {
-                self.pending.lock().unwrap().remove(&req);
-                Ok(None)
+            _ => Ok(None),
+        }
+    }
+
+    /// Hand the MCP port to this host. Only a connection that advertised `CAP_MCP_HOLD` is sent the
+    /// frame (a legacy host drops the connection on an unknown variant), so without the bit this
+    /// writes nothing. A reply that never comes is `Ambiguous`, not a refusal: the frame may
+    /// already have installed the hold, and only the caller knows what to undo.
+    pub async fn hold_mcp(
+        &self, token: &str, spec: termflow_pty_protocol::McpHoldSpec,
+    ) -> Result<McpHoldOutcome, McpSendError> {
+        if !self.mcp_hold() {
+            return Ok(McpHoldOutcome::NotCapable);
+        }
+        let token = token.to_string();
+        let reply = self
+            .request_authorized(MCP_REQUEST_TIMEOUT, move |req| Control::HoldMcp { req, token, spec }, |enqueue| enqueue())
+            .await
+            .map_err(|_| McpSendError::NotSent)?;
+        match reply {
+            Some(Response::McpHoldAck { accepted: true, .. }) => Ok(McpHoldOutcome::Accepted),
+            Some(Response::McpHoldAck { accepted: false, reason, .. }) => {
+                Ok(McpHoldOutcome::Rejected(reason.unwrap_or_default()))
             }
+            _ => Err(McpSendError::Ambiguous),
+        }
+    }
+
+    /// Ask the host to stop holding the port it was handed under `token`.
+    pub async fn release_mcp(&self, token: &str) -> Result<McpReleaseOutcome, String> {
+        if !self.mcp_hold() {
+            return Ok(McpReleaseOutcome::NotCapable);
+        }
+        let token = token.to_string();
+        match self.request_within(MCP_REQUEST_TIMEOUT, move |req| Control::ReleaseMcp { req, token }).await {
+            Some(Response::McpReleaseAck { was_holding, .. }) => Ok(McpReleaseOutcome::Released { was_holding }),
+            _ => Err("pty-host: no McpReleaseAck".to_string()),
         }
     }
 
@@ -828,6 +920,7 @@ where
         attach_acks: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
@@ -1824,51 +1917,55 @@ fn advertised_retention(rec: &termflow_pty_protocol::HostRecord) -> HostRetentio
     }
 }
 
-/// Whether a host's discovery record advertises `CAP_INHERIT_CURSOR`. No record (a legacy
-/// host, or none) is a "no": it cannot be asked for a row it was never built to honour.
-pub fn host_inherits_cursor(record: Option<&termflow_pty_protocol::HostRecord>) -> bool {
-    record.is_some_and(|r| r.capabilities & termflow_pty_protocol::CAP_INHERIT_CURSOR != 0)
+/// Whether a host's discovery record advertises capability `bit`. No record (a legacy host, or
+/// none) is a "no": a frame it was never built to decode must not be sent to it.
+pub fn host_advertises(record: Option<&termflow_pty_protocol::HostRecord>, bit: u32) -> bool {
+    record.is_some_and(|r| r.capabilities & bit != 0)
 }
 
-/// [`host_inherits_cursor`] for a record that must belong to the process serving the
-/// connection: the connection reports a server pid and the record repeats it. A readable record
-/// of a host that is gone (its replacement could not publish its own) names another pid and
-/// says nothing about this host; a connection whose server pid is unknown cannot vouch for any
-/// record.
-pub fn host_inherits_cursor_served_by(
+/// [`host_advertises`] for a record that must belong to the process serving the connection: the
+/// connection reports a server pid and the record repeats it. A readable record of a host that is
+/// gone (its replacement could not publish its own) names another pid and says nothing about this
+/// host; a connection whose server pid is unknown cannot vouch for any record.
+pub fn host_advertises_served_by(
     record: Option<&termflow_pty_protocol::HostRecord>,
     server_pid: Option<u32>,
+    bit: u32,
 ) -> bool {
-    record.is_some_and(|r| server_pid == Some(r.pid)) && host_inherits_cursor(record)
+    record.is_some_and(|r| server_pid == Some(r.pid)) && host_advertises(record, bit)
 }
 
-/// [`host_inherits_cursor_served_by`] for a host THIS connection just launched. The plan was
-/// made from the record read BEFORE the launch, which for a fresh host is no record at all (or
-/// a dead host's); the host writes its own record before it serves, so by the time the
-/// connection is up the file normally holds the answer, and `server_pid` says whether it does.
-pub fn spawned_host_inherits_cursor(server_pid: Option<u32>) -> bool {
-    let record = record_path().and_then(|p| termflow_pty_protocol::read_record(&p).ok().flatten());
-    host_inherits_cursor_served_by(record.as_ref(), server_pid)
+/// The discovery record the host writes before it serves, read now.
+pub(crate) fn read_advertised_record() -> Option<termflow_pty_protocol::HostRecord> {
+    record_path().and_then(|p| termflow_pty_protocol::read_record(&p).ok().flatten())
 }
 
-/// An ADOPTED host's verdict: the selected record's (`planned`), unless the connection shows the
-/// record names a different process than the one serving it (both pids known and different).
-/// An unknown pid on either side leaves the record's verdict as it was. Every adoption asks it:
-/// the primary connect (through [`connected_host_inherits_cursor`]) and the frozen connect.
-pub fn adopted_host_inherits_cursor(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
+/// [`host_advertises_served_by`] for a host THIS connection just launched. The plan was made from
+/// the record read BEFORE the launch, which for a fresh host is no record at all (or a dead
+/// host's); the host writes its own record before it serves, so by the time the connection is up
+/// the file normally holds the answer, and `server_pid` says whether it does.
+pub fn spawned_host_advertises(server_pid: Option<u32>, bit: u32) -> bool {
+    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)
+}
+
+/// An ADOPTED host's verdict for a capability bit: the selected record's (`planned`), unless the
+/// connection shows the record names a different process than the one serving it (both pids known
+/// and different). An unknown pid on either side leaves the record's verdict as it was. Every
+/// adoption asks it: the primary connect (through [`connected_host_advertises`]) and the frozen
+/// connect.
+pub fn adopted_host_advertises(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
     planned && !matches!((record_pid, server_pid), (Some(record), Some(server)) if record != server)
 }
 
-/// Whether the host a connection ended up on can be asked for a cursor row.
+/// Whether the host a connection ended up on advertises a capability bit.
 ///
 /// A host THIS process launched is judged by the record that names the process serving the
-/// connection and by nothing else (`spawned`, called only then; see
-/// [`spawned_host_inherits_cursor`]). The plan's flags came from the record read BEFORE the
-/// launch; when a live host died between that read and the launch, that record is the DEAD
-/// host's, and its positive bit must not carry over to a replacement that may not honour a row
-/// (inbox ConPTY, a bundled load that failed): the GUI would anchor the replay on a row ConPTY
-/// was never told. An ADOPTED host keeps `planned` (see [`adopted_host_inherits_cursor`]).
-pub fn connected_host_inherits_cursor(
+/// connection and by nothing else (`spawned`, called only then; see [`spawned_host_advertises`]).
+/// The plan's flags came from the record read BEFORE the launch; when a live host died between that
+/// read and the launch, that record is the DEAD host's, and its positive bit must not carry over to
+/// a replacement that may not honour it. An ADOPTED host keeps `planned` (see
+/// [`adopted_host_advertises`]).
+pub fn connected_host_advertises(
     origin: HostConnectionOrigin,
     planned: bool,
     spawned: impl FnOnce() -> bool,
@@ -1877,6 +1974,63 @@ pub fn connected_host_inherits_cursor(
         HostConnectionOrigin::SpawnedHere => spawned(),
         HostConnectionOrigin::Adopted => planned,
     }
+}
+
+/// The one installer of a connection's `CAP_MCP_HOLD` bit, used by both connection sites
+/// (`connect_current`, `connect_frozen`). `planned` is the plan's flag (the record read before
+/// connecting); `candidate_pid` the pid that record advertised; `server_pid` the process the
+/// connection reports; `spawned_record` re-reads the record, called only for a host launched
+/// here. A host without the bit is never sent an MCP frame, and no other setter form exists.
+pub fn connection_mcp_hold(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    candidate_pid: Option<u32>,
+    server_pid: Option<u32>,
+    spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
+) -> bool {
+    connected_host_advertises(
+        origin,
+        adopted_host_advertises(planned, candidate_pid, server_pid),
+        || host_advertises_served_by(spawned_record().as_ref(), server_pid, termflow_pty_protocol::CAP_MCP_HOLD),
+    )
+}
+
+/// Whether a host's discovery record advertises `CAP_INHERIT_CURSOR`. No record (a legacy
+/// host, or none) is a "no": it cannot be asked for a row it was never built to honour.
+pub fn host_inherits_cursor(record: Option<&termflow_pty_protocol::HostRecord>) -> bool {
+    host_advertises(record, termflow_pty_protocol::CAP_INHERIT_CURSOR)
+}
+
+/// [`host_inherits_cursor`] for a record that must belong to the process serving the
+/// connection (see [`host_advertises_served_by`]).
+pub fn host_inherits_cursor_served_by(
+    record: Option<&termflow_pty_protocol::HostRecord>,
+    server_pid: Option<u32>,
+) -> bool {
+    host_advertises_served_by(record, server_pid, termflow_pty_protocol::CAP_INHERIT_CURSOR)
+}
+
+/// [`host_inherits_cursor_served_by`] for a host THIS connection just launched (see
+/// [`spawned_host_advertises`]).
+pub fn spawned_host_inherits_cursor(server_pid: Option<u32>) -> bool {
+    spawned_host_advertises(server_pid, termflow_pty_protocol::CAP_INHERIT_CURSOR)
+}
+
+/// An ADOPTED host's cursor verdict (see [`adopted_host_advertises`]). Every adoption asks it: the
+/// primary connect (through [`connected_host_inherits_cursor`]) and the frozen connect.
+pub fn adopted_host_inherits_cursor(planned: bool, record_pid: Option<u32>, server_pid: Option<u32>) -> bool {
+    adopted_host_advertises(planned, record_pid, server_pid)
+}
+
+/// Whether the host a connection ended up on can be asked for a cursor row (see
+/// [`connected_host_advertises`]): a host THIS process launched is judged by its own record
+/// (`spawned`, called only then), an ADOPTED host keeps `planned`.
+pub fn connected_host_inherits_cursor(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    spawned: impl FnOnce() -> bool,
+) -> bool {
+    connected_host_advertises(origin, planned, spawned)
 }
 
 /// Decide how to connect from an already-read discovery record.
@@ -1978,6 +2132,9 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 mod plan_tests;
+
+#[cfg(test)]
+mod mcp_hold_tests;
 
 #[cfg(test)]
 mod install_tests;

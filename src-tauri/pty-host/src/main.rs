@@ -279,6 +279,9 @@ fn resolve_endpoint() -> transport::Endpoint {
 }
 
 #[cfg(test)]
+mod dial_out_census;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use termflow_pty_protocol::{

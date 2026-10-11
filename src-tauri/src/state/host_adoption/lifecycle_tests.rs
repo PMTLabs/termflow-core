@@ -58,7 +58,7 @@ pub(super) fn machine(old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
 }
 
 /// Like [`machine`], with the current host behaving as `current_spec` says.
-fn machine_with_current(current_spec: HostSpec, old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
+pub(super) fn machine_with_current(current_spec: HostSpec, old: &[(&str, HostSpec)]) -> (Arc<World>, FakePort) {
     let world = World::new();
     world.add_host(CURRENT, current_spec);
     let mut candidates = Vec::new();
