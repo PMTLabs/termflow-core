@@ -16,19 +16,16 @@ async fn downgrade_disarm_before_claim_stops_holder_and_preserves_shell() {
     // Legacy shape is pinned by the real client's DisarmAck matcher, plus 054 compat oracle.
     assert!(client.disarm().await);
     let disarmed = Instant::now();
+    // Both stop observations start at once, against the one Disarm-relative deadline.
+    tokio::join!(
+        refuses(gap.port, "127.0.0.1", disarmed + STOP_BOUND),
+        stream.eof_by(disarmed + STOP_BOUND)
+    );
     assert_eq!(
         client.claim_mcp(&rig.token).await.unwrap(),
         McpClaimOutcome::Held(None)
     );
     same_shell(&client, &gap.session_key, gap.pid).await;
-    refuses(gap.port, "127.0.0.1", disarmed + STOP_BOUND).await;
-    stream
-        .eof(
-            STOP_BOUND
-                .saturating_sub(disarmed.elapsed())
-                .max(Duration::from_millis(1)),
-        )
-        .await;
     shell_usable(&client, &gap.session_key).await;
     client.close(&gap.session_key);
     client.list_sessions().await.unwrap();
@@ -100,8 +97,10 @@ async fn accepted_pending_transaction_rollback_cannot_start_a_holder() {
         #[cfg(windows)]
         {
             // Windows refusal delivery exceeds this window. Use the validated exact
-            // loopback bind instead; drop synchronously before every yield so it cannot
-            // occupy P across a holder retry interval (100 ms).
+            // loopback bind instead, dropped before every yield so it never spans a holder
+            // retry interval (100 ms). A holder bind landing inside that instant is only
+            // delayed to its next retry; the omitted-release mutation shows the probe still
+            // catches a real would-be holder, which is evidence, not a scheduling guarantee.
             let listener = std::net::TcpListener::bind(("127.0.0.1", p))
                 .expect("rollback left a conflicting listener");
             drop(listener);

@@ -58,13 +58,17 @@ async fn full_chain(bind: &str) {
         }
     });
     let release_call = Instant::now();
-    assert_eq!(start_mcp(prepared, rig.api_port, &io).await, Some(gap.port));
+    // The old stream must end within STOP_BOUND of the release ACK, sampled while start_mcp runs.
+    let (started, ()) = tokio::join!(start_mcp(prepared, rig.api_port, &io), async {
+        let acked = port.release_ack(Duration::from_secs(20)).await;
+        stream.eof_by(acked + STOP_BOUND).await;
+    });
+    assert_eq!(started, Some(gap.port));
     let identity = health(gap.port).await.unwrap();
     assert_eq!(identity["instanceId"], io.own_id);
     let listening = release_call.elapsed();
     assert!(listening <= Duration::from_secs(5));
     eprintln!("MEASURE bind={bind} release-call-to-listening={listening:?}");
-    stream.eof(STOP_BOUND).await;
     assert_eq!(
         gap.agent.call().await.unwrap().status,
         404,
@@ -150,10 +154,14 @@ async fn changed(change_bind: bool) {
         configured,
         if change_bind { "0.0.0.0" } else { "127.0.0.1" },
     );
-    let prepared = prepare_reclaim(&io, io.inputs(cfg)).await;
+    // Production releases inside prepare_reclaim: probe from the wire ACK, concurrently, so a
+    // listener that outlives the ACK cannot hide behind the rest of preparation.
+    let (prepared, ()) = tokio::join!(prepare_reclaim(&io, io.inputs(cfg)), async {
+        let acked = port.release_ack(Duration::from_secs(20)).await;
+        refuses(gap.port, "127.0.0.1", acked + STOP_BOUND).await;
+    });
     assert!(matches!(prepared.decision(), Decision::Changed(_)));
     assert!(prepared.reserved().is_empty());
-    refuses(gap.port, "127.0.0.1", Instant::now() + STOP_BOUND).await;
     io.completed().await;
     assert_eq!(
         start_mcp(prepared, rig.api_port, &io).await,

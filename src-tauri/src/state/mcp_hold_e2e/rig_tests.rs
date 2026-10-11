@@ -161,7 +161,11 @@ impl Sidecar {
                 }
             }
             if self.child.0.try_wait().unwrap().is_some() {
-                return Err("owned sidecar exited before listening (raw log omitted)".into());
+                // Classify only; the raw log may carry the fixture bearer.
+                let log = std::fs::read_to_string(self._dir.path().join("sidecar.log"))
+                    .unwrap_or_default();
+                let class = if log.contains("EADDRINUSE") { "EADDRINUSE" } else { "other" };
+                return Err(format!("owned sidecar exited before listening: {class} (raw log omitted)"));
             }
             if Instant::now() >= end {
                 return Err("sidecar listening timeout / foreign identity".into());
@@ -355,6 +359,7 @@ impl Sse {
             self.bytes.extend_from_slice(&chunk);
         }
     }
+    /// The stream ends; `within` only bounds the wait, it is not a timing oracle (see `eof_by`).
     pub async fn eof(&mut self, within: Duration) {
         let end = Instant::now() + within;
         loop {
@@ -364,6 +369,22 @@ impl Sse {
             {
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => return,
+            }
+        }
+    }
+    /// The stream ends by `deadline`. A ready future is polled before its timer, so a buffered
+    /// EOF read late would otherwise pass: sample this concurrently with the stop it measures.
+    pub async fn eof_by(&mut self, deadline: Instant) {
+        loop {
+            match tokio::time::timeout_at(deadline, self.response.chunk())
+                .await
+                .expect("bounded SSE EOF")
+            {
+                Ok(Some(_)) => {}
+                Ok(None) | Err(_) => {
+                    assert!(Instant::now() <= deadline, "SSE EOF observed after its deadline");
+                    return;
+                }
             }
         }
     }

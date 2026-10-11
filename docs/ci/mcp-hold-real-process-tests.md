@@ -61,7 +61,10 @@ executable within that target, and rebuilding the current host before the test.
 Run it explicitly with `--ignored --nocapture` and `TERMFLOW_E2E_REQUIRED=1`.
 
 `MEASURE` output reports both bind modes' holder takeover and release-call to
-listening. Port-stop assertions use an exclusive same-address rebind: on Windows,
-TCP's delayed connection refusal can itself exceed the one-second stop bound.
-SSE EOF is separately bounded; a connect timeout is never accepted as a late-claim
-oracle.
+listening. Port-stop assertions rebind the holder's exact bind host and port: on
+Windows, TCP's delayed connection refusal can itself exceed the one-second stop
+bound. "Exact" matters: on Windows a wildcard and a loopback listener can share a
+port, so the probe only proves no listener remains on the holder's own address.
+Stop deadlines start at the observed `McpReleaseAck` or Disarm, and the rebind and
+SSE EOF are sampled while the stop happens, never after unrelated work; a connect
+timeout is never accepted as a refusal.

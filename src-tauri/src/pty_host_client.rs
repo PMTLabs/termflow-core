@@ -255,9 +255,13 @@ pub struct PtyHostClient {
     #[cfg(test)]
     claim_observer: ClaimObserver,
     #[cfg(test)]
+    release_observer: ReleaseObserver,
+    #[cfg(test)]
     stdout_observer: StdoutObserver,
 }
 
+#[cfg(test)]
+type ReleaseObserver = Arc<Mutex<Option<Arc<dyn Fn(bool) + Send + Sync>>>>;
 #[cfg(test)]
 type ReaderHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 #[cfg(test)]
@@ -269,6 +273,13 @@ impl PtyHostClient {
     #[cfg(test)]
     pub(crate) fn observe_claim(&self, observer: impl Fn(Option<termflow_pty_protocol::McpHeld>) + Send + Sync + 'static) {
         *self.claim_observer.lock().unwrap() = Some(Arc::new(observer));
+    }
+
+    /// Called with `was_holding` when an `McpReleaseAck` arrives on the wire, before the waiting
+    /// request is woken: the earliest instant a stop deadline can be measured from.
+    #[cfg(test)]
+    pub(crate) fn observe_release(&self, observer: impl Fn(bool) + Send + Sync + 'static) {
+        *self.release_observer.lock().unwrap() = Some(Arc::new(observer));
     }
 
     #[cfg(test)]
@@ -850,6 +861,10 @@ where
     #[cfg(test)]
     let claim_observer_r = claim_observer.clone();
     #[cfg(test)]
+    let release_observer: ReleaseObserver = Arc::default();
+    #[cfg(test)]
+    let release_observer_r = release_observer.clone();
+    #[cfg(test)]
     let stdout_observer: StdoutObserver = Arc::default();
     #[cfg(test)]
     let stdout_observer_r = stdout_observer.clone();
@@ -956,6 +971,11 @@ where
                         let observer = claim_observer_r.lock().unwrap().clone();
                         if let Some(observer) = observer { observer(held.clone()); }
                     }
+                    #[cfg(test)]
+                    if let Response::McpReleaseAck { was_holding, .. } = &resp {
+                        let observer = release_observer_r.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(*was_holding); }
+                    }
                     let req = resp_req(&resp);
                     if let Some(tx) = pending_r.lock().unwrap().remove(&req) {
                         let _ = tx.send(resp);
@@ -994,6 +1014,8 @@ where
         before_stdout,
         #[cfg(test)]
         claim_observer,
+        #[cfg(test)]
+        release_observer,
         #[cfg(test)]
         stdout_observer,
     }

@@ -31,6 +31,8 @@ pub(super) struct PortState {
     pub late_gate: tokio::sync::Semaphore,
     pub gate_endpoint: Mutex<Option<String>>,
     pub claims: Mutex<Vec<(Instant, Option<termflow_pty_protocol::McpHeld>)>>,
+    /// Wire arrival of each `McpReleaseAck` with its `was_holding`: stop deadlines start here.
+    pub releases: Mutex<Vec<(Instant, bool)>>,
     sibling: SiblingSlot,
 }
 impl RealPort {
@@ -75,6 +77,7 @@ impl RealPort {
             late_gate: tokio::sync::Semaphore::new(0),
             gate_endpoint: Mutex::new(None),
             claims: Mutex::new(vec![]),
+            releases: Mutex::new(vec![]),
             sibling: SiblingSlot::default(),
         }))
     }
@@ -83,6 +86,27 @@ impl RealPort {
             .into_iter()
             .chain(self.frozen_hosts().into_iter().map(|h| h.client))
             .collect()
+    }
+    /// The wire arrival of the first `McpReleaseAck { was_holding: true }`, waited for up to
+    /// `within`. Stop deadlines are measured from here, never from the return of the call that
+    /// sent the release.
+    pub async fn release_ack(&self, within: Duration) -> Instant {
+        let until = Instant::now() + within;
+        loop {
+            let acked = self
+                .0
+                .releases
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(_, was_holding)| *was_holding)
+                .map(|(at, _)| *at);
+            if let Some(at) = acked {
+                return at;
+            }
+            assert!(Instant::now() < until, "no holding McpReleaseAck observed");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
     pub async fn disconnect(&self) {
         for client in self.clients() {
@@ -183,6 +207,12 @@ impl AdoptionPort for RealPort {
         client.observe_claim(move |held| {
             if let Some(state) = state.upgrade() {
                 state.claims.lock().unwrap().push((Instant::now(), held));
+            }
+        });
+        let state = Arc::downgrade(&self.0);
+        client.observe_release(move |was_holding| {
+            if let Some(state) = state.upgrade() {
+                state.releases.lock().unwrap().push((Instant::now(), was_holding));
             }
         });
         let epoch = match frozen {
