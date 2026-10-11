@@ -704,6 +704,8 @@ fn classify(head: &str) -> Option<Classified> {
         return Some(Classified::Kind(Kind::Else));
     }
     let mut depth = 0i32;
+    // Inside a closure's `|..|` parameter list: a parameter type (`|f: fn()|`) is not a keyword.
+    let mut in_pipes = false;
     let mut word = String::new();
     let mut words: Vec<String> = Vec::new();
     for c in trimmed.chars().chain(std::iter::once(' ')) {
@@ -712,7 +714,7 @@ fn classify(head: &str) -> Option<Classified> {
             continue;
         }
         if !word.is_empty() {
-            if depth == 0 {
+            if depth == 0 && !in_pipes {
                 words.push(std::mem::take(&mut word));
             } else {
                 word.clear();
@@ -721,6 +723,7 @@ fn classify(head: &str) -> Option<Classified> {
         match c {
             '(' | '[' => depth += 1,
             ')' | ']' => depth -= 1,
+            '|' if depth == 0 => in_pipes = !in_pipes,
             _ => {}
         }
     }
@@ -1006,6 +1009,8 @@ mod scanner_tests {
             g({ in_arg(); });
             let p = Pair { x: hidden_field() };
             let r = Reader { read: || in_field_closure(), pick: if c { in_field_if() } else { 0 } };
+            let k = |_: fn()| { in_fn_param_closure() };
+            let u = unsafe { in_unsafe_value() };
             let a = [|| in_array_closure(), op(x || y), async || in_async_closure(), async move || in_async_move()];
         }";
         let (src, body) = body_of(text, "fn f(");
@@ -1020,8 +1025,10 @@ mod scanner_tests {
         assert_eq!(body.constructs_at(at("in_array_closure()")), [Kind::Closure]);
         assert!(body.constructs_at(at("op(x")).is_empty(), "`x || y` is an operator, not a closure");
         assert_eq!(body.constructs_at(at("in_async_closure()")), [Kind::Closure]);
+        assert_eq!(body.constructs_at(at("in_fn_param_closure()")), [Kind::Closure], "`fn` in a parameter type");
+        assert_eq!(body.constructs_at(at("in_unsafe_value()")), [Kind::Plain]);
         assert_eq!(body.constructs_at(at("in_async_move()")), [Kind::Closure]);
-        assert_eq!(body.all_stmts().len(), 8, "the function's statements and the block expression's two");
+        assert_eq!(body.all_stmts().len(), 12,"the function's statements and the block expression's two");
         let r = at("let r =");
         assert_eq!(body.deepest_stmt(at("in_field_closure()")).map(|s| s.span.start), Some(r));
     }
