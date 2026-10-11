@@ -10,57 +10,26 @@
 
 use super::fake_hosts::*;
 use super::*;
-use crate::pty_host_client::{connect_or_spawn, resolve_bundled_host_path, PtyHostDeps};
+use crate::pty_host_client::{real_process, PtyHostDeps};
 use crate::state::host_retire::{start_ticker, EMPTY_FOR, TICK};
 use crate::state::host_table::Admission;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct RealHost {
-    child: Child,
-    endpoint: String,
-    bin: PathBuf,
-    dir: PathBuf,
-    // Held for the host's whole life: see `test_dirs::child_process_gate`.
+    host: real_process::RealHost,
     _gate: std::sync::MutexGuard<'static, ()>,
 }
-
-impl Drop for RealHost {
-    fn drop(&mut self) {
-        // Our own child only; a no-op when it already exited.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
+impl std::ops::Deref for RealHost {
+    type Target = real_process::RealHost;
+    fn deref(&self) -> &Self::Target { &self.host }
 }
-
+impl std::ops::DerefMut for RealHost {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.host }
+}
 fn start_host() -> Option<RealHost> {
     let gate = crate::pty_host_client::test_dirs::child_process_gate();
-    let Some(bin) = resolve_bundled_host_path() else {
-        eprintln!("skipping: termflow-pty-host is not built (cargo build in src-tauri/pty-host)");
-        return None;
-    };
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let dir = std::env::temp_dir().join(format!("tfhost-retire-{id}"));
-    std::fs::create_dir(&dir).unwrap();
-    let endpoint = if cfg!(windows) {
-        format!(r"\\.\pipe\tf-retire-{id}")
-    } else {
-        // Short on purpose: socket paths are limited to ~100 bytes.
-        format!("/tmp/tf-retire-{}/h.sock", &id[..8])
-    };
-    let child = Command::new(&bin)
-        .env("TERMFLOW_PTY_PIPE", &endpoint)
-        .env("TERMFLOW_PTY_TOKEN", "tok")
-        .env("TERMFLOW_PTY_RECORD", dir.join("host-record.json"))
-        .current_dir(&dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the test host");
-    Some(RealHost { child, endpoint, bin, dir, _gate: gate })
+    let bin = real_process::host_binary("TERMFLOW_PTY_HOST_BIN")?;
+    Some(RealHost { host: real_process::RealHost::spawn(&bin, "tok"), _gate: gate })
 }
 
 async fn wait_for_exit(host: &mut RealHost, within: Duration) -> bool {
@@ -97,10 +66,9 @@ async fn a_real_empty_host_exits_after_the_ticker_retires_it() {
         },
         stream_offsets: Arc::new(dashmap::DashMap::new()),
     };
-    // `record_pid` makes the open wait for the endpoint instead of spawning a second host.
-    let (client, _origin) = connect_or_spawn(&host.bin, None, &host.endpoint, "tok", Some(host.child.id()), deps)
-        .await
-        .expect("connect to the test host");
+    // Never allow a missing endpoint to trigger spawning on production paths.
+    let client = real_process::connect_only(&host.endpoint, host.child.id(), deps)
+        .await.expect("connect-only to the test host");
     client.set_shutdown_control(true);
     assert!(client.list_sessions().await.expect("a live host answers").is_empty());
 
