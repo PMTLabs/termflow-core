@@ -73,6 +73,83 @@ pub(crate) fn prerequisite(message: &str) -> Option<PathBuf> {
     eprintln!("skipping real-process test: {message}");
     None
 }
+/// Can a child of this process outlive it? Not when this process sits in a kill-on-close job that
+/// refuses breakaway — which is how Cargo runs Windows test binaries. A host spawned from here then
+/// inherits the job and rightly refuses every arm, so the arming tests could only fail. That is a
+/// missing prerequisite, decided before any setup (D2), not an after-setup skip.
+#[cfg(windows)]
+pub(crate) fn children_can_outlive_this_process() -> Result<(), String> {
+    #[repr(C)]
+    struct BasicLimit {
+        per_process_user_time_limit: i64,
+        per_job_user_time_limit: i64,
+        limit_flags: u32,
+        minimum_working_set_size: usize,
+        maximum_working_set_size: usize,
+        active_process_limit: u32,
+        affinity: usize,
+        priority_class: u32,
+        scheduling_class: u32,
+    }
+    #[repr(C)]
+    struct ExtendedLimit {
+        basic: BasicLimit,
+        io_counters: [u64; 6],
+        process_memory_limit: usize,
+        job_memory_limit: usize,
+        peak_process_memory_used: usize,
+        peak_job_memory_used: usize,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn IsProcessInJob(process: *mut core::ffi::c_void, job: *mut core::ffi::c_void, result: *mut i32) -> i32;
+        fn QueryInformationJobObject(
+            job: *mut core::ffi::c_void, class: i32, info: *mut core::ffi::c_void, len: u32, ret: *mut u32,
+        ) -> i32;
+    }
+    const EXTENDED_LIMIT_INFORMATION: i32 = 9;
+    const BREAKAWAY_OK: u32 = 0x0800;
+    const SILENT_BREAKAWAY_OK: u32 = 0x1000;
+    const KILL_ON_JOB_CLOSE: u32 = 0x2000;
+    // SAFETY: plain Win32 queries on the current process and its own job; the buffer is a
+    // correctly sized repr(C) JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
+    unsafe {
+        let mut in_job = 0;
+        if IsProcessInJob(GetCurrentProcess(), std::ptr::null_mut(), &mut in_job) == 0 {
+            return Err("IsProcessInJob failed".into());
+        }
+        if in_job == 0 {
+            return Ok(());
+        }
+        let mut info: ExtendedLimit = std::mem::zeroed();
+        let mut ret = 0;
+        if QueryInformationJobObject(
+            std::ptr::null_mut(),
+            EXTENDED_LIMIT_INFORMATION,
+            &mut info as *mut _ as *mut core::ffi::c_void,
+            std::mem::size_of::<ExtendedLimit>() as u32,
+            &mut ret,
+        ) == 0
+        {
+            return Err("QueryInformationJobObject failed".into());
+        }
+        let flags = info.basic.limit_flags;
+        if flags & KILL_ON_JOB_CLOSE != 0 && flags & (BREAKAWAY_OK | SILENT_BREAKAWAY_OK) == 0 {
+            return Err("this process runs in a kill-on-close job that refuses breakaway (Cargo runs Windows \
+                        tests that way); run the built test executable outside it, see \
+                        docs/ci/mcp-hold-real-process-tests.md"
+                .into());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn children_can_outlive_this_process() -> Result<(), String> {
+    Ok(())
+}
+
 pub(crate) fn host_binary(variable: &str) -> Option<PathBuf> {
     let selected = if let Some(p) = std::env::var_os(variable) {
         PathBuf::from(p) // Explicit selection must NEVER fall back.

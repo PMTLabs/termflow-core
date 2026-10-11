@@ -24,6 +24,11 @@ impl Rig {
         } else {
             "TERMFLOW_PTY_HOST_BIN"
         })?;
+        // After the binary selection, so a missing explicit override is still reported as such.
+        if let Err(why) = real_process::children_can_outlive_this_process() {
+            real_process::prerequisite(&why);
+            return None;
+        }
         let gate = crate::pty_host_client::test_dirs::child_process_gate();
         let bun = real_process::bun_binary()?;
         let marker = format!("backend-057-{}", uuid::Uuid::new_v4());

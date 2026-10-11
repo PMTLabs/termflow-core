@@ -18,9 +18,11 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_hold_e2e -- --nocaptur
 ```
 
 On Windows, set `TERMFLOW_PTY_HOST_BIN` to the `.exe`. **Cargo creates a
-non-breakaway kill-on-close Job Object** around its tests. Consequently, a real
-host correctly refuses `ArmDetach` when started by an ordinary `cargo test`.
-Build with Cargo, then run its exact library test artifact outside Cargo's job
+non-breakaway kill-on-close Job Object** around its tests, and a real host started
+inside it correctly refuses `ArmDetach`. The rig detects that job before any setup
+and treats it as a missing prerequisite: an ordinary `cargo test` skips these tests
+with a message, and fails them only when `TERMFLOW_E2E_REQUIRED=1`. To actually run
+them, build with Cargo, then run its exact library test artifact outside Cargo's job
 (the Windows CI step does this):
 
 ```powershell
@@ -42,8 +44,8 @@ if ($tests.Count -ne 1) { throw 'expected one library test executable' }
 if ($LASTEXITCODE -ne 0) { throw 'real-process tests failed' }
 ```
 
-Use an independent shell, not another non-breakaway job. An arm refusal is a test
-failure, never an after-setup skip. Running without the filter executes the entire
+Use an independent shell, not another non-breakaway job. Once the prerequisites
+hold, an arm refusal is a test failure, never an after-setup skip. Running without the filter executes the entire
 library suite; add `--features velopack-updates` to the build for that gate.
 
 Missing prerequisites skip only when `TERMFLOW_E2E_REQUIRED` is not `1`. An explicit
