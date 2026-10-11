@@ -77,7 +77,7 @@ pub(crate) async fn handle_socket(socket: WebSocket, state: AppState) {
     let welcome = json!({
         "id": "welcome",
         "success": true,
-        "data": { "version": "0.1.0", "mode": "tauri" }
+        "data": { "version": env!("CARGO_PKG_VERSION"), "mode": "tauri" }
     });
     if let Err(e) = sender.send(Message::Text(welcome.to_string())).await {
         log::warn!("Failed to send welcome message: {}", e);
@@ -362,5 +362,18 @@ mod tests {
         );
     }
 
-
+    // The welcome frame and /api/system report Cargo's version, but releases
+    // bump package.json and tauri.conf.json. 0.3.0 shipped with Cargo.toml
+    // still at 0.1.0, so every client was told 0.1.0. Keep all three equal.
+    #[test]
+    fn cargo_version_matches_the_tauri_and_package_manifests() {
+        let version = |src: &str| -> String {
+            let value: serde_json::Value = serde_json::from_str(src).unwrap();
+            value["version"].as_str().unwrap().to_string()
+        };
+        let tauri = version(include_str!("../../tauri.conf.json"));
+        let package = version(include_str!("../../../package.json"));
+        assert_eq!(env!("CARGO_PKG_VERSION"), tauri, "src-tauri/Cargo.toml vs tauri.conf.json");
+        assert_eq!(env!("CARGO_PKG_VERSION"), package, "src-tauri/Cargo.toml vs package.json");
+    }
 }
