@@ -252,12 +252,30 @@ pub struct PtyHostClient {
     exe_origin: Arc<exe_origin::ExeOrigin>,
     #[cfg(test)]
     before_stdout: ReaderHook,
+    #[cfg(test)]
+    claim_observer: ClaimObserver,
+    #[cfg(test)]
+    stdout_observer: StdoutObserver,
 }
 
 #[cfg(test)]
 type ReaderHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
+#[cfg(test)]
+type ClaimObserver = Arc<Mutex<Option<Arc<dyn Fn(Option<termflow_pty_protocol::McpHeld>) + Send + Sync>>>>;
+#[cfg(test)]
+type StdoutObserver = Arc<Mutex<Option<Arc<dyn Fn(&str, &[u8]) + Send + Sync>>>>;
 
 impl PtyHostClient {
+    #[cfg(test)]
+    pub(crate) fn observe_claim(&self, observer: impl Fn(Option<termflow_pty_protocol::McpHeld>) + Send + Sync + 'static) {
+        *self.claim_observer.lock().unwrap() = Some(Arc::new(observer));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_stdout(&self, observer: impl Fn(&str, &[u8]) + Send + Sync + 'static) {
+        *self.stdout_observer.lock().unwrap() = Some(Arc::new(observer));
+    }
+
     pub(crate) fn bind_sessions(&self, keys: &crate::state::HostKeys, channel: crate::elevated_host::HostChannel, epoch: u64) {
         *self.sessions.lock().unwrap() = SessionBinding { keys: keys.clone(), channel, epoch };
         keys.connect(channel, epoch, self.outbound.clone(), self.alive.clone());
@@ -827,6 +845,14 @@ where
     let before_stdout: ReaderHook = Arc::default();
     #[cfg(test)]
     let before_stdout_r = before_stdout.clone();
+    #[cfg(test)]
+    let claim_observer: ClaimObserver = Arc::default();
+    #[cfg(test)]
+    let claim_observer_r = claim_observer.clone();
+    #[cfg(test)]
+    let stdout_observer: StdoutObserver = Arc::default();
+    #[cfg(test)]
+    let stdout_observer_r = stdout_observer.clone();
     let end = Arc::new(ConnLoss {
         conn: conn.clone(),
         alive: alive.clone(),
@@ -880,6 +906,11 @@ where
             };
             match next {
                 Ok(Some(Frame::Data(Data::Stdout { tab_id, offset, bytes }))) => {
+                    #[cfg(test)]
+                    {
+                        let observer = stdout_observer_r.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(&tab_id,&bytes); }
+                    }
                     // Ring bookkeeping stays in the HOST's id space — it is the
                     // host's own offset, and reattach replays from it.
                     let binding = sessions_r.lock().unwrap().clone();
@@ -920,6 +951,11 @@ where
                     }
                 }
                 Ok(Some(Frame::Resp(resp))) => {
+                    #[cfg(test)]
+                    if let Response::McpClaimAck { held, .. } = &resp {
+                        let observer = claim_observer_r.lock().unwrap().clone();
+                        if let Some(observer) = observer { observer(held.clone()); }
+                    }
                     let req = resp_req(&resp);
                     if let Some(tx) = pending_r.lock().unwrap().remove(&req) {
                         let _ = tx.send(resp);
@@ -956,6 +992,10 @@ where
         exe_origin: Arc::default(),
         #[cfg(test)]
         before_stdout,
+        #[cfg(test)]
+        claim_observer,
+        #[cfg(test)]
+        stdout_observer,
     }
 }
 
@@ -1601,6 +1641,9 @@ mod exe_origin_tests;
 
 #[cfg(test)]
 mod real_host_tests;
+#[cfg(test)]
+#[path = "pty_host_client/real_process_tests.rs"]
+pub(crate) mod real_process;
 
 #[cfg(test)]
 pub(crate) mod test_dirs;

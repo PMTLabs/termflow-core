@@ -10,69 +10,31 @@
 use super::*;
 #[path = "real_key_exit_tests.rs"]
 mod real_key_exit_tests;
-use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 struct RealHost {
-    child: Child,
-    endpoint: String,
-    bin: PathBuf,
-    _dir: test_dirs::TestDir,
-    // Held for the host's whole life: see `test_dirs::child_process_gate`.
+    host: real_process::RealHost,
     _gate: std::sync::MutexGuard<'static, ()>,
 }
-
-impl Drop for RealHost {
-    fn drop(&mut self) {
-        // Our own child only; a no-op when it already exited.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
+impl std::ops::Deref for RealHost {
+    type Target = real_process::RealHost;
+    fn deref(&self) -> &Self::Target { &self.host }
 }
-
+impl std::ops::DerefMut for RealHost {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.host }
+}
 fn start_host() -> Option<RealHost> {
     let gate = test_dirs::child_process_gate();
-    let Some(bin) = resolve_bundled_host_path() else {
-        eprintln!("skipping: termflow-pty-host is not built (cargo build in src-tauri/pty-host)");
-        return None;
-    };
-    let dir = test_dirs::tempdir().unwrap();
-    let id = uuid::Uuid::new_v4().simple().to_string();
-    let endpoint = if cfg!(windows) {
-        format!(r"\\.\pipe\tf-real-{id}")
-    } else {
-        // Short on purpose: socket paths are limited to ~100 bytes.
-        format!("/tmp/tf-real-{}/h.sock", &id[..8])
-    };
-    let child = Command::new(&bin)
-        .env("TERMFLOW_PTY_PIPE", &endpoint)
-        .env("TERMFLOW_PTY_TOKEN", "tok")
-        .env("TERMFLOW_PTY_RECORD", dir.path().join("host-record.json"))
-        .current_dir(dir.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn the test host");
-    Some(RealHost { child, endpoint, bin, _dir: dir, _gate: gate })
+    let bin = real_process::host_binary("TERMFLOW_PTY_HOST_BIN")?;
+    Some(RealHost { host: real_process::RealHost::spawn(&bin, "tok"), _gate: gate })
 }
 
 /// Connect to the host we started. `record_pid` makes the open wait for the
 /// endpoint (up to the long grace window) instead of spawning a second host.
 async fn connect(host: &RealHost) -> (PtyHostClient, conn_tests::Counters) {
     let (deps, counters) = conn_tests::deps();
-    let (client, origin) = connect_or_spawn(
-        &host.bin,
-        None,
-        &host.endpoint,
-        "tok",
-        Some(host.child.id()),
-        deps,
-    )
-    .await
-    .expect("connect to the test host");
-    assert_eq!(origin, HostConnectionOrigin::Adopted, "we started it, the client only adopts");
+    let client = real_process::connect_only(&host.endpoint, host.child.id(), deps)
+        .await.expect("connect-only to the test host");
     (client, counters)
 }
 

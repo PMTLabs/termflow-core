@@ -21,6 +21,8 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             conn: conn::ConnState::new(),
             exe_origin: Arc::default(),
             before_stdout: Arc::default(),
+            claim_observer: Arc::default(),
+            stdout_observer: Arc::default(),
         },
         out_rx,
     )

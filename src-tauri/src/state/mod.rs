@@ -18,6 +18,9 @@ mod host_lifecycle;
 mod mcp_handover;
 pub(crate) mod mcp_reclaim;
 mod mcp_snapshot;
+#[cfg(all(test, any(windows, target_os = "linux")))]
+#[path = "mcp_hold_e2e_tests.rs"]
+mod mcp_hold_e2e;
 #[cfg(test)]
 pub(crate) mod mcp_snapshot_tests;
 mod host_port;
