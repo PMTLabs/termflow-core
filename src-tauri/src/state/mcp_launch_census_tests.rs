@@ -30,6 +30,10 @@ const LEGACY_SPAWN: &str = "let child = cmd.spawn().map_err(|e| e.to_string())?;
 /// A command built afresh, without the launch environment.
 const FRESH_SIDECAR: &str = "app_handle.shell().sidecar(\"termflow-mcp-server\").map_err(|e| e.to_string())?";
 const FRESH_LEGACY: &str = "std::process::Command::new(\"node\").arg(&mcp_path)";
+/// The only calls a command may receive between the launch environment and the spawn: ones that add
+/// to it (`.env` is further checked against the launch keys). Clearing or removing variables, or
+/// anything new, fails the census until it is reviewed and listed here.
+const CONFIGURE_AFTER_ENV: [&str; 5] = ["env", "stdin", "stdout", "stderr", "creation_flags"];
 const FORBIDDEN_ENV: [&str; 4] = ["MCP_PORT", "MCP_HOST", "AUTO_TERMINAL_TOKEN", "AUTO_TERMINAL_API_TOKEN"];
 
 /// One spawn path builds its launch record and its environment from one `mcp_launch_env` call,
@@ -82,6 +86,11 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
                 c.root
             ));
         }
+        // After `.envs(env)` the chain only adds to the command (an allowlist, not a denylist).
+        let after: Vec<&String> = c.calls.iter().skip_while(|(name, _)| name != "envs").skip(1).map(|(name, _)| name).collect();
+        if let Some(name) = after.iter().find(|name| !CONFIGURE_AFTER_ENV.contains(&name.as_str())) {
+            return Err(format!("the builder chain calls `.{name}(` after `.envs(env)`"));
+        }
         (idx, args.end + 1)
     } else {
         let idx = require_top_statement(&src, &body, SIDECAR_LOOP)?;
@@ -90,14 +99,18 @@ fn check_spawn_provenance(text: &str, signature: &str, legacy: bool) -> Result<(
     if !(let_idx < consumer_idx && consumer_idx < spawn_idx) {
         return Err("the environment must be built, then applied, then the command spawned".into());
     }
-    // Between the two, the command is only configured further, never replaced: every use up to the
-    // spawn's own receiver, inside the spawn statement (a block initializer) as well as before it.
+    // Between the two, the command is only configured further, never replaced and never stripped:
+    // every use up to the spawn's own receiver, inside the spawn statement (a block initializer) as
+    // well as before it, is a chain on the receiver whose every call is on the allowlist.
     let receiver_at = spawned.len() - receiver.len();
     for found in word_uses(&src.masked, at(consumer_idx).end..receiver_at, receiver) {
         let stmt = body.deepest_stmt(found).ok_or("a use outside every statement")?;
         let text = src.norm(&stmt.span);
         if !(text.starts_with(&format!("{receiver}.")) || text.starts_with(&format!("{receiver}={receiver}."))) {
             return Err(format!("`{receiver}` is replaced between the environment and the spawn: `{text}`"));
+        }
+        if let Some((name, _)) = chain(&src, &stmt.span).calls.iter().find(|(name, _)| !CONFIGURE_AFTER_ENV.contains(&name.as_str())) {
+            return Err(format!("`{receiver}.{name}(` after the environment is applied: `{text}`"));
         }
     }
     // Nothing overrides a launch fact once the environment is applied.
@@ -287,6 +300,8 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_sidecar_path() {
         ("a fresh command spawned instead", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = {FRESH_SIDECAR}.spawn().map_err(|e| e.to_string())?;"))),
         ("the command replaced before the spawn", in_sidecar("    let generation = state", &format!("    sidecar_command = {FRESH_SIDECAR};\n    let generation = state"))),
         ("the command replaced inside the spawn's block initializer", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = {{\n        sidecar_command = {FRESH_SIDECAR};\n        {SIDECAR_SPAWN_CALL}\n    }};"))),
+        ("the environment cleared after the loop", in_sidecar("    // P0b: let the sidecar echo", "    sidecar_command = sidecar_command.env_clear();\n    // P0b: let the sidecar echo")),
+        ("the environment cleared inside the spawn's block initializer", in_sidecar(SIDECAR_SPAWN, &format!("let (mut rx, child) = {{\n        sidecar_command = sidecar_command.env_clear();\n        {SIDECAR_SPAWN_CALL}\n    }};"))),
         ("a different child wrapped", in_sidecar("McpProcessHandle::Sidecar {\n            child,", "McpProcessHandle::Sidecar {\n            child: other_child,")),
     ];
     for (name, source) in cases {
@@ -320,6 +335,9 @@ fn the_provenance_census_kills_each_planted_mutation_in_the_legacy_path() {
         ("a fresh command spawned instead", in_legacy(LEGACY_SPAWN, &format!("let child = {FRESH_LEGACY}.spawn().map_err(|e| e.to_string())?;"))),
         ("the command replaced before the spawn", in_legacy("    let generation = state", "    cmd = std::process::Command::new(\"node\");\n    let generation = state")),
         ("the command replaced inside the spawn's block initializer", in_legacy(LEGACY_SPAWN, "let child = {\n        cmd = std::process::Command::new(\"node\");\n        cmd.arg(&mcp_path);\n        cmd.spawn().map_err(|e| e.to_string())?\n    };")),
+        ("the environment cleared in the builder chain", in_legacy(envs, ".envs(env)\n        .env_clear()\n")),
+        ("the environment cleared in a later statement", in_legacy("    let generation = state", "    cmd.env_clear();\n    let generation = state")),
+        ("a launch key removed after the environment", in_legacy("    let generation = state", "    cmd.env_remove(\"MCP_PORT\");\n    let generation = state")),
         ("a different child wrapped", in_legacy("McpProcessHandle::Legacy(child)", "McpProcessHandle::Legacy(other_child)")),
     ];
     for (name, source) in cases {

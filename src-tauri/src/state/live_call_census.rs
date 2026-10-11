@@ -600,14 +600,14 @@ impl Src {
                 i += 1;
                 continue;
             }
-            // `a || b` and `a | b` are operators; a closure follows `(`, `,`, `=`, `move`, `=>`
-            // or opens the statement.
+            // `a || b` and `a | b` are operators; a closure follows `(`, `[`, `,`, `=`, `:` (a field),
+            // `move`, `=>`, `return` or opens the statement.
             let mut p = i;
             while p > 0 && flat[p - 1].is_ascii_whitespace() {
                 p -= 1;
             }
             let introducer = p == 0
-                || matches!(flat[p - 1], b'(' | b',' | b'=' | b'>' | b'{' | b';' | b':')
+                || matches!(flat[p - 1], b'(' | b'[' | b',' | b'=' | b'>' | b'{' | b';' | b':')
                 || flat[..p].ends_with(b"move")
                 || flat[..p].ends_with(b"return");
             let double = flat.get(i + 1) == Some(&b'|');
@@ -1005,6 +1005,7 @@ mod scanner_tests {
             g({ in_arg(); });
             let p = Pair { x: hidden_field() };
             let r = Reader { read: || in_field_closure(), pick: if c { in_field_if() } else { 0 } };
+            let a = [|| in_array_closure(), op(x || y)];
         }";
         let (src, body) = body_of(text, "fn f(");
         let at = |needle: &str| src.masked.find(needle).unwrap_or_else(|| panic!("{needle}"));
@@ -1015,7 +1016,9 @@ mod scanner_tests {
         // A construct inside a field initializer is seen; the fields are not function statements.
         assert_eq!(body.constructs_at(at("in_field_closure()")), [Kind::Literal, Kind::Closure]);
         assert_eq!(body.constructs_at(at("in_field_if()")), [Kind::Literal, Kind::If]);
-        assert_eq!(body.all_stmts().len(), 7, "the function's statements and the block expression's two");
+        assert_eq!(body.constructs_at(at("in_array_closure()")), [Kind::Closure]);
+        assert!(body.constructs_at(at("op(x")).is_empty(), "`x || y` is an operator, not a closure");
+        assert_eq!(body.all_stmts().len(), 8, "the function's statements and the block expression's two");
         let r = at("let r =");
         assert_eq!(body.deepest_stmt(at("in_field_closure()")).map(|s| s.span.start), Some(r));
     }

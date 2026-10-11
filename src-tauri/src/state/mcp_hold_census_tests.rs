@@ -176,7 +176,9 @@ fn the_record_reader_census_kills_its_mutations() {
         ("a cursor wrapper that stops sharing the resolver", mutate(CLIENT, "spawned_host_advertises(server_pid, termflow_pty_protocol::CAP_INHERIT_CURSOR)", "true")),
         ("a return before the spawned helper's read", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    return false;\n    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)")),
         ("the read only inside a closure nobody calls", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    let _f = || read_advertised_record();\n    host_advertises_served_by(None, server_pid, bit)")),
-        ("the read only in a closure held by a struct field", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    struct Reader<F> { read: F }\n    let _reader = Reader { read: || read_advertised_record() };\n    host_advertises_served_by(None, server_pid, bit)")),
+        ("the read only in a closure held by an array", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    let _readers = [|| read_advertised_record()];\n    host_advertises_served_by(None, server_pid, bit)")),
+        ("the read only in an array closure held by a struct field", mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    struct Reader<F> { read: [F; 1] }\n    let _reader = Reader { read: [|| read_advertised_record()] };\n    host_advertises_served_by(None, server_pid, bit)")),
+        ("the read only in a closure held by a struct field",mutate(CLIENT, "    host_advertises_served_by(read_advertised_record().as_ref(), server_pid, bit)", "    struct Reader<F> { read: F }\n    let _reader = Reader { read: || read_advertised_record() };\n    host_advertises_served_by(None, server_pid, bit)")),
     ];
     for (name, source) in cases {
         assert!(check_record_reader(&source).is_err(), "the census let this mutation through: {name}");
