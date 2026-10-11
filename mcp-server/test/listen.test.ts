@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import http from "node:http";
 import express from "express";
 import net from "node:net";
 import { startListening } from "../src/listen.js";
@@ -83,6 +84,78 @@ function track(listening: Listening): Listening {
 }
 
 describe("startListening", () => {
+    test("Bun_bind_error_measurements_and_nonlocal_retry_limit", async () => {
+        console.log(`Bun bind measurement version=${Bun.version} platform=${process.platform}`);
+        const port = await freePort();
+        const holder = await occupy(port);
+        cleanup.push(() => release(holder));
+        const cases = [
+            ["in-use", port, HOST],
+            ["non-local", port, "203.0.113.1"],
+            ["invalid-host", port, "::notanip"],
+        ] as const;
+        const errors: NodeJS.ErrnoException[] = [];
+        for (const [name, p, host] of cases) {
+            const err = await new Promise<NodeJS.ErrnoException>((resolve, reject) => {
+                const server = http.createServer();
+                server.once("error", (err) => { server.close(); resolve(err); });
+                server.once("listening", () => { server.close(); reject(new Error(`${name} unexpectedly bound`)); });
+                try { server.listen(p, host); } catch (err) { server.close(); resolve(err as NodeJS.ErrnoException); }
+            });
+            console.log(JSON.stringify({ case: name, code: err.code, errno: err.errno, syscall: err.syscall, message: err.message }));
+            errors.push(err);
+        }
+        expect(errors[0]?.code).toBe("EADDRINUSE");
+        // Bun reports the SAME code/errno/syscall for non-local and occupied addresses.
+        expect(errors[1]?.code).toBe("EADDRINUSE");
+        expect(errors[1]?.errno).toBe(errors[0]?.errno);
+        expect(errors[1]?.syscall).toBe(errors[0]?.syscall);
+        expect(errors[2]?.code).not.toBe("EADDRINUSE");
+        const started = Date.now();
+        const listening = track(startListening(buildApp(), port, "203.0.113.1", { retryMs: 20, limitMs: 300 }));
+        const outcome = await settlesWithin(listening.ready, 2000);
+        expect(outcome).not.toBe("pending");
+        expect((outcome as { error: NodeJS.ErrnoException }).error.code).toBe("EADDRINUSE");
+        expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+        expect(Date.now() - started).toBeLessThan(2000);
+    });
+
+    test("invalid_port_observably_throws_without_error_event_or_retry", async () => {
+        const original = http.Server.prototype.listen;
+        let attempts = 0;
+        let thrown: unknown;
+        let errorEvents = 0;
+        let observed: http.Server | undefined;
+        const spy = spyOn(http.Server.prototype, "listen").mockImplementation(function (this: http.Server, ...args: unknown[]) {
+            attempts++;
+            observed = this;
+            this.on("error", () => errorEvents++);
+            try {
+                return Reflect.apply(original, this, args);
+            } catch (err) {
+                thrown = err;
+                throw err;
+            }
+        } as typeof original);
+        try {
+            const started = Date.now();
+            // Bun clamps numeric 70000 to 65535, and emits validation errors asynchronously.
+            // An invalid options object's throwing port getter exercises a REAL synchronous throw
+            // before Bun's internal asynchronous error conversion. The spy only observes it.
+            const invalidPort = { get port(): number { throw new RangeError("invalid port getter"); } } as unknown as number;
+            const listening = track(startListening(buildApp(), invalidPort, HOST, { retryMs: 400, limitMs: 5000 }));
+            const outcome = await settlesWithin(listening.ready, 300);
+            expect(outcome).not.toBe("pending");
+            expect(thrown).toBeInstanceOf(Error);
+            expect((outcome as { error: unknown }).error).toBe(thrown);
+            expect(Date.now() - started).toBeLessThan(400);
+            await Bun.sleep(450);
+            expect(attempts).toBe(1);
+            expect(errorEvents).toBe(0);
+            expect(observed?.listening).toBe(false);
+            expect(observed?.address()).toBeNull();
+        } finally { spy.mockRestore(); }
+    });
     test("binds_after_port_frees", async () => {
         const port = await freePort();
         const holder = await occupy(port);

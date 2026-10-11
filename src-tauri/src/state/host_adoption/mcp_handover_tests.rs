@@ -6,7 +6,7 @@
 use super::fake_hosts::*;
 use super::lifecycle_tests::{machine_with_current, CURRENT};
 use super::*;
-use crate::pty_host_client::{McpHoldOutcome, McpReleaseOutcome, McpSendError};
+use crate::pty_host_client::{McpClaimOutcome, McpHoldOutcome, McpReleaseOutcome, McpSendError};
 use crate::state::host_lifecycle::{begin_offload, begin_relaunch, AckedHost};
 use crate::state::mcp_handover::choose_holder;
 use termflow_pty_protocol::{ArmDetachPurpose, Control, Frame, McpHoldReason, McpHoldSpec};
@@ -52,6 +52,7 @@ async fn a_client_without_the_bit_is_told_not_capable_and_writes_no_frame() {
 
     assert_eq!(client.hold_mcp(TOKEN, spec()).await, Ok(McpHoldOutcome::NotCapable));
     assert_eq!(client.release_mcp(TOKEN).await, Ok(McpReleaseOutcome::NotCapable));
+    assert_eq!(client.claim_mcp(TOKEN).await, Ok(McpClaimOutcome::NotCapable));
 
     assert_eq!(mcp_frames(&world, CURRENT), Vec::<&str>::new(), "nothing reached the host");
     assert!(client.is_alive(), "and the connection is still up");
