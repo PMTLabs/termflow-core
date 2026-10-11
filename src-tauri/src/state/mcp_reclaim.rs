@@ -510,17 +510,20 @@ pub(crate) async fn prepare_reclaim<IO: McpBootIo>(io: &IO, inputs: BootInputs) 
 }
 
 /// Poll `/health` on `port` until our own instance answers it, for at most [`IDENTITY_WAIT`]. The bound
-/// covers the probes as well as the pauses: an answer that arrives after it is not accepted.
-async fn wait_for_identity<IO: McpBootIo>(io: &IO, own_id: &str, port: u16) -> bool {
+/// covers the probes as well as the pauses: an answer seen after it is not accepted, even one that was
+/// ready when the timeout expired (a timeout polls its future before its deadline).
+pub(crate) async fn wait_for_identity<IO: McpBootIo>(io: &IO, own_id: &str, port: u16) -> bool {
+    let deadline = Instant::now() + IDENTITY_WAIT;
     let poll = async {
-        loop {
+        while Instant::now() < deadline {
             if io.owns(own_id, port).await == PortOwner::OwnedBySelf {
-                return;
+                return Instant::now() <= deadline;
             }
             tokio::time::sleep(IDENTITY_POLL).await;
         }
+        false
     };
-    tokio::time::timeout(IDENTITY_WAIT, poll).await.is_ok()
+    tokio::time::timeout_at(deadline, poll).await.unwrap_or(false)
 }
 
 /// Take the held port back: release the holder, start the sidecar on that port and prove it is ours.

@@ -66,6 +66,8 @@ struct FakeIo {
     owner: Box<dyn Fn(u16) -> PortOwner + Send + Sync>,
     /// How long each identity probe takes before it answers.
     probe: Duration,
+    /// When set, each identity probe answers only once this is notified.
+    probe_gate: Option<Arc<tokio::sync::Notify>>,
     pick: Option<u16>,
 }
 
@@ -81,6 +83,7 @@ impl FakeIo {
             spawn_ok: Box::new(|_| true),
             owner: Box::new(|_| PortOwner::OwnedBySelf),
             probe: Duration::ZERO,
+            probe_gate: None,
             pick: Some(PICK),
         }
     }
@@ -148,6 +151,9 @@ impl McpBootIo for FakeIo {
     async fn owns(&self, _own_id: &str, port: u16) -> PortOwner {
         self.note(format!("owns:{port}"));
         tokio::time::sleep(self.probe).await;
+        if let Some(gate) = &self.probe_gate {
+            gate.notified().await;
+        }
         (self.owner)(port)
     }
 
@@ -385,6 +391,37 @@ async fn identity_wait_bounds_slow_probes() {
     io.owner = owned_after(secs(1));
     assert_eq!(start_mcp(prepared, API, &io).await, Some(P));
     assert!(!io.names().contains(&"stop".to_string()), "{:?}", io.names());
+}
+
+/// The race a timeout alone loses (review 318 N1): the probe's own answer and the deadline are both
+/// ready when the check is next polled. `timeout` polls its future first, so the answer would win;
+/// it was seen after the bound and must be rejected.
+#[tokio::test(start_paused = true)]
+async fn identity_seen_after_the_bound_is_rejected_even_when_ready_with_the_timeout() {
+    let (world, _port) = machine_with_current(HostSpec::default(), &[]);
+    let mut io = FakeIo::new(&world);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    io.probe_gate = Some(gate.clone());
+    let check = crate::state::mcp_reclaim::wait_for_identity(&io, "own-056", P);
+    tokio::pin!(check);
+
+    assert!(futures::poll!(&mut check).is_pending(), "the first probe is waiting for its answer");
+    tokio::time::advance(IDENTITY_WAIT + millis(200)).await;
+    gate.notify_one();
+
+    assert!(!check.await, "an identity seen 200 ms past the bound is no proof");
+    assert_eq!(io.names(), [format!("owns:{P}")], "one probe, answered late");
+
+    // The control: the same answer before the bound is accepted.
+    let mut io = FakeIo::new(&world);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    io.probe_gate = Some(gate.clone());
+    let check = crate::state::mcp_reclaim::wait_for_identity(&io, "own-056", P);
+    tokio::pin!(check);
+    assert!(futures::poll!(&mut check).is_pending());
+    tokio::time::advance(IDENTITY_WAIT - millis(200)).await;
+    gate.notify_one();
+    assert!(check.await, "an identity seen within the bound is accepted");
 }
 
 #[tokio::test(start_paused = true)]

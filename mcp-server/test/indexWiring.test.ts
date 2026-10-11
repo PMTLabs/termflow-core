@@ -14,6 +14,7 @@ const MOUNT = "app.use(createDrainMiddleware({ drain, token: ACCESS_TOKEN, now: 
 const GATE = "app.use(createAuthGate(ACCESS_TOKEN));";
 const FIRST_CALLBACK = "() => { drain.begin(Date.now()); }";
 const LISTEN_STATEMENT = "const listening = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });";
+const LISTEN_LOG = "console.log(`[MCP] Listening on http://${MCP_HOST}:${MCP_PORT}`);";
 const LISTEN_ARGS = ["app", "MCP_PORT", "MCP_HOST", "{ retryMs: 100, limitMs: 5000 }"];
 const CANCEL_LINE = "        listening.cancel();\n";
 const REJECT_HANDLER = "    (err) => {\n        console.error(`[MCP] Could not listen on ${MCP_HOST}:${MCP_PORT}:`, err);\n        void gracefulExit(1);\n    },\n";
@@ -216,7 +217,17 @@ export function checkIndexWiring(source: string): string[] {
                 const why = whyNotLive(masked, inResolve[0].at, resolveBody);
                 if (why) problems.push(`the server assignment ${why}`);
             }
-            if (!/Listeningon/.test(resolveText)) problems.push("the success log is not in the resolve handler");
+            // The success log: the exact statement, once, live in the resolve handler (review 318 I4).
+            const logs: number[] = [];
+            for (let at = source.indexOf(LISTEN_LOG); at >= 0; at = source.indexOf(LISTEN_LOG, at + 1)) logs.push(at);
+            const resolveOpen = masked.indexOf("{", resolveArg[0]);
+            if (logs.length !== 1) problems.push(`expected exactly one \`${LISTEN_LOG}\`, found ${logs.length}`);
+            else if (!masked.startsWith("console.log(", logs[0])) problems.push("the success log is not code (a comment or a string)");
+            else if (logs[0] < resolveArg[0] || logs[0] >= resolveArg[1]) problems.push("the success log is not in the resolve handler");
+            else {
+                const why = whyNotLive(masked, logs[0], resolveOpen);
+                if (why) problems.push(`the success log ${why}`);
+            }
             const rejectBody = masked.indexOf("{", rejectArg[0]);
             const exits = findAll(masked.slice(0, rejectArg[1]), /\bvoid\s+gracefulExit\s*\(\s*1\s*\)\s*;/).filter((h) => h.at > rejectBody);
             if (exits.length !== 1) problems.push(`expected exactly one \`void gracefulExit(1);\` in the reject handler, found ${exits.length}`);
@@ -277,6 +288,12 @@ describe("index.ts drain wiring census", () => {
         ["startListening with a changed retry interval", () => mutate(INDEX, "retryMs: 100,", "retryMs: 1000,")],
         ["startListening without its options", () => mutate(INDEX, ", { retryMs: 100, limitMs: 5000 });", ");")],
         ["startListening with an extra argument", () => mutate(INDEX, "limitMs: 5000 });", "limitMs: 5000 }, 1);")],
+        ["the success log under a condition", () => mutate(INDEX, LISTEN_LOG, `if (exiting) { ${LISTEN_LOG} }`)],
+        ["the success log in an uncalled closure", () => mutate(INDEX, LISTEN_LOG, `const later = () => { ${LISTEN_LOG} };`)],
+        ["the success log after a return", () => mutate(INDEX, "        server = listener;\n", "        server = listener;\n        return;\n")],
+        ["the success log only in a comment", () => mutate(INDEX, LISTEN_LOG, `// ${LISTEN_LOG}`)],
+        ["the success log only in a string", () => mutate(INDEX, LISTEN_LOG, `const note = "Listening on";`)],
+        ["the success log with another address", () => mutate(INDEX, LISTEN_LOG, "console.log(`[MCP] Listening on http://127.0.0.1:${MCP_PORT}`);")],
         ["startListening under if (false)", () => mutate(INDEX, LISTEN_STATEMENT, `if (false) ${LISTEN_STATEMENT}`)],
         ["startListening only in a comment", () => mutate(INDEX, LISTEN_STATEMENT, `// ${LISTEN_STATEMENT}`)],
         ["a second startListening", () => mutate(INDEX, LISTEN_STATEMENT, `${LISTEN_STATEMENT}\nconst again = startListening(app, MCP_PORT, MCP_HOST, { retryMs: 100, limitMs: 5000 });`)],

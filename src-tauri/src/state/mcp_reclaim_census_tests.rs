@@ -25,6 +25,8 @@ const OFFER: &str = "ctx.reclaim.offer(Claimed::new(held, client.clone(), ctx.ch
 const SETTLE_CTX_BODY: &str = "SettleCtx { channel, epoch, endpoint: endpoint.to_owned(), token: port.host_token(), reclaim: port.reclaim().clone() }";
 const EXISTING_SITE: &str = "let listing = settle(&client, &settle_ctx(port, channel, epoch, &candidate.endpoint), deadline).await;";
 const RESERVED_EPOCH: &str = "let reserved = frozen.map_or(opened.epoch, |(_, epoch)| epoch);";
+/// The branch the re-list site lives in, directly in `adopt`'s body.
+const EXISTING_BRANCH: &str = "ifletSome((channel,client))=existing{";
 const NEW_SITE: &str = "let listing = settle(&client, &settle_ctx(port, channel, reserved, &candidate.endpoint), deadline).await;";
 
 /// The `async { .. }` block `settle` binds to `work`.
@@ -132,11 +134,30 @@ fn check_settle_ctx_and_sites(text: &str) -> Result<(), String> {
     }
     let adopt = src.try_function("async fn adopt<P: AdoptionPort>(")?;
     let all = adopt.all_stmts();
-    for site in [EXISTING_SITE, RESERVED_EPOCH, NEW_SITE] {
-        let hits = all.iter().filter(|s| src.norm(&s.span) == norm(site)).count();
-        if hits != 1 {
-            return Err(format!("adopt must contain exactly one `{site}`, found {hits}"));
+    // Each site runs on its own route: the re-list directly in the `existing` branch, the new connection's
+    // epoch and claim unconditionally in `adopt`, in that order (review 318 I3).
+    let mut previous = 0;
+    for (site, route) in [(EXISTING_SITE, vec![Kind::If]), (RESERVED_EPOCH, vec![]), (NEW_SITE, vec![])] {
+        let hits: Vec<_> = all.iter().filter(|s| src.norm(&s.span) == norm(site)).collect();
+        let [stmt] = &hits[..] else {
+            return Err(format!("adopt must contain exactly one `{site}`, found {}", hits.len()));
+        };
+        let chain = adopt.constructs_at(stmt.span.start);
+        if chain != route {
+            return Err(format!("`{site}` is not live on its route in adopt: {chain:?}, not {route:?}"));
         }
+        if stmt.span.start <= previous {
+            return Err(format!("`{site}` is out of order in adopt"));
+        }
+        previous = stmt.span.start;
+    }
+    let branches: Vec<_> = adopt.stmts.iter().filter(|s| src.norm(&s.span).starts_with(EXISTING_BRANCH)).collect();
+    let [branch] = &branches[..] else {
+        return Err(format!("adopt must branch once on `{EXISTING_BRANCH}`, found {}", branches.len()));
+    };
+    let relist = all.iter().find(|s| src.norm(&s.span) == norm(EXISTING_SITE)).expect("found above");
+    if !(branch.span.start < relist.span.start && relist.span.end <= branch.span.end) {
+        return Err("the re-list site is not in the `existing` branch".into());
     }
     if find_calls(&src.masked[adopt.open..adopt.close], "settle(").len() != 2 {
         return Err("adopt must call settle exactly twice".into());
@@ -178,6 +199,14 @@ fn the_claim_census_kills_each_planted_mutation() {
         ("a ctx token from the sidecar", mutate(HOST_ADOPTION, "token: port.host_token(), reclaim:", "token: String::from(\"bearer\"), reclaim:")),
         ("the re-list site claiming with another epoch", mutate(HOST_ADOPTION, EXISTING_SITE, "let listing = settle(&client, &settle_ctx(port, channel, 0, &candidate.endpoint), deadline).await;")),
         ("the new-connection site claiming with the published epoch", mutate(HOST_ADOPTION, NEW_SITE, "let listing = settle(&client, &settle_ctx(port, channel, opened.epoch, &candidate.endpoint), deadline).await;")),
+        ("the new connection's claim only for capable hosts", mutate(HOST_ADOPTION, NEW_SITE, &format!("let listing = if client.mcp_hold() {{ {NEW_SITE} listing }} else {{ None }};"))),
+        ("the re-list only for capable hosts", mutate(HOST_ADOPTION, EXISTING_SITE, &format!("let listing = if client.mcp_hold() {{ {EXISTING_SITE} listing }} else {{ None }};"))),
+        ("the re-list site in another branch", mutate(HOST_ADOPTION, &format!("        {EXISTING_SITE}
+"), "").replacen("    let client = opened.client;", &format!("    if frozen.is_none() {{ {EXISTING_SITE} }}
+    let client = opened.client;"), 1)),
+        ("the reserved epoch after the new site", mutate(HOST_ADOPTION, &format!("    {RESERVED_EPOCH}
+"), "").replacen(NEW_SITE, &format!("{NEW_SITE}
+    {RESERVED_EPOCH}"), 1)),
         ("a third settle call in adopt", mutate(HOST_ADOPTION, RESERVED_EPOCH, &format!("{RESERVED_EPOCH}\n    let _extra = settle(&client, &settle_ctx(port, channel, reserved, &candidate.endpoint), deadline).await;"))),
     ];
     for (name, source) in cases {
@@ -200,6 +229,14 @@ const MCP_PUBLISH: &str = "api_state.effective_endpoints.write().mcp_port = mcp_
 const RECORD: &str = "if let Err(e) = crate::net_ports::publish(&crate::net_ports::InstanceRecord { profile: crate::profile::current().key(), pid: std::process::id(), api_port: Some(api_port), mcp_port: mcp_effective_port, token: (crate::profile::current().integrity == crate::profile::Integrity::High).then(|| api_net.auth_token.clone()), }, crate::profile::current().integrity == crate::profile::Integrity::High,) { log::warn!(\"[NET] could not republish the instance record: {e}\"); }";
 const SERVE: &str = "crate::api_server::start_api_server(api_state, listener, api_net.expose_on_network, api_sd_rx,).await;";
 const DROP_PREPARED: &str = "drop(prepared);";
+/// The bind's match and its two arms, whole: the subject, and each pattern with its bindings and no guard.
+const BIND_MATCH: &str = "matchpicked{";
+const SUCCESS_ARM: &str = "Some(crate::net_ports::Picked { port: api_port, bound: listener })";
+const FAILURE_ARM: &str = "None";
+/// Where the boot task's own statements sit: the `setup` closure, then the spawned `async move` block.
+/// Established independently of any statement in it, so that a construct around the whole task (a
+/// condition, an uncalled closure, an earlier `return`) is seen (review 318 N2).
+const BOOT_SCOPE: [Kind; 2] = [Kind::Closure, Kind::Async];
 
 /// Where each statement is and how it is guarded, in the order the boot task must run them.
 fn check_boot_task(text: &str) -> Result<(), String> {
@@ -213,12 +250,31 @@ fn check_boot_task(text: &str) -> Result<(), String> {
             _ => Err(format!("`{wanted}` must be exactly one statement of the boot task, found {}", hits.len())),
         }
     };
+    let base = BOOT_SCOPE.to_vec();
+    let in_arm = |pattern: &str| {
+        let mut chain = base.clone();
+        chain.push(Kind::MatchArm(pattern.to_owned()));
+        chain
+    };
     let anchor = find(ANCHOR)?;
-    let base = run.constructs_at(anchor.span.start);
-    // Each statement runs exactly when the boot task does (same guards as the lock), or, for the
-    // ones after the bind, exactly in the `Some(Picked ..)` arm of its match.
+    if run.constructs_at(anchor.span.start) != base {
+        return Err(format!("`{ANCHOR}` is not live in the boot task: {:?} (boot task: {base:?})", run.constructs_at(anchor.span.start)));
+    }
+    // The bind's result is matched once, directly in the boot task; the post-bind statements are in its
+    // success arm and the claim's cleanup in its failure arm (review 318 N3).
+    let matches: Vec<_> = all.iter().filter(|s| src.norm(&s.span).starts_with(BIND_MATCH)).collect();
+    let [bind_match] = &matches[..] else {
+        return Err(format!("the boot task must match the bind's result exactly once (`match picked {{`), found {}", matches.len()));
+    };
+    if run.constructs_at(bind_match.span.start) != base {
+        return Err("`match picked` is not live in the boot task".into());
+    }
+    let in_match = |stmt: &crate::state::live_call_census::Stmt| {
+        bind_match.span.start < stmt.span.start && stmt.span.end <= bind_match.span.end
+    };
+    // Each statement runs exactly when the boot task does, or, after the bind, exactly in the success arm.
     let mut previous = anchor.span.start;
-    for (statement, in_arm) in [
+    for (statement, after_bind) in [
         (MCP_IO, false),
         (PREPARE, false),
         (BIND, false),
@@ -230,13 +286,7 @@ fn check_boot_task(text: &str) -> Result<(), String> {
     ] {
         let stmt = find(statement)?;
         let chain = run.constructs_at(stmt.span.start);
-        let live = if in_arm {
-            chain.len() == base.len() + 1
-                && chain[..base.len()] == base[..]
-                && matches!(&chain[base.len()], Kind::MatchArm(pattern) if norm(pattern).starts_with("Some(crate::net_ports::Picked"))
-        } else {
-            chain == base
-        };
+        let live = if after_bind { chain == in_arm(SUCCESS_ARM) && in_match(stmt) } else { chain == base };
         if !live {
             return Err(format!("`{statement}` is not live in the boot task: {chain:?} (boot task: {base:?})"));
         }
@@ -245,14 +295,10 @@ fn check_boot_task(text: &str) -> Result<(), String> {
         }
         previous = stmt.span.start;
     }
-    // The failed-bind arm hands the claim back before anything else.
-    let none_arm = all.iter().filter(|s| src.norm(&s.span) == norm(DROP_PREPARED)).count();
-    if none_arm != 1 {
-        return Err(format!("the bind-failure arm must drop `prepared` exactly once, found {none_arm}"));
-    }
-    let drop_at = find(DROP_PREPARED)?.span.start;
-    if !matches!(run.constructs_at(drop_at).last(), Some(Kind::MatchArm(pattern)) if norm(pattern) == "None") {
-        return Err("`drop(prepared);` is not in the `None` arm of the bind".into());
+    // The failed-bind arm hands the claim back.
+    let drop_prepared = find(DROP_PREPARED)?;
+    if run.constructs_at(drop_prepared.span.start) != in_arm(FAILURE_ARM) || !in_match(drop_prepared) {
+        return Err(format!("`drop(prepared);` is not live in the `None` arm of the bind: {:?}", run.constructs_at(drop_prepared.span.start)));
     }
     // The listener is only ever handed to serving.
     if !find_calls(&src.masked[run.open..run.close], "drop(listener)").is_empty() {
@@ -270,6 +316,24 @@ fn check_boot_task(text: &str) -> Result<(), String> {
 #[test]
 fn the_boot_task_runs_the_reclaim_phases_around_the_api_bind_in_order() {
     check_boot_task(LIB).unwrap();
+}
+
+/// `lib.rs` with the whole boot task, otherwise unchanged, enclosed in `before … after`.
+fn wrap_boot_task(before: &str, after: &str) -> String {
+    let head = "        tauri::async_runtime::spawn(async move {
+            // Boot network initialization";
+    let tail = "                }
+            }
+        });
+
+        // Spawn the PTY Output Listener";
+    let wrapped = mutate(LIB, head, &format!("        {before}{}", head.trim_start()));
+    let end = "        });
+
+        // Spawn the PTY Output Listener";
+    mutate(&wrapped, tail, &tail.replacen(end, &format!("        }});{after}
+
+        // Spawn the PTY Output Listener"), 1))
 }
 
 /// `lib.rs` with the instance record publication, otherwise unchanged, enclosed in `before … after`.
@@ -307,6 +371,19 @@ fn the_boot_task_census_kills_each_planted_mutation() {
         ("the record published only on a network launch", wrap_record("if api_net.expose_on_network { ", " }")),
         ("the record published only from an uncalled closure", wrap_record("let _later = || { ", " };")),
         ("the record with another token", mutate(LIB, ".then(|| api_net.auth_token.clone()),", ".then(String::new),")),
+        ("the whole boot task under a condition", wrap_boot_task("if api_net.expose_on_network { ", " }")),
+        ("the whole boot task in an uncalled closure", wrap_boot_task("let _later = || { ", " };")),
+        ("the boot task's body after a return", mutate(LIB, "            let _op = api_state.network_op_lock.lock().await;", "            return;
+            let _op = api_state.network_op_lock.lock().await;")),
+        ("the success arm guarded, with a fallback arm", mutate(LIB, "Some(crate::net_ports::Picked { port: api_port, bound: listener }) => {", "Some(crate::net_ports::Picked { port: api_port, bound: listener }) if api_net.expose_on_network => {")
+            .replacen("                None => {
+                    drop(_op);", "                Some(_) => {}
+                None => {
+                    drop(_op);", 1)),
+        ("the bind's result not the match's subject", mutate(LIB, "            match picked {", "            match picked.or(None).filter(|_| false) {")),
+        ("the claim's cleanup moved into an uncalled closure's match", mutate(LIB, "                    drop(prepared);
+", "                    let _later = || match Some(1) { None => { drop(prepared); } _ => {} };
+")),
         ("the MCP publication from the configuration", mutate(LIB, MCP_PUBLISH, "api_state.effective_endpoints.write().mcp_port = Some(api_net.mcp_port);")),
     ];
     for (name, source) in cases {
