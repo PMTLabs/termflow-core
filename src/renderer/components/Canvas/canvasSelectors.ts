@@ -330,7 +330,7 @@ function buildModel(
         paneId: leaf.id,
         title: leaf.name || tab.title || 'Terminal',
         groupTitle: tab.title || 'Terminal',
-        titleColor: tab.titleColor,
+        titleColor: leaf.titleColor ?? tab.titleColor,
         shellType: leaf.shellType || tab.shellType || '',
         rect: rects[i],
         // Per-terminal (Req 8, plan/020 §2): this node reports its OWN process's activity,

@@ -31,7 +31,7 @@ import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
 import { dropTabAcrossWindows, detachTabToNewWindow, captureDetachGesture } from '../Panes/dnd/detach';
 import { ShellProfileIcon } from '../Terminal/ShellProfileIcon';
-import { titleColorStyle } from '../../store/titleColor';
+import { titleColorStyle, useTabEffectiveTitleColors } from '../../store/titleColor';
 import './TabManager.css';
 
 /** A pending tab-close awaiting confirmation (single tab or a bulk set). */
@@ -405,6 +405,7 @@ const TabItem: React.FC<TabItemProps> = ({
    * now is too.
    */
   const isCanvasHere = useSelector((state: RootState) => state.canvas.nearestGroupId === tab.id);
+  const tabTitleColors = useTabEffectiveTitleColors(tab.id);
 
   return (
     <>
@@ -439,7 +440,7 @@ const TabItem: React.FC<TabItemProps> = ({
         <span
           key={tab.activityTick ?? 0}
           className="tab-title"
-          style={titleColorStyle(tab.titleColor)}
+          style={titleColorStyle(tabTitleColors)}
         >
           {tab.title}
         </span>
@@ -858,7 +859,18 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   return (
     <>
       <div className="tab-manager">
-        <div className="tabs-container" data-tauri-drag-region>
+        <div
+          className="tabs-container"
+          data-tauri-drag-region
+          onContextMenu={(e) => {
+            if ((e.target as HTMLElement).closest('.tab-item, .tab-actions, .tab-scroll-button')) return;
+            e.preventDefault();
+            const targetTabId = tabsArray.find((t) => t.isActive)?.id ?? tabsArray[0]?.id;
+            if (targetTabId) {
+              setOpenTabContextMenu({ tabId: targetTabId, x: e.clientX, y: e.clientY });
+            }
+          }}
+        >
           {(tabSizingMode === 'scroll' || tabSizingMode === 'fixed') && canScrollLeft && (
             <button
               className="tab-scroll-button left"

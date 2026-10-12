@@ -40,6 +40,7 @@ export const TERMINAL_BOUND_FIELDS = [
   'seededForTabId',
   'elevated',
   'apiCreated',
+  'titleColor',
 ] as const;
 
 /** The terminal-bound half of a pane node — everything that must follow the terminal. */
@@ -441,4 +442,35 @@ export function tabHasNoPanes(
   tabId: string,
 ): boolean {
   return treesByTabId[tabId] == null;
+}
+
+/** All terminal leaf nodes in a tree, in depth-first order. */
+export function getPaneLeaves(node: PaneNode | null | undefined): PaneNode[] {
+  if (!node) return [];
+  if (node.type === 'terminal') return [node];
+  if (node.children) return node.children.flatMap((c) => getPaneLeaves(c));
+  return [];
+}
+
+/** Find a terminal leaf by its terminalId across all tabs' trees. */
+export function findLeafByTerminalId(
+  treesByTabId: Record<string, PaneNode | null>,
+  terminalId: string,
+): PaneNode | null {
+  const find = (node: PaneNode | null): PaneNode | null => {
+    if (!node) return null;
+    if (node.type === 'terminal' && node.terminalId === terminalId) return node;
+    if (node.type === 'split' && node.children) {
+      for (const c of node.children) {
+        const found = find(c);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  for (const tabId of Object.keys(treesByTabId)) {
+    const leaf = find(treesByTabId[tabId]);
+    if (leaf) return leaf;
+  }
+  return null;
 }

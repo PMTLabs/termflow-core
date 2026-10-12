@@ -33,22 +33,9 @@ type TabSubmenuKey = 'schema' | 'color' | 'admin';
 // rose/red or indigo/violet). Deliberately no white (that is the default title
 // color, reachable via "Reset to Default") and no greys: a grey title reads
 // as a DISABLED tab, not a colored one.
-const TAB_NAME_COLORS: { name: string; hex: string }[] = [
-  { name: 'Red', hex: '#FF3B3B' },
-  { name: 'Orange', hex: '#FF8C1A' },
-  { name: 'Yellow', hex: '#FFE81A' },
-  { name: 'Lime', hex: '#9CF52A' },
-  { name: 'Green', hex: '#22C94E' },
-  { name: 'Teal', hex: '#19B39B' },
-  { name: 'Cyan', hex: '#22E5FF' },
-  { name: 'Sky', hex: '#8FCBFF' },
-  { name: 'Blue', hex: '#3F6DFF' },
-  { name: 'Purple', hex: '#A85CFF' },
-  { name: 'Magenta', hex: '#FF3DE0' },
-  { name: 'Pink', hex: '#FFA0D2' },
-  { name: 'Brown', hex: '#C9925A' },
-  { name: 'Olive', hex: '#B8B84A' },
-];
+import { closeAllEndedTerminals, collectEndedNodes } from '../../services/closeEnded';
+import { TAB_NAME_COLORS } from '../../store/titleColor';
+export { TAB_NAME_COLORS };
 
 interface TabContextMenuProps {
   x: number;
@@ -87,6 +74,7 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
   const dispatch = useDispatch();
   const tab = useSelector((s: RootState) => s.tabs.tabs.find((t) => t.id === tabId));
   const globalSchemaId = useSelector((s: RootState) => s.settings.colorSchemaId);
+  const endedCount = useSelector((s: RootState) => collectEndedNodes(s).length);
   const adminSupport = adminTabSupport();
 
   // Flyout submenus (Color Schema / Tab Color / Open admin Tab), consistent with the
@@ -199,6 +187,12 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
           break;
         case 'o':
           if (computeAffectedTabs(ordered, tabId, 'others').length) fire('others');
+          break;
+        case 'e':
+          if (collectEndedNodes(store.getState()).length > 0) {
+            e.preventDefault();
+            runAndClose(closeAllEndedTerminals);
+          }
           break;
         default:
           break;
@@ -430,6 +424,15 @@ export const TabContextMenu: React.FC<TabContextMenuProps> = ({
       >
         <span className="menu-icon">⊗</span>
         <Mnemonic label="Close Other Tabs" char="O" />
+      </button>
+      <button
+        className="context-menu-item close-item"
+        disabled={endedCount === 0}
+        onMouseEnter={scheduleSubmenuClose}
+        onClick={() => runAndClose(closeAllEndedTerminals)}
+      >
+        <span className="menu-icon">⊘</span>
+        <Mnemonic label="Closed ended session terminals" char="E" />
       </button>
       <div className="context-menu-divider" />
       <button className="context-menu-item" onMouseEnter={scheduleSubmenuClose} onClick={handleCopyInfo}>

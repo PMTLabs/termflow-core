@@ -31,7 +31,7 @@ import { isAdminUacCancelled } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminal } from '../Canvas/CanvasHiddenBadge';
-import { titleColorStyle } from '../../store/titleColor';
+import { titleColorStyle, useTerminalTitleColor } from '../../store/titleColor';
 import './TerminalPane.css';
 
 // Global map to track terminal initialization state
@@ -139,6 +139,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const owner = findTabIdByTerminalId(state.panes.treesByTabId, terminalId);
     return owner ? state.tabs.tabs.find(t => t.id === owner) : undefined;
   });
+  const paneTitleColor = useTerminalTitleColor(terminalId);
 
   // Get the default profile from settings
   const defaultProfile = useSelector((state: RootState) => state.settings.defaultProfile);
@@ -802,7 +803,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 // The box REPLACES the coloured name on screen, and `.pane-name-input` sets its
                 // own colour, so without this a rename reads as the colour having been lost
                 // rather than as an edit in progress.
-                style={titleColorStyle(tab?.titleColor)}
+                style={titleColorStyle(paneTitleColor)}
                 autoFocus
               />
             ) : (
@@ -815,7 +816,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 // is what makes an API/MCP pane opened into this tab inherit with nothing copied.
                 // Omitted entirely when the tab has none, so `.pane-name` keeps inheriting the
                 // header's colour exactly as before.
-                style={titleColorStyle(tab?.titleColor)}
+                style={titleColorStyle(paneTitleColor)}
               >
                 {name || 'Terminal'}
               </span>

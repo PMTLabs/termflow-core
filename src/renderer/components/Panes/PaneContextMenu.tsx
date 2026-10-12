@@ -4,7 +4,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { store, RootState } from '../../store';
 import { findLeaf } from '../../store/slices/paneTreeOps';
 import { setAgentColorScheme, removeAgentColorScheme } from '../../store/slices/settingsSlice';
-import { toggleMaximizePane } from '../../store/slices/panesSlice';
+import { toggleMaximizePane, setPaneTitleColor } from '../../store/slices/panesSlice';
 import { BellIcon } from '../UI/BellIcon';
 import { agentSchemeTracker } from '../../services/AgentSchemeTracker';
 import { detachPaneToNewWindow } from './dnd/detach';
@@ -17,7 +17,7 @@ import { usePaneMuteState } from './usePaneMuteState';
 import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surfaceChrome';
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 import { useTooltipDwell } from '../../hooks/useTooltipDwell';
-import { useTerminalTitleColor, titleColorStyle } from '../../store/titleColor';
+import { useTerminalTitleColor, titleColorStyle, TAB_NAME_COLORS } from '../../store/titleColor';
 import { NewPaneRow } from '../UI/NewPaneRow';
 import './PaneContextMenu.css';
 
@@ -69,7 +69,12 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // owns their tooltips.
   const tip = useTooltipDwell();
   const [schemaExpanded, setSchemaExpanded] = useState(false);
+  const [colorExpanded, setColorExpanded] = useState(false);
   const [adminExpanded, setAdminExpanded] = useState(false);
+  const currentPaneLeaf = useSelector((s: RootState) =>
+    owningTabId ? findLeaf(s.panes.treesByTabId[owningTabId] ?? null, paneId) : null
+  );
+  const currentPaneColor = currentPaneLeaf?.titleColor;
   const adminSupport = adminTabSupport();
   // The coding agent detected in this pane (codex/claude/…), or null. Seeded
   // synchronously from the tracker, then refreshed once on open so a just-started
@@ -221,6 +226,35 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
           <span className="menu-icon">🎨</span>
           Color scheme for agent
         </button>
+      )}
+      <div className="context-menu-divider" />
+      <button className="context-menu-item" onClick={() => setColorExpanded((v) => !v)}>
+        <span className="menu-icon">🏷️</span>
+        Pane Color
+        <span className="context-menu-expand-arrow">{colorExpanded ? '▾' : '▸'}</span>
+      </button>
+      {colorExpanded && (
+        <div className="context-menu-subpanel">
+          <div className="tab-color-swatches">
+            {TAB_NAME_COLORS.map(({ name, hex }) => (
+              <button
+                key={hex}
+                type="button"
+                title={name}
+                className={`tab-color-dot${currentPaneColor === hex ? ' active' : ''}`}
+                style={{ background: hex }}
+                onClick={() => dispatch(setPaneTitleColor({ paneId, titleColor: hex }))}
+              />
+            ))}
+          </div>
+          <button
+            type="button"
+            className="tab-color-reset"
+            onClick={() => dispatch(setPaneTitleColor({ paneId, titleColor: undefined }))}
+          >
+            Reset to Default
+          </button>
+        </div>
       )}
       <div className="context-menu-divider" />
       <button className="context-menu-item" onClick={() => runAndClose(openNewTabWithDefaultProfile)}>

@@ -154,3 +154,39 @@
 .pane-context-menu .color-schema-grid::-webkit-scrollbar-thumb:hover {
   background-color: #777;
 }
+
+.pane-context-menu .tab-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.pane-context-menu .tab-color-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+  padding: 0;
+}
+
+.pane-context-menu .tab-color-dot.active {
+  border-color: #007acc;
+  box-shadow: 0 0 0 1px #007acc;
+}
+
+.pane-context-menu .tab-color-reset {
+  background: none;
+  border: 1px solid #464647;
+  border-radius: 4px;
+  color: #cccccc;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.pane-context-menu .tab-color-reset:hover {
+  background-color: #094771;
+  color: #ffffff;
+}

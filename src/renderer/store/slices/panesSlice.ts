@@ -64,6 +64,8 @@ export interface PaneNode {
    *  spawn, or orphan recovery. Absent means "main" (plan 048), which is also what every pane
    *  persisted before this field existed reads as. Read by Canvas Mode's Main only filter. */
   apiCreated?: true;
+  /** Custom title/header colour for this pane. */
+  titleColor?: string;
 }
 
 export type DropZone = EdgeZone | 'center';
@@ -195,6 +197,7 @@ function splitLeafInTree(
         // new sibling spawns Medium while the tab strip still badges it
         // Administrator (plan 045 T8 / runbook step 23).
         elevated: node.elevated,
+        titleColor: node.titleColor,
         // The NEW pane only — the surviving one keeps its own origin via `survivingLeaf`
         // (plan 048: origin belongs to whoever created that pane, not to its tab).
         ...(apiCreated ? { apiCreated: true as const } : {}),
@@ -213,6 +216,7 @@ function splitLeafInTree(
       // it isn't stranded where no tracker/UI lookup would ever read it.
       delete node.notifyMuted;
       delete node.apiCreated;
+      delete node.titleColor;
       return newPaneId;
     }
     if (node.type === 'split' && node.children) {
@@ -383,6 +387,29 @@ const panesSlice = createSlice({
           // NOT reflect into the other — reassign so active-tab readers see it.
           if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
           return;
+        }
+      }
+    },
+
+    setPaneTitleColor: (
+      state,
+      action: PayloadAction<{ paneId: string; titleColor?: string }>
+    ) => {
+      const { paneId, titleColor } = action.payload;
+      for (const tabId of Object.keys(state.treesByTabId)) {
+        const node = findLeaf(state.treesByTabId[tabId], paneId);
+        if (node) {
+          if (titleColor) node.titleColor = titleColor;
+          else delete node.titleColor;
+          if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+          return;
+        }
+      }
+      if (state.paneTree) {
+        const node = findLeaf(state.paneTree, paneId);
+        if (node) {
+          if (titleColor) node.titleColor = titleColor;
+          else delete node.titleColor;
         }
       }
     },
@@ -818,6 +845,7 @@ const panesSlice = createSlice({
             // R8: see the matching comment in `splitLeafInTree` — the new
             // sibling must inherit elevation too, not just the surviving pane.
             elevated: node.elevated,
+            titleColor: node.titleColor,
           };
 
           // Convert current terminal pane to split pane. Goes through the SAME
@@ -834,6 +862,7 @@ const panesSlice = createSlice({
           delete node.terminalId;
           delete node.notifyMuted; // node is a split container now, not a leaf
           delete node.apiCreated;
+          delete node.titleColor;
 
           // Set the new pane as active
           state.activePaneId = newPaneId;
@@ -866,6 +895,7 @@ export const {
   toggleMaximizePane,
   setMaximizedPane,
   setPaneMuted,
+  setPaneTitleColor,
   closePane,
   resizePane,
   resizeFocusedPane,
