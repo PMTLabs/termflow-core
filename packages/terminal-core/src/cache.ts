@@ -563,3 +563,191 @@ export const setAgentColorLock = (terminalIds: string[], locked: boolean): void 
     if (cached) cached.agentColorLocked = locked;
   }
 };
+
+/**
+ * Check whether a cached terminal has pending unparsed or coalescing writes.
+ * Returns true if hydration is in flight, pendingOutput chunks exist,
+ * coalesced liveWriteBuf has not yet flushed, or xterm internal writeBuffer
+ * has queued writes awaiting parse.
+ */
+export const hasTerminalPendingWrites = (terminalId: string): boolean => {
+  const cached = terminalCache.get(terminalId);
+  if (!cached || !cached.terminal) return false;
+  if (cached.hydrating) return true;
+  if (cached.pendingOutput && cached.pendingOutput.length > 0) return true;
+  if (cached.liveWriteBuf && cached.liveWriteBuf.length > 0) return true;
+  const writeBuffer = (cached.terminal as any)?._core?._writeBuffer;
+  if (writeBuffer && Array.isArray(writeBuffer._writeBuffer) && writeBuffer._writeBuffer.length > 0) {
+    return true;
+  }
+  return false;
+};
+
+/**
+ * Flush any coalesced live-write buffer directly to the cached terminal.
+ */
+export const flushTerminalLiveWrites = (terminalId: string): void => {
+  const entry = terminalCache.get(terminalId);
+  if (!entry || !entry.terminal) return;
+  if (entry.liveWriteTimer != null) {
+    clearTimeout(entry.liveWriteTimer);
+    entry.liveWriteTimer = undefined;
+  }
+  entry.liveWriteFirstAt = undefined;
+  const buf = entry.liveWriteBuf;
+  entry.liveWriteBuf = '';
+  if (buf) entry.terminal.write(buf);
+};
+
+/**
+ * Flush any coalescing writes and await parser completion via xterm's write callback.
+ * If xterm or write parsing is unavailable, falls back to timeout.
+ */
+export const drainTerminalWrites = (
+  terminalId: string,
+  callback: () => void,
+  timeoutMs: number = 50,
+): void => {
+  flushTerminalLiveWrites(terminalId);
+  const entry = terminalCache.get(terminalId);
+  if (!entry || !entry.terminal || typeof entry.terminal.write !== 'function') {
+    callback();
+    return;
+  }
+  let settled = false;
+  const timer = setTimeout(() => {
+    if (!settled) {
+      settled = true;
+      callback();
+    }
+  }, timeoutMs);
+
+  try {
+    entry.terminal.write('', () => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        callback();
+      }
+    });
+  } catch {
+    if (!settled) {
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    }
+  }
+};
+
+/**
+ * Structured snapshot of visible terminal screen content and buffer state.
+ * Used by activity tracking to verify that settled background output produced
+ * a real visual change before ringing the unseen bell.
+ */
+export interface TerminalScreenFingerprint {
+  terminalId: string;
+  bufferType: 'normal' | 'alternate';
+  cols: number;
+  rows: number;
+  length: number;
+  baseY: number;
+  lines: string[];
+  attrHash?: number;
+}
+
+/**
+ * Capture a structured fingerprint of the terminal's visible live/bottom page and buffer geometry.
+ * The visible page starts at baseY (the top of the active scrollback page where output lands).
+ * Returns null if the terminal is not cached, is hydrating, has pending unparsed writes,
+ * or has no active buffer.
+ */
+export const getTerminalScreenFingerprint = (terminalId: string): TerminalScreenFingerprint | null => {
+  const cached = terminalCache.get(terminalId);
+  if (!cached || cached.hydrating || !cached.terminal) return null;
+  // If there are pending unwritten or unparsed chunks, buffer state is not settled
+  if (hasTerminalPendingWrites(terminalId)) return null;
+
+  const term = cached.terminal;
+  const buf = term.buffer.active;
+  if (!buf) return null;
+  const rows = term.rows;
+  const cols = term.cols;
+  const baseY = buf.baseY;
+  const lines: string[] = [];
+  // FNV-1a 32-bit offset basis (0x811c9dc5)
+  let attrHash = 2166136261 >>> 0;
+  // Reuse a single CellData instance across iterations to eliminate transient GC allocation
+  const nullCell = typeof (buf as any).getNullCell === 'function' ? (buf as any).getNullCell() : undefined;
+
+  for (let i = 0; i < rows; i++) {
+    const line = buf.getLine(baseY + i);
+    if (!line) {
+      lines.push('');
+      continue;
+    }
+    // Limit text capture to cols bounds
+    lines.push(typeof line.translateToString === 'function' ? line.translateToString(true, 0, cols) : '');
+    if (typeof (line as any).getCell === 'function') {
+      const lineLen = Math.min(cols, line.length);
+      for (let c = 0; c < lineLen; c++) {
+        const cell = (line as any).getCell(c, nullCell);
+        if (!cell) continue;
+        const flags =
+          (typeof cell.isBold === 'function' && cell.isBold() ? 1 : 0) |
+          (typeof cell.isItalic === 'function' && cell.isItalic() ? 2 : 0) |
+          (typeof cell.isDim === 'function' && cell.isDim() ? 4 : 0) |
+          (typeof cell.isUnderline === 'function' && cell.isUnderline() ? 8 : 0) |
+          (typeof cell.isBlink === 'function' && cell.isBlink() ? 16 : 0) |
+          (typeof cell.isInverse === 'function' && cell.isInverse() ? 32 : 0) |
+          (typeof cell.isInvisible === 'function' && cell.isInvisible() ? 64 : 0) |
+          (typeof cell.isStrikethrough === 'function' && cell.isStrikethrough() ? 128 : 0) |
+          (typeof cell.isOverline === 'function' && cell.isOverline() ? 256 : 0) |
+          (((typeof cell.getWidth === 'function' ? cell.getWidth() : 1) & 0x3) << 9);
+        const fg = typeof cell.getFgColor === 'function' ? cell.getFgColor() : 0;
+        const bg = typeof cell.getBgColor === 'function' ? cell.getBgColor() : 0;
+        const fgMode = typeof cell.getFgColorMode === 'function' ? cell.getFgColorMode() : 0;
+        const bgMode = typeof cell.getBgColorMode === 'function' ? cell.getBgColorMode() : 0;
+
+        // FNV-1a 32-bit mix (prime 16777619)
+        attrHash = Math.imul(attrHash ^ flags, 16777619) >>> 0;
+        attrHash = Math.imul(attrHash ^ fg, 16777619) >>> 0;
+        attrHash = Math.imul(attrHash ^ bg, 16777619) >>> 0;
+        attrHash = Math.imul(attrHash ^ fgMode, 16777619) >>> 0;
+        attrHash = Math.imul(attrHash ^ bgMode, 16777619) >>> 0;
+      }
+    }
+  }
+
+  return {
+    terminalId,
+    bufferType: buf.type,
+    cols,
+    rows,
+    length: buf.length,
+    baseY,
+    lines,
+    attrHash,
+  };
+};
+
+/**
+ * Compare two terminal screen fingerprints for visual equality.
+ * Returns true only if both fingerprints exist and match across buffer type,
+ * geometry, scroll offsets, visible trimmed text, and cell attributes.
+ */
+export const areTerminalScreenFingerprintsEqual = (
+  a: TerminalScreenFingerprint | null | undefined,
+  b: TerminalScreenFingerprint | null | undefined,
+): boolean => {
+  if (!a || !b) return false;
+  if (a.terminalId !== b.terminalId) return false;
+  if (a.bufferType !== b.bufferType) return false;
+  if (a.cols !== b.cols || a.rows !== b.rows) return false;
+  if (a.baseY !== b.baseY || a.length !== b.length) return false;
+  if (a.attrHash !== b.attrHash) return false;
+  if (a.lines.length !== b.lines.length) return false;
+  for (let i = 0; i < a.lines.length; i++) {
+    if (a.lines[i] !== b.lines[i]) return false;
+  }
+  return true;
+};

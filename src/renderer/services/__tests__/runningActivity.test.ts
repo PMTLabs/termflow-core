@@ -235,6 +235,37 @@ describe('computeUnseenUpdate', () => {
       expect(toFlag).toEqual(['tb-1']);
     });
   });
+
+  describe('visual change (hasVisualChange)', () => {
+    it('does NOT flag when hasVisualChange returns false, but STILL advances mark', () => {
+      const noVisual = () => false;
+      const { toFlag, marks, causalByTab } = computeUnseenUpdate(
+        [out('p1', 100)], resolve, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, () => false, noVisual);
+      expect(toFlag).toEqual([]);
+      expect(marks.get('p1')).toBe(100);
+      expect(causalByTab.has('tb-1')).toBe(false);
+    });
+
+    it('flags when hasVisualChange returns true', () => {
+      const hasVisual = () => true;
+      const { toFlag, marks, causalByTab } = computeUnseenUpdate(
+        [out('p1', 100)], resolve, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, () => false, hasVisual);
+      expect(toFlag).toEqual(['tb-1']);
+      expect(marks.get('p1')).toBe(100);
+      expect(causalByTab.get('tb-1')).toBe(100);
+    });
+
+    it('multi-pane: pane without visual change does not flag, but sibling with visual change flags', () => {
+      const sameTab = (_pid: string) => 'tb-1';
+      const visualOnlyP2 = (pid: string) => pid === 'p2';
+      const { toFlag, marks, causalByTab } = computeUnseenUpdate(
+        [out('p1', 100), out('p2', 200)], sameTab, null, new Set(), new Map(), SETTLED_NOW, DEBOUNCE, () => false, visualOnlyP2);
+      expect(toFlag).toEqual(['tb-1']);
+      expect(marks.get('p1')).toBe(100);
+      expect(marks.get('p2')).toBe(200);
+      expect(causalByTab.get('tb-1')).toBe(200);
+    });
+  });
 });
 
 describe('isEchoChunk (typing echo / line-repaint detection)', () => {

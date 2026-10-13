@@ -322,6 +322,7 @@ export function computeUnseenUpdate(
   now: number,
   debounceMs: number,
   isSuppressed: (processId: string, tabId: string) => boolean = () => false,
+  hasVisualChange?: (processId: string) => boolean,
 ): { toFlag: string[]; marks: Map<string, number>; causalByTab: Map<string, number> } {
   const nextMarks = new Map(marks);
   const toFlag = new Set<string>();
@@ -336,10 +337,14 @@ export function computeUnseenUpdate(
     if (!tabId) continue; // unresolved → retry next tick, do NOT advance the mark
     nextMarks.set(processId, newest); // resolved + settled → this output is now accounted for
     if (tabId === activeTabId || alreadyUnseen.has(tabId)) continue;
-    // Suppressed source (muted, or the canvas is showing every terminal at once): the mark
+    // Suppressed source (muted, or the single overlaid terminal): the mark
     // was already advanced above, so nothing rings in arrears; the tab is simply never
     // flagged, which turns off every notification surface downstream of the flag.
     if (isSuppressed(processId, tabId)) continue;
+    // Visual change check: if the screen did not visually change compared to baseline
+    // (e.g. idle OSC title update, cursor query, or in-place static redraw), suppress the
+    // unseen flag and bell. The mark was already advanced above, so this settled output is accounted for.
+    if (hasVisualChange && !hasVisualChange(processId)) continue;
     toFlag.add(tabId);
     causalByTab.set(tabId, Math.max(causalByTab.get(tabId) ?? 0, newest));
   }
