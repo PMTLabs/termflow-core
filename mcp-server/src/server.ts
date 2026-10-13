@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { resolveTerminalId } from "./identity.js";
+import { parseKeys } from "./keys.js";
 
 /** Minimal shape of the backend HTTP client the tools need (an AxiosInstance satisfies this). */
 export interface ApiLike {
@@ -168,7 +169,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 const extras = {
                     cliType: cliType || "copilot",
                     ...(useBracketedPaste !== undefined && { useBracketedPaste }),
-                    ...(submissionSignal !== undefined && { submissionSignal }),
+                    ...(submissionSignal !== undefined && { submissionSignal: parseKeys(submissionSignal) }),
                 };
                 if (Array.isArray(terminalId)) {
                     const resolved = [...new Set(terminalId.map((t) => resolveTerminalId(t, getCallerId())))];
@@ -208,16 +209,17 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
         "send_keys",
         {
             description:
-                "Write raw bytes/escape sequences straight to a terminal's PTY — no paste wrapper, no submit keystroke appended. Use for keys rather than text: Enter \"\\r\", Ctrl+C \"\\u0003\", Esc \"\\u001b\", Up \"\\u001b[A\", Down \"\\u001b[B\". Prefer execute_command for sending a prompt; use this to submit a composer a TUI left unsubmitted, or to answer an interactive y/n prompt.",
+                "Write raw bytes or keystroke escape sequences straight to a terminal's PTY — no paste wrapper, no submit keystroke appended. Supports escape sequences (e.g. \"\\r\" for Enter, \"\\u0003\" or \"\\x03\" for Ctrl+C, \"\\u0015\" or \"\\x15\" for Ctrl+U, \"\\u001b\" or \"\\e\" for Esc, \"\\u001b[A\" for Up, \"\\u001b[B\" for Down), caret notation (\"^C\", \"^U\"), and named keys (\"Enter\", \"Ctrl+C\", \"Ctrl+U\", \"Esc\", \"Up\", \"Down\"). Prefer execute_command for sending a prompt; use this to submit a composer a TUI left unsubmitted, or to answer an interactive y/n prompt.",
             inputSchema: {
                 terminalId: z.string().describe(`The ID of the terminal to write to. ${ME_HINT}`),
-                keys: z.string().describe("Raw bytes to write, verbatim. Sent exactly as given — nothing is appended."),
+                keys: z.string().describe("Keystroke(s) or escape sequences to write. Supports escape strings (\"\\r\", \"\\u0015\", \"\\x15\", \"\\u001b[A\"), named keys (\"Ctrl+U\", \"Ctrl+C\", \"Enter\", \"Esc\"), caret notation (\"^U\", \"^C\"), or raw bytes. Must not be empty."),
             },
         },
         async ({ terminalId, keys }) => {
             try {
+                const parsed = parseKeys(keys);
                 const id = resolveTerminalId(terminalId, getCallerId());
-                const response = await api.post(`/terminals/${id}/input`, { data: keys });
+                const response = await api.post(`/terminals/${id}/input`, { data: parsed });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
                 const msg = error instanceof Error ? error.message : String(error);

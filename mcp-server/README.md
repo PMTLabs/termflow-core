@@ -144,7 +144,7 @@ Note: Stdio mode spawns a new process per client and does not share sessions bet
 *   `list_terminals`: List active terminal sessions.
 *   `create_terminal`: Spawn a new terminal (args: `name`, `cols`, `rows`, `cwd`).
 *   `execute_command`: Send a command to a terminal (args: `terminalId`, `command`, `cliType`, `submissionSignal`). Pass an empty `command` for a bare submit — it sends only the submit keystroke, pressing Enter on a composer that already holds text.
-*   `send_keys`: Write raw bytes/escape sequences to a terminal's PTY (args: `terminalId`, `keys`). No paste wrapper, nothing appended — for Enter, Ctrl+C, Esc, arrows.
+*   `send_keys`: Write raw bytes, escape sequences, caret notation, or named keys to a terminal's PTY (args: `terminalId`, `keys`). Supports escape sequences (`"\r"`, `"\u0015"`, `"\x15"`, `"\u001b[A"`), caret notation (`"^U"`, `"^C"`), and named keys (`"Ctrl+U"`, `"Ctrl+C"`, `"Enter"`, `"Esc"`, `"Up"`). Rejects empty keys with an actionable error. No paste wrapper, nothing appended.
 *   `get_terminal_output`: Read recent output from a terminal.
 *   `close_terminal`: Terminate a session.
 

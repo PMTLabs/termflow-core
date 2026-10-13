@@ -156,6 +156,37 @@ describe("createMcpServer tool wiring", () => {
         expect((call!.body as any).data).toBe("\r");
     });
 
+    it("send_keys decodes escape sequence \\u0015 to byte 0x15 (Ctrl+U)", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "\\u0015" } });
+        expect(res.isError).toBeFalsy();
+        const call = calls.find((c) => c.method === "post" && c.url === "/terminals/pc-self/input");
+        expect(call).toBeTruthy();
+        expect((call!.body as any).data).toBe("\x15");
+        expect(((call!.body as any).data as string).charCodeAt(0)).toBe(0x15);
+    });
+
+    it("send_keys decodes Ctrl+U and ^U to byte 0x15", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "Ctrl+U" } });
+        await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "^U" } });
+        const inputCalls = calls.filter((c) => c.method === "post" && c.url === "/terminals/pc-self/input");
+        expect(inputCalls.length).toBe(2);
+        expect((inputCalls[0].body as any).data).toBe("\x15");
+        expect((inputCalls[1].body as any).data).toBe("\x15");
+    });
+
+    it("send_keys rejects empty keys with an actionable error", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
+        const res: any = await client.callTool({ name: "send_keys", arguments: { terminalId: "me", keys: "" } });
+        expect(res.isError).toBe(true);
+        expect(res.content[0].text).toContain('"keys" must not be empty');
+        expect(calls.some((c) => c.url.includes("input"))).toBe(false);
+    });
+
     it("forwards an empty command as a bare submit instead of rejecting it", async () => {
         const { api, calls } = makeFakeApi();
         const client = await connectClient(createMcpServer({ api, getCallerId: () => "pc-self" }));
