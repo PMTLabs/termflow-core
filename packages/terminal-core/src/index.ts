@@ -24,6 +24,9 @@ export {
   setAgentColorLock,
   getTerminalScreenFingerprint,
   areTerminalScreenFingerprintsEqual,
+  hasTerminalPendingWrites,
+  flushTerminalLiveWrites,
+  drainTerminalWrites,
 } from './cache';
 export type { TerminalScreenFingerprint } from './cache';
 export { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
