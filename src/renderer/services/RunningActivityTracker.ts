@@ -1,7 +1,12 @@
 import { store } from '../store';
 import { setRunningActivity, markUnseenOutput, markTabSeen } from '../store/slices/tabsSlice';
-import { findTabIdByTerminalId, isTerminalMuted } from '../store/slices/paneTreeOps';
+import { findTabIdByTerminalId, isTerminalMuted, getAllTerminalIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
+import {
+  getTerminalScreenFingerprint,
+  areTerminalScreenFingerprintsEqual,
+} from '@termflow/terminal-core';
+import type { TerminalScreenFingerprint } from '@termflow/terminal-core';
 import {
   isRunningFromEvents,
   computeRunningTabIds,
@@ -62,6 +67,29 @@ class RunningActivityTrackerClass {
   // hot-swap reattach bind an already-running process whose output is genuine. See
   // SPAWN_GRACE_MS.
   private spawnGraceUntil = new Map<string, number>();
+  // terminalId → baseline screen fingerprint captured when the terminal was last seen
+  // (e.g. when leaving its tab, when closing canvas overlay, or after accounted visual output).
+  // Used to ensure background output actually changed the screen visually before ringing the bell.
+  private terminalBaselines = new Map<string, TerminalScreenFingerprint>();
+
+  private recordTerminalBaseline(terminalId: string): void {
+    const fp = getTerminalScreenFingerprint(terminalId);
+    if (fp) {
+      this.terminalBaselines.set(terminalId, fp);
+    }
+  }
+
+  private hasTerminalBaseline(terminalId: string): boolean {
+    return this.terminalBaselines.has(terminalId);
+  }
+
+  private checkTerminalVisualChange(terminalId: string): boolean {
+    const baseline = this.terminalBaselines.get(terminalId);
+    if (!baseline) return true; // No baseline -> cannot prove unchanged -> treat as changed
+    const current = getTerminalScreenFingerprint(terminalId);
+    if (!current) return true; // Missing/hydrating cache entry -> fallback to changed
+    return !areTerminalScreenFingerprintsEqual(baseline, current);
+  }
   private lastActiveTabId: string | null = null; // for focus-change detection
   // The terminal the canvas overlay was last showing at 1:1, so `handleOverlaySeen` fires on the
   // EDGE rather than on every store change. Same shape as `lastActiveTabId`, for the same reason.
@@ -122,6 +150,7 @@ class RunningActivityTrackerClass {
     this.lastOutputAt.clear();
     this.lastInputAt.clear();
     this.spawnGraceUntil.clear();
+    this.terminalBaselines.clear();
     this.lastActiveTabId = null;
     this.lastOverlaidTerminalId = null;
     this.suppressUntil = 0;
@@ -146,6 +175,15 @@ class RunningActivityTrackerClass {
     // lastOutputAt still holds the pending-but-not-yet-debounced output.
     for (const processId of this.lastOutputAt.keys()) {
       if (this.resolveTab(processId) === leftTabId) this.unseenMark.set(processId, now);
+    }
+    // Baseline capture: when user leaves leftTabId, every terminal leaf in that tab
+    // was on-screen (seen). Record their current screen fingerprint as baseline.
+    const tree = store.getState().panes.treesByTabId[leftTabId];
+    if (tree) {
+      const leafTerminalIds = getAllTerminalIds(tree);
+      for (const tId of leafTerminalIds) {
+        this.recordTerminalBaseline(tId);
+      }
     }
   }
 
@@ -188,7 +226,12 @@ class RunningActivityTrackerClass {
   private handleOverlaySeen(): void {
     const overlaidTerminalId = this.currentOverlaidTerminalId();
     if (overlaidTerminalId === this.lastOverlaidTerminalId) return;
+    const prevOverlaid = this.lastOverlaidTerminalId;
     this.lastOverlaidTerminalId = overlaidTerminalId;
+    if (prevOverlaid) {
+      // User just finished watching prevOverlaid at 1:1 on canvas -> record baseline
+      this.recordTerminalBaseline(prevOverlaid);
+    }
     if (!overlaidTerminalId) return;
 
     const tabId = findTabIdByTerminalId(
@@ -384,6 +427,10 @@ class RunningActivityTrackerClass {
     if (processId && Date.now() >= this.suppressUntil) {
       this.flagOnExit(processId, terminalId);
     }
+    const effectiveTerminalId = terminalId ?? (processId ? terminalService.getTerminalIdForProcess(processId) : undefined);
+    if (effectiveTerminalId) {
+      this.terminalBaselines.delete(effectiveTerminalId);
+    }
     if (processId) {
       this.buffers.delete(processId);
       this.unseenMark.delete(processId);
@@ -426,6 +473,13 @@ class RunningActivityTrackerClass {
       ? isTerminalMuted(store.getState().panes.treesByTabId, effectiveTerminalId)
       : false;
     if (tabMuted || paneMuted) return;
+    // Visual change gate on exit: if baseline exists and screen has not changed visually,
+    // suppress this exit-settled bell (plan-review Finding 3 [A]).
+    if (effectiveTerminalId && this.hasTerminalBaseline(effectiveTerminalId)) {
+      if (!this.checkTerminalVisualChange(effectiveTerminalId)) {
+        return;
+      }
+    }
     // Skip a redundant dispatch if the tab is already flagged (mirrors computeUnseenUpdate);
     // markUnseenOutput is itself a no-op for the active/missing tab.
     const alreadyUnseen = tabsState.tabs.some(t => t.id === tabId && t.hasUnseenOutput);
@@ -546,6 +600,11 @@ class RunningActivityTrackerClass {
       if (terminalId === overlaidTerminalId) return true;
       return isTerminalMuted(treesByTabId, terminalId);
     };
+    const hasVisualChange = (processId: string): boolean => {
+      const terminalId = terminalService.getTerminalIdForProcess(processId);
+      if (!terminalId) return true;
+      return this.checkTerminalVisualChange(terminalId);
+    };
     const { toFlag, marks, causalByTab } = computeUnseenUpdate(
       outputs,
       resolveTab,
@@ -555,6 +614,7 @@ class RunningActivityTrackerClass {
       now,
       UNSEEN_DEBOUNCE_MS,
       isSuppressed,
+      hasVisualChange,
     );
     this.unseenMark = marks;
     // Synchronized repaint burst (window resize / RDP↔console reattach / un-minimize):
@@ -578,6 +638,15 @@ class RunningActivityTrackerClass {
     for (const tabId of toFlag) {
       store.dispatch(markUnseenOutput({ tabId }));
       this.emitBell(tabId, causalByTab.get(tabId) ?? now);
+    }
+    // Update baseline only for terminals whose settled output was accounted and produced a visual change
+    for (const { processId, newest } of outputs) {
+      if (newest <= (this.unseenMark.get(processId) ?? -Infinity) && now - newest >= UNSEEN_DEBOUNCE_MS) {
+        const terminalId = terminalService.getTerminalIdForProcess(processId);
+        if (terminalId && this.checkTerminalVisualChange(terminalId)) {
+          this.recordTerminalBaseline(terminalId);
+        }
+      }
     }
   }
 

@@ -22,7 +22,10 @@ export {
   applyColorSchemaGlobally,
   applyColorSchemaToTerminals,
   setAgentColorLock,
+  getTerminalScreenFingerprint,
+  areTerminalScreenFingerprintsEqual,
 } from './cache';
+export type { TerminalScreenFingerprint } from './cache';
 export { shouldBlockColorOsc, COLOR_OSC_CODES } from './colorGuard';
 export { isWebGLGloballyDisabled } from './webgl';
 export { redactSecrets } from './redactSecrets';

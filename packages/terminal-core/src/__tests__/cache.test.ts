@@ -4,6 +4,8 @@ import {
   MAX_TERMINAL_CACHE_ENTRIES,
   setAgentColorLock,
   refreshGlyphAtlases,
+  getTerminalScreenFingerprint,
+  areTerminalScreenFingerprintsEqual,
 } from '../cache';
 import type { TerminalCacheEntry } from '../cache';
 import {
@@ -399,3 +401,73 @@ test('cleanupTerminalCache: a quarantined addon is not double-counted when termi
   releaseFromWebGLQuarantine(wedged);
   expect(countActiveWebGLAddons()).toBe(0);
 });
+
+describe('getTerminalScreenFingerprint & areTerminalScreenFingerprintsEqual', () => {
+  test('returns null for unknown terminal or hydrating terminal', () => {
+    expect(getTerminalScreenFingerprint('unknown-terminal')).toBeNull();
+
+    const hydratingEntry = {
+      terminal: { rows: 24, cols: 80, buffer: { active: { type: 'normal', baseY: 0, length: 24, getLine: () => undefined } } },
+      hydrating: true,
+    } as unknown as TerminalCacheEntry;
+    terminalCache.set('t-hydrating', hydratingEntry);
+    expect(getTerminalScreenFingerprint('t-hydrating')).toBeNull();
+  });
+
+  test('captures visible rows, buffer type, and geometry', () => {
+    const lines = ['user@host:~$ ', '', ''];
+    const mockTerm = {
+      rows: 3,
+      cols: 80,
+      buffer: {
+        active: {
+          type: 'normal',
+          baseY: 0,
+          length: 3,
+          getLine: (idx: number) => ({
+            translateToString: (trim?: boolean) => (trim ? lines[idx]?.trimEnd() ?? '' : lines[idx] ?? ''),
+          }),
+        },
+      },
+    };
+    terminalCache.set('t-visible', {
+      terminal: mockTerm,
+      hydrating: false,
+    } as unknown as TerminalCacheEntry);
+
+    const fp = getTerminalScreenFingerprint('t-visible');
+    expect(fp).not.toBeNull();
+    expect(fp?.terminalId).toBe('t-visible');
+    expect(fp?.bufferType).toBe('normal');
+    expect(fp?.cols).toBe(80);
+    expect(fp?.rows).toBe(3);
+    expect(fp?.lines).toEqual(['user@host:~$', '', '']);
+  });
+
+  test('areTerminalScreenFingerprintsEqual matches identical fingerprints and detects changes', () => {
+    const fp1 = {
+      terminalId: 't1',
+      bufferType: 'normal' as const,
+      cols: 80,
+      rows: 24,
+      length: 24,
+      baseY: 0,
+      lines: ['prompt $'],
+      attrHash: 12345,
+    };
+    const fp1Copy = { ...fp1, lines: ['prompt $'] };
+    const fpDifferentText = { ...fp1, lines: ['prompt $ echo hi'] };
+    const fpDifferentLength = { ...fp1, length: 25, baseY: 1 };
+    const fpDifferentAttr = { ...fp1, attrHash: 99999 };
+    const fpDifferentBuffer = { ...fp1, bufferType: 'alternate' as const };
+
+    expect(areTerminalScreenFingerprintsEqual(fp1, fp1Copy)).toBe(true);
+    expect(areTerminalScreenFingerprintsEqual(fp1, fpDifferentText)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, fpDifferentLength)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, fpDifferentAttr)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, fpDifferentBuffer)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(fp1, null)).toBe(false);
+    expect(areTerminalScreenFingerprintsEqual(null, fp1)).toBe(false);
+  });
+});
+

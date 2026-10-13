@@ -563,3 +563,92 @@ export const setAgentColorLock = (terminalIds: string[], locked: boolean): void 
     if (cached) cached.agentColorLocked = locked;
   }
 };
+
+/**
+ * Structured snapshot of visible terminal screen content and buffer state.
+ * Used by activity tracking to verify that settled background output produced
+ * a real visual change before ringing the unseen bell.
+ */
+export interface TerminalScreenFingerprint {
+  terminalId: string;
+  bufferType: 'normal' | 'alternate';
+  cols: number;
+  rows: number;
+  length: number;
+  baseY: number;
+  lines: string[];
+  attrHash?: number;
+}
+
+/**
+ * Capture a structured fingerprint of the terminal's visible page and buffer geometry.
+ * Returns null if the terminal is not cached, is hydrating, or has no active buffer.
+ */
+export const getTerminalScreenFingerprint = (terminalId: string): TerminalScreenFingerprint | null => {
+  const cached = terminalCache.get(terminalId);
+  if (!cached || cached.hydrating || !cached.terminal) return null;
+  const term = cached.terminal;
+  const buf = term.buffer.active;
+  if (!buf) return null;
+  const rows = term.rows;
+  const cols = term.cols;
+  const baseY = buf.baseY;
+  const lines: string[] = [];
+  let attrHash = 0;
+
+  for (let i = 0; i < rows; i++) {
+    const line = buf.getLine(baseY + i);
+    if (!line) {
+      lines.push('');
+      continue;
+    }
+    lines.push(line.translateToString(true));
+    if (typeof (line as any).getCell === 'function') {
+      const lineLen = Math.min(cols, line.length);
+      for (let c = 0; c < lineLen; c++) {
+        const cell = (line as any).getCell(c);
+        if (!cell) continue;
+        const fg = typeof cell.getFgColor === 'function' ? cell.getFgColor() : 0;
+        const bg = typeof cell.getBgColor === 'function' ? cell.getBgColor() : 0;
+        const bold = typeof cell.isBold === 'function' ? cell.isBold() : 0;
+        const italic = typeof cell.isItalic === 'function' ? cell.isItalic() : 0;
+        // FNV-1a 32-bit mix
+        attrHash = (((attrHash ^ fg) * 16777619) ^ bg) * 16777619;
+        attrHash = (((attrHash ^ bold) * 16777619) ^ italic) * 16777619;
+      }
+    }
+  }
+
+  return {
+    terminalId,
+    bufferType: buf.type,
+    cols,
+    rows,
+    length: buf.length,
+    baseY,
+    lines,
+    attrHash,
+  };
+};
+
+/**
+ * Compare two terminal screen fingerprints for visual equality.
+ * Returns true only if both fingerprints exist and match across buffer type,
+ * geometry, scroll offsets, visible trimmed text, and cell attributes.
+ */
+export const areTerminalScreenFingerprintsEqual = (
+  a: TerminalScreenFingerprint | null | undefined,
+  b: TerminalScreenFingerprint | null | undefined,
+): boolean => {
+  if (!a || !b) return false;
+  if (a.terminalId !== b.terminalId) return false;
+  if (a.bufferType !== b.bufferType) return false;
+  if (a.cols !== b.cols || a.rows !== b.rows) return false;
+  if (a.baseY !== b.baseY || a.length !== b.length) return false;
+  if (a.attrHash !== b.attrHash) return false;
+  if (a.lines.length !== b.lines.length) return false;
+  for (let i = 0; i < a.lines.length; i++) {
+    if (a.lines[i] !== b.lines[i]) return false;
+  }
+  return true;
+};
