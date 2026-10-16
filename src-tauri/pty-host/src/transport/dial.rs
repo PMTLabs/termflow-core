@@ -1,76 +1,319 @@
-//! Dial-out transport mode for the elevated sidecar (plan 045).
+//! Dial-out transport mode for the elevated sidecar (plan 045, updated plan 058).
 //!
 //! In every other mode this process is the pipe SERVER (`Listener::bind` /
 //! `accept`). When launched with `--connect-pipe`, that direction is
 //! reversed: the GUI already created and owns the listener, and this process
-//! DIALS OUT to it as a client, then serves exactly that one connection and
-//! exits. See `docs/plan/045-open-admin-tab.md` §4.1 for why: a medium-
-//! integrity GUI cannot open a High-integrity pipe (`NWNR` mandatory-label
-//! policy, `pipe_windows.rs`), so the elevated side must be the one that
-//! reaches out, over a pipe the GUI secures instead.
+//! DIALS OUT to it as a client.
 //!
-//! Consequences that make this mode simpler than the normal listener loop,
-//! not just inverted:
-//! - No Hold / reconnect semantics. `SessionManager` is constructed with
-//!   `survivable: false`, which makes `ArmDetach` a rejected no-op, so
-//!   `on_gui_disconnect` can only ever return `TearDown`.
-//! - No discovery record. This host must never advertise itself — advertising
-//!   would let `ensure_pty_host_inner` (GUI side) mistake it for the primary.
-//! - Exactly one connection, ever. EOF — for any reason, including the GUI
-//!   process crashing — means exit. That is the whole orphan-prevention story
-//!   for the elevated process (plan 045 §4.1): nothing else has to notice.
+//! Under plan 058 (Review 326):
+//! - The elevated host supports `ArmDetach`, enabling offload and update survival.
+//! - When disconnected after an armed offload (or crash with live sessions),
+//!   it enters a bounded Hold state (900 seconds of active time).
+//! - During Hold, it binds a High-Integrity rendezvous pipe:
+//!   `\\.\pipe\termflow-admin-rendezvous.<user-sid>.<host-pid>`
+//!   secured with SDDL `O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;HI)`.
+//! - It publishes an elevated survivor record to the update-stable path.
+//! - Upon UAC reconnection, the High helper verifies server identity and sends
+//!   a rendezvous request with target pipe, GUI pid, and fresh token.
+//! - The held host verifies the target pipe is local, dials down to the GUI pipe,
+//!   authenticates the GUI server process identity, and resumes session servicing.
 
-use super::{run_connection, Endpoint, SystemActiveClock, CHAN_CAP};
-use crate::manager::SessionManager;
+use super::{ActiveClock, deadline_expired, run_connection, Endpoint, HoldDeadline, Listener, PendingDeadline, SystemActiveClock, CHAN_CAP};
+use crate::manager::{Disposition, SessionManager};
 use std::time::{Duration, Instant};
-use termflow_pty_protocol::{Data, Response};
+use termflow_pty_protocol::{
+    read_rendezvous_request, write_rendezvous_response, Data,
+    ElevatedRendezvousResponse, ElevatedRendezvousStatus, Response, ELEVATED_RENDEZVOUS_VERSION,
+};
 
 /// Total time budget to establish the dial-out connection, from the moment
-/// dialing starts. Covers two things at once: the ordinary race against the
-/// GUI's listener not being bound yet the instant we're launched, and the
-/// "UAC was approved but the GUI died immediately after" case — after this
-/// many seconds with nothing to talk to, this process has no reason to exist.
+/// dialing starts.
 const CONNECT_WATCHDOG_BUDGET: Duration = Duration::from_secs(30);
 const CONNECT_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Dial the GUI-hosted pipe as a client, retrying while the server side is
-/// not yet listening or momentarily busy accepting another instance. Any
-/// error is retried blindly (mirroring the existing `connect_with_retry` test
-/// helper) until the watchdog budget is spent, at which point the last error
-/// is returned.
-async fn dial(endpoint: &Endpoint) -> std::io::Result<super::ClientStream> {
+/// Check if a pipe path is strictly a local named pipe (no UNC remote host or directory traversal).
+fn is_local_named_pipe(pipe: &str) -> bool {
+    let prefix = r"\\.\pipe\";
+    if !pipe.starts_with(prefix) {
+        return false;
+    }
+    let rest = &pipe[prefix.len()..];
+    !rest.is_empty() && !rest.contains('\\') && !rest.contains('/') && !rest.contains("..")
+}
+
+/// Dial the GUI-hosted pipe as a client, verifying server PID if specified.
+async fn dial_and_verify(endpoint: &Endpoint, expected_server_pid: Option<u32>) -> std::io::Result<super::ClientStream> {
     let deadline = Instant::now() + CONNECT_WATCHDOG_BUDGET;
     loop {
         match super::connect(endpoint).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => {
+                if let Some(expected) = expected_server_pid {
+                    use std::os::windows::io::AsRawHandle;
+                    let handle = stream.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+                    extern "system" {
+                        fn GetNamedPipeServerProcessId(
+                            pipe: windows_sys::Win32::Foundation::HANDLE,
+                            server_process_id: *mut u32,
+                        ) -> windows_sys::Win32::Foundation::BOOL;
+                    }
+                    let mut server_pid = 0u32;
+                    let ok = unsafe { GetNamedPipeServerProcessId(handle, &mut server_pid) };
+                    if ok == 0 || server_pid != expected {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            format!("server pid mismatch: expected {expected}, got {server_pid}"),
+                        ));
+                    }
+                }
+                return Ok(stream);
+            }
             Err(e) if Instant::now() >= deadline => return Err(e),
             Err(_) => tokio::time::sleep(CONNECT_RETRY_INTERVAL).await,
         }
     }
 }
 
-/// Run the dial-out mode to completion: connect, serve the one connection
-/// through the same frame loop the listener mode uses, then return. The
-/// caller (`main`) exits the process right after — there is no loop back to
-/// re-dial.
-pub async fn serve_dial(endpoint: Endpoint, token: Option<String>) -> std::io::Result<()> {
-    let (events_tx, events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
-    let (resp_tx, resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
-    // `survivable: false` — see module doc: this is what makes teardown
-    // unconditional below, with no Hold path to fall into.
-    let mut mgr = SessionManager::new(events_tx, resp_tx, token, false);
+/// Query this process's creation time for the survivor record identity.
+fn current_process_creation_time() -> u64 {
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    extern "system" {
+        fn GetProcessTimes(
+            hprocess: HANDLE,
+            lpcreationtime: *mut windows_sys::Win32::Foundation::FILETIME,
+            lpexittime: *mut windows_sys::Win32::Foundation::FILETIME,
+            lpkerneltime: *mut windows_sys::Win32::Foundation::FILETIME,
+            lpusertime: *mut windows_sys::Win32::Foundation::FILETIME,
+        ) -> windows_sys::Win32::Foundation::BOOL;
+    }
+    unsafe {
+        let mut creation = std::mem::zeroed();
+        let mut exit = std::mem::zeroed();
+        let mut kernel = std::mem::zeroed();
+        let mut user = std::mem::zeroed();
+        if GetProcessTimes(GetCurrentProcess(), &mut creation, &mut exit, &mut kernel, &mut user) != 0 {
+            ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64)
+        } else {
+            0
+        }
+    }
+}
+
+fn host_instance_id() -> u128 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    ((std::process::id() as u128) << 96) | (nanos & ((1u128 << 96) - 1))
+}
+
+fn elevated_caps(inherit_cursor: bool) -> u32 {
+    termflow_pty_protocol::CAP_ATTACH_ACK
+        | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
+        | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
+        | if inherit_cursor { termflow_pty_protocol::CAP_INHERIT_CURSOR } else { 0 }
+}
+
+struct ReconnectInfo {
+    gui_pid: u32,
+    target_pipe: String,
+    auth_token: String,
+    deadline: Option<PendingDeadline>,
+}
+
+enum RendezvousWaitResult {
+    Reconnected(ReconnectInfo),
+    Empty,
+    Expired,
+}
+
+/// Await a connection on the High rendezvous pipe, enforcing active-time deadline.
+async fn wait_for_rendezvous(
+    listener: &mut Listener,
+    mgr: &SessionManager,
+    mut deadline: Option<PendingDeadline>,
+    clock: &SystemActiveClock,
+) -> RendezvousWaitResult {
+    const RECHECK: Duration = Duration::from_millis(250);
+    loop {
+        if mgr.live_session_count() == 0 {
+            return RendezvousWaitResult::Empty;
+        }
+        if let Some(hold) = deadline_expired(mgr, &mut deadline, clock) {
+            let _ = hold;
+            return RendezvousWaitResult::Expired;
+        }
+
+        tokio::select! {
+            r = listener.accept() => match r {
+                Ok(mut stream) => {
+                    match read_rendezvous_request(&mut stream).await {
+                        Ok(req) => {
+                            if req.version != ELEVATED_RENDEZVOUS_VERSION {
+                                let resp = ElevatedRendezvousResponse {
+                                    status: ElevatedRendezvousStatus::Rejected(format!("unsupported version {}", req.version)),
+                                    capabilities: elevated_caps(false),
+                                    protocol_version: termflow_pty_protocol::PROTOCOL_VERSION,
+                                };
+                                let _ = write_rendezvous_response(&mut stream, &resp).await;
+                                continue;
+                            }
+                            if !is_local_named_pipe(&req.target_pipe) {
+                                let resp = ElevatedRendezvousResponse {
+                                    status: ElevatedRendezvousStatus::Rejected("target pipe must be a local named pipe".into()),
+                                    capabilities: elevated_caps(false),
+                                    protocol_version: termflow_pty_protocol::PROTOCOL_VERSION,
+                                };
+                                let _ = write_rendezvous_response(&mut stream, &resp).await;
+                                continue;
+                            }
+
+                            let resp = ElevatedRendezvousResponse {
+                                status: ElevatedRendezvousStatus::Ok,
+                                capabilities: elevated_caps(termflow_pty_protocol::da1::inherit_cursor_supported()),
+                                protocol_version: termflow_pty_protocol::PROTOCOL_VERSION,
+                            };
+                            if write_rendezvous_response(&mut stream, &resp).await.is_err() {
+                                continue;
+                            }
+
+                            return RendezvousWaitResult::Reconnected(ReconnectInfo {
+                                gui_pid: req.gui_pid,
+                                target_pipe: req.target_pipe,
+                                auth_token: req.auth_token,
+                                deadline,
+                            });
+                        }
+                        Err(e) => {
+                            log::warn!("rendezvous request read error: {e}");
+                            continue;
+                        }
+                    }
+                }
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+            },
+            _ = tokio::time::sleep(RECHECK) => continue,
+        }
+    }
+}
+
+/// Run the dial-out mode: connect, serve the connection, and support bounded
+/// hold across offload and update if armed.
+pub async fn serve_dial(
+    endpoint: Endpoint,
+    token: Option<String>,
+    survivor_record: Option<std::path::PathBuf>,
+) -> std::io::Result<()> {
+    let (events_tx, mut events_rx) = tokio::sync::mpsc::channel::<Data>(CHAN_CAP);
+    let (resp_tx, mut resp_rx) = tokio::sync::mpsc::channel::<Response>(CHAN_CAP);
+    let survivable = cfg!(test) || crate::detach::assert_survivable().is_ok();
+    let mut mgr = SessionManager::new(events_tx.clone(), resp_tx.clone(), token, survivable);
     let clock = SystemActiveClock::new();
 
-    let stream = dial(&endpoint).await?;
-    let (_events_rx, _resp_rx, _result) =
-        run_connection(&mut mgr, stream, events_rx, resp_rx, None, &clock).await;
+    let mut stream = dial_and_verify(&endpoint, None).await?;
+    let mut pending_deadline: Option<PendingDeadline> = None;
 
-    // Whatever ended the connection — the GUI closing it on purpose (last
-    // admin tab closed) or the GUI/pipe dying unexpectedly — tear the live
-    // sessions down and exit. `survivable: false` guarantees this is the only
-    // reachable disposition; asserted by `dial_tests`.
-    mgr.on_gui_disconnect();
-    Ok(())
+    loop {
+        let (erx, rrx, connection) =
+            run_connection(&mut mgr, stream, events_rx, resp_rx, pending_deadline, &clock).await;
+        events_rx = erx;
+        resp_rx = rrx;
+
+        if let super::ConnectionResult::Expired(hold) = connection {
+            mgr.expire_local_hold(hold);
+            return Ok(());
+        }
+
+        let armed = mgr.is_armed();
+        match mgr.on_gui_disconnect() {
+            Disposition::TearDown => return Ok(()),
+            Disposition::Hold if !armed => return Ok(()),
+            Disposition::Hold => {
+                while events_rx.try_recv().is_ok() {}
+                while resp_rx.try_recv().is_ok() {}
+
+                let deadline = mgr.begin_local_absence().map(|hold| match clock.now() {
+                    Some(now) => PendingDeadline::Established(HoldDeadline {
+                        hold,
+                        at: now + Duration::from_secs(termflow_pty_protocol::LOCAL_HOLD_ACTIVE_SECS),
+                    }),
+                    None => PendingDeadline::AwaitingClock(hold),
+                });
+
+                let sid = match super::pipe_windows::current_user_sid_string() {
+                    Some(sid) => sid,
+                    None => {
+                        log::error!("cannot resolve user SID for elevated rendezvous pipe");
+                        mgr.on_gui_disconnect();
+                        return Ok(());
+                    }
+                };
+                let pid = std::process::id();
+                let rendezvous_name = format!(r"\\.\pipe\termflow-admin-rendezvous.{sid}.{pid}");
+                let mut rendezvous_listener = match Listener::bind(&Endpoint(rendezvous_name.clone())) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        log::error!("cannot bind rendezvous listener {rendezvous_name}: {e}");
+                        return Ok(());
+                    }
+                };
+
+                let instance_id = host_instance_id();
+                if let Some(record_path) = &survivor_record {
+                    let rec = termflow_pty_protocol::ElevatedSurvivorRecord {
+                        format: 1,
+                        user_sid: sid.clone(),
+                        host_pid: pid,
+                        host_creation_time: current_process_creation_time(),
+                        instance_id,
+                        rendezvous_pipe: rendezvous_name.clone(),
+                        proto_min: termflow_pty_protocol::PROTOCOL_MIN,
+                        proto_max: termflow_pty_protocol::PROTOCOL_MAX,
+                        capabilities: elevated_caps(termflow_pty_protocol::da1::inherit_cursor_supported()),
+                    };
+                    let _ = termflow_pty_protocol::publish_elevated_survivor(record_path, &rec);
+                }
+
+                match wait_for_rendezvous(&mut rendezvous_listener, &mgr, deadline, &clock).await {
+                    RendezvousWaitResult::Reconnected(info) => {
+                        drop(rendezvous_listener);
+                        if let Some(record_path) = &survivor_record {
+                            let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
+                        }
+
+                        mgr.update_expected_token(info.auth_token);
+
+                        match dial_and_verify(&Endpoint(info.target_pipe), Some(info.gui_pid)).await {
+                            Ok(new_stream) => {
+                                stream = new_stream;
+                                pending_deadline = info.deadline;
+                                continue;
+                            }
+                            Err(e) => {
+                                log::error!("failed to dial reconnected GUI pipe: {e}");
+                                return Ok(());
+                            }
+                        }
+                    }
+                    RendezvousWaitResult::Empty => {
+                        if let Some(record_path) = &survivor_record {
+                            let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
+                        }
+                        return Ok(());
+                    }
+                    RendezvousWaitResult::Expired => {
+                        if let Some(record_path) = &survivor_record {
+                            let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

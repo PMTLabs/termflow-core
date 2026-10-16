@@ -89,6 +89,7 @@ fn every_host_listing_has_a_scope() {
         ("pty_host_client.rs", "list_sessions_numbered"), // default deadline adapter
         ("state/host_adoption.rs", "settle"), // routed: each independent candidate
         ("state/host_retire.rs", "sample"), // routed: one frozen id + epoch
+        ("state/terminals.rs", "ensure_elevated_host_inner"), // routed: cold elevated host adoption
         ("state/update_full.rs", "scope_of"), // merged: all owned hosts
     ]);
 }

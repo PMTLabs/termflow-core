@@ -44,12 +44,13 @@ use windows_sys::Win32::System::Threading::{
 pub struct AdminPipeListener {
     pub name: String,
     sid: String,
+    initial_server: std::sync::Mutex<Option<NamedPipeServer>>,
 }
 
 impl AdminPipeListener {
-    /// Create the listener's NAME and resolve the securing SID up front.
-    /// Binds no pipe instance yet — none exists until the first
-    /// `accept_verified` call, exactly like `pipe_windows::Listener::bind`.
+    /// Create the listener's NAME, resolve the securing SID, and immediately bind
+    /// the secured first pipe instance (`first_pipe_instance(true)`). This guarantees
+    /// anti-squatting before any child process or helper is invoked (plan 058 §3.2 B / Blocker 2).
     /// `profile_key` is folded into the name only for operator legibility in
     /// a process list; it carries no security meaning (the DACL and the
     /// random suffix do that work).
@@ -57,7 +58,12 @@ impl AdminPipeListener {
         let sid = require_sid(current_user_sid_string())?;
         let random = uuid::Uuid::new_v4().simple().to_string();
         let name = format!(r"\\.\pipe\termflow-pty-host-admin.{profile_key}.{random}");
-        Ok(Self { name, sid })
+        let initial = secured_instance(&name, &sid, true)?;
+        Ok(Self {
+            name,
+            sid,
+            initial_server: std::sync::Mutex::new(Some(initial)),
+        })
     }
 
     /// Accept connections, verifying each peer's PID and elevation, until a
@@ -78,7 +84,11 @@ impl AdminPipeListener {
                     "timed out waiting for the elevated host to connect",
                 ));
             }
-            let server = secured_instance(&self.name, &self.sid)?;
+            let server = if let Some(initial) = self.initial_server.lock().unwrap().take() {
+                initial
+            } else {
+                secured_instance(&self.name, &self.sid, false)?
+            };
             match tokio::time::timeout(remaining, server.connect()).await {
                 Err(_) => {
                     return Err(io::Error::new(
@@ -106,7 +116,7 @@ impl AdminPipeListener {
 /// Mint one fresh, secured pipe instance. `first_pipe_instance(true)` refuses
 /// to create a second instance of the same name — the same anti-squatting
 /// guard `pipe_windows.rs` documents for the primary sidecar.
-fn secured_instance(name: &str, sid: &str) -> io::Result<NamedPipeServer> {
+fn secured_instance(name: &str, sid: &str, first_instance: bool) -> io::Result<NamedPipeServer> {
     let psd = build_security_descriptor(sid).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -123,7 +133,7 @@ fn secured_instance(name: &str, sid: &str) -> io::Result<NamedPipeServer> {
     // it, so it is freed immediately after.
     let result = unsafe {
         ServerOptions::new()
-            .first_pipe_instance(true)
+            .first_pipe_instance(first_instance)
             .create_with_security_attributes_raw(name, &mut sa as *mut _ as *mut std::ffi::c_void)
     };
     unsafe { LocalFree(psd as _) };

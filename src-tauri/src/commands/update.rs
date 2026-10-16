@@ -310,10 +310,6 @@ pub async fn restart_for_update(state: State<'_, AppState>) -> Result<(), String
     // it — an offload that skipped this came back with no persisted cwd for a
     // just-created/just-`cd`'d tab (see `flush_all_windows`).
     flush_all_windows(&state.app_handle).await;
-    // Admin tabs are never restored elevated, so the elevated
-    // sidecar (unlike the primary above) is torn down rather than kept alive
-    // across the offload. No-op if no admin tab was ever opened this run.
-    state.elevated_host.shutdown().await;
     log::info!("pty-host: armed hot-swap hold; exiting to release the .exe lock");
     handed.commit();
     state.app_handle.exit(0);
@@ -412,9 +408,6 @@ pub async fn restart_keeping_terminals(
         }
     };
     log::info!("[RECOVERY] relaunch spawned (pid {pid}); exiting");
-    // Same reason as restart_for_update: admin tabs are never restored
-    // elevated across a relaunch.
-    state.elevated_host.shutdown().await;
     in_flight.keep = true;
     handed.commit();
     app.exit(0);

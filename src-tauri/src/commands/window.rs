@@ -928,22 +928,19 @@ mod quit_teardown_wiring_tests {
         );
     }
 
-    /// Plan 045 AC9, the offload path's half: `restart_for_update` keeps the
-    /// PRIMARY host armed (tested above) but must still tear down the elevated
-    /// one — admin tabs are never restored elevated across the swap.
+    /// Plan 058 AC1: `restart_for_update` arms all hosts (elevated included via begin_offload)
+    /// and does NOT shut down elevated_host on offload.
     #[test]
-    fn the_offload_path_shuts_down_the_elevated_host_before_exiting() {
+    fn the_offload_path_arms_and_does_not_shut_down_elevated_host() {
         let body = fn_body(&source("commands/update.rs"), "pub async fn restart_for_update");
         let stripped = strip_line_comments(&body);
         assert!(
-            stripped.contains("elevated_host") && stripped.contains(".shutdown("),
-            "restart_for_update must tear down state.elevated_host. Body:\n{body}"
+            !stripped.contains("state.elevated_host.shutdown"),
+            "restart_for_update must NOT shut down state.elevated_host (must hold across offload). Body:\n{body}"
         );
-        let shutdown_at = stripped.find(".shutdown(").expect("checked above");
-        let exit_at = stripped.find(".exit(").expect("restart_for_update must still exit");
         assert!(
-            shutdown_at < exit_at,
-            "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{body}"
+            stripped.contains("begin_offload"),
+            "restart_for_update must arm via begin_offload. Body:\n{body}"
         );
     }
 
@@ -1019,12 +1016,10 @@ mod quit_teardown_wiring_tests {
         );
     }
 
-    /// Plan 045 AC9, the hot-swap-restart path's half: same obligation as
-    /// `restart_for_update`, reachable only on the success path (a failed
-    /// spawn returns early with nothing to tear down — no admin tab survives
-    /// a process that never exits).
+    /// Plan 058 AC1: `restart_keeping_terminals` arms all hosts and does NOT shut down
+    /// elevated_host on relaunch.
     #[test]
-    fn restart_keeping_terminals_shuts_down_the_elevated_host_before_exiting() {
+    fn restart_keeping_terminals_arms_and_does_not_shut_down_elevated_host() {
         let body = fn_body(
             &source("commands/update.rs"),
             "pub async fn restart_keeping_terminals",
@@ -1032,14 +1027,12 @@ mod quit_teardown_wiring_tests {
         let stripped = strip_line_comments(&body);
         let live = strip_dead_blocks(&stripped);
         assert!(
-            live.contains("elevated_host") && live.contains(".shutdown("),
-            "restart_keeping_terminals must tear down state.elevated_host. Body:\n{live}"
+            !live.contains("state.elevated_host.shutdown"),
+            "restart_keeping_terminals must NOT shut down state.elevated_host (must hold across relaunch). Body:\n{live}"
         );
-        let shutdown_at = live.find(".shutdown(").expect("checked above");
-        let exit_at = live.find(".exit(").expect("restart_keeping_terminals must still exit");
         assert!(
-            shutdown_at < exit_at,
-            "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{live}"
+            live.contains("begin_relaunch"),
+            "restart_keeping_terminals must arm via begin_relaunch. Body:\n{live}"
         );
     }
 

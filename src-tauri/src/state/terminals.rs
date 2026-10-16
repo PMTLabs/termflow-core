@@ -685,46 +685,123 @@ impl<R: Runtime> AppState<R> {
         }
 
         let profile_key = crate::profile::current().info().key;
+        let survivor_path = crate::pty_host_client::runtime_host_dir()
+            .map(|d| d.join(format!("elevated-survivor-{profile_key}.json")));
+
+        let mut survivor_record = None;
+        if let Some(ref path) = survivor_path {
+            if path.exists() {
+                if let Ok(Some(rec)) = termflow_pty_protocol::rendezvous::read_elevated_survivor(path) {
+                    use windows_sys::Win32::System::Threading::{
+                        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+                    };
+                    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+                    const SYNCHRONIZE: u32 = 0x0010_0000;
+                    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, rec.host_pid) };
+                    if !handle.is_null() && (handle as isize) != -1 {
+                        let mut exit_code = 0u32;
+                        let ok_code = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0;
+                        const STILL_ACTIVE: u32 = 259;
+                        let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+                        let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+                        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+                        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+                        let ok_time = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
+                        let creation_u64 = ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
+                        if ok_code && exit_code == STILL_ACTIVE && ok_time && creation_u64 == rec.host_creation_time {
+                            let proc = crate::elevated_host::launch::LaunchedProcess::from_handle(
+                                rec.host_pid,
+                                windows::Win32::Foundation::HANDLE(handle as _),
+                            );
+                            survivor_record = Some((rec, proc));
+                        } else {
+                            unsafe { CloseHandle(handle) };
+                            let _ = termflow_pty_protocol::rendezvous::remove_elevated_survivor_if_owned(path, rec.instance_id);
+                        }
+                    } else {
+                        let _ = termflow_pty_protocol::rendezvous::remove_elevated_survivor_if_owned(path, rec.instance_id);
+                    }
+                }
+            }
+        }
+
         let listener = crate::elevated_host::pipe_server::AdminPipeListener::create(&profile_key)
             .map_err(|e| format!("could not create the admin pipe: {e}"))?;
 
-        // Fresh per launch, never the persisted `%TEMP%` token
-        // (`pty_host_client::resolve_token`) and never written to disk — this
-        // is a separate credential scoped to exactly one elevated launch.
-        let token = uuid::Uuid::new_v4().simple().to_string();
-        let log_path = crate::pty_host_client::runtime_host_dir()
-            .map(|d| d.join("host-admin.log"))
-            .unwrap_or_else(|| std::env::temp_dir().join("termflow-host-admin.log"));
-        let parameters = crate::elevated_host::launch::build_dial_out_parameters(
-            &listener.name,
-            &token,
-            &log_path,
-        );
+        let (launched, token, stream) = if let Some((survivor, survivor_proc)) = survivor_record {
+            let fresh_token = uuid::Uuid::new_v4().simple().to_string();
+            let gui_pid = std::process::id();
+            let params = crate::elevated_host::launch::build_reconnect_parameters(
+                survivor.host_pid,
+                &survivor.rendezvous_pipe,
+                &listener.name,
+                gui_pid,
+                &fresh_token,
+            );
+            log::info!("[ADMIN] launching reconnect helper for surviving elevated pty-host (pid {})", survivor.host_pid);
+            let helper = match crate::elevated_host::launch::run_as(params).await {
+                crate::elevated_host::launch::LaunchOutcome::Cancelled => {
+                    log::info!("[ADMIN] UAC prompt was denied for reconnect; preserved survivor in hold");
+                    return Err(crate::elevated_host::ADMIN_UAC_CANCELLED.to_string());
+                }
+                crate::elevated_host::launch::LaunchOutcome::Failed(code) => {
+                    return Err(format!("could not launch the reconnect helper (code {code})"));
+                }
+                crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
+            };
+            self.elevated_host.wait_owned_process(Some(helper)).await;
 
-        log::info!("[ADMIN] requesting elevation for the admin-tab sidecar");
-        let launched = match crate::elevated_host::launch::run_as(parameters).await {
-            crate::elevated_host::launch::LaunchOutcome::Cancelled => {
-                log::info!("[ADMIN] UAC prompt was denied; no admin tab will open");
-                return Err(crate::elevated_host::ADMIN_UAC_CANCELLED.to_string());
+            if self.elevated_host.is_shutting_down() {
+                return Err("elevated terminal host is shutting down".into());
             }
-            crate::elevated_host::launch::LaunchOutcome::Failed(code) => {
-                return Err(format!("could not launch the elevated pty-host (code {code})"));
-            }
-            crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
-        };
-        log::info!("[ADMIN] elevated pty-host launched (pid {})", launched.pid);
-        if self.elevated_host.is_shutting_down() {
-            drop(listener);
-            self.elevated_host.wait_owned_process(Some(launched)).await;
-            return Err("elevated terminal host is shutting down".into());
-        }
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let stream = match listener.accept_verified(launched.pid, deadline).await {
-            Ok(s) => s,
-            Err(e) => return Err(format!("elevated pty-host did not connect: {e}")),
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let stream = match listener.accept_verified(survivor.host_pid, deadline).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(format!("surviving elevated pty-host did not connect: {e}"));
+                }
+            };
+            log::info!("[ADMIN] surviving elevated pty-host reconnected and verified (pid {})", survivor.host_pid);
+            (survivor_proc, fresh_token, stream)
+        } else {
+            let token = uuid::Uuid::new_v4().simple().to_string();
+            let log_path = crate::pty_host_client::runtime_host_dir()
+                .map(|d| d.join("host-admin.log"))
+                .unwrap_or_else(|| std::env::temp_dir().join("termflow-host-admin.log"));
+            let parameters = crate::elevated_host::launch::build_dial_out_parameters(
+                &listener.name,
+                &token,
+                &log_path,
+                survivor_path.as_deref(),
+            );
+
+            log::info!("[ADMIN] requesting elevation for the admin-tab sidecar");
+            let launched = match crate::elevated_host::launch::run_as(parameters).await {
+                crate::elevated_host::launch::LaunchOutcome::Cancelled => {
+                    log::info!("[ADMIN] UAC prompt was denied; no admin tab will open");
+                    return Err(crate::elevated_host::ADMIN_UAC_CANCELLED.to_string());
+                }
+                crate::elevated_host::launch::LaunchOutcome::Failed(code) => {
+                    return Err(format!("could not launch the elevated pty-host (code {code})"));
+                }
+                crate::elevated_host::launch::LaunchOutcome::Ok(proc) => proc,
+            };
+            log::info!("[ADMIN] elevated pty-host launched (pid {})", launched.pid);
+            if self.elevated_host.is_shutting_down() {
+                drop(listener);
+                self.elevated_host.wait_owned_process(Some(launched)).await;
+                return Err("elevated terminal host is shutting down".into());
+            }
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let stream = match listener.accept_verified(launched.pid, deadline).await {
+                Ok(s) => s,
+                Err(e) => return Err(format!("elevated pty-host did not connect: {e}")),
+            };
+            log::info!("[ADMIN] elevated pty-host connected and verified (pid {})", launched.pid);
+            (launched, token, stream)
         };
-        log::info!("[ADMIN] elevated pty-host connected and verified (pid {})", launched.pid);
 
         let my_gen = self.elevated_host.bump_gen()?;
         let epoch = self.host_table.reserve_epoch()?;
@@ -792,7 +869,17 @@ impl<R: Runtime> AppState<R> {
         };
 
         let client = crate::pty_host_client::wire_client(rd, wr, deps);
+        client.set_peer_pid(launched.pid);
+        client.set_shutdown_control(true);
+        client.set_attach_acks(true);
         client.bind_sessions(self.host_table.keys(), HostChannel::Elevated, epoch);
+
+        // Mandatory cold session listing adoption (plan 058 §3.4 / Blocker 7)
+        if let Some(listing) = client.list_sessions_numbered_within(std::time::Duration::from_secs(5)).await {
+            log::info!("[ADMIN] adopting {} sessions from elevated host", listing.len());
+            client.apply_listing_on(self.host_table.keys(), HostChannel::Elevated, &listing, std::time::Instant::now(), |_| false);
+        }
+
         self.elevated_host.publish(client, launched).await
     }
 

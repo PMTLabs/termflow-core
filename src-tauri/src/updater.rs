@@ -284,8 +284,6 @@ pub async fn update_and_restart(
     // used to assume Tauri would still "flush tab/session state" on the way out,
     // but nothing actually asked the windows to; see `commands::flush_all_windows`.
     crate::commands::flush_all_windows(&state.app_handle).await;
-    // Plan 045 AC9: admin tabs are never restored elevated across an update.
-    state.elevated_host.shutdown().await;
     log::info!("[UPDATE] updater launched; exiting gracefully — host holds the sessions");
     // Admission stays closed until the process is gone.
     handed.commit();
@@ -399,23 +397,19 @@ mod arm_lifecycle_wiring_tests {
     }
 
     /// Plan 045 AC9: admin tabs are never restored elevated across a real
-    /// Velopack update, so — unlike the primary host, which stays armed —
-    /// the elevated sidecar must be torn down before this exits.
+    /// Plan 058 AC1 / AC2: in-app update arms the elevated sidecar to survive the
+    /// update in runtime_host_dir(), so it is NOT shut down before exiting.
     #[test]
-    fn update_and_restart_shuts_down_the_elevated_host_before_exiting() {
+    fn update_and_restart_arms_and_does_not_shut_down_elevated_host() {
         let body = fn_body(&source(), "pub async fn update_and_restart");
         let stripped = strip_line_comments(&body);
         assert!(
-            stripped.contains("elevated_host") && stripped.contains(".shutdown("),
-            "update_and_restart must tear down state.elevated_host. Body:\n{body}"
+            !stripped.contains("state.elevated_host.shutdown"),
+            "update_and_restart must NOT tear down state.elevated_host (must hold across update). Body:\n{body}"
         );
-        let shutdown_at = stripped.find(".shutdown(").expect("checked above");
-        let exit_at = stripped
-            .find(".exit(")
-            .expect("update_and_restart must still exit");
         assert!(
-            shutdown_at < exit_at,
-            "elevated_host.shutdown() must be awaited BEFORE exit(0). Body:\n{body}"
+            stripped.contains("hold\n        .arm_detach") || stripped.contains("hold.arm_detach"),
+            "update_and_restart must arm via hold.arm_detach. Body:\n{body}"
         );
     }
 }

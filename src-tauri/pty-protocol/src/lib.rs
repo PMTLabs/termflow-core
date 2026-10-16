@@ -11,6 +11,7 @@ pub mod da1;
 pub mod discovery;
 pub mod frame;
 pub mod pump;
+pub mod rendezvous;
 pub mod spec;
 
 pub use bootstrap::{
@@ -25,6 +26,12 @@ pub use discovery::{
 pub use frame::{
     decode, encode, read_frame, write_frame, ArmDetachPurpose, Control, Data, DecodeError, Frame,
     McpHeld, McpHoldReason, McpHoldSpec, Response, SessionMeta, MAX_FRAME_LEN, PROTOCOL_VERSION,
+};
+pub use rendezvous::{
+    publish_elevated_survivor, read_elevated_survivor, read_rendezvous_request,
+    read_rendezvous_response, remove_elevated_survivor_if_owned, write_rendezvous_request,
+    write_rendezvous_response, ElevatedRendezvousRequest, ElevatedRendezvousResponse,
+    ElevatedRendezvousStatus, ElevatedSurvivorRecord, ELEVATED_RENDEZVOUS_VERSION,
 };
 pub use spec::SpawnSpec;
 

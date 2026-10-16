@@ -129,7 +129,7 @@ fn owner_only_security_descriptor() -> Option<*mut std::ffi::c_void> {
 /// This process's user SID in string form (`S-1-5-21-…`). Crate-local on
 /// purpose: the sidecar is a separate binary and cannot call the app crate's
 /// `profile` module.
-fn current_user_sid_string() -> Option<String> {
+pub(crate) fn current_user_sid_string() -> Option<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, HANDLE};
     use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
     use windows_sys::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
