@@ -77,10 +77,9 @@ import { StateManager } from './services/StateManager';
 import { resolvePostRestoreAction } from './services/postRestoreAction';
 import { terminalService } from './services/TerminalService';
 import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapshot';
-import { setInitialCwd } from './services/initialCwd';
 import './styles/App.css';
 import { generateId } from './utils/id';
-import { addTabTree } from './store/slices/panesSlice';
+import { addTabRootedAt } from './services/folderTab';
 
 // config.json is hand-editable, so hydration validates against the known
 // weight set rather than trusting the string straight into xterm's option.
@@ -828,30 +827,9 @@ const App: React.FC = () => {
       };
 
       console.log('Dispatching addTab with:', newTab);
-      if (folderPath) addTabRootedAt(newTab, folderPath);
+      if (folderPath) addTabRootedAt(dispatch, newTab, folderPath);
       else dispatch(addTab(newTab));
     }
-  };
-
-  // "Open in TermFlow": add a tab whose first terminal spawns in `folderPath`.
-  // The initial cwd is keyed by the root pane's terminalId, and since design 014 that is a
-  // fresh `tm-` id, NOT the tab id — so we seed the tab's tree ourselves (the id is then
-  // known) instead of leaving it to TerminalContainer, which mints one we cannot see.
-  const addTabRootedAt = (newTab: Parameters<typeof addTab>[0], folderPath: string) => {
-    const terminalId = generateId('tm');
-    const tree = {
-      id: generateId('pn'),
-      type: 'terminal' as const,
-      terminalId,
-      seededForTabId: newTab.id,
-      name: newTab.title || 'Terminal',
-      shellType: newTab.shellType,
-    };
-    setInitialCwd(terminalId, folderPath);
-    if (!(window as any).tabPanes) (window as any).tabPanes = {};
-    (window as any).tabPanes[newTab.id] = tree;
-    dispatch(addTab(newTab));
-    dispatch(addTabTree({ tabId: newTab.id, tree }));
   };
 
   // "Open in TermFlow" when a session was restored (cold launch with an existing session):
@@ -868,7 +846,7 @@ const App: React.FC = () => {
       shellType: defaultShell.id,
       icon: '🖥️',
     };
-    addTabRootedAt(newTab, folderPath);
+    addTabRootedAt(dispatch, newTab, folderPath);
   };
 
   const handleExternalActivity = (event: CustomEvent) => {

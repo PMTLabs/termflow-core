@@ -22,12 +22,26 @@ pub fn is_file_manager_integration_installed() -> Result<bool, String> {
     })
 }
 
-/// Re-point an enabled integration at the running exe when the exe it names is gone. The
-/// entry stores the exe's path at toggle time, so a move or reinstall elsewhere would
-/// otherwise leave it dangling until the user toggled it off and on. A live entry is left
-/// alone: nightly and release share the same keys, and neither may take over the other's.
+/// The exe named by a registered `"<exe>" --path "%V"` command, or "" when there is none.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn command_exe(command: &str) -> &str {
+    command.trim_start_matches('"').split('"').next().unwrap_or("")
+}
+
+/// True when `command` names no exe, or one that `exists` rejects.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn command_is_stale(command: &str, exists: impl Fn(&std::path::Path) -> bool) -> bool {
+    let exe = command_exe(command);
+    exe.is_empty() || !exists(std::path::Path::new(exe))
+}
+
+/// Re-point an enabled integration at the running exe when an exe it names is gone. On
+/// Windows the entry stores the exe's path at toggle time, so a move or reinstall elsewhere
+/// would otherwise leave it dangling until the user toggled it off and on; Linux scripts embed
+/// the path the same way but are not checked (see that platform's `is_stale`). A live entry is
+/// left alone: nightly and release share the same keys, and neither may take over the other's.
 pub fn refresh_if_installed() {
-    match platform::is_installed().and_then(|on| Ok(on && platform::is_stale())) {
+    match platform::is_installed().map(|on| on && platform::is_stale()) {
         Ok(true) => {
             if let Err(error) = platform::install() {
                 log::warn!("Failed to refresh file manager integration: {error}");
@@ -93,14 +107,16 @@ mod platform {
         Ok(())
     }
 
-    /// True when the registered command names an exe that no longer exists (or is unreadable).
+    /// True when EITHER registered command (folder or folder background) names an exe that no
+    /// longer exists, or cannot be read.
     pub fn is_stale() -> bool {
-        let command = CURRENT_USER
-            .open(format!(r"{DIRECTORY_KEY}\command"))
-            .and_then(|key| key.get_string(""))
-            .unwrap_or_default();
-        let exe = command.trim_start_matches('"').split('"').next().unwrap_or("");
-        exe.is_empty() || !std::path::Path::new(exe).exists()
+        [DIRECTORY_KEY, BACKGROUND_KEY].into_iter().any(|key_path| {
+            let command = CURRENT_USER
+                .open(format!(r"{key_path}\command"))
+                .and_then(|key| key.get_string(""))
+                .unwrap_or_default();
+            super::command_is_stale(&command, |exe| exe.exists())
+        })
     }
 
     pub fn is_installed() -> Result<bool, String> {
@@ -242,5 +258,39 @@ mod platform {
 
     pub fn is_installed() -> Result<bool, String> {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command_exe, command_is_stale};
+    use std::path::Path;
+
+    const QUOTED: &str = r#""C:\Program Files\TermFlow\termflow.exe" --path "%V""#;
+
+    #[test]
+    fn extracts_a_quoted_exe_with_spaces() {
+        assert_eq!(command_exe(QUOTED), r"C:\Program Files\TermFlow\termflow.exe");
+    }
+
+    #[test]
+    fn a_live_exe_is_not_stale_and_a_missing_one_is() {
+        assert!(!command_is_stale(QUOTED, |_| true));
+        assert!(command_is_stale(QUOTED, |_| false));
+    }
+
+    #[test]
+    fn the_exe_is_what_gets_checked_not_the_arguments() {
+        let seen = std::cell::RefCell::new(String::new());
+        command_is_stale(QUOTED, |p: &Path| {
+            *seen.borrow_mut() = p.to_string_lossy().into_owned();
+            true
+        });
+        assert_eq!(*seen.borrow(), r"C:\Program Files\TermFlow\termflow.exe");
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_command_is_stale_without_asking_the_filesystem() {
+        assert!(command_is_stale("", |_| panic!("must not be consulted")));
     }
 }
