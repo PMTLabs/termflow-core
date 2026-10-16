@@ -12,6 +12,7 @@ import { addTab } from '../store/slices/tabsSlice';
 import type { ShellProfile } from '../store/slices/settingsSlice';
 import { generateId } from '../utils/id';
 import { generateUniqueTabName } from './newTabActions';
+import { terminalService } from './TerminalService';
 
 export type AdminTabSupportReason =
   | 'ok'
@@ -101,6 +102,9 @@ export function isOptimisticAdminTab(tabId: string): boolean {
 export function openAdminTabWithProfile(profile: ShellProfile, afterTabId?: string): void {
   const existing = store.getState().tabs.tabs.map((t) => t.title);
   const id = generateId('tb');
+  // An explicit request is a new consent decision: an earlier cancelled prompt must not make this
+  // silently fail without ever asking.
+  terminalService.beginUserElevatedAttempt();
   markOptimisticAdminTab(id);
   store.dispatch(addTab({
     id,

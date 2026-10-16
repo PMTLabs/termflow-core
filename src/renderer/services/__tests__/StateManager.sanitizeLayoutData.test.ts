@@ -218,3 +218,28 @@ describe('sanitizeLayoutData migrates every pre-014 leaf shape', () => {
     expect(leaf.sessionKey).toBe('tb-old');
   });
 });
+
+/**
+ * Plan 058 review F-03. `elevated` on a tab is a promise to reattach to the held elevated
+ * host after a restart. A saved or imported layout is just a file: if loading one kept the
+ * flag, a layout from anyone would open an elevated shell, with no UAC prompt when the
+ * elevated host is already connected.
+ */
+describe('sanitizeLayoutData — elevation intent', () => {
+  const withElevatedTab = () => ({
+    tabs: [{ id: 'tb-adm00001', elevated: true }, { id: 'tb-plain001' }],
+    activeTabId: 'tb-adm00001',
+    activePaneId: null,
+    paneTree: null,
+  });
+
+  it('strips elevated from a layout load (the default)', () => {
+    const out = (StateManager as any).sanitizeLayoutData(withElevatedTab());
+    expect(out.tabs.map((t: any) => t.elevated)).toEqual([undefined, undefined]);
+  });
+
+  it('keeps elevated for a session restore, which reattaches under UAC', () => {
+    const out = (StateManager as any).sanitizeLayoutData(withElevatedTab(), undefined, true);
+    expect(out.tabs.map((t: any) => t.elevated)).toEqual([true, undefined]);
+  });
+});

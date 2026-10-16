@@ -190,6 +190,17 @@ export class TerminalServiceClass {
     return this.elevatedConsentDenied;
   }
 
+  /**
+   * A fresh, user-initiated elevated attempt (Open Admin Tab, Restart). The latch exists so N
+   * restored panes do not each raise a UAC prompt; it must not outlive the user's next explicit
+   * request, or one cancelled prompt would make every later admin action fail without a prompt.
+   * Unlike `reconnectElevated` this does not wake the panes that are showing the banner.
+   */
+  beginUserElevatedAttempt(): void {
+    this.elevatedConsentDenied = false;
+    this.reconnectElevatedPromise = null;
+  }
+
   reconnectElevated(): void {
     this.elevatedConsentDenied = false;
     this.reconnectElevatedPromise = null;
@@ -281,7 +292,9 @@ export class TerminalServiceClass {
       if (this.elevatedConsentDenied) {
         throw new Error('ADMIN_UAC_CANCELLED');
       }
-      if (this.reconnectElevatedPromise) {
+      // `while`, not `if`: when the flight settles several waiters resume together, and each must
+      // re-check that nobody else has already started the next flight before it becomes the owner.
+      while (this.reconnectElevatedPromise) {
         try {
           await this.reconnectElevatedPromise;
         } catch (error) {
@@ -299,9 +312,10 @@ export class TerminalServiceClass {
     let isElevatedFlightOwner = false;
     let flightResolve: ((val: string) => void) | undefined;
     let flightReject: ((err: any) => void) | undefined;
+    let flight: Promise<string> | undefined;
     if (elevated && !this.reconnectElevatedPromise) {
       isElevatedFlightOwner = true;
-      const flight = new Promise<string>((res, rej) => {
+      flight = new Promise<string>((res, rej) => {
         flightResolve = res;
         flightReject = rej;
       });
@@ -386,10 +400,7 @@ export class TerminalServiceClass {
       if (attemptPi) protocol.setRestoreResolved(attemptPi);
       this.bindCreated(terminalId, processId, owningTabId);
 
-      if (isElevatedFlightOwner) {
-        flightResolve?.(processId);
-        this.reconnectElevatedPromise = null;
-      }
+      if (isElevatedFlightOwner) flightResolve?.(processId);
 
       return processId;
     } catch (error) {
@@ -398,13 +409,22 @@ export class TerminalServiceClass {
           this.elevatedConsentDenied = true;
         }
         flightReject?.(error);
-        this.reconnectElevatedPromise = null;
       }
       if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
         console.error('Failed to create terminal:', error);
         console.error('Shell type was:', shellType);
       }
       throw error;
+    } finally {
+      // The owner can leave through any of the early `return ''` exits (pane unmounted, incarnation
+      // superseded, window ended) without settling the flight; a flight that never settles would
+      // make every later elevated create wait forever. Settling an already-settled promise is a
+      // no-op, and the flight is only cleared if it is still OURS (reconnectElevated may have
+      // replaced it).
+      if (isElevatedFlightOwner) {
+        flightResolve?.('');
+        if (this.reconnectElevatedPromise === flight) this.reconnectElevatedPromise = null;
+      }
     }
   }
 
