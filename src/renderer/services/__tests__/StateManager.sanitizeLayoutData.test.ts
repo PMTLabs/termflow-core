@@ -242,4 +242,28 @@ describe('sanitizeLayoutData — elevation intent', () => {
     const out = (StateManager as any).sanitizeLayoutData(withElevatedTab(), undefined, true);
     expect(out.tabs.map((t: any) => t.elevated)).toEqual([true, undefined]);
   });
+
+  // The pane leaf is what spawns the shell (`findElevatedByTerminalId` reads it), so stripping
+  // only the tab flag would leave the exploit and drop the badge that warns about it.
+  describe('on the pane leaves', () => {
+    const leaf = () => ({ type: 'terminal', id: 'pn-adm00001', terminalId: 'tm-adm00001', elevated: true });
+    const withElevatedLeaf = () => ({
+      ...withElevatedTab(),
+      activePaneId: 'pn-adm00001',
+      paneTree: leaf(),
+      tabPanes: { 'tb-adm00001': leaf() },
+      treesByTabId: { 'tb-adm00001': leaf() },
+    });
+    const leaves = (out: any) => [out.paneTree, out.tabPanes['tb-adm00001'], out.treesByTabId['tb-adm00001']];
+
+    it('strips elevated from every copy of the tree on a layout load', () => {
+      const out = (StateManager as any).sanitizeLayoutData(withElevatedLeaf());
+      expect(leaves(out).map((n: any) => n.elevated)).toEqual([undefined, undefined, undefined]);
+    });
+
+    it('keeps elevated on every copy of the tree for a session restore', () => {
+      const out = (StateManager as any).sanitizeLayoutData(withElevatedLeaf(), undefined, true);
+      expect(leaves(out).map((n: any) => n.elevated)).toEqual([true, true, true]);
+    });
+  });
 });
