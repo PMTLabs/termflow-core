@@ -1,6 +1,7 @@
 import { store } from '../store';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../store/slices/panesSlice';
+import { noteUserSplitOf } from './paneActions';
 import { getAllLeafIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
 import { insertTextIntoTerminal } from './insertTextIntoTerminal';
@@ -382,6 +383,7 @@ export class InputHandler {
     const state = store.getState();
     const activePaneId = state.panes.activePaneId;
     if (activePaneId) {
+      noteUserSplitOf(activePaneId);
       store.dispatch(splitPane({ paneId: activePaneId, direction: 'horizontal' }));
     }
   };

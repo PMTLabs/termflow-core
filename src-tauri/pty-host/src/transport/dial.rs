@@ -7,11 +7,18 @@
 //!
 //! Under plan 058 (Review 326):
 //! - The elevated host supports `ArmDetach`, enabling offload and update survival.
-//! - When disconnected after an armed offload (or crash with live sessions),
-//!   it enters a bounded Hold state (900 seconds of active time).
+//! - When disconnected after an ARMED offload, it enters a bounded Hold state (900 seconds of
+//!   active time). A disconnect that was never armed (the GUI crashed or was killed) does not
+//!   hold: the sessions are torn down and the host exits, since nothing is waiting to reconnect.
 //! - During Hold, it binds a High-Integrity rendezvous pipe:
-//!   `\\.\pipe\termflow-admin-rendezvous.<user-sid>.<host-pid>`
-//!   secured with SDDL `O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;HI)`.
+//!   `\\.\pipe\termflow-admin-rendezvous.<user-sid>.<host-pid>.<nonce>`
+//!   (the nonce is chosen when the Hold begins; the pipe is created, by `Listener::bind`,
+//!   before the name is published in the survivor record, so no one can claim it first)
+//!   secured with SDDL `O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;HI)`. The name is not a secret
+//!   from this user's other processes, which can read the record: between two connections a
+//!   same-user process can take the name and deny reconnects until the hold ends, but it cannot
+//!   obtain a token (the reconnect helper checks the server's pid first).
+//!   Holding requires an elevated token: with anything less the host tears down instead.
 //! - It publishes an elevated survivor record to the update-stable path.
 //! - Upon UAC reconnection, the High helper verifies server identity and sends
 //!   a rendezvous request with target pipe, GUI pid, and fresh token.
@@ -99,6 +106,20 @@ fn current_process_creation_time() -> u64 {
     }
 }
 
+/// 128 bits that another process cannot predict: each `RandomState` is keyed from the OS RNG, so
+/// the digest of a fresh one is unknown to anyone who cannot read this process's memory.
+fn unpredictable_nonce() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(32);
+    for round in 0u32..2 {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.write_u32(round);
+        out.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    out
+}
+
 fn host_instance_id() -> u128 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -124,7 +145,7 @@ struct ReconnectInfo {
 enum RendezvousWaitResult {
     Reconnected(ReconnectInfo),
     Empty,
-    Expired,
+    Expired(crate::manager::LocalHold),
 }
 
 /// Await a connection on the High rendezvous pipe, enforcing active-time deadline.
@@ -140,8 +161,7 @@ async fn wait_for_rendezvous(
             return RendezvousWaitResult::Empty;
         }
         if let Some(hold) = deadline_expired(mgr, &mut deadline, clock) {
-            let _ = hold;
-            return RendezvousWaitResult::Expired;
+            return RendezvousWaitResult::Expired(hold);
         }
 
         tokio::select! {
@@ -230,7 +250,14 @@ pub async fn serve_dial(
         let armed = mgr.is_armed();
         match mgr.on_gui_disconnect() {
             Disposition::TearDown => return Ok(()),
-            Disposition::Hold if !armed => return Ok(()),
+            Disposition::Hold if !armed => {
+                // Never armed: the GUI went away without handing these sessions to anyone.
+                // `on_gui_disconnect` only parked them, and this process is about to exit, so end
+                // them here rather than leave children to a kill thread that dies with us.
+                log::warn!("elevated host: GUI disconnected without an arm; tearing down");
+                mgr.tear_down_sessions();
+                return Ok(());
+            }
             Disposition::Hold => {
                 while events_rx.try_recv().is_ok() {}
                 while resp_rx.try_recv().is_ok() {}
@@ -243,25 +270,40 @@ pub async fn serve_dial(
                     None => PendingDeadline::AwaitingClock(hold),
                 });
 
+                // Fail closed. The mandatory label on the rendezvous pipe is chosen from this
+                // process's token; if it is not elevated the pipe would be Medium-labelled and any
+                // same-user process could talk to a privileged host.
+                if !cfg!(test) && !super::pipe_windows::is_elevated() {
+                    log::error!("elevated host: token is not elevated; refusing to hold, tearing down");
+                    mgr.tear_down_sessions();
+                    return Ok(());
+                }
                 let sid = match super::pipe_windows::current_user_sid_string() {
                     Some(sid) => sid,
                     None => {
-                        log::error!("cannot resolve user SID for elevated rendezvous pipe");
-                        mgr.on_gui_disconnect();
+                        log::error!("cannot resolve user SID for elevated rendezvous pipe; tearing down");
+                        mgr.tear_down_sessions();
                         return Ok(());
                     }
                 };
                 let pid = std::process::id();
-                let rendezvous_name = format!(r"\\.\pipe\termflow-admin-rendezvous.{sid}.{pid}");
+                let rendezvous_name =
+                    termflow_pty_protocol::rendezvous_pipe_name(&sid, pid, &unpredictable_nonce());
                 let mut rendezvous_listener = match Listener::bind(&Endpoint(rendezvous_name.clone())) {
                     Ok(l) => l,
                     Err(e) => {
-                        log::error!("cannot bind rendezvous listener {rendezvous_name}: {e}");
+                        log::error!("cannot bind rendezvous listener {rendezvous_name}: {e}; tearing down");
+                        mgr.tear_down_sessions();
                         return Ok(());
                     }
                 };
 
                 let instance_id = host_instance_id();
+                let remove_record = || {
+                    if let Some(record_path) = &survivor_record {
+                        let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
+                    }
+                };
                 if let Some(record_path) = &survivor_record {
                     let rec = termflow_pty_protocol::ElevatedSurvivorRecord {
                         format: 1,
@@ -277,39 +319,43 @@ pub async fn serve_dial(
                     let _ = termflow_pty_protocol::publish_elevated_survivor(record_path, &rec);
                 }
 
-                match wait_for_rendezvous(&mut rendezvous_listener, &mgr, deadline, &clock).await {
-                    RendezvousWaitResult::Reconnected(info) => {
-                        drop(rendezvous_listener);
-                        if let Some(record_path) = &survivor_record {
-                            let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
-                        }
-
-                        mgr.update_expected_token(info.auth_token);
-
-                        match dial_and_verify(&Endpoint(info.target_pipe), Some(info.gui_pid)).await {
-                            Ok(new_stream) => {
-                                stream = new_stream;
-                                pending_deadline = info.deadline;
-                                continue;
+                // Stay reachable until the deadline: one failed reconnect attempt (the GUI pipe
+                // went away, a stray request) must not end a host that is still holding sessions.
+                let wait_deadline = deadline;
+                let reconnected = loop {
+                    match wait_for_rendezvous(&mut rendezvous_listener, &mgr, wait_deadline, &clock).await {
+                        RendezvousWaitResult::Reconnected(info) => {
+                            match dial_and_verify(&Endpoint(info.target_pipe), Some(info.gui_pid)).await {
+                                Ok(new_stream) => {
+                                    // Only a reconnect that was verified changes what the host
+                                    // expects or how long it holds.
+                                    mgr.update_expected_token(info.auth_token);
+                                    break Some((new_stream, info.deadline));
+                                }
+                                Err(e) => {
+                                    log::error!("failed to dial reconnecting GUI pipe: {e}; still holding");
+                                    continue;
+                                }
                             }
-                            Err(e) => {
-                                log::error!("failed to dial reconnected GUI pipe: {e}");
-                                return Ok(());
-                            }
+                        }
+                        RendezvousWaitResult::Empty => break None,
+                        RendezvousWaitResult::Expired(hold) => {
+                            log::warn!("elevated host: hold expired waiting for rendezvous; tearing down");
+                            mgr.expire_local_hold(hold);
+                            break None;
                         }
                     }
-                    RendezvousWaitResult::Empty => {
-                        if let Some(record_path) = &survivor_record {
-                            let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
-                        }
-                        return Ok(());
+                };
+
+                drop(rendezvous_listener);
+                remove_record();
+                match reconnected {
+                    Some((new_stream, resumed_deadline)) => {
+                        stream = new_stream;
+                        pending_deadline = resumed_deadline;
+                        continue;
                     }
-                    RendezvousWaitResult::Expired => {
-                        if let Some(record_path) = &survivor_record {
-                            let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
-                        }
-                        return Ok(());
-                    }
+                    None => return Ok(()),
                 }
             }
         }

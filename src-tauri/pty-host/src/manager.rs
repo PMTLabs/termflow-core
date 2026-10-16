@@ -578,7 +578,7 @@ impl SessionManager {
     /// schedule (a SIGKILL'd Unix child is a zombie until its waiter runs).
     /// Issuing the kill is the part that dies with the process, so it is the
     /// part worth waiting for.
-    fn tear_down_sessions(&mut self) {
+    pub(crate) fn tear_down_sessions(&mut self) {
         self.mcp.stop();
         mcp_hold::note_order("teardown-begin");
         let kills: Vec<_> = self.sessions.values().filter_map(|s| s.kill()).collect();

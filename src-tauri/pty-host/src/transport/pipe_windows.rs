@@ -1,10 +1,13 @@
 //! Windows named-pipe transport.
 //!
-//! Each `accept()` mints a FRESH pipe instance with an owner-only DACL and
-//! waits for exactly one client — the same lifecycle the host used before the
-//! transport was made OS-neutral: the previous instance is fully released
-//! (dropped when the connection ends) before the next is created, so
-//! `first_pipe_instance(true)` continues to guard against a squatter.
+//! `bind()` creates the first pipe instance (owner-only DACL), so a name that cannot be
+//! created fails there, and a squatter cannot take the name between `bind()` and the first
+//! `accept()`. Each later `accept()` mints a FRESH instance and waits for exactly one client:
+//! the previous instance is fully released (dropped when the connection ends) before the next
+//! is created, so `first_pipe_instance(true)` continues to guard against a squatter. The
+//! window between two connections is still open; a squatter there denies service (the real
+//! host's `accept` keeps retrying) but cannot read a token, because the client checks the
+//! server's pid before sending one.
 
 #![cfg(windows)]
 
@@ -26,22 +29,39 @@ pub type ClientStream = NamedPipeClient;
 /// Owns the pipe NAME and mints a fresh secured instance per `accept()`.
 pub struct Listener {
     name: String,
+    /// The instance `bind()` created, handed to the first `accept()`.
+    pending: Option<NamedPipeServer>,
 }
 
 impl Listener {
     pub fn bind(endpoint: &Endpoint) -> std::io::Result<Self> {
-        // The Windows pipe namespace is global; no filesystem object to create
-        // up front. The instance itself is created (secured) in `accept()`.
+        // The Windows pipe namespace is global, so "binding" is creating the first instance.
+        // Failing here (name taken, no security descriptor) is what lets a caller refuse to
+        // go on, rather than discover it on every later `accept()`.
+        let first = secured_server(&endpoint.0)?;
         Ok(Self {
             name: endpoint.0.clone(),
+            pending: Some(first),
         })
     }
 
     /// Create a secured pipe instance and wait for one client to connect.
     pub async fn accept(&mut self) -> std::io::Result<Stream> {
-        let server = secured_server(&self.name)?;
-        server.connect().await?;
-        Ok(server)
+        // The instance stays in `pending` until a client has connected: callers race this
+        // against a timer and drop the future on every tick, and an instance owned by the
+        // future would close with it, leaving the name unowned.
+        if self.pending.is_none() {
+            self.pending = Some(secured_server(&self.name)?);
+        }
+        let connected = match self.pending.as_ref() {
+            Some(server) => server.connect().await,
+            None => unreachable!("pending was just filled"),
+        };
+        if let Err(e) = connected {
+            self.pending = None;
+            return Err(e);
+        }
+        Ok(self.pending.take().expect("pending is still ours: only this method takes it"))
     }
 }
 
@@ -178,7 +198,7 @@ pub(crate) fn current_user_sid_string() -> Option<String> {
 /// a wrong `true` would stamp a HIGH label a medium process cannot even set,
 /// failing pipe creation outright, whereas a wrong `false` still leaves the
 /// owner-only DACL in place.
-fn is_elevated() -> bool {
+pub(crate) fn is_elevated() -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,

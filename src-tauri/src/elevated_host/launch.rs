@@ -64,12 +64,36 @@ pub enum LaunchOutcome {
 /// in `main.rs` already assumes) does. Only `--log <path>` can realistically
 /// contain a space (a user profile directory); pipe names and UUID tokens
 /// never do, but every argument is quoted uniformly rather than special-cased.
+///
+/// The rules (what `CommandLineToArgvW` undoes): wrap in quotes when the argument is empty or
+/// holds a space, tab or quote; inside the quotes a run of backslashes that ends at a `"` (an
+/// embedded one, or the closing one) is doubled, and each embedded `"` gets one more backslash.
+/// Backslashes anywhere else are literal.
 fn quote_arg(s: &str) -> String {
-    if s.is_empty() || s.contains([' ', '"']) {
-        format!("\"{}\"", s.replace('"', "\\\""))
-    } else {
-        s.to_string()
+    if !s.is_empty() && !s.contains([' ', '\t', '"']) {
+        return s.to_string();
     }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let mut backslashes = 0usize;
+    for c in s.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.extend(std::iter::repeat('\\').take(backslashes));
+                out.push(c);
+                backslashes = 0;
+            }
+        }
+    }
+    out.extend(std::iter::repeat('\\').take(backslashes * 2));
+    out.push('"');
+    out
 }
 
 /// Build the dial-out mode arguments (plan 045 §4.3, plan 058) as one `lpParameters`
@@ -239,6 +263,61 @@ mod launch_tests {
             p,
             r#"--connect-pipe \\.\pipe\termflow-pty-host-admin.default.abc123 --token 5b6c1e8e-aaaa-bbbb-cccc-000000000000 --log "C:\Users\Jane Doe\AppData\Local\Temp\host-admin.log" --survivor-record "C:\Users\Jane Doe\AppData\Local\elevated-survivor-default.json""#
         );
+    }
+
+    /// Reference `CommandLineToArgvW` for one argument, enough to round-trip `quote_arg`.
+    fn unquote(arg: &str) -> String {
+        let chars: Vec<char> = arg.chars().collect();
+        let mut out = String::new();
+        let (mut i, mut in_quotes) = (0, false);
+        while i < chars.len() {
+            let mut n = 0;
+            while i < chars.len() && chars[i] == '\\' {
+                n += 1;
+                i += 1;
+            }
+            if i < chars.len() && chars[i] == '"' {
+                out.extend(std::iter::repeat('\\').take(n / 2));
+                if n % 2 == 1 {
+                    out.push('"');
+                } else {
+                    in_quotes = !in_quotes;
+                }
+                i += 1;
+            } else {
+                out.extend(std::iter::repeat('\\').take(n));
+                if i < chars.len() {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+            }
+        }
+        assert!(!in_quotes, "unterminated quote in {arg:?}");
+        out
+    }
+
+    #[test]
+    fn quote_arg_round_trips_every_awkward_shape() {
+        for raw in [
+            "",
+            "plain",
+            "with space",
+            "tab\there",
+            r"C:\dir with space\",
+            r"C:\dir\",
+            r#"say "hi""#,
+            r#"trailing quote\""#,
+            r#"x" --connect-pipe \\.\pipe\evil"#,
+            r"\\.\pipe\name",
+            r"two\\\ back",
+        ] {
+            let quoted = quote_arg(raw);
+            assert_eq!(unquote(&quoted), raw, "quoted as {quoted}");
+        }
+        // A trailing backslash must not swallow the closing quote.
+        assert_eq!(quote_arg(r"C:\a b\"), r#""C:\a b\\""#);
+        // Nothing to protect, nothing added.
+        assert_eq!(quote_arg(r"\\.\pipe\x"), r"\\.\pipe\x");
     }
 
     #[test]

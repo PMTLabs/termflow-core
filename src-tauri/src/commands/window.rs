@@ -195,11 +195,16 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
 }
 
 /// Everything a quit does to the shells' hosts, short of exiting: release every
-/// pty-host this instance owns — the current one and any older one that survived
-/// an update, connected or not, not just the primary; see `AppState::exit_hosts`
-/// — then the elevated sidecar. That one is never armed for detach and never
-/// restored elevated, so unlike the others it always tears down rather than
-/// being disarmed. A no-op if no admin tab was ever opened this run.
+/// pty-host this instance owns — the current one, any older one that survived
+/// an update, and the elevated one, connected or not; see `AppState::exit_hosts` —
+/// then close the elevated transport and stop admitting elevated sessions. Whether
+/// the elevated host's shells die or are held is decided by `exit_hosts`, exactly as
+/// for the others: only an armed host holds. A no-op if no admin tab was ever opened
+/// this run.
+///
+/// Known limit: a held survivor this run never reconnected to (UAC declined, or quit
+/// before any admin tab reattached) cannot be told to stop from here without elevating,
+/// so it ends with its own bounded hold (15 minutes of active time).
 ///
 /// With `bounds`, the hosts get that long and no more, for a caller that has
 /// something else waiting for it (an update that has started its updater).
@@ -808,11 +813,10 @@ mod quit_teardown_wiring_tests {
         );
     }
 
-    /// Plan 045 AC9: an elevated sidecar is never armed for detach and never
-    /// restored elevated, so a real quit must tear it down before exiting —
-    /// unlike the primary above, which is only disarmed. Order matters: after
-    /// `exit(0)` the process is already gone, so a shutdown placed after it
-    /// would never run.
+    /// A real quit must close every host, the elevated one included, before exiting:
+    /// `exit_hosts` tears down what was not armed, and `close_all_hosts` then closes the
+    /// elevated transport. Order matters: after `exit(0)` the process is already gone, so
+    /// a close placed after it would never run.
     #[test]
     fn disarm_then_exit_shuts_down_the_elevated_host_before_exiting() {
         let window = source("commands/window.rs");
@@ -928,16 +932,23 @@ mod quit_teardown_wiring_tests {
         );
     }
 
+    /// Every spelling that closes the elevated host. The offload and relaunch paths must use
+    /// none of them; matching only `state.elevated_host.shutdown` missed the `elevated.shutdown(`
+    /// alias `close_all_hosts` itself uses, and `close_all_hosts` as a whole.
+    const ELEVATED_CLOSE_SPELLINGS: [&str; 3] = ["elevated_host.shutdown", "elevated.shutdown(", "close_all_hosts("];
+
     /// Plan 058 AC1: `restart_for_update` arms all hosts (elevated included via begin_offload)
     /// and does NOT shut down elevated_host on offload.
     #[test]
     fn the_offload_path_arms_and_does_not_shut_down_elevated_host() {
         let body = fn_body(&source("commands/update.rs"), "pub async fn restart_for_update");
         let stripped = strip_line_comments(&body);
-        assert!(
-            !stripped.contains("state.elevated_host.shutdown"),
-            "restart_for_update must NOT shut down state.elevated_host (must hold across offload). Body:\n{body}"
-        );
+        for alias in ELEVATED_CLOSE_SPELLINGS {
+            assert!(
+                !stripped.contains(alias),
+                "restart_for_update must NOT close the elevated host (`{alias}`): it holds across offload. Body:\n{body}"
+            );
+        }
         assert!(
             stripped.contains("begin_offload"),
             "restart_for_update must arm via begin_offload. Body:\n{body}"
@@ -1026,10 +1037,12 @@ mod quit_teardown_wiring_tests {
         );
         let stripped = strip_line_comments(&body);
         let live = strip_dead_blocks(&stripped);
-        assert!(
-            !live.contains("state.elevated_host.shutdown"),
-            "restart_keeping_terminals must NOT shut down state.elevated_host (must hold across relaunch). Body:\n{live}"
-        );
+        for alias in ELEVATED_CLOSE_SPELLINGS {
+            assert!(
+                !live.contains(alias),
+                "restart_keeping_terminals must NOT close the elevated host (`{alias}`): it holds across relaunch. Body:\n{live}"
+            );
+        }
         assert!(
             live.contains("begin_relaunch"),
             "restart_keeping_terminals must arm via begin_relaunch. Body:\n{live}"

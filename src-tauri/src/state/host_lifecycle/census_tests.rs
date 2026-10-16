@@ -313,3 +313,20 @@ fn the_restore_sweep_stops_only_for_the_exit_that_is_final() {
         "the only way out of the loop is the verdict that the exit is final: {sweep}"
     );
 }
+
+/// Plan 058: the elevated host is part of the owned set, so every arm, quiesce and release
+/// reaches it. If `collect` stopped adding it, an update would leave the elevated shells to
+/// whatever the host does on a bare disconnect and no test about the other hosts would notice.
+#[test]
+fn the_owned_set_includes_the_elevated_host_as_an_elevated_channel_host() {
+    let body = fn_body(&read("state/host_lifecycle.rs"), "fn collect<P: LifecyclePort>");
+    assert!(body.contains("port.elevated_client()"), "collect must ask the port for the elevated client. Body:
+{body}");
+    assert!(
+        body.contains("channel: Some(HostChannel::Elevated)"),
+        "the elevated entry must carry the Elevated channel so arming and listing address it. Body:
+{body}"
+    );
+    assert!(body.contains("hosts.push("), "the elevated entry must be pushed into the owned set. Body:
+{body}");
+}

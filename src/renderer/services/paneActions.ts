@@ -53,6 +53,15 @@ export async function openNewWindow(): Promise<void> {
   }
 }
 
+/** Splitting an elevated pane is the user asking for another elevated shell: a UAC prompt they
+ *  cancelled earlier must not silently fail this one. Every user-initiated split (menu, context
+ *  menu, shortcut) calls this before it dispatches; API/MCP splits and session restore do not,
+ *  because the latch exists to stop those from raising prompt after prompt. */
+export function noteUserSplitOf(paneId: string): void {
+  const node = findLeafInAnyTree(store.getState().panes, paneId);
+  if (node?.elevated) terminalService.beginUserElevatedAttempt();
+}
+
 /** Split a specific pane. Direction matches the pane split buttons: 'horizontal'
  *  stacks panes top/bottom, 'vertical' places them side-by-side. `position` says
  *  which side of the original the NEW pane lands on ('before' = top/left,
@@ -98,7 +107,9 @@ export async function splitPaneById(
     console.warn('paneActions: could not read source pane cwd; using default', err);
   }
 
-  if (current()) store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
+  if (!current()) return;
+  noteUserSplitOf(paneId);
+  store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
 }
 
 /** Find a leaf by id in any tab's tree (falling back to the active mirror).

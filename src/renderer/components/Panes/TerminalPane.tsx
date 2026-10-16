@@ -364,6 +364,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         }
         setWaitingForHost(undefined);
         setElevationRequired(false);
+        // The tab now exists for real: a later UAC cancel (restart, host dropped) is a retained
+        // session, not a fresh optimistic tab to undo.
+        const mountedTabId = findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId);
+        if (mountedTabId) takeOptimisticAdminTab(mountedTabId);
         // Spend a provisional-recovery mark on its first settle, successful or
         // failed. A later create failure belongs to an established user pane.
         takeProvisionalRecovery(terminalId);
@@ -644,6 +648,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // handled by the backend (pty_manager.rs is_dir()-checks the spawn cwd).
     const cwd = getCwdSnapshot(terminalId) ?? takeInitialCwd(terminalId) ?? profile?.cwd;
     const terminalName = name || tab?.title || 'Terminal';
+    const restartElevated = findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId);
+    // Restart is an explicit request: forget an earlier cancelled prompt so this one asks again.
+    if (restartElevated) terminalService.beginUserElevatedAttempt();
     // A tab can be marked "exited" once every pane in its tree has exited
     // (see App.tsx handleTerminalProcessExit / resolveExitedTabId), even for
     // a non-root pane's terminalId — so resolve the owning tab rather than
@@ -684,7 +691,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       if (ownerTabId) dispatch(clearTabExited(ownerTabId));
     } catch (error) {
       if (!current()) return;
-      if (isHostOwnershipPending(error)) {
+      if (isAdminUacCancelled(error)) {
+        // A declined prompt is a normal choice, not a failure. The pane keeps its old process id, so
+        // the elevation banner would not render here; say so, and Restart asks again.
+        dispatch(addToast({ message: 'Administrator approval was cancelled. Restart to try again.', type: 'warning' }));
+      } else if (isHostOwnershipPending(error)) {
         dispatch(addToast({ message: 'Waiting for terminal host. Please retry when the host is available.', type: 'warning' }));
       } else if (isLifecycleBusy(error)) {
         dispatch(addToast({ message: 'TermFlow is exiting or updating. Please retry when it is ready.', type: 'warning' }));

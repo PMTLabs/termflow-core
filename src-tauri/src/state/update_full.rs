@@ -34,7 +34,6 @@ use super::host_lifecycle::{begin_full_update, origins, owned_hosts, owned_hosts
 use super::host_lifecycle::{CloseBounds, LifecyclePort, OwnedHost};
 use super::types::AppState;
 use super::update_survival::{effective_mode, FullReason, UpdateMode};
-use crate::elevated_host::HostChannel;
 use crate::net_ports::InstanceRecord;
 use crate::update_policy;
 use futures::future::join_all;
@@ -144,7 +143,8 @@ fn survival_mode(mode: update_policy::UpdateMode) -> UpdateMode {
 
 /// What a full update needs from the application beyond the hosts.
 pub(super) trait FullUpdatePort: LifecyclePort {
-    /// Live shells that no pty-host owns: in-process ones and the elevated host's.
+    /// Live shells that no pty-host owns. The elevated host is one of the owned hosts, so its
+    /// shells arrive through the host listing; counting them here as well would count each twice.
     fn local_shells(&self) -> u32;
     /// The other TermFlow instances running now.
     fn live_siblings(&self) -> Result<Vec<InstanceRecord>, String>;
@@ -450,8 +450,7 @@ where
 impl FullUpdatePort for AppState {
     fn local_shells(&self) -> u32 {
         let in_process = self.terminals.iter().filter(|t| !self.host_terminals.contains_key(t.key())).count();
-        let elevated = self.host_terminals.iter().filter(|t| *t.value() == HostChannel::Elevated).count();
-        u32::try_from(in_process + elevated).unwrap_or(u32::MAX)
+        u32::try_from(in_process).unwrap_or(u32::MAX)
     }
 
     fn live_siblings(&self) -> Result<Vec<InstanceRecord>, String> {

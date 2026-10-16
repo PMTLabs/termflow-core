@@ -368,4 +368,61 @@ describe('TerminalService elevated single-flight and consent denial latch', () =
     expect(pid).toBe('pc-admin-new');
     expect(createTerminalMock).toHaveBeenCalledTimes(1);
   });
+
+  const elevatedCreate = (leaf: string) =>
+    terminalService.createTerminal(leaf, 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+  // A hang is the defect under test, so a wedged promise must fail the test instead of the run.
+  const within = <T,>(work: Promise<T>, ms = 1000) => Promise.race([
+    work,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out: promise never settled')), ms)),
+  ]);
+
+  it('beginUserElevatedAttempt forgets a cancelled prompt without waking the banner panes', async () => {
+    createTerminalMock.mockRejectedValueOnce(new Error('ADMIN_UAC_CANCELLED'));
+    await expect(elevatedCreate('tm-singleflight-1')).rejects.toThrow('ADMIN_UAC_CANCELLED');
+    expect(terminalService.isElevatedConsentDenied()).toBe(true);
+
+    let eventFired = false;
+    const onReconnect = () => { eventFired = true; };
+    window.addEventListener('pty:elevated-reconnect', onReconnect);
+    terminalService.beginUserElevatedAttempt();
+    window.removeEventListener('pty:elevated-reconnect', onReconnect);
+
+    expect(terminalService.isElevatedConsentDenied()).toBe(false);
+    expect(eventFired).toBe(false);
+    createTerminalMock.mockClear();
+    createTerminalMock.mockResolvedValueOnce('pc-admin-again');
+    await expect(elevatedCreate('tm-singleflight-2')).resolves.toBe('pc-admin-again');
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a flight owner that leaves through an early return does not wedge later elevated creates', async () => {
+    // The pane leaves this window's tree while its spawn is in flight, so the create returns ''
+    // after the backend answered, without ever settling or rejecting the flight.
+    const treeBefore = (window as any).__REDUX_STORE__;
+    createTerminalMock.mockImplementationOnce(async () => {
+      (window as any).__REDUX_STORE__ = { getState: () => ({ panes: { treesByTabId: {} } }) };
+      return 'pc-owner-gone';
+    });
+    await expect(within(elevatedCreate('tm-singleflight-1'))).resolves.toBe('');
+    (window as any).__REDUX_STORE__ = treeBefore;
+
+    createTerminalMock.mockResolvedValueOnce('pc-after-owner-gone');
+    await expect(within(elevatedCreate('tm-singleflight-1'))).resolves.toBe('pc-after-owner-gone');
+  });
+
+  it('waiters do not start their own backend create when the flight owner fails', async () => {
+    let failOwner: (error: Error) => void = () => {};
+    createTerminalMock.mockImplementationOnce(() => new Promise((_, reject) => { failOwner = reject; }));
+
+    const owner = elevatedCreate('tm-singleflight-1');
+    const waiterA = elevatedCreate('tm-singleflight-2');
+    const waiterB = elevatedCreate('tm-singleflight-3');
+    failOwner(new Error('surviving elevated pty-host did not connect'));
+
+    const settled = await within(Promise.allSettled([owner, waiterA, waiterB]));
+    expect(settled.map(r => r.status)).toEqual(['rejected', 'rejected', 'rejected']);
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+    expect(terminalService.isElevatedConsentDenied()).toBe(false);
+  });
 });

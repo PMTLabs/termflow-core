@@ -385,7 +385,7 @@ class StateManagerClass {
       // Leaf renames performed by sanitisation — chiefly the design-014
       // migration of a pre-014 `tb-` root leaf to a minted `tm-`.
       const leafRenames = new Map<string, string>();
-      const appState: AppState = this.sanitizeLayoutData(rawState, leafRenames);
+      const appState: AppState = this.sanitizeLayoutData(rawState, leafRenames, true);
       // Move the persisted scrollback to follow the renamed leaves, BEFORE any
       // tab, pane or reattach exists. `terminal_history` is keyed by the leaf,
       // so a pane whose leaf moved would otherwise come back blank — silently,
@@ -1808,7 +1808,7 @@ class StateManagerClass {
     tabPanes?: { [tabId: string]: any };
     terminalCwds?: { [terminalId: string]: string };
     treesByTabId?: { [tabId: string]: any };
-  }>(data: T, renamesOut?: Map<string, string>): T {
+  }>(data: T, renamesOut?: Map<string, string>, keepElevated = false): T {
     const tabIdMap = new Map<string, string>();
     const paneIdMap = new Map<string, string>();
     const terminalIdMap = new Map<string, string>();
@@ -1838,9 +1838,11 @@ class StateManagerClass {
         // Unseen-output bell is transient (recomputed at runtime from live output);
         // never restore it, or a loaded layout / restored session shows a stale bell.
         hasUnseenOutput: undefined,
-        // Plan 058: preserve elevation intent across a restart so elevated
-        // tabs can reattach to the held elevated host upon UAC confirmation.
-        elevated: tab.elevated,
+        // Plan 058: elevation intent survives a SESSION restart only, so elevated tabs can
+        // reattach to the held elevated host upon UAC confirmation. A saved or imported
+        // layout is a file anyone can hand over: loading one must never open an elevated
+        // shell (which, with the elevated host already connected, needs no UAC prompt).
+        elevated: keepElevated ? tab.elevated : undefined,
       };
     });
 
@@ -1852,6 +1854,9 @@ class StateManagerClass {
     const sanitizeNode = (node: any, tabId: string): any => {
       if (!node) return null;
       const newNode = { ...node };
+      // The pane leaf, not the tab, is what decides whether a shell spawns elevated
+      // (`findElevatedByTerminalId`), so the same session-restore-only rule applies here.
+      if (!keepElevated) delete newNode.elevated;
 
       // Map Pane ID
       if (newNode.id) {
@@ -1863,7 +1868,7 @@ class StateManagerClass {
       }
 
       if (newNode.type === 'terminal') {
-        // Plan 058: preserve elevation intent on terminal pane leaves.
+        // Plan 058: elevation intent on a leaf is kept only when `keepElevated` (see above).
         if (newNode.terminalId) {
           const oldTerminalId = newNode.terminalId;
           // DESIGN 014 MIGRATION — ONE rule: a live leaf is a `tm-`, so anything
