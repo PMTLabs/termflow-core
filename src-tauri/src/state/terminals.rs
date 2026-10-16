@@ -1628,3 +1628,22 @@ mod host_close_announces_tests {
         assert!(emit > queued, "the emit sits inside the live-client arm; a queued close would be silent");
     }
 }
+
+#[cfg(test)]
+mod elevated_survivor_inspection_wiring_tests {
+    #[test]
+    fn invalid_or_dead_survivor_fallback_cleans_its_record() {
+        let source = crate::state::source_scan::production(include_str!("terminals.rs"));
+        let connect = crate::state::source_scan::fn_body(
+            &source,
+            "async fn ensure_elevated_host_inner(&self)",
+        );
+        let compact: String = connect.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(
+                "match(pipe_ok,live_process){(true,Some(proc))=>survivor_record=Some((rec,proc)),_=>crate::elevated_host::survivor::cleanup_dead_survivor_record(path,rec.instance_id),}"
+            ),
+            "the rejected survivor-record arm must clean that record and its matching stand-down signal"
+        );
+    }
+}

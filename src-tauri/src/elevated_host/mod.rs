@@ -298,6 +298,10 @@ mod connected_pid_tests {
         assert!(!disconnected.is_connected_to_pid(2345));
 
         client.close_transport().await;
+        assert!(
+            !manager.is_connected_to_pid(2345),
+            "a closed client still stored in the manager must not count as connected"
+        );
     }
 }
 
