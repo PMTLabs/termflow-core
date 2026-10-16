@@ -884,13 +884,9 @@ impl<R: Runtime> AppState<R> {
         client.bind_sessions(self.host_table.keys(), HostChannel::Elevated, epoch);
 
         // Mandatory cold session listing adoption (plan 058 §3.4 / Blocker 7)
-        // KNOWN GAP (deferred): sessions the host lists that no restored pane claims are not
-        // surfaced as recovered tabs the way the primary's are (`surface_orphans`). A recovered
-        // tab would have to be created elevated, which needs the renderer to mint an elevated
-        // pane for a key it never asked for; until then such a session stays listed and is
-        // reattached if its pane is restored. Once this client is connected the host's hold is
-        // over, so an unclaimed session lives until the last claimed one closes (the host then
-        // shuts down idle) or the next quit.
+        // A survivor arms a one-shot orphan pass at publication. The connecting create
+        // starts it AFTER placement, and it waits for window restore before listing again.
+        // Unclaimed keys then surface as unfocused recovered admin tabs.
         // A held host answers this in milliseconds; a slow answer is retried rather than read as
         // "no sessions". If a RECONNECTED survivor still cannot list its sessions, publishing it
         // would leave live shells nobody can see or close, so the attempt fails instead.
@@ -904,7 +900,7 @@ impl<R: Runtime> AppState<R> {
         match listing {
             Some(listing) => {
                 log::info!("[ADMIN] adopting {} sessions from elevated host", listing.len());
-                client.apply_listing_on(self.host_table.keys(), HostChannel::Elevated, &listing, std::time::Instant::now(), |_| false);
+                super::host_adoption::AdoptionPort::apply_listing(self, HostChannel::Elevated, &client, Some(&listing));
             }
             None if is_survivor_reconnect => {
                 // The client was wired and its epoch published above; undo both so the failed
@@ -917,12 +913,22 @@ impl<R: Runtime> AppState<R> {
             None => {}
         }
 
-        self.elevated_host.publish(client, launched).await
+        self.elevated_host.publish(client, launched).await?;
+        if is_survivor_reconnect { self.elevated_host.arm_orphan_pass(epoch); }
+        Ok(())
     }
 
     #[cfg(not(windows))]
     async fn ensure_elevated_host_inner(&self) -> Result<(), String> {
         Err("elevated tabs are only supported on Windows".to_string())
+    }
+
+    pub(crate) fn spawn_elevated_orphan_pass(&self, epoch: u64) {
+        let Some(client) = self.elevated_host.client_clone() else { return; };
+        let port = self.clone();
+        tokio::spawn(async move {
+            super::host_adoption::elevated_orphans::run(&port, &client, epoch).await;
+        });
     }
 
     /// Tear down one previously host-owned terminal that did NOT survive a pipe

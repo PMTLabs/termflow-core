@@ -1,3 +1,5 @@
+jest.mock('../TerminalService', () => ({ terminalService: { beginUserElevatedAttempt: jest.fn() } }));
+import { terminalService } from '../TerminalService';
 import { configureStore } from '@reduxjs/toolkit';
 import tabsReducer, { addTab, setActiveTab } from '../../store/slices/tabsSlice';
 import panesReducer, { addTabTree, setActiveTabId } from '../../store/slices/panesSlice';
@@ -149,6 +151,29 @@ describe('runApiCreateMode0 — an agent-spawned tab inherits its caller tab col
     expect(result.paneTree.terminalId).toBe('tm-recovered');
     expect(result.paneTree.sessionKey).toBe(sessionKey);
     expect(findSessionKeyByTerminalId(restoredTrees, 'tm-recovered')).toBe(sessionKey);
+  });
+
+  it.each([
+    ['admin recovery', { sessionKey: 'tm-old', elevated: true }, true, false],
+    ['untrusted API create', { elevated: true }, undefined, true],
+    ['primary recovery', { sessionKey: 'tm-old', elevated: false }, undefined, true],
+  ] as const)('%s preserves privilege and focus policy', (_label, detail, elevated, active) => {
+    const store = makeStore();
+    const registerExistingTerminal = jest.fn();
+    const beginUserElevatedAttempt = jest.spyOn(terminalService, 'beginUserElevatedAttempt');
+    const result = runApiCreateMode0({ processId: 'pc-new', rendererTerminalId: 'tm-new', ...detail }, {
+      dispatch: store.dispatch, generateId: (prefix: string) => `${prefix}-generated`,
+      defaultProfile: 'default', registerExistingTerminal, tabPanes: {}, tabExists: () => false,
+      activateOnApiCreate: true, tabCount: 2, addTab, addTabTree, setActiveTab, setActiveTabId,
+      titleColorForTerminal: () => undefined,
+    });
+    const tab = store.getState().tabs.tabs.find(t => t.id === result.targetTabId)!;
+    expect(tab.elevated).toBe(elevated);
+    expect(result.paneTree.elevated).toBe(elevated);
+    expect(tab.isActive).toBe(active);
+    expect(registerExistingTerminal).toHaveBeenCalledTimes('sessionKey' in detail ? 0 : 1);
+    expect(beginUserElevatedAttempt).not.toHaveBeenCalled();
+    beginUserElevatedAttempt.mockRestore();
   });
 
   const spawnedTab = (store: ReturnType<typeof makeStore>, id: string) =>

@@ -1086,6 +1086,7 @@ const App: React.FC = () => {
         // A live pty-host session which has no app tab. Mode 0 creates a pane
         // for it, whose normal createTerminal call consumes this pending key.
         sessionKey?: string;
+        elevated?: boolean;
         // plan/013 Task 20 — the terminal whose agent asked for this spawn. PLACEMENT ONLY:
         // the edge itself was already written by the backend before this event was emitted.
         parentTerminalId?: string;

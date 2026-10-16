@@ -411,6 +411,9 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
             None => return Err("elevated spawn failed: elevated pty-host not connected".to_string()),
         };
         let (process_id, placement) = state.place_elevated_create(&id, session_key.as_deref(), client, cg, prepared)?;
+        if let Some(epoch) = state.elevated_host.take_pending_orphan_pass() {
+            state.spawn_elevated_orphan_pass(epoch);
+        }
         match placement {
             crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
             crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
