@@ -161,3 +161,18 @@ fn session_lifecycle_has_one_authority_and_one_wire_close_sender() {
     let table = scanned.iter().find(|(p, _)| p == "state/host_table.rs").unwrap();
     assert!(fn_body(&table.1, "pub fn guard_key(").contains("self.stages.push(stage)"));
 }
+
+#[test]
+fn idle_detach_refuses_while_an_unclaimed_listed_key_remains() {
+    let keys = HostKeys::default();
+    keys.connect_fixture(CHANNEL, 1);
+    let meta = SessionMeta { tab_id: "orphan".into(), pid: 9, alive: true, head_offset: 0, tail_offset: 0 };
+    keys.listing(CHANNEL, &listing(1, vec![meta]), |_| false);
+    assert_eq!(keys.state(CHANNEL, "orphan"), Some(KeyState::Listed));
+    let mut detached = false;
+    assert!(!keys.detach_idle(CHANNEL, 1, || { detached = true; true }), "an unclaimed live session must keep the host attached");
+    assert!(!detached, "the transport must not even be taken");
+    assert_eq!(keys.state(CHANNEL, "orphan"), Some(KeyState::Listed));
+    keys.listing(CHANNEL, &listing(2, vec![]), |_| false);
+    assert!(keys.detach_idle(CHANNEL, 1, || true), "with nothing left the idle host detaches");
+}

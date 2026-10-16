@@ -98,11 +98,13 @@ impl HostKeys {
         valid.then(publish)
     }
 
+    /// Idle detach (elevated host only). A `Listed` key is a live session on that host nobody has
+    /// claimed yet, so it keeps the channel attached exactly like a `Held`/`Bound` one.
     pub(crate) fn detach_idle(&self, channel: HostChannel, epoch: u64, detach: impl FnOnce() -> bool) -> bool {
         let mut inner = self.lock();
         if inner.owners.values().any(|r| owners::shell_of(&r.state).is_some_and(|s|
             matches!(&s.stage, ShellStage::Hosted(h) if h.channel == channel)))
-            || inner.keys.iter().any(|((c, _), r)| *c == channel && matches!(r.state, KeyState::Held(_) | KeyState::Bound(_)))
+            || inner.keys.iter().any(|((c, _), r)| *c == channel && matches!(r.state, KeyState::Listed | KeyState::Held(_) | KeyState::Bound(_)))
             || !inner.channels.get(&channel).and_then(|c| c.connection.as_ref()).is_some_and(|c| c.epoch == epoch)
             || !detach() { return false; }
         self.disconnect_inner(&mut inner, channel, epoch);
