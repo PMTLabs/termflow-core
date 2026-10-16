@@ -18,7 +18,7 @@ jest.mock('../../store', () => ({
 jest.mock('../paneEffect', () => ({ capturePaneEffect: () => () => true }));
 jest.mock('../cwdSnapshot', () => ({ getCwdSnapshot: () => undefined }));
 
-import { splitPaneById } from '../paneActions';
+import { noteUserSplitOf, splitPaneById } from '../paneActions';
 
 beforeEach(() => {
   beginUserElevatedAttempt.mockClear();
@@ -37,4 +37,17 @@ it('leaves the latch alone when the pane is not elevated', async () => {
   await splitPaneById('pn-1', 'horizontal');
   expect(beginUserElevatedAttempt).not.toHaveBeenCalled();
   expect(dispatch).toHaveBeenCalledTimes(1);
+});
+
+// The shortcut and menu splits dispatch straight to the slice and call this instead of
+// splitPaneById, so it has to stand on its own.
+it('noteUserSplitOf resets the latch for an elevated pane and only for that', () => {
+  leaf = { type: 'terminal', id: 'pn-1', terminalId: 'tm-1', elevated: true };
+  noteUserSplitOf('pn-1');
+  expect(beginUserElevatedAttempt).toHaveBeenCalledTimes(1);
+  beginUserElevatedAttempt.mockClear();
+  leaf = { type: 'terminal', id: 'pn-1', terminalId: 'tm-1' };
+  noteUserSplitOf('pn-1');
+  noteUserSplitOf('pn-missing');
+  expect(beginUserElevatedAttempt).not.toHaveBeenCalled();
 });

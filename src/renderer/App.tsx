@@ -80,6 +80,7 @@ import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapsh
 import './styles/App.css';
 import { generateId } from './utils/id';
 import { addTabRootedAt } from './services/folderTab';
+import { noteUserSplitOf } from './services/paneActions';
 
 // config.json is hand-editable, so hydration validates against the known
 // weight set rather than trusting the string straight into xterm's option.
@@ -1031,6 +1032,7 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     const activePaneId = state?.panes?.activePaneId;
     if (activePaneId) {
+      noteUserSplitOf(activePaneId);
       dispatch(splitPane({ paneId: activePaneId, direction: 'horizontal' }));
     }
   };
@@ -1040,6 +1042,7 @@ const App: React.FC = () => {
     const state = (window as any).__REDUX_STORE__?.getState();
     const activePaneId = state?.panes?.activePaneId;
     if (activePaneId) {
+      noteUserSplitOf(activePaneId);
       dispatch(splitPane({ paneId: activePaneId, direction: 'vertical' }));
     }
   };
