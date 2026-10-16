@@ -97,10 +97,18 @@ async fn dials_the_named_pipe_serves_a_spawn_then_ends_it_and_exits_on_an_unarme
     // sidecar must end the session and exit rather than hold it or loop back to accept.
     drop(gui);
     drop(gui_listener);
-    let result = tokio::time::timeout(Duration::from_secs(5), sidecar).await;
+    // Teardown joins its kills, and one `taskkill /T /F` of a shell was measured near 5 s.
+    let result = tokio::time::timeout(Duration::from_secs(20), sidecar).await;
     assert!(
         result.is_ok(),
         "dial-out sidecar must exit promptly on EOF, not wait for a reconnect"
+    );
+    // Dropping the manager also kills the shell (from a detached thread, which only happens to
+    // finish in a test process that stays alive), so the pid check alone cannot tell a teardown
+    // from a drop. The order log can: only `tear_down_sessions` writes this entry.
+    assert!(
+        crate::mcp_hold::holder::gauges::order().contains(&"teardown-begin"),
+        "an unarmed disconnect must run the host's teardown before it exits"
     );
     let mut gone = false;
     for _ in 0..50 {

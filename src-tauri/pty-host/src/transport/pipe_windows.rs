@@ -47,12 +47,21 @@ impl Listener {
 
     /// Create a secured pipe instance and wait for one client to connect.
     pub async fn accept(&mut self) -> std::io::Result<Stream> {
-        let server = match self.pending.take() {
-            Some(first) => first,
-            None => secured_server(&self.name)?,
+        // The instance stays in `pending` until a client has connected: callers race this
+        // against a timer and drop the future on every tick, and an instance owned by the
+        // future would close with it, leaving the name unowned.
+        if self.pending.is_none() {
+            self.pending = Some(secured_server(&self.name)?);
+        }
+        let connected = match self.pending.as_ref() {
+            Some(server) => server.connect().await,
+            None => unreachable!("pending was just filled"),
         };
-        server.connect().await?;
-        Ok(server)
+        if let Err(e) = connected {
+            self.pending = None;
+            return Err(e);
+        }
+        Ok(self.pending.take().expect("pending is still ours: only this method takes it"))
     }
 }
 

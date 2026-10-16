@@ -98,7 +98,11 @@ export async function splitPaneById(
     console.warn('paneActions: could not read source pane cwd; using default', err);
   }
 
-  if (current()) store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
+  if (!current()) return;
+  // Splitting an elevated pane is the user asking for another elevated shell: a UAC prompt
+  // they cancelled earlier must not silently fail this one.
+  if (node.elevated) terminalService.beginUserElevatedAttempt();
+  store.dispatch(splitPaneWithTab({ paneId, direction, position, shellType, cwd }));
 }
 
 /** Find a leaf by id in any tab's tree (falling back to the active mirror).
