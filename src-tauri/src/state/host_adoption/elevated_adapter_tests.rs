@@ -95,8 +95,9 @@ async fn elevated_orphan_pass_does_not_surface_a_session_a_pane_already_claims()
     let client = elevated(&port, &world).await;
     let channel = HostChannel::Elevated;
     let epoch = port.table().epoch(channel).unwrap();
-    // A pane that claims the session but whose key is still `Listed` (not yet Held/Bound), so the
-    // key table alone would not protect it: only the `panes_on` claim filter does.
+    // A pane claims the session while its key is still `Listed` (not yet Held/Bound), so the key
+    // table alone would not protect it. `panes_on` supplies that claim, but `surface_orphans` also
+    // rejects keys registered on any channel; this checks the combined guard, not `panes_on` alone.
     port.0.host_terminals.insert("pc-claimed".into(), channel);
     port.0.terminals.insert("pc-claimed".into(), crate::state::Terminal {
         id: "pc-claimed".into(), pid: 0, shell: "test".into(), name: "Terminal-test".into(), created_at: String::new(),
@@ -136,37 +137,47 @@ async fn elevated_orphan_pass_discards_a_superseded_epoch() {
     assert_eq!(manager.take_pending_orphan_pass(), Some(new));
 }
 
-/// Code lines only, whitespace-normalised, so a pin cannot be satisfied by a comment.
+/// Trims line edges and drops blank lines and full-line `//` comments; internal whitespace and
+/// block comments remain, so this is a lexical line filter rather than Rust-aware normalization.
 fn code_lines(body: &str) -> Vec<String> {
     body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("//")).map(String::from).collect()
 }
 
 #[test]
 fn elevated_orphan_pass_is_taken_only_after_a_successful_create_and_uses_normal_adoption() {
-    use crate::state::source_scan::fn_body;
+    use crate::state::source_scan::{fn_body, matching_brace};
+    fn block_after(source: &str, marker: &str) -> String {
+        let start = source.find(marker).unwrap_or_else(|| panic!("missing block marker: {marker}"));
+        let open = start + source[start..].find('{').expect("marked block has an opening brace");
+        source[open..=matching_brace(source, open)].to_string()
+    }
+
     let source = include_str!("../../commands/terminal.rs");
-    let run_create = code_lines(&fn_body(source, "pub(super) async fn run_create("));
-    // The pass is started by the helper on BOTH success paths (Attach and Spawn), each directly
-    // after `complete_create`; nothing in the create takes it before the create has succeeded.
-    let starts: Vec<_> = run_create.iter().enumerate().filter(|(_, l)| l.contains("start_elevated_orphan_pass(")).collect();
-    assert_eq!(starts.len(), 2, "attach path and spawn path each start the pass once");
-    for (i, line) in &starts {
-        assert_eq!(line.as_str(), "start_elevated_orphan_pass(state, channel);");
-        assert_eq!(run_create[i - 1], "state.complete_create(&id, cg, &staged);", "the pass follows a completed create");
+    let run_create_source = fn_body(source, "pub(super) async fn run_create(");
+    let run_create = code_lines(&run_create_source);
+    // Bind each pass start to its own success branch, not just an aggregate call count.
+    for (marker, label) in [
+        ("if let Some(pid) = claimed_pid {", "Attach"),
+        ("Ok(pid) => {", "Spawn Ok(pid)"),
+    ] {
+        let branch = code_lines(&block_after(&run_create_source, marker));
+        let starts: Vec<_> = branch.iter().enumerate().filter(|(_, l)| l.contains("start_elevated_orphan_pass(")).collect();
+        assert_eq!(starts.len(), 1, "{label} branch starts the pass exactly once");
+        assert_eq!(starts[0].1.as_str(), "start_elevated_orphan_pass(state, channel);");
+        assert_eq!(branch[starts[0].0 - 1], "state.complete_create(&id, cg, &staged);", "{label} starts the pass after create completion");
     }
     assert!(!run_create.iter().any(|l| l.contains("take_pending_orphan_pass(")), "a create must not take the pass before it succeeds");
-    let place = run_create.iter().position(|l| l.contains("place_elevated_create(")).unwrap();
-    assert!(place < starts[0].0);
+    assert!(run_create.iter().any(|l| l.contains("place_elevated_create(")));
     let helper = code_lines(&fn_body(source, "fn start_elevated_orphan_pass("));
     let take = helper.iter().position(|l| l == "if let Some(epoch) = state.elevated_host.take_pending_orphan_pass() {").unwrap();
     assert_eq!(helper[take + 1], "state.spawn_elevated_orphan_pass(epoch);");
     assert!(helper.iter().any(|l| l.starts_with("if channel != ") && l.contains("HostChannel::Elevated { return; }")));
 
     let source = include_str!("../terminals.rs");
-    let spawn = code_lines(&fn_body(source, "pub(crate) fn spawn_elevated_orphan_pass("));
-    assert!(spawn.iter().any(|l| l == "tokio::spawn(async move {"));
-    assert!(spawn.iter().any(|l| l == "super::host_adoption::elevated_orphans::run(&port, &client, epoch).await;"),
-        "the spawned task must actually run the pass");
+    let spawn_source = fn_body(source, "pub(crate) fn spawn_elevated_orphan_pass(");
+    let spawn_closure = code_lines(&block_after(&spawn_source, "tokio::spawn(async move {"));
+    assert!(spawn_closure.iter().any(|l| l == "super::host_adoption::elevated_orphans::run(&port, &client, epoch).await;"),
+        "the orphan pass must run inside the spawned task");
 
     // `surface_orphans` also refuses registered keys, so the pane-claim filter is a second guard that
     // no behavioural test can isolate; pin that the pass really hands the pane claims to the planner.
@@ -180,7 +191,10 @@ fn elevated_orphan_pass_is_taken_only_after_a_successful_create_and_uses_normal_
     assert_eq!(ensure[publish + 1], "if is_survivor_reconnect { self.elevated_host.arm_orphan_pass(epoch); }",
         "a reconnected survivor (and only that) arms the pass once published");
     assert!(ensure.iter().any(|l| l == "self.apply_listing(HostChannel::Elevated, &client, Some(&listing));"));
-    assert!(ensure.iter().any(|l| l.contains("listing_is_current(")), "the awaited listing is validated before adoption");
+    let rejection = code_lines(&block_after(&fn_body(source, "async fn ensure_elevated_host_inner("),
+        "if !super::host_adoption::listing_is_current("));
+    assert!(rejection.iter().any(|l| l.starts_with("return Err(")),
+        "a stale/disconnected listing must be rejected when the listing is not current");
     assert!(!ensure.iter().any(|l| l.contains("|_| false")));
 }
 

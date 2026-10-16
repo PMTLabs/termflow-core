@@ -167,12 +167,16 @@ fn idle_detach_refuses_while_an_unclaimed_listed_key_remains() {
     let keys = HostKeys::default();
     keys.connect_fixture(CHANNEL, 1);
     let meta = SessionMeta { tab_id: "orphan".into(), pid: 9, alive: true, head_offset: 0, tail_offset: 0 };
-    keys.listing(CHANNEL, &listing(1, vec![meta]), |_| false);
+    keys.listing(CHANNEL, &listing(1, vec![meta.clone()]), |_| false);
     assert_eq!(keys.state(CHANNEL, "orphan"), Some(KeyState::Listed));
     let mut detached = false;
     assert!(!keys.detach_idle(CHANNEL, 1, || { detached = true; true }), "an unclaimed live session must keep the host attached");
     assert!(!detached, "the transport must not even be taken");
     assert_eq!(keys.state(CHANNEL, "orphan"), Some(KeyState::Listed));
-    keys.listing(CHANNEL, &listing(2, vec![]), |_| false);
-    assert!(keys.detach_idle(CHANNEL, 1, || true), "with nothing left the idle host detaches");
+
+    let dead = SessionMeta { alive: false, ..meta };
+    keys.listing(CHANNEL, &listing(2, vec![dead]), |_| false);
+    assert_eq!(keys.state(CHANNEL, "orphan"), Some(KeyState::Listed));
+    assert!(keys.detach_idle(CHANNEL, 1, || { detached = true; true }), "a dead-only listing must not keep the idle host attached");
+    assert!(detached, "the dead listing permits taking the transport");
 }
