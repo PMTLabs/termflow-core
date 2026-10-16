@@ -54,7 +54,7 @@ async fn no_args_still_listens() {
 }
 
 #[tokio::test]
-async fn dials_the_named_pipe_serves_a_spawn_then_exits_on_eof() {
+async fn dials_the_named_pipe_serves_a_spawn_then_tears_down_on_an_unarmed_eof() {
     let ep = test_endpoint("dial-spawn");
     let mut gui_listener = Listener::bind(&ep).unwrap();
 

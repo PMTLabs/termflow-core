@@ -57,6 +57,30 @@ impl ElevatedSurvivorRecord {
     }
 }
 
+/// Prefix every elevated rendezvous pipe name starts with.
+pub const RENDEZVOUS_PIPE_PREFIX: &str = r"\\.\pipe\termflow-admin-rendezvous.";
+
+/// The rendezvous pipe a held elevated host listens on. `nonce` is unpredictable and chosen by
+/// the host when it enters Hold, so a same-user process cannot pre-create the name (the pid and
+/// SID alone are guessable) and keep the real host from ever being reachable.
+pub fn rendezvous_pipe_name(user_sid: &str, host_pid: u32, nonce: &str) -> String {
+    format!("{RENDEZVOUS_PIPE_PREFIX}{user_sid}.{host_pid}.{nonce}")
+}
+
+/// True only for a well-formed rendezvous pipe name. The name is read back from a record that any
+/// same-user process can edit and is then placed on the command line of an ELEVATED process, so
+/// anything that is not plainly a pipe name (quotes, spaces, backslashes, extra flags) is refused.
+pub fn is_valid_rendezvous_pipe_name(name: &str) -> bool {
+    match name.strip_prefix(RENDEZVOUS_PIPE_PREFIX) {
+        Some(rest) => {
+            !rest.is_empty()
+                && rest.len() <= 200
+                && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        }
+        None => false,
+    }
+}
+
 pub fn publish_elevated_survivor(path: &std::path::Path, rec: &ElevatedSurvivorRecord) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -139,6 +163,37 @@ pub async fn read_rendezvous_response<R: AsyncRead + Unpin>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rendezvous_pipe_names_round_trip_through_the_validator() {
+        let name = super::rendezvous_pipe_name("S-1-5-21-123-456-789-1001", 9988, "0123456789abcdef");
+        assert_eq!(
+            name,
+            r"\\.\pipe\termflow-admin-rendezvous.S-1-5-21-123-456-789-1001.9988.0123456789abcdef"
+        );
+        assert!(super::is_valid_rendezvous_pipe_name(&name));
+        // A record written before the nonce existed is still a plain pipe name.
+        assert!(super::is_valid_rendezvous_pipe_name(
+            r"\\.\pipe\termflow-admin-rendezvous.S-1-5-21-123-456-789-1001.9988"
+        ));
+    }
+
+    #[test]
+    fn the_validator_refuses_anything_that_could_carry_a_flag() {
+        let base = r"\\.\pipe\termflow-admin-rendezvous.S-1-5-21.1";
+        for bad in [
+            format!(r#"{base}" --connect-pipe \\.\pipe\evil"#),
+            format!("{base} --gui-pid 1"),
+            format!(r"{base}\x"),
+            format!("{base}\""),
+            r"\\.\pipe\other-pipe".to_string(),
+            r"\\server\pipe\termflow-admin-rendezvous.S-1-5-21.1".to_string(),
+            super::RENDEZVOUS_PIPE_PREFIX.to_string(),
+            String::new(),
+        ] {
+            assert!(!super::is_valid_rendezvous_pipe_name(&bad), "accepted {bad:?}");
+        }
+    }
+
     use super::*;
 
     #[tokio::test]

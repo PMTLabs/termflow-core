@@ -178,7 +178,7 @@ pub(crate) fn current_user_sid_string() -> Option<String> {
 /// a wrong `true` would stamp a HIGH label a medium process cannot even set,
 /// failing pipe creation outright, whereas a wrong `false` still leaves the
 /// owner-only DACL in place.
-fn is_elevated() -> bool {
+pub(crate) fn is_elevated() -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::Security::{
         GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
