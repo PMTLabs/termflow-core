@@ -1005,6 +1005,7 @@ mod sweep;
 
 #[cfg(all(test, feature = "integration-tests"))]
 pub(super) use panes::surface_orphans;
+pub(super) mod elevated_orphans;
 pub(super) use panes::PanePort;
 pub(super) use reconnect::{reconnect_frozen, reconnect_primary, RECONNECT_BACKOFF_MS};
 pub(super) use sweep::sweep;

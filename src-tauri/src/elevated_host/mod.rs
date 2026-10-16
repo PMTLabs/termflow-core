@@ -65,6 +65,7 @@ pub struct ElevatedHost {
     /// generation is still current, mirroring `AppState::pty_host_gen` — a
     /// dying old client can't clobber a freshly reconnected one.
     gen: AtomicU64,
+    pending_orphan_pass: Mutex<Option<u64>>,
     shutting_down: AtomicBool,
 }
 
@@ -82,6 +83,7 @@ impl ElevatedHost {
             #[cfg(windows)]
             proc: Mutex::new(None),
             gen: AtomicU64::new(0),
+            pending_orphan_pass: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -106,6 +108,14 @@ impl ElevatedHost {
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
                 .is_some_and(|proc| proc.pid == pid)
+    }
+
+    pub(crate) fn arm_orphan_pass(&self, epoch: u64) {
+        *self.pending_orphan_pass.lock().unwrap_or_else(|e| e.into_inner()) = Some(epoch);
+    }
+
+    pub(crate) fn take_pending_orphan_pass(&self) -> Option<u64> {
+        self.pending_orphan_pass.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn current_gen(&self) -> u64 {

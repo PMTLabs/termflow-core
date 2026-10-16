@@ -376,6 +376,15 @@ pub(crate) async fn spawn_routed(state: &AppState, req: SpawnRequest) -> Result<
     result
 }
 
+/// Starts the one-shot orphan pass a reconnected elevated survivor armed. Called only once an
+/// elevated create has fully succeeded, so a failed create leaves the pass armed for the next one.
+fn start_elevated_orphan_pass(state: &AppState, channel: crate::elevated_host::HostChannel) {
+    if channel != crate::elevated_host::HostChannel::Elevated { return; }
+    if let Some(epoch) = state.elevated_host.take_pending_orphan_pass() {
+        state.spawn_elevated_orphan_pass(epoch);
+    }
+}
+
 pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> Result<String, String> {
     let SpawnRequest {
         leaf_id: id,
@@ -479,6 +488,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
         }
         client.repaint_owned(&identity, cols, rows);
         state.complete_create(&id, cg, &staged);
+        start_elevated_orphan_pass(state, channel);
         return Ok(process_id);
     }
 
@@ -529,6 +539,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
                 t.pid = pid;
             }
             state.complete_create(&id, cg, &staged);
+            start_elevated_orphan_pass(state, channel);
             Ok(process_id)
         }
         Err(e) => {

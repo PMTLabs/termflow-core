@@ -43,9 +43,11 @@ fn census(needle: &str, classified: &[(&str, &str)]) {
 fn listing_side_effect_callers_share_post_await_validation() {
     census(".apply_listing(", &[
         ("state/host_adoption.rs", "apply_validated_listing"),
+        ("state/host_adoption/elevated_orphans.rs", "run"), // one-shot elevated epoch, after restore
         ("state/host_adoption/reconnect.rs", "reconnect_primary"),
         ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"),
         ("state/host_adoption/sweep.rs", "sweep"),
+        ("state/terminals.rs", "ensure_elevated_host_inner"), // cold elevated connect, validated after the await
     ]);
     census("host_registry::apply_answered_listing(", &[("state/host_port.rs", "apply_listing")]);
     census("apply_validated_listing(port,", &[
@@ -61,6 +63,8 @@ fn listing_side_effect_callers_share_post_await_validation() {
         (include_str!("host_adoption/reconnect.rs"), "async fn reconnect_primary<"),
         (include_str!("host_adoption/reconnect.rs"), "async fn reconnect_frozen_pass<"),
         (include_str!("host_adoption/sweep.rs"), "async fn sweep<"),
+        (include_str!("host_adoption/elevated_orphans.rs"), "async fn run<"),
+        (include_str!("terminals.rs"), "async fn ensure_elevated_host_inner("),
         (include_str!("host_retire.rs"), "async fn sample<"),
         (include_str!("update_full.rs"), "async fn scope_of<"),
     ] {
@@ -88,6 +92,7 @@ fn every_host_listing_has_a_scope() {
         ("pty_host_client.rs", "list_sessions_within"), // observation-only Vec adapter
         ("pty_host_client.rs", "list_sessions_numbered"), // default deadline adapter
         ("state/host_adoption.rs", "settle"), // routed: each independent candidate
+        ("state/host_adoption/elevated_orphans.rs", "run"), // routed: reconnected elevated epoch only
         ("state/host_retire.rs", "sample"), // routed: one frozen id + epoch
         ("state/terminals.rs", "ensure_elevated_host_inner"), // routed: cold elevated host adoption
         ("state/update_full.rs", "scope_of"), // merged: all owned hosts
@@ -98,6 +103,7 @@ fn every_host_listing_has_a_scope() {
 fn every_channel_key_map_access_has_a_scope() {
     census(".host_sessions_by_key(", &[("state/host_port.rs", "panes_on")]); // routed adapter
     census(".panes_on(", &[
+        ("state/host_adoption/elevated_orphans.rs", "run"), // routed: Elevated only, after restore
         ("state/host_adoption/panes.rs", "reattach_listed"), // routed, fresh ownership
         ("state/host_adoption/panes.rs", "reconnect_snapshot"), // original routed identity before any wait
         ("state/host_adoption/reconnect.rs", "reconnect_frozen_pass"), // routed, after

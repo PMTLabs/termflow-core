@@ -34,6 +34,7 @@ export interface ApiCreatedTabFields {
   icon: string;
   titleIsCustom?: true;
   titleColor?: string;
+  elevated?: true;
 }
 
 /**
@@ -184,6 +185,7 @@ export interface ApiCreateMode0Result {
     name?: string;
     shellType?: string;
     sessionKey?: string;
+    elevated?: true;
     apiCreated?: true;
   };
 }
@@ -212,6 +214,7 @@ export function runApiCreateMode0(
     tabId?: string;
     /** A pending pty-host session to adopt rather than a process already registered here. */
     sessionKey?: string;
+    elevated?: boolean;
     /**
      * The terminal whose agent asked for this spawn (`getCallerId()` in the MCP
      * sidecar, resolved to a renderer leaf by the backend). Absent when the tool
@@ -244,7 +247,9 @@ export function runApiCreateMode0(
   // elsewhere should not change which group a terminal reads as.
   const titleColor = deps.titleColorForTerminal(detail.parentTerminalId) || detail.parentTitleColor || undefined;
 
+  const elevatedRecovery = !!detail.sessionKey && detail.elevated === true;
   const newTab = buildApiCreatedTab({ targetTabId, name, profile, defaultProfile: deps.defaultProfile, titleColor });
+  if (elevatedRecovery) newTab.elevated = true;
 
   const paneTree: ApiCreateMode0Result['paneTree'] = {
     id: deps.generateId('pn'),
@@ -254,6 +259,7 @@ export function runApiCreateMode0(
     shellType: profile || deps.defaultProfile || 'default',
     sessionKey: detail.sessionKey,
   };
+  if (elevatedRecovery) paneTree.elevated = true;
   // Prepare before the tab is renderable, including exact-key recovery panes.
   if (leafId) paneIncarnations.prepare([{ paneId: paneTree.id, leaf: leafId, restore: !!detail.sessionKey, override: detail.sessionKey }]);
 
@@ -273,7 +279,7 @@ export function runApiCreateMode0(
   // in the same synchronous turn, so no render sees the tab without a tree.
   deps.tabPanes[targetTabId] = paneTree;
 
-  const shouldActivate = deps.activateOnApiCreate || deps.tabCount === 0;
+  const shouldActivate = (!elevatedRecovery && deps.activateOnApiCreate) || deps.tabCount === 0;
   deps.dispatch(deps.addTab({ ...newTab, isActive: shouldActivate }));
   deps.dispatch(deps.addTabTree({ tabId: targetTabId, tree: paneTree }));
   if (shouldActivate) {
