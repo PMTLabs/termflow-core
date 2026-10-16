@@ -80,6 +80,7 @@ import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapsh
 import { setInitialCwd } from './services/initialCwd';
 import './styles/App.css';
 import { generateId } from './utils/id';
+import { addTabTree } from './store/slices/panesSlice';
 
 // config.json is hand-editable, so hydration validates against the known
 // weight set rather than trusting the string straight into xterm's option.
@@ -826,14 +827,31 @@ const App: React.FC = () => {
         icon: '🖥️',
       };
 
-      // "Open in TermFlow": root this default terminal at the requested folder. The root
-      // pane's terminalId === the tab id (TerminalContainer seeds it that way), so set the
-      // initial cwd BEFORE dispatching addTab so the pane spawns in that directory.
-      if (folderPath) setInitialCwd(newTab.id, folderPath);
-
       console.log('Dispatching addTab with:', newTab);
-      dispatch(addTab(newTab));
+      if (folderPath) addTabRootedAt(newTab, folderPath);
+      else dispatch(addTab(newTab));
     }
+  };
+
+  // "Open in TermFlow": add a tab whose first terminal spawns in `folderPath`.
+  // The initial cwd is keyed by the root pane's terminalId, and since design 014 that is a
+  // fresh `tm-` id, NOT the tab id — so we seed the tab's tree ourselves (the id is then
+  // known) instead of leaving it to TerminalContainer, which mints one we cannot see.
+  const addTabRootedAt = (newTab: Parameters<typeof addTab>[0], folderPath: string) => {
+    const terminalId = generateId('tm');
+    const tree = {
+      id: generateId('pn'),
+      type: 'terminal' as const,
+      terminalId,
+      seededForTabId: newTab.id,
+      name: newTab.title || 'Terminal',
+      shellType: newTab.shellType,
+    };
+    setInitialCwd(terminalId, folderPath);
+    if (!(window as any).tabPanes) (window as any).tabPanes = {};
+    (window as any).tabPanes[newTab.id] = tree;
+    dispatch(addTab(newTab));
+    dispatch(addTabTree({ tabId: newTab.id, tree }));
   };
 
   // "Open in TermFlow" when a session was restored (cold launch with an existing session):
@@ -850,8 +868,7 @@ const App: React.FC = () => {
       shellType: defaultShell.id,
       icon: '🖥️',
     };
-    setInitialCwd(newTab.id, folderPath);
-    dispatch(addTab(newTab));
+    addTabRootedAt(newTab, folderPath);
   };
 
   const handleExternalActivity = (event: CustomEvent) => {

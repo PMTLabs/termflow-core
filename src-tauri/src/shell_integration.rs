@@ -22,6 +22,22 @@ pub fn is_file_manager_integration_installed() -> Result<bool, String> {
     })
 }
 
+/// Re-point an enabled integration at the running exe when the exe it names is gone. The
+/// entry stores the exe's path at toggle time, so a move or reinstall elsewhere would
+/// otherwise leave it dangling until the user toggled it off and on. A live entry is left
+/// alone: nightly and release share the same keys, and neither may take over the other's.
+pub fn refresh_if_installed() {
+    match platform::is_installed().and_then(|on| Ok(on && platform::is_stale())) {
+        Ok(true) => {
+            if let Err(error) = platform::install() {
+                log::warn!("Failed to refresh file manager integration: {error}");
+            }
+        }
+        Ok(false) => {}
+        Err(error) => log::warn!("Failed to check file manager integration: {error}"),
+    }
+}
+
 #[cfg(any(windows, target_os = "linux"))]
 fn current_exe() -> Result<std::path::PathBuf, String> {
     std::env::current_exe()
@@ -75,6 +91,16 @@ mod platform {
 
         log::info!("Uninstalled Windows file manager integration");
         Ok(())
+    }
+
+    /// True when the registered command names an exe that no longer exists (or is unreadable).
+    pub fn is_stale() -> bool {
+        let command = CURRENT_USER
+            .open(format!(r"{DIRECTORY_KEY}\command"))
+            .and_then(|key| key.get_string(""))
+            .unwrap_or_default();
+        let exe = command.trim_start_matches('"').split('"').next().unwrap_or("");
+        exe.is_empty() || !std::path::Path::new(exe).exists()
     }
 
     pub fn is_installed() -> Result<bool, String> {
@@ -166,6 +192,11 @@ mod platform {
         Ok(())
     }
 
+    /// Not detected on Linux: the exe is embedded in a script, so only a toggle rewrites it.
+    pub fn is_stale() -> bool {
+        false
+    }
+
     pub fn is_installed() -> Result<bool, String> {
         let (nautilus_path, kio_path) = integration_paths()?;
         Ok(nautilus_path.exists() || kio_path.exists())
@@ -186,6 +217,10 @@ mod platform {
         Ok(())
     }
 
+    pub fn is_stale() -> bool {
+        false
+    }
+
     pub fn is_installed() -> Result<bool, String> {
         Ok(false)
     }
@@ -199,6 +234,10 @@ mod platform {
 
     pub fn uninstall() -> Result<(), String> {
         Err("file manager integration is not supported on this platform".to_string())
+    }
+
+    pub fn is_stale() -> bool {
+        false
     }
 
     pub fn is_installed() -> Result<bool, String> {

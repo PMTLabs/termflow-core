@@ -646,6 +646,11 @@ pub fn run() {
             }
         }
 
+        // A dev build must not rewrite the installed app's right-click entry to point at itself.
+        if !is_headless && !app_config::is_dev() {
+            shell_integration::refresh_if_installed();
+        }
+
         // Manage state in Tauri
         app.manage(state.clone());
         // Tauri has already built the configured window before calling setup.
