@@ -171,9 +171,26 @@ describe('runApiCreateMode0 — an agent-spawned tab inherits its caller tab col
     expect(tab.elevated).toBe(elevated);
     expect(result.paneTree.elevated).toBe(elevated);
     expect(tab.isActive).toBe(active);
+    expect(store.getState().panes.activeTabId === result.targetTabId).toBe(active);
     expect(registerExistingTerminal).toHaveBeenCalledTimes('sessionKey' in detail ? 0 : 1);
     expect(beginUserElevatedAttempt).not.toHaveBeenCalled();
     beginUserElevatedAttempt.mockRestore();
+  });
+
+  it('activates an admin recovery tab when it is the first tab (nothing to steal focus from)', () => {
+    const store = makeStore();
+    const dispatch = jest.fn(store.dispatch);
+    const result = runApiCreateMode0({ processId: 'pc-new', rendererTerminalId: 'tm-new', sessionKey: 'tm-old', elevated: true }, {
+      dispatch, generateId: (prefix: string) => `${prefix}-generated`,
+      defaultProfile: 'default', registerExistingTerminal: jest.fn(), tabPanes: {}, tabExists: () => false,
+      activateOnApiCreate: false, tabCount: 0, addTab, addTabTree, setActiveTab, setActiveTabId,
+      titleColorForTerminal: () => undefined,
+    });
+    const id = result.targetTabId;
+    expect(store.getState().tabs.tabs.find(t => t.id === id)!.isActive).toBe(true);
+    expect(store.getState().panes.activeTabId).toBe(id);
+    expect(dispatch).toHaveBeenCalledWith(setActiveTab(id));
+    expect(dispatch).toHaveBeenCalledWith(setActiveTabId(id));
   });
 
   const spawnedTab = (store: ReturnType<typeof makeStore>, id: string) =>

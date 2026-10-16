@@ -30,6 +30,9 @@ pub(super) enum ListBehavior {
     /// Answers the first `n` listing requests of each connection, then goes
     /// silent: a host that stops answering after it was adopted.
     AnswerFirst(usize),
+    /// Drops the first `n` listing requests of each connection and answers every
+    /// later one: a host whose first answer is lost (the caller sees `None` once).
+    DropFirst(usize),
     /// Drops listing requests received from `.0` to `.1` after the world began,
     /// answers the rest: a host that goes quiet for a while and comes back.
     SilentBetween(Duration, Duration),
@@ -562,6 +565,7 @@ async fn serve(
                     ListBehavior::Never => false,
                     ListBehavior::SilentFor(d) => Instant::now() >= world_start + *d,
                     ListBehavior::AnswerFirst(n) => listings <= *n,
+                    ListBehavior::DropFirst(n) => listings > *n,
                     ListBehavior::SilentBetween(from, to) => {
                         let now = Instant::now();
                         !(world_start + *from <= now && now < world_start + *to)

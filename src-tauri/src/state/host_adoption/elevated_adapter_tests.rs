@@ -78,6 +78,39 @@ async fn elevated_orphan_pass_waits_for_restore_closes_unowned_and_runs_once_aft
     drop(placement);
 }
 
+#[tokio::test(start_paused = true)]
+async fn elevated_orphan_pass_retries_a_lost_listing_answer() {
+    let (world, port) = machine(HostSpec { sessions: vec![meta("tm-orphan", 8)], list: ListBehavior::DropFirst(1), ..HostSpec::default() });
+    let client = elevated(&port, &world).await;
+    let epoch = port.table().epoch(HostChannel::Elevated).unwrap();
+    super::elevated_orphans::run(&port, &client, epoch).await;
+    port.table().keys().flush_deliveries();
+    assert_eq!(world.count("owner-host", "List"), 2, "the first answer was lost, the second try answered");
+    assert_eq!(*port.0.recovered.lock().unwrap(), vec!["tm-orphan"], "a lost answer must not forfeit the one-shot pass");
+}
+
+#[tokio::test]
+async fn elevated_orphan_pass_does_not_surface_a_session_a_pane_already_claims() {
+    let (world, port) = machine(HostSpec { sessions: vec![meta("tm-claimed", 8), meta("tm-orphan", 9)], ..HostSpec::default() });
+    let client = elevated(&port, &world).await;
+    let channel = HostChannel::Elevated;
+    let epoch = port.table().epoch(channel).unwrap();
+    // A pane that claims the session but whose key is still `Listed` (not yet Held/Bound), so the
+    // key table alone would not protect it: only the `panes_on` claim filter does.
+    port.0.host_terminals.insert("pc-claimed".into(), channel);
+    port.0.terminals.insert("pc-claimed".into(), crate::state::Terminal {
+        id: "pc-claimed".into(), pid: 0, shell: "test".into(), name: "Terminal-test".into(), created_at: String::new(),
+        cols: 80, rows: 24, backend: crate::tmux_manager::TerminalBackend::PortablePty,
+        renderer_terminal_id: Some("tm-claimed".into()), owning_tab_id: None, session_key: "tm-claimed".into(),
+        last_input_source: None, last_input_at: None, prompt_hook: false, display_label: None, title_color: None,
+    });
+    assert_eq!(port.panes_on(channel).keys().collect::<Vec<_>>(), vec!["tm-claimed"]);
+    super::elevated_orphans::run(&port, &client, epoch).await;
+    port.table().keys().flush_deliveries();
+    assert_eq!(port.table().keys().state(channel, "tm-claimed"), Some(KeyState::Listed));
+    assert_eq!(*port.0.recovered.lock().unwrap(), vec!["tm-orphan"], "a claimed session is not an orphan");
+}
+
 #[tokio::test]
 async fn elevated_orphan_pass_discards_a_superseded_epoch() {
     let gate = Arc::new(ListGate::default());
@@ -103,15 +136,52 @@ async fn elevated_orphan_pass_discards_a_superseded_epoch() {
     assert_eq!(manager.take_pending_orphan_pass(), Some(new));
 }
 
+/// Code lines only, whitespace-normalised, so a pin cannot be satisfied by a comment.
+fn code_lines(body: &str) -> Vec<String> {
+    body.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("//")).map(String::from).collect()
+}
+
 #[test]
-fn elevated_orphan_pass_is_taken_only_after_placement_and_uses_normal_adoption() {
+fn elevated_orphan_pass_is_taken_only_after_a_successful_create_and_uses_normal_adoption() {
+    use crate::state::source_scan::fn_body;
     let source = include_str!("../../commands/terminal.rs");
-    let body = crate::state::source_scan::fn_body(source, "pub(super) async fn run_create(");
-    assert!(body.find("place_elevated_create(").unwrap() < body.find("take_pending_orphan_pass(").unwrap());
+    let run_create = code_lines(&fn_body(source, "pub(super) async fn run_create("));
+    // The pass is started by the helper on BOTH success paths (Attach and Spawn), each directly
+    // after `complete_create`; nothing in the create takes it before the create has succeeded.
+    let starts: Vec<_> = run_create.iter().enumerate().filter(|(_, l)| l.contains("start_elevated_orphan_pass(")).collect();
+    assert_eq!(starts.len(), 2, "attach path and spawn path each start the pass once");
+    for (i, line) in &starts {
+        assert_eq!(line.as_str(), "start_elevated_orphan_pass(state, channel);");
+        assert_eq!(run_create[i - 1], "state.complete_create(&id, cg, &staged);", "the pass follows a completed create");
+    }
+    assert!(!run_create.iter().any(|l| l.contains("take_pending_orphan_pass(")), "a create must not take the pass before it succeeds");
+    let place = run_create.iter().position(|l| l.contains("place_elevated_create(")).unwrap();
+    assert!(place < starts[0].0);
+    let helper = code_lines(&fn_body(source, "fn start_elevated_orphan_pass("));
+    let take = helper.iter().position(|l| l == "if let Some(epoch) = state.elevated_host.take_pending_orphan_pass() {").unwrap();
+    assert_eq!(helper[take + 1], "state.spawn_elevated_orphan_pass(epoch);");
+    assert!(helper.iter().any(|l| l.starts_with("if channel != ") && l.contains("HostChannel::Elevated { return; }")));
+
     let source = include_str!("../terminals.rs");
-    let body = crate::state::source_scan::fn_body(source, "async fn ensure_elevated_host_inner(");
-    assert!(body.contains("AdoptionPort::apply_listing(self, HostChannel::Elevated, &client, Some(&listing))"));
-    assert!(!body.contains("|_| false"));
+    let spawn = code_lines(&fn_body(source, "pub(crate) fn spawn_elevated_orphan_pass("));
+    assert!(spawn.iter().any(|l| l == "tokio::spawn(async move {"));
+    assert!(spawn.iter().any(|l| l == "super::host_adoption::elevated_orphans::run(&port, &client, epoch).await;"),
+        "the spawned task must actually run the pass");
+
+    // `surface_orphans` also refuses registered keys, so the pane-claim filter is a second guard that
+    // no behavioural test can isolate; pin that the pass really hands the pane claims to the planner.
+    let pass = code_lines(&fn_body(include_str!("elevated_orphans.rs"), "pub(in crate::state) async fn run<"));
+    assert!(pass.iter().any(|l| l == "let claims: Vec<_> = port.panes_on(channel).into_keys().collect();"));
+    assert!(pass.iter().any(|l| l.starts_with("let plan = crate::state::reattach::plan_reattach(&claims,")));
+    assert!(pass.iter().any(|l| l == "for _ in 0..3 {"), "three listing tries");
+
+    let ensure = code_lines(&fn_body(source, "async fn ensure_elevated_host_inner("));
+    let publish = ensure.iter().position(|l| l == "self.elevated_host.publish(client, launched).await?;").unwrap();
+    assert_eq!(ensure[publish + 1], "if is_survivor_reconnect { self.elevated_host.arm_orphan_pass(epoch); }",
+        "a reconnected survivor (and only that) arms the pass once published");
+    assert!(ensure.iter().any(|l| l == "self.apply_listing(HostChannel::Elevated, &client, Some(&listing));"));
+    assert!(ensure.iter().any(|l| l.contains("listing_is_current(")), "the awaited listing is validated before adoption");
+    assert!(!ensure.iter().any(|l| l.contains("|_| false")));
 }
 
 #[tokio::test]
