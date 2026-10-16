@@ -28,8 +28,10 @@ pub use frame::{
     McpHeld, McpHoldReason, McpHoldSpec, Response, SessionMeta, MAX_FRAME_LEN, PROTOCOL_VERSION,
 };
 pub use rendezvous::{
-    is_valid_rendezvous_pipe_name, publish_elevated_survivor, rendezvous_pipe_name, read_elevated_survivor, read_rendezvous_request,
-    read_rendezvous_response, remove_elevated_survivor_if_owned, write_rendezvous_request,
+    elevated_stand_down_path_for_survivor, is_valid_rendezvous_pipe_name, publish_elevated_survivor,
+    read_elevated_stand_down, rendezvous_pipe_name, read_elevated_survivor, read_rendezvous_request,
+    read_rendezvous_response, remove_elevated_stand_down_if_owned, remove_elevated_survivor_if_owned,
+    request_elevated_stand_down, write_rendezvous_request,
     write_rendezvous_response, ElevatedRendezvousRequest, ElevatedRendezvousResponse,
     ElevatedRendezvousStatus, ElevatedSurvivorRecord, ELEVATED_RENDEZVOUS_VERSION,
 };

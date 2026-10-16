@@ -284,3 +284,235 @@ async fn dials_arms_holds_and_reconnects_through_rendezvous() {
     let _ = std::fs::remove_file(&survivor_path);
 }
 
+struct HeldHostCleanup {
+    survivor_path: std::path::PathBuf,
+    shell_pid: Option<u32>,
+    active: bool,
+}
+
+impl Drop for HeldHostCleanup {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        for _ in 0..40 {
+            if let Ok(Some(record)) = termflow_pty_protocol::read_elevated_survivor(&self.survivor_path) {
+                if let Some(path) = termflow_pty_protocol::elevated_stand_down_path_for_survivor(&self.survivor_path) {
+                    let _ = termflow_pty_protocol::request_elevated_stand_down(&path, record.instance_id);
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if let Some(pid) = self.shell_pid {
+            for _ in 0..100 {
+                if !pid_is_alive(pid) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // A failing mutation can skip the host's teardown path. Kill only this
+            // test's own shell, by the PID returned for its Spawn request.
+            let _ = std::process::Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/T", "/F"])
+                .output();
+        }
+    }
+}
+
+struct HeldSession {
+    sidecar: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    survivor_path: std::path::PathBuf,
+    stand_down_path: std::path::PathBuf,
+    survivor: termflow_pty_protocol::ElevatedSurvivorRecord,
+    shell_pid: u32,
+    cleanup: HeldHostCleanup,
+}
+
+impl HeldSession {
+    fn disable_cleanup(&mut self) {
+        self.cleanup.active = false;
+    }
+}
+
+async fn start_held_session(tag: &str) -> HeldSession {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let survivor_path = std::env::temp_dir().join(format!(
+        "elevated-survivor-{tag}-{}-{nonce}.json",
+        std::process::id()
+    ));
+    let mut cleanup = HeldHostCleanup { survivor_path: survivor_path.clone(), shell_pid: None, active: true };
+    let ep = test_endpoint(&format!("{tag}-gui1"));
+    let mut gui_listener = Listener::bind(&ep).unwrap();
+    let sidecar = tokio::spawn(serve_dial(ep.clone(), Some("held-token".into()), Some(survivor_path.clone())));
+    let mut gui = gui_listener.accept().await.unwrap();
+
+    write_frame(
+        &mut gui,
+        &Frame::Ctrl(Control::Spawn {
+            req: 1,
+            tab_id: "t-held".into(),
+            spec: persist_spec(true),
+        }),
+    )
+    .await
+    .unwrap();
+    let shell_pid = tokio::time::timeout(Duration::from_secs(15), async {
+        let mut shell_pid = None;
+        let mut output = String::new();
+        while let Ok(Some(frame)) = read_frame(&mut gui).await {
+            match frame {
+                Frame::Resp(Response::Spawned { pid, .. }) => shell_pid = Some(pid),
+                Frame::Data(Data::Stdout { bytes, .. }) => output.push_str(&String::from_utf8_lossy(&bytes)),
+                _ => {}
+            }
+            if output.contains("persist") {
+                if let Some(pid) = shell_pid { return Some(pid); }
+            }
+        }
+        None
+    })
+    .await
+    .unwrap()
+    .expect("persistent shell spawned");
+
+    cleanup.shell_pid = Some(shell_pid);
+    write_frame(
+        &mut gui,
+        &Frame::Ctrl(Control::ArmDetach {
+            req: 2,
+            timeout_secs: 900,
+            token: "held-token".into(),
+            purpose: Some(termflow_pty_protocol::ArmDetachPurpose::Local),
+        }),
+    )
+    .await
+    .unwrap();
+    let ack = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Ok(Some(frame)) = read_frame(&mut gui).await {
+            if matches!(frame, Frame::Resp(Response::ArmAck { req: 2, .. })) { return true; }
+        }
+        false
+    })
+    .await
+    .unwrap();
+    assert!(ack, "sidecar acknowledged ArmDetach");
+    assert!(pid_is_alive(shell_pid), "held shell is live before GUI disconnect");
+    drop(gui);
+    drop(gui_listener);
+
+    let mut survivor = None;
+    for _ in 0..100 {
+        if let Ok(Some(record)) = termflow_pty_protocol::read_elevated_survivor(&survivor_path) {
+            survivor = Some(record);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let survivor = survivor.expect("survivor record was published after the armed disconnect");
+    let stand_down_path = termflow_pty_protocol::elevated_stand_down_path_for_survivor(&survivor_path).unwrap();
+    HeldSession {
+        sidecar: Some(sidecar),
+        survivor_path,
+        stand_down_path,
+        survivor,
+        shell_pid,
+        cleanup,
+    }
+}
+
+#[tokio::test]
+async fn stand_down_tears_down_the_held_sessions() {
+    crate::mcp_hold::holder::gauges::clear_order();
+    let mut held = start_held_session("stand-down").await;
+    termflow_pty_protocol::request_elevated_stand_down(&held.stand_down_path, held.survivor.instance_id).unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(5), held.sidecar.take().unwrap()).await;
+    assert!(result.is_ok(), "stand-down ends the hold promptly");
+    result.unwrap().unwrap().unwrap();
+    assert!(
+        crate::mcp_hold::holder::gauges::order().contains(&"teardown-begin"),
+        "the stand-down path calls tear_down_sessions before exit"
+    );
+    let mut gone = false;
+    for _ in 0..50 {
+        if !pid_is_alive(held.shell_pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(gone, "stand-down terminates the held shell");
+    assert_eq!(termflow_pty_protocol::read_elevated_survivor(&held.survivor_path).unwrap(), None);
+    assert_eq!(termflow_pty_protocol::read_elevated_stand_down(&held.stand_down_path), None);
+    held.disable_cleanup();
+}
+
+#[tokio::test]
+async fn stand_down_for_another_instance_is_ignored() {
+    crate::mcp_hold::holder::gauges::clear_order();
+    let mut held = start_held_session("wrong-instance").await;
+    termflow_pty_protocol::request_elevated_stand_down(
+        &held.stand_down_path,
+        held.survivor.instance_id.wrapping_add(1),
+    )
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(pid_is_alive(held.shell_pid), "a foreign signal does not tear down the held shell");
+    assert!(
+        !crate::mcp_hold::holder::gauges::order().contains(&"teardown-begin"),
+        "a foreign signal does not enter teardown"
+    );
+
+    let ep = test_endpoint("wrong-instance-gui2");
+    let mut gui_listener = Listener::bind(&ep).unwrap();
+    let mut rendezvous = connect(&Endpoint(held.survivor.rendezvous_pipe.clone())).await.unwrap();
+    let request = termflow_pty_protocol::ElevatedRendezvousRequest {
+        version: termflow_pty_protocol::ELEVATED_RENDEZVOUS_VERSION,
+        gui_pid: std::process::id(),
+        target_pipe: ep.0.clone(),
+        auth_token: "reattached-token".into(),
+    };
+    termflow_pty_protocol::write_rendezvous_request(&mut rendezvous, &request).await.unwrap();
+    assert_eq!(
+        termflow_pty_protocol::read_rendezvous_response(&mut rendezvous).await.unwrap().status,
+        termflow_pty_protocol::ElevatedRendezvousStatus::Ok
+    );
+    let mut gui = gui_listener.accept().await.unwrap();
+    write_frame(
+        &mut gui,
+        &Frame::Ctrl(Control::ListSessions { req: 3, token: Some("reattached-token".into()) }),
+    )
+    .await
+    .unwrap();
+    let sessions = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Ok(Some(frame)) = read_frame(&mut gui).await {
+            if let Frame::Resp(Response::SessionList { req: 3, sessions }) = frame { return sessions; }
+        }
+        vec![]
+    })
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].tab_id, "t-held");
+    assert!(sessions[0].alive);
+
+    write_frame(
+        &mut gui,
+        &Frame::Ctrl(Control::Shutdown { req: 4, token: "reattached-token".into() }),
+    )
+    .await
+    .unwrap();
+    drop(gui);
+    drop(gui_listener);
+    let result = tokio::time::timeout(Duration::from_secs(5), held.sidecar.take().unwrap()).await;
+    assert!(result.is_ok(), "the valid rendezvous reconnects after ignoring a foreign signal");
+    result.unwrap().unwrap().unwrap();
+    assert_eq!(termflow_pty_protocol::read_elevated_survivor(&held.survivor_path).unwrap(), None);
+    let _ = std::fs::remove_file(&held.stand_down_path);
+    held.disable_cleanup();
+}
+
