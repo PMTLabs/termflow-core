@@ -220,7 +220,7 @@ pub(crate) async fn close_all_hosts(app: &tauri::AppHandle, bounds: Option<Close
 fn stand_down_unreconnected_survivor(state: &AppState) {
     let Some(runtime_dir) = crate::pty_host_client::runtime_host_dir() else { return };
     let profile_key = crate::profile::current().info().key;
-    let survivor_path = runtime_dir.join(format!("elevated-survivor-{profile_key}.json"));
+    let survivor_path = crate::elevated_host::survivor::survivor_record_path(&runtime_dir, &profile_key);
     let result = stand_down_unreconnected_survivor_with(
         &survivor_path,
         |path| match termflow_pty_protocol::rendezvous::read_elevated_survivor(path) {
@@ -262,30 +262,7 @@ fn stand_down_unreconnected_survivor_with(
 
 #[cfg(windows)]
 fn survivor_record_is_live(record: &termflow_pty_protocol::ElevatedSurvivorRecord) -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-    use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    const SYNCHRONIZE: u32 = 0x0010_0000;
-    const STILL_ACTIVE: u32 = 259;
-    // SAFETY: each process query uses a valid handle and closes it before returning.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, record.host_pid);
-        if handle.is_null() || (handle as isize) == -1 {
-            return false;
-        }
-        let mut exit_code = 0u32;
-        let ok_code = GetExitCodeProcess(handle, &mut exit_code) != 0;
-        let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-        let ok_time = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
-        let creation_time = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
-        let live = ok_code && exit_code == STILL_ACTIVE && ok_time && creation_time == record.host_creation_time;
-        CloseHandle(handle);
-        live
-    }
+    crate::elevated_host::survivor::open_live_process(record).is_some()
 }
 
 #[cfg(all(test, windows))]
@@ -316,7 +293,10 @@ mod stand_down_tests {
         let stand_down_path = dir.join("elevated-standdown-default.json");
         stand_down_unreconnected_survivor_with(
             &survivor_path,
-            |_| record,
+            |path| {
+                assert_eq!(path, survivor_path.as_path());
+                record
+            },
             |_| live,
             |pid| {
                 assert_eq!(pid, 2345);

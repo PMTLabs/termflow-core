@@ -308,6 +308,14 @@ mod tests {
         super::remove_elevated_stand_down_if_owned(&path, owner.wrapping_add(1)).unwrap();
 
         assert_eq!(super::read_elevated_stand_down(&path), Some(owner));
+
+        super::remove_elevated_stand_down_if_owned(&path, owner).unwrap();
+        assert_eq!(super::read_elevated_stand_down(&path), None);
+        assert!(
+            !path.exists(),
+            "the matching instance must remove its stand-down file"
+        );
+
         let parent = path.parent().unwrap().to_path_buf();
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(parent);
