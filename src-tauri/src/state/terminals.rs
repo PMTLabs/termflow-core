@@ -899,8 +899,16 @@ impl<R: Runtime> AppState<R> {
         }
         match listing {
             Some(listing) => {
+                // The awaited answer is validated like every other listing caller: a pipe that
+                // dropped (or an epoch that was superseded) during the await must not be adopted.
+                if !super::host_adoption::listing_is_current(&self.host_table, HostChannel::Elevated, epoch, &client, super::Admission::Open) {
+                    client.close_transport().await;
+                    self.host_table.routes().remove_epoch(HostChannel::Elevated, epoch);
+                    return Err("the elevated pty-host disconnected while listing its sessions".to_string());
+                }
                 log::info!("[ADMIN] adopting {} sessions from elevated host", listing.len());
-                super::host_adoption::AdoptionPort::apply_listing(self, HostChannel::Elevated, &client, Some(&listing));
+                use super::host_adoption::AdoptionPort as _;
+                self.apply_listing(HostChannel::Elevated, &client, Some(&listing));
             }
             None if is_survivor_reconnect => {
                 // The client was wired and its epoch published above; undo both so the failed
