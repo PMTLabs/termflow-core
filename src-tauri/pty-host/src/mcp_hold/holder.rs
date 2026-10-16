@@ -209,6 +209,10 @@ pub mod gauges {
         ORDER.with(|o| o.borrow().clone())
     }
 
+    pub fn clear_order() {
+        ORDER.with(|o| o.borrow_mut().clear());
+    }
+
     pub fn task_ends() -> Vec<&'static str> {
         TASK_ENDS.with(|o| o.borrow().clone())
     }

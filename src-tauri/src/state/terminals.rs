@@ -686,47 +686,23 @@ impl<R: Runtime> AppState<R> {
 
         let profile_key = crate::profile::current().info().key;
         let survivor_path = crate::pty_host_client::runtime_host_dir()
-            .map(|d| d.join(format!("elevated-survivor-{profile_key}.json")));
+            .map(|d| crate::elevated_host::survivor::survivor_record_path(&d, &profile_key));
 
         let mut survivor_record = None;
         if let Some(ref path) = survivor_path {
             if path.exists() {
                 if let Ok(Some(rec)) = termflow_pty_protocol::rendezvous::read_elevated_survivor(path) {
-                    use windows_sys::Win32::System::Threading::{
-                        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-                    };
-                    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
-                    const SYNCHRONIZE: u32 = 0x0010_0000;
-                    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, rec.host_pid) };
-                    if !handle.is_null() && (handle as isize) != -1 {
-                        let mut exit_code = 0u32;
-                        let ok_code = unsafe { GetExitCodeProcess(handle, &mut exit_code) } != 0;
-                        const STILL_ACTIVE: u32 = 259;
-                        let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-                        let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-                        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-                        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
-                        let ok_time = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
-                        let creation_u64 = ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
-                        // The record is writable by any process of this user and its pipe name goes onto the
-                        // command line of an ELEVATED helper, so a name that is not plainly a
-                        // rendezvous pipe is dropped like a stale record, never launched.
-                        let pipe_ok = termflow_pty_protocol::is_valid_rendezvous_pipe_name(&rec.rendezvous_pipe);
-                        if !pipe_ok {
-                            log::warn!("[ADMIN] ignoring survivor record with a malformed rendezvous pipe name");
-                        }
-                        if pipe_ok && ok_code && exit_code == STILL_ACTIVE && ok_time && creation_u64 == rec.host_creation_time {
-                            let proc = crate::elevated_host::launch::LaunchedProcess::from_handle(
-                                rec.host_pid,
-                                windows::Win32::Foundation::HANDLE(handle as _),
-                            );
-                            survivor_record = Some((rec, proc));
-                        } else {
-                            unsafe { CloseHandle(handle) };
-                            let _ = termflow_pty_protocol::rendezvous::remove_elevated_survivor_if_owned(path, rec.instance_id);
-                        }
-                    } else {
-                        let _ = termflow_pty_protocol::rendezvous::remove_elevated_survivor_if_owned(path, rec.instance_id);
+                    let live_process = crate::elevated_host::survivor::open_live_process(&rec);
+                    // The record is writable by any process of this user and its pipe name goes onto the
+                    // command line of an ELEVATED helper, so a name that is not plainly a
+                    // rendezvous pipe is dropped like a stale record, never launched.
+                    let pipe_ok = termflow_pty_protocol::is_valid_rendezvous_pipe_name(&rec.rendezvous_pipe);
+                    if !pipe_ok {
+                        log::warn!("[ADMIN] ignoring survivor record with a malformed rendezvous pipe name");
+                    }
+                    match (pipe_ok, live_process) {
+                        (true, Some(proc)) => survivor_record = Some((rec, proc)),
+                        _ => crate::elevated_host::survivor::cleanup_dead_survivor_record(path, rec.instance_id),
                     }
                 }
             }
@@ -1664,5 +1640,24 @@ mod host_close_announces_tests {
         let queued = body.find("keys().end_process(").expect("the shared ending (which queues disconnected closes) is gone");
         let emit = body.find("\"terminal:exit\"").expect("emit gone");
         assert!(emit > queued, "the emit sits inside the live-client arm; a queued close would be silent");
+    }
+}
+
+#[cfg(test)]
+mod elevated_survivor_inspection_wiring_tests {
+    #[test]
+    fn invalid_or_dead_survivor_fallback_cleans_its_record() {
+        let source = crate::state::source_scan::production(include_str!("terminals.rs"));
+        let connect = crate::state::source_scan::fn_body(
+            &source,
+            "async fn ensure_elevated_host_inner(&self)",
+        );
+        let compact: String = connect.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(
+                "match(pipe_ok,live_process){(true,Some(proc))=>survivor_record=Some((rec,proc)),_=>crate::elevated_host::survivor::cleanup_dead_survivor_record(path,rec.instance_id),}"
+            ),
+            "the rejected survivor-record arm must clean that record and its matching stand-down signal"
+        );
     }
 }

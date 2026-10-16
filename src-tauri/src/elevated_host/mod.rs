@@ -15,6 +15,8 @@
 pub mod launch;
 #[cfg(windows)]
 pub mod pipe_server;
+#[cfg(windows)]
+pub mod survivor;
 
 use crate::pty_host_client::PtyHostClient;
 use std::sync::Mutex;
@@ -95,6 +97,17 @@ impl ElevatedHost {
 
     pub fn is_connected(&self) -> bool {
         self.client_clone().is_some_and(|c| c.is_alive())
+    }
+
+    #[cfg(windows)]
+    pub fn is_connected_to_pid(&self, pid: u32) -> bool {
+        self.client_clone().is_some_and(|client| client.is_alive())
+            && self
+                .proc
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|proc| proc.pid == pid)
     }
 
     pub(crate) fn arm_orphan_pass(&self, epoch: u64) {
@@ -250,6 +263,58 @@ fn wait_for_exit(proc: launch::LaunchedProcess, timeout_ms: u32) -> bool {
 /// (Windows-only — see `state/terminals.rs`), generation-guarded the same
 /// way the primary's own reconnect handler is, so a stale disconnect from an
 /// already-superseded connection can't tear down a freshly opened one.
+#[cfg(all(test, windows))]
+mod connected_pid_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn live_test_client() -> (PtyHostClient, tokio::io::DuplexStream) {
+        let (client_side, peer) = tokio::io::duplex(1024);
+        let (rd, wr) = tokio::io::split(client_side);
+        let (output_tx, _) = tokio::sync::broadcast::channel(1);
+        let deps = crate::pty_host_client::PtyHostDeps {
+            lifecycle_token: "test".into(),
+            output_tx,
+            output_produced: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            on_exit: Arc::new(|_, _, _| {}),
+            on_gap: Arc::new(|_| {}),
+            on_disconnect: Arc::new(|| {}),
+            resolve_process: Arc::new(|_| None),
+            stream_offsets: Arc::new(dashmap::DashMap::new()),
+        };
+        (crate::pty_host_client::wire_client(rd, wr, deps), peer)
+    }
+
+    fn install_process(manager: &ElevatedHost, pid: u32) {
+        *manager.proc.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(launch::LaunchedProcess::from_handle(
+                pid,
+                windows::Win32::Foundation::HANDLE::default(),
+            ));
+    }
+
+    #[tokio::test]
+    async fn is_connected_to_pid_requires_a_live_client_and_matching_pid() {
+        let manager = ElevatedHost::new();
+        let (client, _peer) = live_test_client();
+        manager.install_client(client.clone());
+        install_process(&manager, 2345);
+
+        assert!(manager.is_connected_to_pid(2345));
+        assert!(!manager.is_connected_to_pid(9876));
+
+        let disconnected = ElevatedHost::new();
+        install_process(&disconnected, 2345);
+        assert!(!disconnected.is_connected_to_pid(2345));
+
+        client.close_transport().await;
+        assert!(
+            !manager.is_connected_to_pid(2345),
+            "a closed client still stored in the manager must not count as connected"
+        );
+    }
+}
+
 #[cfg(test)]
 mod crash_tests {
     #[test]

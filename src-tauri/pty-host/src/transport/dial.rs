@@ -146,17 +146,25 @@ enum RendezvousWaitResult {
     Reconnected(ReconnectInfo),
     Empty,
     Expired(crate::manager::LocalHold),
+    StandDown,
 }
 
 /// Await a connection on the High rendezvous pipe, enforcing active-time deadline.
 async fn wait_for_rendezvous(
     listener: &mut Listener,
     mgr: &SessionManager,
+    stand_down_path: Option<&std::path::Path>,
+    instance_id: u128,
     mut deadline: Option<PendingDeadline>,
     clock: &SystemActiveClock,
 ) -> RendezvousWaitResult {
     const RECHECK: Duration = Duration::from_millis(250);
     loop {
+        if stand_down_path.is_some_and(|path| {
+            termflow_pty_protocol::read_elevated_stand_down(path) == Some(instance_id)
+        }) {
+            return RendezvousWaitResult::StandDown;
+        }
         if mgr.live_session_count() == 0 {
             return RendezvousWaitResult::Empty;
         }
@@ -299,9 +307,15 @@ pub async fn serve_dial(
                 };
 
                 let instance_id = host_instance_id();
+                let stand_down_path = survivor_record
+                    .as_deref()
+                    .and_then(termflow_pty_protocol::elevated_stand_down_path_for_survivor);
                 let remove_record = || {
                     if let Some(record_path) = &survivor_record {
                         let _ = termflow_pty_protocol::remove_elevated_survivor_if_owned(record_path, instance_id);
+                    }
+                    if let Some(path) = &stand_down_path {
+                        let _ = termflow_pty_protocol::remove_elevated_stand_down_if_owned(path, instance_id);
                     }
                 };
                 if let Some(record_path) = &survivor_record {
@@ -323,7 +337,16 @@ pub async fn serve_dial(
                 // went away, a stray request) must not end a host that is still holding sessions.
                 let wait_deadline = deadline;
                 let reconnected = loop {
-                    match wait_for_rendezvous(&mut rendezvous_listener, &mgr, wait_deadline, &clock).await {
+                    match wait_for_rendezvous(
+                        &mut rendezvous_listener,
+                        &mgr,
+                        stand_down_path.as_deref(),
+                        instance_id,
+                        wait_deadline,
+                        &clock,
+                    )
+                    .await
+                    {
                         RendezvousWaitResult::Reconnected(info) => {
                             match dial_and_verify(&Endpoint(info.target_pipe), Some(info.gui_pid)).await {
                                 Ok(new_stream) => {
@@ -339,6 +362,11 @@ pub async fn serve_dial(
                             }
                         }
                         RendezvousWaitResult::Empty => break None,
+                        RendezvousWaitResult::StandDown => {
+                            log::info!("elevated host: received stand-down for this survivor; tearing down");
+                            mgr.tear_down_sessions();
+                            break None;
+                        }
                         RendezvousWaitResult::Expired(hold) => {
                             log::warn!("elevated host: hold expired waiting for rendezvous; tearing down");
                             mgr.expire_local_hold(hold);

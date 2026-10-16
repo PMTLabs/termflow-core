@@ -81,9 +81,23 @@ pub fn is_valid_rendezvous_pipe_name(name: &str) -> bool {
     }
 }
 
+/// Derive the profile-scoped stand-down signal path next to a survivor record.
+pub fn elevated_stand_down_path_for_survivor(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let suffix = name.strip_prefix("elevated-survivor-")?;
+    Some(path.with_file_name(format!("elevated-standdown-{suffix}")))
+}
+
 pub fn publish_elevated_survivor(path: &std::path::Path, rec: &ElevatedSurvivorRecord) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
+    }
+    if let Some(stand_down_path) = elevated_stand_down_path_for_survivor(path) {
+        match std::fs::remove_file(stand_down_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
     }
     let tmp = path.with_extension(format!("tmp-{}", rec.instance_id));
     std::fs::write(&tmp, rec.to_json())?;
@@ -103,6 +117,30 @@ pub fn read_elevated_survivor(path: &std::path::Path) -> std::io::Result<Option<
 pub fn remove_elevated_survivor_if_owned(path: &std::path::Path, instance_id: u128) -> std::io::Result<()> {
     match read_elevated_survivor(path) {
         Ok(Some(rec)) if rec.instance_id == instance_id => std::fs::remove_file(path),
+        _ => Ok(()),
+    }
+}
+
+/// Atomically publish the instance id of the held host that should stand down.
+pub fn request_elevated_stand_down(path: &std::path::Path, instance_id: u128) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension(format!("tmp-{instance_id}"));
+    std::fs::write(&tmp, serde_json::to_vec(&instance_id).expect("serialize stand-down instance id"))?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Read the target instance id from a stand-down signal, or `None` for a missing or invalid file.
+pub fn read_elevated_stand_down(path: &std::path::Path) -> Option<u128> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Remove a stand-down signal only when it still names this host instance.
+pub fn remove_elevated_stand_down_if_owned(path: &std::path::Path, instance_id: u128) -> std::io::Result<()> {
+    match read_elevated_stand_down(path) {
+        Some(found) if found == instance_id => std::fs::remove_file(path),
         _ => Ok(()),
     }
 }
@@ -223,6 +261,64 @@ mod tests {
         let mut cursor = std::io::Cursor::new(pipe);
         let back = read_rendezvous_response(&mut cursor).await.unwrap();
         assert_eq!(back, resp);
+    }
+
+    fn temp_rendezvous_path(tag: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("termflow-rendezvous-{}-{nonce}", std::process::id()))
+            .join(tag)
+    }
+
+    #[test]
+    fn publishing_a_survivor_clears_a_stale_stand_down() {
+        let survivor_path = temp_rendezvous_path("elevated-survivor-default.json");
+        let stand_down_path = super::elevated_stand_down_path_for_survivor(&survivor_path).unwrap();
+        super::request_elevated_stand_down(&stand_down_path, 0xDEADBEEF_CAFE_1234).unwrap();
+        let rec = super::ElevatedSurvivorRecord {
+            format: 1,
+            user_sid: "S-1-5-21-test".into(),
+            host_pid: 9988,
+            host_creation_time: 13350000000000,
+            instance_id: 0xDEADBEEF_CAFE_1235,
+            rendezvous_pipe: r"\\.\pipe\termflow-admin-rendezvous.test.9988.nonce".into(),
+            proto_min: 1,
+            proto_max: 1,
+            capabilities: 0,
+        };
+
+        super::publish_elevated_survivor(&survivor_path, &rec).unwrap();
+
+        assert_eq!(super::read_elevated_stand_down(&stand_down_path), None);
+        let parent = survivor_path.parent().unwrap().to_path_buf();
+        let _ = std::fs::remove_file(&survivor_path);
+        let _ = std::fs::remove_file(&stand_down_path);
+        let _ = std::fs::remove_dir(parent);
+    }
+
+    #[test]
+    fn remove_stand_down_if_owned_spares_another_instance() {
+        let path = temp_rendezvous_path("elevated-standdown-default.json");
+        let owner = 0xDEADBEEF_CAFE_1234;
+        super::request_elevated_stand_down(&path, owner).unwrap();
+
+        super::remove_elevated_stand_down_if_owned(&path, owner.wrapping_add(1)).unwrap();
+
+        assert_eq!(super::read_elevated_stand_down(&path), Some(owner));
+
+        super::remove_elevated_stand_down_if_owned(&path, owner).unwrap();
+        assert_eq!(super::read_elevated_stand_down(&path), None);
+        assert!(
+            !path.exists(),
+            "the matching instance must remove its stand-down file"
+        );
+
+        let parent = path.parent().unwrap().to_path_buf();
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(parent);
     }
 
     #[test]
