@@ -289,3 +289,83 @@ describe('TerminalService publishes pty:spawn for a FRESH spawn only', () => {
     expect(spawns).toEqual([]);
   });
 });
+
+describe('TerminalService elevated single-flight and consent denial latch', () => {
+  let createTerminalMock: jest.Mock;
+
+  beforeEach(() => {
+    terminalService.reconnectElevated();
+    createTerminalMock = jest.fn();
+    (window as any).electronAPI = {
+      createTerminal: createTerminalMock,
+      adoptConsoleWindow: jest.fn().mockResolvedValue(undefined),
+    };
+  });
+
+  afterEach(() => {
+    terminalService.reconnectElevated();
+  });
+
+  it('coalesces concurrent elevated creates across different panes into a single flight', async () => {
+    let resolveFirst: (pid: string) => void = () => {};
+    const firstPromise = new Promise<string>((res) => { resolveFirst = res; });
+    createTerminalMock.mockImplementationOnce(() => firstPromise);
+    createTerminalMock.mockResolvedValueOnce('pc-admin-2');
+
+    const call1 = terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+    const call2 = terminalService.createTerminal('tm-singleflight-2', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+
+    // Only the first call hit the backend createTerminal so far
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+
+    // Now resolve first
+    resolveFirst('pc-admin-1');
+
+    const [pid1, pid2] = await Promise.all([call1, call2]);
+    expect(pid1).toBe('pc-admin-1');
+    expect(pid2).toBe('pc-admin-2');
+    expect(createTerminalMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('latches denial on ADMIN_UAC_CANCELLED and prevents subsequent elevated attempts', async () => {
+    createTerminalMock.mockRejectedValueOnce(new Error('ADMIN_UAC_CANCELLED'));
+
+    await expect(
+      terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true)
+    ).rejects.toThrow('ADMIN_UAC_CANCELLED');
+
+    expect(terminalService.isElevatedConsentDenied()).toBe(true);
+
+    // Subsequent call fails immediately without calling createTerminal
+    createTerminalMock.mockClear();
+    await expect(
+      terminalService.createTerminal('tm-singleflight-2', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true)
+    ).rejects.toThrow('ADMIN_UAC_CANCELLED');
+
+    expect(createTerminalMock).not.toHaveBeenCalled();
+  });
+
+  it('reconnectElevated clears the denied latch and dispatches pty:elevated-reconnect', async () => {
+    createTerminalMock.mockRejectedValueOnce(new Error('ADMIN_UAC_CANCELLED'));
+    await expect(
+      terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true)
+    ).rejects.toThrow('ADMIN_UAC_CANCELLED');
+    expect(terminalService.isElevatedConsentDenied()).toBe(true);
+
+    let eventFired = false;
+    const onReconnect = () => { eventFired = true; };
+    window.addEventListener('pty:elevated-reconnect', onReconnect);
+
+    terminalService.reconnectElevated();
+    expect(terminalService.isElevatedConsentDenied()).toBe(false);
+    expect(eventFired).toBe(true);
+    window.removeEventListener('pty:elevated-reconnect', onReconnect);
+
+    // New attempt can proceed to backend
+    createTerminalMock.mockClear();
+    createTerminalMock.mockResolvedValueOnce('pc-admin-new');
+    const pid = await terminalService.createTerminal('tm-singleflight-1', 'default', undefined, undefined, undefined, undefined, undefined, undefined, true);
+    expect(pid).toBe('pc-admin-new');
+    expect(createTerminalMock).toHaveBeenCalledTimes(1);
+  });
+});

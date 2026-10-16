@@ -63,6 +63,10 @@ pub(super) trait LifecyclePort: AdoptionPort {
     }
     /// Where the hold a sibling's arm request took is kept until its disarm.
     fn sibling_slot(&self) -> &SiblingSlot;
+    /// The elevated host's connection, if active.
+    fn elevated_client(&self) -> Option<PtyHostClient> {
+        None
+    }
 }
 
 // ---- the owned set --------------------------------------------------------
@@ -167,6 +171,22 @@ fn collect<P: LifecyclePort>(port: &P, discovered: &[HostCandidate]) -> Vec<Owne
             unresolved: reason_of(&host.endpoint),
             candidate: found(&host.endpoint).unwrap_or_else(|| frozen_candidate(&host)),
         });
+    }
+
+    if let Some(elevated) = port.elevated_client() {
+        if elevated.is_alive() {
+            let endpoint = "elevated".to_string();
+            let candidate = candidate_for(&endpoint, None, HostRole::Current);
+            hosts.push(OwnedHost {
+                endpoint: endpoint.clone(),
+                generation: None,
+                channel: Some(HostChannel::Elevated),
+                exe_in_payload: port.exe_origin(&endpoint, &elevated),
+                client: Some(elevated),
+                unresolved: None,
+                candidate,
+            });
+        }
     }
 
     // Hosts the barrier is waiting for that were never connected: a busy host
@@ -351,7 +371,12 @@ async fn arm_hosts(
     purpose: Option<ArmDetachPurpose>,
 ) -> Result<(), String> {
     let results = join_all(hosts.iter().map(|(name, client)| async move {
-        let result = client.arm_detach(timeout_secs, token, purpose).await;
+        let host_token = if client.lifecycle_token().is_empty() {
+            token
+        } else {
+            client.lifecycle_token()
+        };
+        let result = client.arm_detach(timeout_secs, host_token, purpose).await;
         log::info!("[GEN] arm {name}: acknowledged={}", result.is_ok());
         (name, result)
     }))
@@ -930,6 +955,10 @@ impl<R: Runtime> LifecyclePort for AppState<R> {
 
     fn sibling_slot(&self) -> &SiblingSlot {
         &self.sibling_hold
+    }
+
+    fn elevated_client(&self) -> Option<PtyHostClient> {
+        self.elevated_host.client_clone()
     }
 }
 

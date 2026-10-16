@@ -30,6 +30,10 @@ pub struct LaunchedProcess {
 unsafe impl Send for LaunchedProcess {}
 
 impl LaunchedProcess {
+    pub fn from_handle(pid: u32, handle: HANDLE) -> Self {
+        Self { pid, handle }
+    }
+
     pub fn raw_handle(&self) -> HANDLE {
         self.handle
     }
@@ -68,30 +72,53 @@ fn quote_arg(s: &str) -> String {
     }
 }
 
-/// Build the dial-out mode arguments (plan 045 §4.3) as one `lpParameters`
+/// Build the dial-out mode arguments (plan 045 §4.3, plan 058) as one `lpParameters`
 /// string.
-pub fn build_dial_out_parameters(pipe_name: &str, token: &str, log_path: &Path) -> String {
-    format!(
+pub fn build_dial_out_parameters(
+    pipe_name: &str,
+    token: &str,
+    log_path: &Path,
+    survivor_record_path: Option<&Path>,
+) -> String {
+    let mut params = format!(
         "--connect-pipe {} --token {} --log {}",
         quote_arg(pipe_name),
         quote_arg(token),
         quote_arg(&log_path.to_string_lossy()),
+    );
+    if let Some(record) = survivor_record_path {
+        params.push_str(&format!(" --survivor-record {}", quote_arg(&record.to_string_lossy())));
+    }
+    params
+}
+
+/// Build the reconnect helper mode arguments (plan 058 §3.2) as one `lpParameters`
+/// string.
+pub fn build_reconnect_parameters(
+    reconnect_target: u32,
+    rendezvous_pipe: &str,
+    gui_pipe: &str,
+    gui_pid: u32,
+    token: &str,
+) -> String {
+    format!(
+        "--reconnect-target {} --rendezvous-pipe {} --gui-pipe {} --gui-pid {} --token {}",
+        reconnect_target,
+        quote_arg(rendezvous_pipe),
+        quote_arg(gui_pipe),
+        gui_pid,
+        quote_arg(token),
     )
 }
 
-/// Resolve the bundled `termflow-pty-host.exe` and re-verify it immediately
-/// before elevating (plan 045 R3): between resolving and elevating, a
-/// same-user medium process could in principle overwrite a user-writable
-/// path. This does not close that class — TermFlow installs per-user into a
-/// user-writable root regardless (§9 O3) — it narrows the window as far as a
-/// same-thread, back-to-back check can. Deliberately re-run here rather than
-/// reusing a path resolved earlier in async code, which would widen the gap
-/// between "verified" and "elevated" by however long that code took to run.
+/// Resolve the update-stable `termflow-pty-host.exe` and re-verify it immediately
+/// before elevating (plan 058 §3.1 / T4): resolves and installs into
+/// `runtime_host_dir()` outside the install root so it survives payload updates.
 fn resolve_and_verify_host_path() -> Result<PathBuf, String> {
-    let path = crate::pty_host_client::resolve_bundled_host_path()
+    let launch = crate::pty_host_client::resolve_host_launch()
         .ok_or_else(|| "no termflow-pty-host binary found to elevate".to_string())?;
-    std::fs::metadata(&path).map_err(|e| format!("cannot verify {}: {e}", path.display()))?;
-    Ok(path)
+    std::fs::metadata(&launch.path).map_err(|e| format!("cannot verify {}: {e}", launch.path.display()))?;
+    Ok(launch.path)
 }
 
 fn to_wide(s: &str) -> Vec<u16> {
@@ -206,10 +233,26 @@ mod launch_tests {
             r"\\.\pipe\termflow-pty-host-admin.default.abc123",
             "5b6c1e8e-aaaa-bbbb-cccc-000000000000",
             Path::new(r"C:\Users\Jane Doe\AppData\Local\Temp\host-admin.log"),
+            Some(Path::new(r"C:\Users\Jane Doe\AppData\Local\elevated-survivor-default.json")),
         );
         assert_eq!(
             p,
-            r#"--connect-pipe \\.\pipe\termflow-pty-host-admin.default.abc123 --token 5b6c1e8e-aaaa-bbbb-cccc-000000000000 --log "C:\Users\Jane Doe\AppData\Local\Temp\host-admin.log""#
+            r#"--connect-pipe \\.\pipe\termflow-pty-host-admin.default.abc123 --token 5b6c1e8e-aaaa-bbbb-cccc-000000000000 --log "C:\Users\Jane Doe\AppData\Local\Temp\host-admin.log" --survivor-record "C:\Users\Jane Doe\AppData\Local\elevated-survivor-default.json""#
+        );
+    }
+
+    #[test]
+    fn reconnect_parameters_format() {
+        let p = build_reconnect_parameters(
+            1234,
+            r"\\.\pipe\termflow-admin-rendezvous.S-1-5-21.1234",
+            r"\\.\pipe\termflow-pty-host-admin.default.xyz789",
+            5678,
+            "secret-token",
+        );
+        assert_eq!(
+            p,
+            r#"--reconnect-target 1234 --rendezvous-pipe \\.\pipe\termflow-admin-rendezvous.S-1-5-21.1234 --gui-pipe \\.\pipe\termflow-pty-host-admin.default.xyz789 --gui-pid 5678 --token secret-token"#
         );
     }
 }

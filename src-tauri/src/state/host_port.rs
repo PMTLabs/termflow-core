@@ -387,9 +387,12 @@ impl<R: Runtime> PanePort for AppState<R> {
 
     fn announce_recovered(&self, session_key: &str) {
         let leaf_id = format!("tm-{}", uuid::Uuid::new_v4().simple());
+        let is_elevated = self.host_table.keys().channel_of_key(session_key) == Some(HostChannel::Elevated);
         if let Err(e) = self.app_handle.emit("api:createTerminalTab", serde_json::json!({
-            "name": "Recovered terminal", "profile": "default", "processId": leaf_id,
+            "name": if is_elevated { "Recovered admin terminal" } else { "Recovered terminal" },
+            "profile": "default", "processId": leaf_id,
             "rendererTerminalId": leaf_id, "sessionKey": session_key,
+            "elevated": is_elevated,
             "targetWindow": self.resolve_active_window_label(),
         })) {
             log::warn!("[HOTSWAP] failed to surface recovered session {session_key}: {e}");

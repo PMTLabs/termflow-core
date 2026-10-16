@@ -98,6 +98,7 @@ function durableTab(tab: Tab) {
     titleColor: tab.titleColor,
     titleIsCustom: tab.titleIsCustom,
     notifyMuted: tab.notifyMuted,
+    elevated: tab.elevated,
   };
 }
 

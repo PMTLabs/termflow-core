@@ -224,7 +224,7 @@ fn the_handover_census_kills_each_planted_mutation_on_restart_for_update() {
     cases.extend([
         ("the call after flush_all_windows", {
             let cut = mutate_in(UPDATE_RS, "pub async fn restart_for_update(", FOR_UPDATE_HANDOVER, "");
-            mutate_in(&cut, "pub async fn restart_for_update(", "state.elevated_host.shutdown().await;", &format!("{FOR_UPDATE_HANDOVER}\n    state.elevated_host.shutdown().await;"))
+            mutate_in(&cut, "pub async fn restart_for_update(", "handed.commit();", &format!("{FOR_UPDATE_HANDOVER}\n    handed.commit();"))
         }),
         ("a missing commit", mutate_in(UPDATE_RS, "pub async fn restart_for_update(", "handed.commit();", "")),
         ("the commit inside `if false`", mutate_in(UPDATE_RS, "pub async fn restart_for_update(", "handed.commit();", "if false { handed.commit(); }")),

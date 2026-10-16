@@ -3,6 +3,7 @@ import { termDiag } from '../utils/diag';
 import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
+import { isAdminUacCancelled } from './adminUacCancelled';
 import { clearZoom } from '../store/slices/zoomSlice';
 import { reassertOwnerAfterSpawn } from './paneOwnership';
 import { reassertLabelAfterSpawn } from './terminalLabelSync';
@@ -40,6 +41,11 @@ export class TerminalServiceClass {
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
   private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
+  // Plan 058: window-wide single-flight elevated reconnect and denial latch.
+  // Prevents multiple concurrent elevated panes from prompting UAC repeatedly,
+  // and remembers consent denial until explicitly re-requested by the user.
+  private elevatedConsentDenied = false;
+  private reconnectElevatedPromise: Promise<string> | null = null;
 
   constructor(
     private readonly paneTrees: () => Record<string, PaneNode | null> =
@@ -180,6 +186,18 @@ export class TerminalServiceClass {
     return this.hostWaitStates.get(terminalId);
   }
 
+  isElevatedConsentDenied(): boolean {
+    return this.elevatedConsentDenied;
+  }
+
+  reconnectElevated(): void {
+    this.elevatedConsentDenied = false;
+    this.reconnectElevatedPromise = null;
+    if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+      window.dispatchEvent(new CustomEvent('pty:elevated-reconnect'));
+    }
+  }
+
   private setHostWaitState(terminalId: string, state: HostWaitState): void {
     if (state) this.hostWaitStates.set(terminalId, state);
     else this.hostWaitStates.delete(terminalId);
@@ -259,6 +277,38 @@ export class TerminalServiceClass {
     elevated: boolean = false,
     mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture,
   ): Promise<string> {
+    if (elevated) {
+      if (this.elevatedConsentDenied) {
+        throw new Error('ADMIN_UAC_CANCELLED');
+      }
+      if (this.reconnectElevatedPromise) {
+        try {
+          await this.reconnectElevatedPromise;
+        } catch (error) {
+          if (isAdminUacCancelled(error) || this.elevatedConsentDenied) {
+            throw new Error('ADMIN_UAC_CANCELLED');
+          }
+          throw error;
+        }
+        if (this.elevatedConsentDenied) {
+          throw new Error('ADMIN_UAC_CANCELLED');
+        }
+      }
+    }
+
+    let isElevatedFlightOwner = false;
+    let flightResolve: ((val: string) => void) | undefined;
+    let flightReject: ((err: any) => void) | undefined;
+    if (elevated && !this.reconnectElevatedPromise) {
+      isElevatedFlightOwner = true;
+      const flight = new Promise<string>((res, rej) => {
+        flightResolve = res;
+        flightReject = rej;
+      });
+      flight.catch(() => {});
+      this.reconnectElevatedPromise = flight;
+    }
+
     try {
       console.log(`TerminalService: Creating terminal ${terminalId} with shell type: "${shellType}", name: ${name}, cwd: ${cwd}`);
 
@@ -336,8 +386,20 @@ export class TerminalServiceClass {
       if (attemptPi) protocol.setRestoreResolved(attemptPi);
       this.bindCreated(terminalId, processId, owningTabId);
 
+      if (isElevatedFlightOwner) {
+        flightResolve?.(processId);
+        this.reconnectElevatedPromise = null;
+      }
+
       return processId;
     } catch (error) {
+      if (isElevatedFlightOwner) {
+        if (isAdminUacCancelled(error)) {
+          this.elevatedConsentDenied = true;
+        }
+        flightReject?.(error);
+        this.reconnectElevatedPromise = null;
+      }
       if (!isHostOwnershipPending(error) && !isLifecycleBusy(error)) {
         console.error('Failed to create terminal:', error);
         console.error('Shell type was:', shellType);

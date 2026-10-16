@@ -80,14 +80,30 @@ export function nativeProfilesForAdmin(
   return (state.settings.shellProfiles ?? []).filter((p) => !p.is_wsl);
 }
 
+const optimisticAdminTabIds = new Set<string>();
+
+export function markOptimisticAdminTab(tabId: string): void {
+  optimisticAdminTabIds.add(tabId);
+}
+
+export function takeOptimisticAdminTab(tabId: string): boolean {
+  return optimisticAdminTabIds.delete(tabId);
+}
+
+export function isOptimisticAdminTab(tabId: string): boolean {
+  return optimisticAdminTabIds.has(tabId);
+}
+
 /** Open a new elevated tab running `profile`, immediately after `afterTabId`
  *  when given (mirrors `openNewTabWithDefaultProfile`'s placement rule),
  *  otherwise appended. The pane leaf inherits `elevated: true` from the tab
  *  via `tabTreeSeed`, which is what actually routes the spawn (T8). */
 export function openAdminTabWithProfile(profile: ShellProfile, afterTabId?: string): void {
   const existing = store.getState().tabs.tabs.map((t) => t.title);
+  const id = generateId('tb');
+  markOptimisticAdminTab(id);
   store.dispatch(addTab({
-    id: generateId('tb'),
+    id,
     title: generateUniqueTabName(existing, profile.name),
     shellType: profile.id,
     icon: '🖥️',
@@ -96,19 +112,7 @@ export function openAdminTabWithProfile(profile: ShellProfile, afterTabId?: stri
   }));
 }
 
-/** True when `error` is the backend's UAC-deny sentinel (plan 045 AC6): the
- *  user declining the elevation prompt is a normal choice, not a failure, so
- *  callers use this to recognise it and undo state optimistically created
- *  before the spawn (e.g. `TerminalPane`'s create-catch) instead of showing
- *  an error. `ensure_elevated_host_inner` returns the sentinel UNWRAPPED
- *  (see `ADMIN_UAC_CANCELLED`'s own doc comment) specifically so this exact
- *  match works — mirrors `isHostSessionContended`'s error-shape handling. */
-export function isAdminUacCancelled(error: unknown): boolean {
-  const ADMIN_UAC_CANCELLED = 'ADMIN_UAC_CANCELLED';
-  return error instanceof Error
-    ? error.message === ADMIN_UAC_CANCELLED
-    : typeof error === 'string' && error === ADMIN_UAC_CANCELLED;
-}
+export { isAdminUacCancelled, ADMIN_UAC_CANCELLED } from './adminUacCancelled';
 
 /** Test seam. Production code sets this only via `initAdminTabSupport`. */
 export function __setAdminTabSupportForTests(support: AdminTabSupport): void {

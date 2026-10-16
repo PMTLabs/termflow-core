@@ -379,6 +379,11 @@ impl PtyHostClient {
         self.exe_origin.server_pid()
     }
 
+    /// Set the peer PID for inbound connections where GUI acts as server.
+    pub fn set_peer_pid(&self, pid: u32) {
+        self.exe_origin.set_server_pid(Some(pid));
+    }
+
     /// Whether an intentional exit must announce itself to this host.
     pub fn shutdown_control(&self) -> bool {
         self.shutdown_control.load(Ordering::Acquire)
@@ -822,6 +827,10 @@ impl PtyHostClient {
             log::warn!("[HOTSWAP] shutdown attempt {attempt}/{ATTEMPTS} got no ShutdownAck");
         }
         false
+    }
+
+    pub fn lifecycle_token(&self) -> &str {
+        &self.lifecycle_token
     }
 }
 

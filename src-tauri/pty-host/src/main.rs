@@ -48,36 +48,59 @@ fn restore_ctrl_c_processing() {
 #[cfg(not(windows))]
 fn restore_ctrl_c_processing() {}
 
-/// Arguments for the elevated dial-out mode (plan 045). Hand-parsed, like the
-/// rest of this binary's configuration — `ShellExecuteExW` (the launcher for
-/// this mode) has no environment-block parameter, so these cannot ride on
-/// env vars the way `TERMFLOW_PTY_PIPE` et al. do for the normal path.
+/// Arguments for the elevated dial-out mode (plan 045) or reconnect helper mode (plan 058).
+/// Hand-parsed, like the rest of this binary's configuration — `ShellExecuteExW`
+/// has no environment-block parameter.
 struct DialArgs {
     connect_pipe: String,
     token: Option<String>,
     log: Option<std::path::PathBuf>,
+    survivor_record: Option<std::path::PathBuf>,
+    reconnect_target: Option<u32>,
+    rendezvous_pipe: Option<String>,
+    gui_pipe: Option<String>,
+    gui_pid: Option<u32>,
 }
 
-/// `None` when `--connect-pipe` is absent — every other flag is meaningless
-/// without it, and a missing `--connect-pipe` must mean today's behaviour,
-/// bit for bit (plan 045 §4.3).
+/// `None` when neither `--connect-pipe` nor `--reconnect-target` is present.
 fn parse_dial_args() -> Option<DialArgs> {
     let mut args = std::env::args().skip(1);
     let mut connect_pipe = None;
     let mut token = None;
     let mut log = None;
+    let mut survivor_record = None;
+    let mut reconnect_target = None;
+    let mut rendezvous_pipe = None;
+    let mut gui_pipe = None;
+    let mut gui_pid = None;
+
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--connect-pipe" => connect_pipe = args.next(),
             "--token" => token = args.next(),
             "--log" => log = args.next().map(std::path::PathBuf::from),
+            "--survivor-record" => survivor_record = args.next().map(std::path::PathBuf::from),
+            "--reconnect-target" => reconnect_target = args.next().and_then(|s| s.parse::<u32>().ok()),
+            "--rendezvous-pipe" => rendezvous_pipe = args.next(),
+            "--gui-pipe" => gui_pipe = args.next(),
+            "--gui-pid" => gui_pid = args.next().and_then(|s| s.parse::<u32>().ok()),
             _ => {}
         }
     }
-    connect_pipe.map(|connect_pipe| DialArgs {
-        connect_pipe,
+
+    if connect_pipe.is_none() && reconnect_target.is_none() {
+        return None;
+    }
+
+    Some(DialArgs {
+        connect_pipe: connect_pipe.unwrap_or_default(),
         token,
         log,
+        survivor_record,
+        reconnect_target,
+        rendezvous_pipe,
+        gui_pipe,
+        gui_pid,
     })
 }
 
@@ -118,9 +141,54 @@ fn redirect_stdio_to(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Dial-out mode entry point (plan 045): connect to the GUI-hosted pipe,
-/// serve exactly that one connection, then return so the process exits —
-/// never falls through to the normal listener path below.
+#[cfg(windows)]
+async fn run_reconnect_helper(
+    reconnect_target: u32,
+    rendezvous_pipe: String,
+    gui_pipe: String,
+    gui_pid: u32,
+    token: String,
+) -> std::io::Result<()> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let stream = ClientOptions::new().open(&rendezvous_pipe)?;
+
+    let mut server_pid = 0u32;
+    use std::os::windows::io::AsRawHandle;
+    let handle = stream.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    extern "system" {
+        fn GetNamedPipeServerProcessId(
+            pipe: windows_sys::Win32::Foundation::HANDLE,
+            server_process_id: *mut u32,
+        ) -> windows_sys::Win32::Foundation::BOOL;
+    }
+    let ok = unsafe { GetNamedPipeServerProcessId(handle, &mut server_pid) };
+    if ok == 0 || server_pid != reconnect_target {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("rendezvous server pid mismatch: expected {reconnect_target}, got {server_pid}"),
+        ));
+    }
+
+    let req = termflow_pty_protocol::ElevatedRendezvousRequest {
+        version: termflow_pty_protocol::ELEVATED_RENDEZVOUS_VERSION,
+        gui_pid,
+        target_pipe: gui_pipe,
+        auth_token: token,
+    };
+    let mut stream = stream;
+    termflow_pty_protocol::write_rendezvous_request(&mut stream, &req).await?;
+
+    let resp = termflow_pty_protocol::read_rendezvous_response(&mut stream).await?;
+    match resp.status {
+        termflow_pty_protocol::ElevatedRendezvousStatus::Ok => Ok(()),
+        termflow_pty_protocol::ElevatedRendezvousStatus::Rejected(reason) => Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            format!("held host rejected rendezvous: {reason}"),
+        )),
+    }
+}
+
+/// Dial-out mode entry point (plan 045, updated plan 058).
 #[cfg(windows)]
 async fn run_dial_out_mode(args: DialArgs) {
     if let Some(log_path) = &args.log {
@@ -131,12 +199,30 @@ async fn run_dial_out_mode(args: DialArgs) {
             );
         }
     }
+
+    if let (Some(target), Some(rendezvous), Some(gui_pipe), Some(gui_pid), Some(token)) = (
+        args.reconnect_target,
+        args.rendezvous_pipe,
+        args.gui_pipe,
+        args.gui_pid,
+        args.token.clone(),
+    ) {
+        match run_reconnect_helper(target, rendezvous, gui_pipe, gui_pid, token).await {
+            Ok(()) => eprintln!("termflow-pty-host: [HELPER] rendezvous handshake succeeded"),
+            Err(e) => {
+                eprintln!("termflow-pty-host: [HELPER] rendezvous handshake failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     eprintln!(
         "termflow-pty-host: [ADMIN] dial-out mode, connecting to {}",
         args.connect_pipe
     );
     let endpoint = transport::Endpoint(args.connect_pipe);
-    match transport::dial::serve_dial(endpoint, args.token).await {
+    match transport::dial::serve_dial(endpoint, args.token, args.survivor_record).await {
         Ok(()) => eprintln!("termflow-pty-host: [ADMIN] dial-out connection ended, exiting"),
         Err(e) => eprintln!("termflow-pty-host: [ADMIN] dial-out serve failed: {e}"),
     }

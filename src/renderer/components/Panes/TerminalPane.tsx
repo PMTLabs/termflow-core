@@ -27,7 +27,7 @@ import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
-import { isAdminUacCancelled } from '../../services/adminTabActions';
+import { isAdminUacCancelled, takeOptimisticAdminTab } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminal } from '../Canvas/CanvasHiddenBadge';
@@ -99,6 +99,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const [startupFailed, setStartupFailed] = useState(false);
   const [waitingForHost, setWaitingForHost] = useState<HostWaitState>();
   const [retryAttempt, setRetryAttempt] = useState(0);
+  const [elevationRequired, setElevationRequired] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editName, setEditName] = useState(name || 'Terminal');
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
@@ -362,6 +363,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           return;
         }
         setWaitingForHost(undefined);
+        setElevationRequired(false);
         // Spend a provisional-recovery mark on its first settle, successful or
         // failed. A later create failure belongs to an established user pane.
         takeProvisionalRecovery(terminalId);
@@ -437,13 +439,22 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         const isProvisionalRecovery = takeProvisionalRecovery(terminalId);
         const state = store.getState();
 
-        // Plan 045 AC6: a denied UAC prompt is a normal user choice, not an
-        // error — undo the optimistic tab/pane `openAdminTabWithProfile`
-        // already created instead of leaving a permanently-broken
-        // "Administrator"-badged tab behind.
+        // Plan 045 AC6 / Plan 058 AC6: a denied UAC prompt is a normal user choice.
+        // For fresh optimistic tabs (`openAdminTabWithProfile`), undo the tab.
+        // For restored panes (carrying a session key or restored layout), retain the tab/tree
+        // and show the elevation-required reconnect banner instead of deleting the user's session.
         if (isAdminUacCancelled(error)) {
           const cancelTabId = findTabIdByTerminalId(state.panes.treesByTabId, terminalId);
           const cancelTree = cancelTabId ? state.panes.treesByTabId[cancelTabId] : null;
+          const isOptimistic = cancelTabId ? takeOptimisticAdminTab(cancelTabId) : false;
+          const sessionKey = findSessionKeyByTerminalId(state.panes.treesByTabId, terminalId);
+          const isRestored = !isOptimistic || !!sessionKey;
+          if (isRestored) {
+            console.info(`TerminalPane: Elevation required to reconnect running session for ${terminalId}`);
+            setElevationRequired(true);
+            setStartupFailed(false);
+            return;
+          }
           if (cancelTabId && cancelTree?.type === 'terminal' && cancelTree.terminalId === terminalId) {
             console.info(`TerminalPane: UAC prompt cancelled for ${terminalId}; removing tab ${cancelTabId}`);
             dispatch(removeTab(cancelTabId));
@@ -595,6 +606,20 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     return () => window.removeEventListener('pty:exit', onExit as EventListener);
   }, [terminalId, paneId, incarnation, processId]);
 
+  useEffect(() => {
+    const handleElevatedReconnect = () => {
+      if (elevationRequired) {
+        setElevationRequired(false);
+        setStartupFailed(false);
+        setRetryAttempt(attempt => attempt + 1);
+      }
+    };
+    window.addEventListener('pty:elevated-reconnect', handleElevatedReconnect);
+    return () => {
+      window.removeEventListener('pty:elevated-reconnect', handleElevatedReconnect);
+    };
+  }, [elevationRequired]);
+
   // Restart the session IN PLACE: spawn a fresh shell for the same pane id,
   // reusing the original profile + working directory. The process map and init
   // guards were already cleared when the old process exited, so createTerminal
@@ -603,7 +628,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // session's; the engine's hydrate() already skips reset() for a brand-new
   // process with an empty snapshot (see TerminalEngine.hydrate).
   const handleRestart = useCallback(async () => {
-    if (!terminalId || !currentCopy()) return;
+    if (!terminalId || !currentCopy() || elevationRequired) return;
     if (isRestartingRef.current) return;
     isRestartingRef.current = true;
     const pi = incarnation;
@@ -669,7 +694,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     } finally {
       isRestartingRef.current = false;
     }
-  }, [terminalId, paneId, incarnation, shellType, defaultProfile, tab?.title, shellProfiles, name, dispatch]);
+  }, [terminalId, paneId, incarnation, shellType, defaultProfile, tab?.title, shellProfiles, name, dispatch, elevationRequired]);
 
   const handleDismissBanner = useCallback(
     () => { if (terminalId) dispatch(clearSessionClosed({ terminalId })); },
@@ -920,6 +945,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               onRestartSession={restartSessionCb}
               onDismissSessionClosed={handleDismissBanner}
               onData={(data: string) => {
+                if (elevationRequired) return;
                 // Send data to PTY through terminal service
                 terminalService.writeToTerminal(terminalId, data).catch(console.error);
               }}
@@ -943,6 +969,21 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 dispatch(setAutoTabTitle({ id: owningTabId, title }));
               }}
             />
+          ) : terminalId && !processId && elevationRequired ? (
+            <div className="terminal-elevation-required" style={{ fontFamily, fontSize: effectiveFontSize }}>
+              <div className="terminal-elevation-message">
+                Administrator privileges required to reconnect to running session
+              </div>
+              <button
+                className="terminal-elevation-reconnect-button"
+                onClick={() => {
+                  setElevationRequired(false);
+                  terminalService.reconnectElevated();
+                }}
+              >
+                Reconnect as Administrator
+              </button>
+            </div>
           ) : terminalId && !processId && waitingForHost ? (
             <div className="terminal-startup-status" style={{ fontFamily, fontSize: effectiveFontSize }}>
               Waiting for terminal host{waitingForHost === 'waiting' ? '…' : '. The host has not answered.'}

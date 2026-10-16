@@ -439,6 +439,10 @@ impl HostKeys {
     #[cfg(test)]
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
+    pub fn channel_of_key(&self, key: &str) -> Option<HostChannel> {
+        self.lock().keys.keys().find(|(_, k)| k == key).map(|(c, _)| *c)
+    }
+
     #[cfg(test)]
     pub fn contains_key(&self, key: &str) -> bool { self.lock().keys.keys().any(|(_, k)| k == key) }
 

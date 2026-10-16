@@ -28,7 +28,6 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("commands/terminal.rs", &["run_create"], "original cg/pc/key and client epoch at publication/enqueue; admission ticket"),
     ("commands/terminal.rs", &["resize_terminal", "write_terminal"], "Registered original pc through host enqueue; retained local master/writer"),
     ("commands/update.rs", &["take_reattach_prompt_hook"], "exact non-reused pc prompt-hook removal"),
-    ("commands/update.rs", &["restart_for_update", "restart_keeping_terminals"], "retained quiesce/exit admission and exact clients"),
     ("commands/window.rs", &["reserve_window_id", "record_new_window", "create_detached_window", "open_new_window"], "stable-id prebind owned by build guard; native success commits and failure/unwind compare-restores prior binding"),
     ("commands/window.rs", &["close_all_hosts"], "exit owns closed admission; retained exact clients"),
     ("commands/window.rs", &["flush_all_windows", "open_settings_in_main_window", "set_active_window"], "out of scope window/flush intent; framework objects"),
@@ -96,7 +95,6 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("state/terminals.rs", &["note_duplicate_sessions"], "out of scope advisory duplicate notice"),
     ("state/types.rs", &["clear_if_current", "install_if_current", "take", "take_if_current"], "generation compare-and-take/install under caller-retained slot mutex; retained actual child returned"),
     ("tray.rs", &["build_tray"], "out of scope window intent; global exit owns retained clients/children"),
-    ("updater.rs", &["update_and_restart"], "out of scope legacy deliberate application restart"),
 ];
 
 fn production(source: &str) -> String {

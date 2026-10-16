@@ -192,7 +192,6 @@ impl SessionManager {
         self.teardown_grace = grace;
     }
 
-    #[cfg(test)]
     pub fn is_armed(&self) -> bool {
         self.armed_deadline.is_some()
     }
@@ -515,6 +514,11 @@ impl SessionManager {
             Control::ClaimMcp { token, .. } => self.expected_token.as_deref() == Some(token.as_str()),
             _ => false,
         }
+    }
+
+    /// Install a fresh expected token when adopting a new authenticated reconnect.
+    pub fn update_expected_token(&mut self, token: String) {
+        self.expected_token = Some(token);
     }
 
     /// Starts a fresh deadline only after the GUI's absence is confirmed.  An

@@ -304,7 +304,7 @@ const tabsSlice = createSlice({
       state,
       action: PayloadAction<{
         id: string;
-        patch: Partial<Pick<Tab, 'title' | 'shellType' | 'icon' | 'colorSchemaId' | 'titleColor' | 'titleIsCustom' | 'notifyMuted'>>;
+        patch: Partial<Pick<Tab, 'title' | 'shellType' | 'icon' | 'colorSchemaId' | 'titleColor' | 'titleIsCustom' | 'notifyMuted' | 'elevated'>>;
       }>,
     ) => {
       const tab = state.tabs.find(t => t.id === action.payload.id);
