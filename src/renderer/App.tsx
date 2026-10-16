@@ -77,9 +77,9 @@ import { StateManager } from './services/StateManager';
 import { resolvePostRestoreAction } from './services/postRestoreAction';
 import { terminalService } from './services/TerminalService';
 import { refreshLiveCwds, setCwdSnapshotByProcessId } from './services/cwdSnapshot';
-import { setInitialCwd } from './services/initialCwd';
 import './styles/App.css';
 import { generateId } from './utils/id';
+import { addTabRootedAt } from './services/folderTab';
 
 // config.json is hand-editable, so hydration validates against the known
 // weight set rather than trusting the string straight into xterm's option.
@@ -826,13 +826,9 @@ const App: React.FC = () => {
         icon: '🖥️',
       };
 
-      // "Open in TermFlow": root this default terminal at the requested folder. The root
-      // pane's terminalId === the tab id (TerminalContainer seeds it that way), so set the
-      // initial cwd BEFORE dispatching addTab so the pane spawns in that directory.
-      if (folderPath) setInitialCwd(newTab.id, folderPath);
-
       console.log('Dispatching addTab with:', newTab);
-      dispatch(addTab(newTab));
+      if (folderPath) addTabRootedAt(dispatch, newTab, folderPath);
+      else dispatch(addTab(newTab));
     }
   };
 
@@ -850,8 +846,7 @@ const App: React.FC = () => {
       shellType: defaultShell.id,
       icon: '🖥️',
     };
-    setInitialCwd(newTab.id, folderPath);
-    dispatch(addTab(newTab));
+    addTabRootedAt(dispatch, newTab, folderPath);
   };
 
   const handleExternalActivity = (event: CustomEvent) => {
