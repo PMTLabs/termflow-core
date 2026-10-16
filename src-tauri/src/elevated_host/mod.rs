@@ -95,6 +95,17 @@ impl ElevatedHost {
         self.client_clone().is_some_and(|c| c.is_alive())
     }
 
+    #[cfg(windows)]
+    pub fn is_connected_to_pid(&self, pid: u32) -> bool {
+        self.client_clone().is_some_and(|client| client.is_alive())
+            && self
+                .proc
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .is_some_and(|proc| proc.pid == pid)
+    }
+
     pub fn current_gen(&self) -> u64 {
         self.gen.load(Ordering::Acquire)
     }

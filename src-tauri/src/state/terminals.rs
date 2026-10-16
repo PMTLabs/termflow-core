@@ -724,9 +724,15 @@ impl<R: Runtime> AppState<R> {
                         } else {
                             unsafe { CloseHandle(handle) };
                             let _ = termflow_pty_protocol::rendezvous::remove_elevated_survivor_if_owned(path, rec.instance_id);
+                            if let Some(stand_down_path) = termflow_pty_protocol::rendezvous::elevated_stand_down_path_for_survivor(path) {
+                                let _ = termflow_pty_protocol::rendezvous::remove_elevated_stand_down_if_owned(&stand_down_path, rec.instance_id);
+                            }
                         }
                     } else {
                         let _ = termflow_pty_protocol::rendezvous::remove_elevated_survivor_if_owned(path, rec.instance_id);
+                        if let Some(stand_down_path) = termflow_pty_protocol::rendezvous::elevated_stand_down_path_for_survivor(path) {
+                            let _ = termflow_pty_protocol::rendezvous::remove_elevated_stand_down_if_owned(&stand_down_path, rec.instance_id);
+                        }
                     }
                 }
             }

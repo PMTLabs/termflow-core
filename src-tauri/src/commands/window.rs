@@ -195,16 +195,10 @@ pub fn disarm_then_exit(app: &tauri::AppHandle) {
 }
 
 /// Everything a quit does to the shells' hosts, short of exiting: release every
-/// pty-host this instance owns — the current one, any older one that survived
-/// an update, and the elevated one, connected or not; see `AppState::exit_hosts` —
-/// then close the elevated transport and stop admitting elevated sessions. Whether
-/// the elevated host's shells die or are held is decided by `exit_hosts`, exactly as
-/// for the others: only an armed host holds. A no-op if no admin tab was ever opened
-/// this run.
-///
-/// Known limit: a held survivor this run never reconnected to (UAC declined, or quit
-/// before any admin tab reattached) cannot be told to stop from here without elevating,
-/// so it ends with its own bounded hold (15 minutes of active time).
+/// pty-host this instance owns, then close the elevated transport and stop admitting
+/// elevated sessions. Before closing that transport, signal a live held elevated
+/// survivor this run never reconnected to; the signal is instance-scoped and does not
+/// elevate. A connected elevated host is shut down through its existing transport.
 ///
 /// With `bounds`, the hosts get that long and no more, for a caller that has
 /// something else waiting for it (an update that has started its updater).
@@ -214,10 +208,136 @@ pub(crate) async fn close_all_hosts(app: &tauri::AppHandle, bounds: Option<Close
     // Clone out of the `State` borrow before awaiting.
     let state = app.try_state::<AppState>().map(|s| s.inner().clone());
     if let Some(state) = &state {
+        stand_down_unreconnected_survivor(state);
         state.exit_hosts_within(bounds).await;
     }
     if let Some(elevated) = state.map(|s| s.elevated_host.clone()) {
         elevated.shutdown().await;
+    }
+}
+
+#[cfg(windows)]
+fn stand_down_unreconnected_survivor(state: &AppState) {
+    let Some(runtime_dir) = crate::pty_host_client::runtime_host_dir() else { return };
+    let profile_key = crate::profile::current().info().key;
+    let survivor_path = runtime_dir.join(format!("elevated-survivor-{profile_key}.json"));
+    let result = stand_down_unreconnected_survivor_with(
+        &survivor_path,
+        |path| match termflow_pty_protocol::rendezvous::read_elevated_survivor(path) {
+            Ok(record) => record,
+            Err(error) => {
+                log::warn!("[ADMIN] could not read elevated survivor record before quit: {error}");
+                None
+            }
+        },
+        survivor_record_is_live,
+        |pid| state.elevated_host.is_connected_to_pid(pid),
+        termflow_pty_protocol::rendezvous::request_elevated_stand_down,
+    );
+    if let Err(error) = result {
+        log::warn!("[ADMIN] could not request elevated survivor stand-down: {error}");
+    }
+}
+
+#[cfg(not(windows))]
+fn stand_down_unreconnected_survivor(_state: &AppState) {}
+
+#[cfg(windows)]
+fn stand_down_unreconnected_survivor_with(
+    survivor_path: &std::path::Path,
+    read_record: impl FnOnce(&std::path::Path) -> Option<termflow_pty_protocol::ElevatedSurvivorRecord>,
+    is_live: impl FnOnce(&termflow_pty_protocol::ElevatedSurvivorRecord) -> bool,
+    is_connected: impl FnOnce(u32) -> bool,
+    request: impl FnOnce(&std::path::Path, u128) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let Some(record) = read_record(survivor_path) else { return Ok(()) };
+    if !is_live(&record) || is_connected(record.host_pid) {
+        return Ok(());
+    }
+    let Some(stand_down_path) = termflow_pty_protocol::rendezvous::elevated_stand_down_path_for_survivor(survivor_path) else {
+        return Ok(());
+    };
+    request(&stand_down_path, record.instance_id)
+}
+
+#[cfg(windows)]
+fn survivor_record_is_live(record: &termflow_pty_protocol::ElevatedSurvivorRecord) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const SYNCHRONIZE: u32 = 0x0010_0000;
+    const STILL_ACTIVE: u32 = 259;
+    // SAFETY: each process query uses a valid handle and closes it before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, record.host_pid);
+        if handle.is_null() || (handle as isize) == -1 {
+            return false;
+        }
+        let mut exit_code = 0u32;
+        let ok_code = GetExitCodeProcess(handle, &mut exit_code) != 0;
+        let mut creation = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut exit = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut kernel = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let ok_time = GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) != 0;
+        let creation_time = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        let live = ok_code && exit_code == STILL_ACTIVE && ok_time && creation_time == record.host_creation_time;
+        CloseHandle(handle);
+        live
+    }
+}
+
+#[cfg(all(test, windows))]
+mod stand_down_tests {
+    use super::*;
+
+    fn record() -> termflow_pty_protocol::ElevatedSurvivorRecord {
+        termflow_pty_protocol::ElevatedSurvivorRecord {
+            format: 1,
+            user_sid: "S-1-5-21-test".into(),
+            host_pid: 2345,
+            host_creation_time: 6789,
+            instance_id: 0xDEADBEEF_CAFE_1234,
+            rendezvous_pipe: r"\\.\pipe\termflow-admin-rendezvous.test.2345.nonce".into(),
+            proto_min: 1,
+            proto_max: 1,
+            capabilities: 0,
+        }
+    }
+
+    fn run_case(tag: &str, record: Option<termflow_pty_protocol::ElevatedSurvivorRecord>, live: bool, connected: bool) -> Option<u128> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("termflow-app-standdown-{}-{nonce}-{tag}", std::process::id()));
+        let survivor_path = dir.join("elevated-survivor-default.json");
+        let stand_down_path = dir.join("elevated-standdown-default.json");
+        stand_down_unreconnected_survivor_with(
+            &survivor_path,
+            |_| record,
+            |_| live,
+            |pid| {
+                assert_eq!(pid, 2345);
+                connected
+            },
+            termflow_pty_protocol::rendezvous::request_elevated_stand_down,
+        )
+        .unwrap();
+        let requested = termflow_pty_protocol::rendezvous::read_elevated_stand_down(&stand_down_path);
+        let _ = std::fs::remove_file(stand_down_path);
+        let _ = std::fs::remove_dir(dir);
+        requested
+    }
+
+    #[test]
+    fn stand_down_unreconnected_survivor_signals_only_live_unconnected_records() {
+        let rec = record();
+        assert_eq!(run_case("live-unconnected", Some(rec.clone()), true, false), Some(rec.instance_id));
+        assert_eq!(run_case("no-record", None, true, false), None);
+        assert_eq!(run_case("connected", Some(rec.clone()), true, true), None);
+        assert_eq!(run_case("dead", Some(rec), false, false), None);
     }
 }
 
@@ -865,6 +985,9 @@ mod quit_teardown_wiring_tests {
             panic!("the quit must release every owned host via `exit_hosts_within(..).await`. Body:\n{close}")
         });
         let elevated_at = close.find("elevated.shutdown(").expect("the elevated host is torn down too");
+        let stand_down_at = close.find("stand_down_unreconnected_survivor(state)")
+            .expect("the quit signals an abandoned held survivor before closing the elevated transport");
+        assert!(stand_down_at < elevated_at, "the stand-down signal is written before the elevated transport closes. Body:\n{close}");
         assert!(hosts_at < elevated_at, "the owned hosts are released first. Body:\n{close}");
         let quit = strip_line_comments(&fn_body(&window, "pub fn disarm_then_exit"));
         assert!(
