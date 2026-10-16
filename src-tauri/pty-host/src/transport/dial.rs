@@ -12,8 +12,12 @@
 //!   hold: the sessions are torn down and the host exits, since nothing is waiting to reconnect.
 //! - During Hold, it binds a High-Integrity rendezvous pipe:
 //!   `\\.\pipe\termflow-admin-rendezvous.<user-sid>.<host-pid>.<nonce>`
-//!   (the nonce is chosen when the Hold begins, so the name cannot be pre-created by another
-//!   process) secured with SDDL `O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;HI)`.
+//!   (the nonce is chosen when the Hold begins; the pipe is created, by `Listener::bind`,
+//!   before the name is published in the survivor record, so no one can claim it first)
+//!   secured with SDDL `O:{sid}D:P(A;;GA;;;{sid})S:(ML;;NWNR;;;HI)`. The name is not a secret
+//!   from this user's other processes, which can read the record: between two connections a
+//!   same-user process can take the name and deny reconnects until the hold ends, but it cannot
+//!   obtain a token (the reconnect helper checks the server's pid first).
 //!   Holding requires an elevated token: with anything less the host tears down instead.
 //! - It publishes an elevated survivor record to the update-stable path.
 //! - Upon UAC reconnection, the High helper verifies server identity and sends
@@ -317,14 +321,17 @@ pub async fn serve_dial(
 
                 // Stay reachable until the deadline: one failed reconnect attempt (the GUI pipe
                 // went away, a stray request) must not end a host that is still holding sessions.
-                let mut wait_deadline = deadline;
+                let wait_deadline = deadline;
                 let reconnected = loop {
                     match wait_for_rendezvous(&mut rendezvous_listener, &mgr, wait_deadline, &clock).await {
                         RendezvousWaitResult::Reconnected(info) => {
-                            wait_deadline = info.deadline;
-                            mgr.update_expected_token(info.auth_token);
                             match dial_and_verify(&Endpoint(info.target_pipe), Some(info.gui_pid)).await {
-                                Ok(new_stream) => break Some((new_stream, info.deadline)),
+                                Ok(new_stream) => {
+                                    // Only a reconnect that was verified changes what the host
+                                    // expects or how long it holds.
+                                    mgr.update_expected_token(info.auth_token);
+                                    break Some((new_stream, info.deadline));
+                                }
                                 Err(e) => {
                                     log::error!("failed to dial reconnecting GUI pipe: {e}; still holding");
                                     continue;

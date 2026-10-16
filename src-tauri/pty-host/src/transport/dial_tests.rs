@@ -54,7 +54,7 @@ async fn no_args_still_listens() {
 }
 
 #[tokio::test]
-async fn dials_the_named_pipe_serves_a_spawn_then_tears_down_on_an_unarmed_eof() {
+async fn dials_the_named_pipe_serves_a_spawn_then_ends_it_and_exits_on_an_unarmed_eof() {
     let ep = test_endpoint("dial-spawn");
     let mut gui_listener = Listener::bind(&ep).unwrap();
 
@@ -62,34 +62,39 @@ async fn dials_the_named_pipe_serves_a_spawn_then_tears_down_on_an_unarmed_eof()
     let sidecar = tokio::spawn(serve_dial(sidecar_ep, Some("tok".into()), None));
 
     let mut gui = gui_listener.accept().await.unwrap();
+    // `/k`: the shell stays alive, so only a teardown can end it.
     write_frame(
         &mut gui,
         &Frame::Ctrl(Control::Spawn {
             req: 1,
             tab_id: "t1".into(),
-            spec: persist_spec(false),
+            spec: persist_spec(true),
         }),
     )
     .await
     .unwrap();
 
     let mut got = String::new();
+    let mut shell_pid = None;
     let _ = tokio::time::timeout(Duration::from_secs(15), async {
         while let Ok(Some(f)) = read_frame(&mut gui).await {
-            if let Frame::Data(Data::Stdout { bytes, .. }) = f {
-                got.push_str(&String::from_utf8_lossy(&bytes));
-                if got.contains("persist") {
-                    break;
-                }
+            match f {
+                Frame::Resp(Response::Spawned { pid, .. }) => shell_pid = Some(pid),
+                Frame::Data(Data::Stdout { bytes, .. }) => got.push_str(&String::from_utf8_lossy(&bytes)),
+                _ => {}
+            }
+            if shell_pid.is_some() && got.contains("persist") {
+                break;
             }
         }
     })
     .await;
     assert!(got.contains("persist"), "dial-out sidecar served the spawn");
+    let shell_pid = shell_pid.expect("the spawn was answered with a pid");
+    assert!(pid_is_alive(shell_pid), "the shell is running before the GUI goes away");
 
-    // GUI closes its end — the sidecar must exit rather than loop back to
-    // accept a second connection: dial-out mode has no Hold path to fall
-    // into, by construction (`survivable: false` in `serve_dial`).
+    // The GUI goes away without ever arming the host: nothing is waiting to reconnect, so the
+    // sidecar must end the session and exit rather than hold it or loop back to accept.
     drop(gui);
     drop(gui_listener);
     let result = tokio::time::timeout(Duration::from_secs(5), sidecar).await;
@@ -97,6 +102,31 @@ async fn dials_the_named_pipe_serves_a_spawn_then_tears_down_on_an_unarmed_eof()
         result.is_ok(),
         "dial-out sidecar must exit promptly on EOF, not wait for a reconnect"
     );
+    let mut gone = false;
+    for _ in 0..50 {
+        if !pid_is_alive(shell_pid) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(gone, "an unarmed disconnect must tear the shell down, not leave it running");
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain Win32 queries; the handle is closed on every path.
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if h.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(h, &mut code);
+        CloseHandle(h);
+        ok != 0 && code == STILL_ACTIVE as u32
+    }
 }
 
 #[tokio::test]

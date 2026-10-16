@@ -887,8 +887,10 @@ impl<R: Runtime> AppState<R> {
         // KNOWN GAP (deferred): sessions the host lists that no restored pane claims are not
         // surfaced as recovered tabs the way the primary's are (`surface_orphans`). A recovered
         // tab would have to be created elevated, which needs the renderer to mint an elevated
-        // pane for a key it never asked for; until then such a session stays listed, is
-        // reattached if its pane is restored, and ends with the host's hold or the next quit.
+        // pane for a key it never asked for; until then such a session stays listed and is
+        // reattached if its pane is restored. Once this client is connected the host's hold is
+        // over, so an unclaimed session lives until the last claimed one closes (the host then
+        // shuts down idle) or the next quit.
         // A held host answers this in milliseconds; a slow answer is retried rather than read as
         // "no sessions". If a RECONNECTED survivor still cannot list its sessions, publishing it
         // would leave live shells nobody can see or close, so the attempt fails instead.
@@ -905,6 +907,11 @@ impl<R: Runtime> AppState<R> {
                 client.apply_listing_on(self.host_table.keys(), HostChannel::Elevated, &listing, std::time::Instant::now(), |_| false);
             }
             None if is_survivor_reconnect => {
+                // The client was wired and its epoch published above; undo both so the failed
+                // attempt leaves no route behind. The host sees the pipe close and decides for
+                // itself (it tears down: this connection has already been accepted as the GUI).
+                client.close_transport().await;
+                self.host_table.routes().remove_epoch(HostChannel::Elevated, epoch);
                 return Err("the surviving elevated pty-host did not list its sessions".to_string());
             }
             None => {}
