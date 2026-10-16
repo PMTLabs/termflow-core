@@ -708,7 +708,14 @@ impl<R: Runtime> AppState<R> {
                         let mut user = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
                         let ok_time = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
                         let creation_u64 = ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
-                        if ok_code && exit_code == STILL_ACTIVE && ok_time && creation_u64 == rec.host_creation_time {
+                        // The record is writable by any process of this user and its pipe name goes onto the
+                        // command line of an ELEVATED helper, so a name that is not plainly a
+                        // rendezvous pipe is dropped like a stale record, never launched.
+                        let pipe_ok = termflow_pty_protocol::is_valid_rendezvous_pipe_name(&rec.rendezvous_pipe);
+                        if !pipe_ok {
+                            log::warn!("[ADMIN] ignoring survivor record with a malformed rendezvous pipe name");
+                        }
+                        if pipe_ok && ok_code && exit_code == STILL_ACTIVE && ok_time && creation_u64 == rec.host_creation_time {
                             let proc = crate::elevated_host::launch::LaunchedProcess::from_handle(
                                 rec.host_pid,
                                 windows::Win32::Foundation::HANDLE(handle as _),
@@ -728,6 +735,7 @@ impl<R: Runtime> AppState<R> {
         let listener = crate::elevated_host::pipe_server::AdminPipeListener::create(&profile_key)
             .map_err(|e| format!("could not create the admin pipe: {e}"))?;
 
+        let is_survivor_reconnect = survivor_record.is_some();
         let (launched, token, stream) = if let Some((survivor, survivor_proc)) = survivor_record {
             let fresh_token = uuid::Uuid::new_v4().simple().to_string();
             let gui_pid = std::process::id();
@@ -822,7 +830,7 @@ impl<R: Runtime> AppState<R> {
             // unindex, cleanup, emit) — kept as its own closure rather than
             // shared, so a change to one sidecar's exit handling can never
             // silently move the other's (see also `on_disconnect` below, which
-            // is NOT identical: elevated never reconnects).
+            // is NOT identical: this client never reconnects in place).
             on_exit: Arc::new(move |process_id: String, session_key: String, exit_cwd: Option<String>| {
                 use tauri::Emitter;
                 let cwd = exit_cwd
@@ -841,10 +849,11 @@ impl<R: Runtime> AppState<R> {
             resolve_process: Arc::new(move |k: &str| host_registry::resolve_inbound(
                 &st_resolve.host_terminals, &st_resolve.host_table, HostChannel::Elevated, epoch, k,
             )),
-            // Plan 045 §5 / R6: the elevated channel is NEVER reconnected — a
-            // held session recovering into a re-prompted or nonexistent UAC
-            // flow would be worse than just ending it. Every terminal still
-            // registered as `Elevated` ends exactly like a normal pty exit.
+            // This client is never reconnected in place: when its pipe drops, every
+            // terminal still registered as `Elevated` ends exactly like a normal pty exit.
+            // A host that was armed for an update outlives this process and is re-adopted
+            // by the NEXT process through its survivor record and rendezvous pipe
+            // (plan 058), which is a fresh launch of the reconnect helper, not this closure.
             on_disconnect: Arc::new(move || {
                 if st_disc.elevated_host.current_gen() != my_gen {
                     return;
@@ -875,9 +884,30 @@ impl<R: Runtime> AppState<R> {
         client.bind_sessions(self.host_table.keys(), HostChannel::Elevated, epoch);
 
         // Mandatory cold session listing adoption (plan 058 §3.4 / Blocker 7)
-        if let Some(listing) = client.list_sessions_numbered_within(std::time::Duration::from_secs(5)).await {
-            log::info!("[ADMIN] adopting {} sessions from elevated host", listing.len());
-            client.apply_listing_on(self.host_table.keys(), HostChannel::Elevated, &listing, std::time::Instant::now(), |_| false);
+        // KNOWN GAP (deferred): sessions the host lists that no restored pane claims are not
+        // surfaced as recovered tabs the way the primary's are (`surface_orphans`). A recovered
+        // tab would have to be created elevated, which needs the renderer to mint an elevated
+        // pane for a key it never asked for; until then such a session stays listed, is
+        // reattached if its pane is restored, and ends with the host's hold or the next quit.
+        // A held host answers this in milliseconds; a slow answer is retried rather than read as
+        // "no sessions". If a RECONNECTED survivor still cannot list its sessions, publishing it
+        // would leave live shells nobody can see or close, so the attempt fails instead.
+        let mut listing = None;
+        for _ in 0..3 {
+            listing = client.list_sessions_numbered_within(std::time::Duration::from_secs(5)).await;
+            if listing.is_some() {
+                break;
+            }
+        }
+        match listing {
+            Some(listing) => {
+                log::info!("[ADMIN] adopting {} sessions from elevated host", listing.len());
+                client.apply_listing_on(self.host_table.keys(), HostChannel::Elevated, &listing, std::time::Instant::now(), |_| false);
+            }
+            None if is_survivor_reconnect => {
+                return Err("the surviving elevated pty-host did not list its sessions".to_string());
+            }
+            None => {}
         }
 
         self.elevated_host.publish(client, launched).await
@@ -910,7 +940,8 @@ impl<R: Runtime> AppState<R> {
     /// (offsets have advanced past what the first pass consumed).
     ///
     /// Primary-only by design: an older host recovers from its own drop
-    /// (`reconnect_frozen`), and an elevated session is never reconnected.
+    /// (`reconnect_frozen`), and the elevated client is never reconnected in place
+    /// (a held elevated host is re-adopted by the next process instead).
     pub async fn reconnect_after_pipe_drop(&self) {
         // Single-flight (see host_recovering): a second flap queues here and
         // re-snapshots offsets once the first pass is done.
@@ -997,8 +1028,8 @@ impl<R: Runtime> AppState<R> {
     /// channel filter, an elevated tab would appear in a primary pipe drop's
     /// `tabs` but never in the primary's own `ListSessions` answer, so the
     /// drop would classify every open admin tab as "lost" and tear it down
-    /// (plan 045 §5: an elevated session is never reconnected — the elevated
-    /// host self-exits on EOF instead). A check that must hold whichever
+    /// (the elevated client is not reconnected in place; the elevated host
+    /// tears down or holds on its own side). A check that must hold whichever
     /// channel owns the key uses `session_registered_on_any_channel`.
     ///
     /// **The pty-host speaks only session keys.** `host_terminals`,
