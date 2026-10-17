@@ -294,7 +294,7 @@ async fn a_quit_stops_a_queued_send_and_never_splits_one_already_typing() {
 
         let writes = fake.written();
         assert_eq!(writes.len(), 3, "paste, focus-in, submit: {:?}", writes);
-        assert_eq!(writes[2], "\x1b\r\r", "the submit itself: {:?}", writes);
+        assert_eq!(writes[2], "\r", "the submit itself: {:?}", writes);
         assert_eq!(
             engine.runtime.arm_state("au-1", "tm-1"),
             ArmState::Fired { at_ms: 1_000 },

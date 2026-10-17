@@ -150,9 +150,10 @@ Note: Stdio mode spawns a new process per client and does not share sessions bet
 
 ### Picking a `cliType`
 
-`cliType` selects the submit keystroke and defaults to `copilot` (`Down-Arrow + Enter`), which is
-wrong for agent TUIs — Down-Arrow navigates message history there. Use `codex` / `opencode`
-(plain Enter) for those, or `submissionSignal` to supply a sequence directly.
+`cliType` selects the submit keystroke and defaults to `copilot`. Every agent type (`claude`,
+`codex`, `copilot`, `pi`, `opencode`, `agy`, `gemini`) submits on a single Enter (`\r`); anything
+more is an extra keystroke — `Esc + Enter` is Alt+Enter, a newline in Claude Code. For a TUI with
+no built-in type, use `submissionSignal` to supply a sequence directly.
 
 Codex additionally absorbs an Enter that arrives in the same PTY read as the end of the pasted
 text, leaving the prompt sitting unsubmitted in its composer. A settle delay between the paste and

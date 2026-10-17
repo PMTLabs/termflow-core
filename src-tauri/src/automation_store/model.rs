@@ -341,7 +341,7 @@ pub struct ActionStep {
     #[serde(default = "default_true")]
     pub submit: bool,
     /// Q1's hybrid: route A's paste / settle / submit with an explicit CLI type rather than route A's
-    /// own default of `"copilot"` (Down-Arrow + CR), which navigates history in a plain shell.
+    /// own default of `"copilot"`.
     #[serde(default = "default_cli_type")]
     pub cli_type: String,
     /// Whether `$1`, `$2`, `${name}` in `message` are replaced with the pattern's captures.

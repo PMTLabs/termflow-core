@@ -10,28 +10,27 @@ use super::terminals::{emit_external_activity, write_data_to_terminal};
 
 // CLI prompt patterns for AI integration
 pub(crate) fn get_cli_pattern(cli_type: &str) -> Option<(&'static str, &'static str)> {
-    // OS-aware line endings for raw PTY input
-    let shell_enter = if cfg!(target_os = "windows") { "\r\n" } else { "\r" };
-    
+    // Every agent TUI and shell submits on ONE plain CR — the byte xterm.js itself sends for
+    // Enter. Anything extra is a keystroke of its own, verified live on Windows 2026-10-16:
+    // - `\r\n` (the old Windows shell pattern): the LF is a second Enter, leaving a stray `>>`
+    //   continuation prompt in PowerShell 7.
+    // - `\x1b\r\r` (the old claude pattern): `ESC CR` is Alt+Enter, which Claude Code reads as
+    //   "insert newline", so every prompt was submitted with a trailing blank line.
+    // - `\x1b[B\r` (the old copilot pattern): Copilot CLI 1.0.96 left the prompt unsubmitted in
+    //   its composer, twice in a row; Down-Arrow also navigates history in codex/opencode.
+    // Tested with a single CR: codex-cli 0.162.1, Claude Code (Haiku 5.5), Copilot CLI 1.0.96,
+    // pi, opencode 1.18.23, Antigravity CLI (agy) 1.4.0, PowerShell 7 and cmd.exe. See the
+    // paste/submit race note on `automation::send::PASTE_SUBMIT_GAP_MS` — codex swallows a CR
+    // that arrives in the same read chunk as the paste.
     match cli_type {
-        "claude" => Some(("", "\x1b\r\r")), // Escape + two carriage returns (universal for Claude CLI)
-        "gemini" | "gemini-probe" => Some(("", "\r")), // Temporary override per user
-        // Codex and opencode TUIs submit on a plain CR. Deliberately NOT the copilot
-        // pattern: Down-Arrow navigates composer/message history in both, so
-        // `\x1b[B\r` risks submitting the wrong buffer. Verified live against
-        // codex-cli 0.146.0 and opencode 1.18.9. See the paste/submit race note in
-        // `send_prompt_to_terminal` — codex swallows a same-read-chunk CR, opencode
-        // does not.
-        "codex" | "codex-probe" => Some(("", "\r")),
-        "opencode" | "opencode-probe" => Some(("", "\r")),
-        "pi" | "pi-probe" => Some(("", "\r")),
-        "chatgpt" => Some(("", shell_enter)),
-        "copilot" | "copilot-probe" => Some(("", "\x1b[B\r")), // Down Arrow + Enter for interactive menu bypass
+        "claude" | "gemini" | "gemini-probe" | "codex" | "codex-probe" | "opencode"
+        | "opencode-probe" | "pi" | "pi-probe" | "agy" | "agy-probe" | "chatgpt" | "copilot"
+        | "copilot-probe" => Some(("", "\r")),
         "default" | "shell" => {
             if cfg!(target_os = "macos") {
                 Some(("", "\r\x0c"))
             } else {
-                Some(("", shell_enter))
+                Some(("", "\r"))
             }
         },
         _ => {
@@ -444,11 +443,16 @@ mod tests {
 
     #[test]
     fn get_cli_pattern_submits_agent_tuis_with_a_plain_cr() {
-        // Regression guard: codex/opencode must NOT inherit copilot's Down-Arrow
-        // (`\x1b[B\r`), which navigates message history in both TUIs.
-        assert_eq!(get_cli_pattern("codex"), Some(("", "\r")));
-        assert_eq!(get_cli_pattern("opencode"), Some(("", "\r")));
-        assert_eq!(get_cli_pattern("copilot"), Some(("", "\x1b[B\r")));
+        // Regression guard: every agent submits on exactly one CR. An extra byte is an extra
+        // keystroke — `ESC CR` is Alt+Enter (a newline in Claude Code), a trailing LF is a
+        // second Enter in a Windows shell, Down-Arrow navigates history.
+        for cli in ["claude", "codex", "copilot", "pi", "opencode", "agy", "gemini", "chatgpt"] {
+            assert_eq!(get_cli_pattern(cli), Some(("", "\r")), "{} must submit on one CR", cli);
+        }
+        if !cfg!(target_os = "macos") {
+            assert_eq!(get_cli_pattern("default"), Some(("", "\r")));
+            assert_eq!(get_cli_pattern("shell"), Some(("", "\r")));
+        }
         // Unknown types still reject, so a typo'd cliType fails loudly (400)
         // rather than silently sending the wrong keystrokes.
         assert_eq!(get_cli_pattern("codexx"), None);

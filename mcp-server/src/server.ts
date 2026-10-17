@@ -133,8 +133,8 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 command: z.string().describe(
                     "The command string to execute. Pass an EMPTY string for a bare submit: it skips the paste and sends only the submit keystroke, which presses Enter on a composer that already holds text (use it when a TUI left your prompt sitting unsubmitted)."
                 ),
-                cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot", "codex", "opencode"]).optional().describe(
-                    "The CLI personality/keystroke pattern. Defaults to copilot if omitted. Use `codex` or `opencode` for those TUIs — they submit on a plain Enter, whereas the copilot default prefixes a Down-Arrow that navigates message history in them."
+                cliType: z.enum(["default", "claude", "gemini", "chatgpt", "copilot", "codex", "opencode", "pi", "agy"]).optional().describe(
+                    "The CLI personality/keystroke pattern. Defaults to copilot if omitted. Every agent TUI listed here submits on a single Enter (CR); `default` is a shell."
                 ),
                 submissionSignal: z.string().optional().describe("Raw escape sequence to use as the submit keystroke, overriding cliType's pattern (e.g. \"\\r\"). For TUIs with no built-in pattern."),
                 useBracketedPaste: z.boolean().optional().describe("Whether to use bracketed paste mode for the prompt (more reliable for long inputs)"),
