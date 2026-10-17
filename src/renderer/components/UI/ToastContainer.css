@@ -1,6 +1,9 @@
+/* The app draws its own 40px title bar (TitleBar.css .title-bar) carrying the tabs, settings
+   and window controls, so the default top-right position must start below it — at `top: 24px`
+   the stack covered the tab strip and the minimize/maximize/close buttons. */
 .toast-container {
   position: fixed;
-  top: 24px;
+  top: 56px;
   right: 24px;
   z-index: 10000;
   display: flex;
