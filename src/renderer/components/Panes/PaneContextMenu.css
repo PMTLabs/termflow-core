@@ -122,37 +122,18 @@
   font-size: 11px;
 }
 
-/* Accordion panel for the agent Color Schema section (base .color-schema-*
-   styles come from SettingsPage.css; this only adds the menu-scoped layout,
-   mirroring TabContextMenu.css). */
+/* Inline accordion panel, still used by the Automation section's rows. The Color scheme /
+   Pane Color / Open admin Tab submenus are hover flyouts (`SubmenuFlyoutHost.css`; the
+   Color scheme grid sizing lives there under `.submenu-flyout-panel--wide`). */
 .pane-context-menu .context-menu-subpanel {
   padding: 8px 12px;
   background-color: #252526;
 }
 
-.pane-context-menu .color-schema-grid {
-  grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
-  max-height: 220px;
-  overflow-y: auto;
-  padding-right: 6px;
-}
-
-.pane-context-menu .color-schema-grid::-webkit-scrollbar {
-  width: 10px;
-}
-
-.pane-context-menu .color-schema-grid::-webkit-scrollbar-track {
-  background: #252526;
-}
-
-.pane-context-menu .color-schema-grid::-webkit-scrollbar-thumb {
-  background-color: #555;
-  border-radius: 5px;
-  border: 2px solid #252526;
-}
-
-.pane-context-menu .color-schema-grid::-webkit-scrollbar-thumb:hover {
-  background-color: #777;
+/* Keep the parent item lit while its flyout is open — mirrors TabContextMenu.css. */
+.pane-context-menu .context-menu-item.is-submenu-open:not(:disabled) {
+  background-color: #094771;
+  color: #ffffff;
 }
 
 .pane-context-menu .tab-color-swatches {

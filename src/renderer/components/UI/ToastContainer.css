@@ -1,11 +1,11 @@
 /* The default top-right position must clear the chrome above the terminal pane: the 40px title bar
    (TitleBar.css .title-bar), the 35px tab bar (TabBar.css .tab-bar) and the 30px pane header
-   (TerminalPane.css .terminal-pane-header) — 105px in total, plus a small gap. The pane's agent
-   chip (AgentChip.css .agent-chip) sits inside that header's band, so it is covered too if this
-   is any higher. */
+   (TerminalPane.css .terminal-pane-header) — 105px in total. The stack sits at 95px, 17px above
+   the 112px that fully cleared the header, because that was too far down; it therefore overlaps
+   the lower part of the pane header band (where the agent chip sits). */
 .toast-container {
   position: fixed;
-  top: 112px;
+  top: 95px;
   right: 24px;
   z-index: 10000;
   display: flex;

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useSelector, useDispatch } from 'react-redux';
 import { store, RootState } from '../../store';
@@ -13,6 +13,8 @@ import { adminTabSupport, adminTabTooltip } from '../../services/adminTabActions
 import { AdminProfileList } from '../UI/AdminProfileList';
 import { CopyableInfoRow } from '../UI/CopyableInfoRow';
 import { ColorSchemaGrid } from '../UI/ColorSchemaGrid';
+import { SubmenuFlyoutHost } from '../UI/SubmenuFlyoutHost';
+import { HOVER_CLOSE_DELAY_MS, SUBMENU_HOVER_OPEN_DELAY_MS } from '../Terminal/ContextMenu';
 import { usePaneMuteState } from './usePaneMuteState';
 import { getSurfaceChrome, useSurfaceChromeAvailable } from '../../services/surfaceChrome';
 import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
@@ -20,6 +22,8 @@ import { useTooltipDwell } from '../../hooks/useTooltipDwell';
 import { useTerminalTitleColor, titleColorStyle, TAB_NAME_COLORS } from '../../store/titleColor';
 import { NewPaneRow } from '../UI/NewPaneRow';
 import './PaneContextMenu.css';
+
+type PaneSubmenuKey = 'schema' | 'color' | 'admin' | 'automation';
 
 interface PaneContextMenuProps {
   x: number;
@@ -68,9 +72,56 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   // see Mute, below. The accordion between them owns its own; a section that renders its own rows
   // owns their tooltips.
   const tip = useTooltipDwell();
-  const [schemaExpanded, setSchemaExpanded] = useState(false);
-  const [colorExpanded, setColorExpanded] = useState(false);
-  const [adminExpanded, setAdminExpanded] = useState(false);
+  // Flyout submenus (Color scheme / Pane Color / Open admin Tab / Automation), the same model as
+  // `TabContextMenu`: a single-slot `openSubmenu`, a hover-open debounce and a hover-close grace,
+  // with both delays imported so the menus can only ever agree.
+  const [openSubmenu, setOpenSubmenu] = useState<PaneSubmenuKey | null>(null);
+  const openTimer = useRef<number | null>(null);
+  const closeTimer = useRef<number | null>(null);
+
+  const cancelPendingOpen = useCallback(() => {
+    if (openTimer.current !== null) {
+      window.clearTimeout(openTimer.current);
+      openTimer.current = null;
+    }
+  }, []);
+  const cancelPendingClose = useCallback(() => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  }, []);
+  /** Click — opens immediately, and never toggles shut (hover may already have opened it). */
+  const openSubmenuNow = useCallback((key: PaneSubmenuKey) => {
+    cancelPendingOpen();
+    cancelPendingClose();
+    setOpenSubmenu(key);
+  }, [cancelPendingClose, cancelPendingOpen]);
+  /** Hover — debounced, and idempotent on an already-open parent. */
+  const scheduleSubmenuOpen = useCallback((key: PaneSubmenuKey) => {
+    cancelPendingClose();
+    cancelPendingOpen();
+    if (openSubmenu === key) return;
+    openTimer.current = window.setTimeout(() => {
+      openTimer.current = null;
+      openSubmenuNow(key);
+    }, SUBMENU_HOVER_OPEN_DELAY_MS);
+  }, [cancelPendingClose, cancelPendingOpen, openSubmenu, openSubmenuNow]);
+  /** Hovering a row that is not a submenu parent retires whatever flyout is open. */
+  const scheduleSubmenuClose = useCallback(() => {
+    cancelPendingOpen();
+    cancelPendingClose();
+    closeTimer.current = window.setTimeout(() => {
+      closeTimer.current = null;
+      setOpenSubmenu(null);
+    }, HOVER_CLOSE_DELAY_MS);
+  }, [cancelPendingClose, cancelPendingOpen]);
+
+  useEffect(() => () => {
+    cancelPendingOpen();
+    cancelPendingClose();
+  }, [cancelPendingOpen, cancelPendingClose]);
+
   const currentPaneLeaf = useSelector((s: RootState) =>
     owningTabId ? findLeaf(s.panes.treesByTabId[owningTabId] ?? null, paneId) : null
   );
@@ -98,8 +149,15 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       }
     };
 
+    // Esc closes an open flyout first, and only closes the whole menu once none is open.
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key !== 'Escape') return;
+      if (openSubmenu !== null) {
+        e.stopPropagation();
+        cancelPendingOpen();
+        cancelPendingClose();
+        setOpenSubmenu(null);
+      } else {
         onClose();
       }
     };
@@ -111,7 +169,7 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleEscape);
     };
-  }, [onClose]);
+  }, [onClose, openSubmenu, cancelPendingOpen, cancelPendingClose]);
 
   // Edge-aware: after mount, shift the menu left/up so it never spills past the
   // right/bottom edge when opened near a corner.
@@ -202,83 +260,116 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       </div>
       <div className="context-menu-divider" />
       {agent ? (
-        <>
-          <button className="context-menu-item" onClick={() => setSchemaExpanded((v) => !v)}>
-            <span className="menu-icon">🎨</span>
-            Color scheme for “{agent}”
-            <span className="context-menu-expand-arrow">{schemaExpanded ? '▾' : '▸'}</span>
-          </button>
-          {schemaExpanded && (
-            <div className="context-menu-subpanel">
-              <ColorSchemaGrid
-                activeId={agentColorSchemes[agent]}
-                defaultSwatchSchemaId={globalSchemaId}
-                defaultLabel="Use tab / default"
-                onPick={(id) => (id
-                  ? dispatch(setAgentColorScheme({ agent, colorSchemaId: id }))
-                  : dispatch(removeAgentColorScheme({ agent })))}
-              />
-            </div>
-          )}
-        </>
+        <SubmenuFlyoutHost
+          open={openSubmenu === 'schema'}
+          panelClassName="submenu-flyout-panel--wide"
+          onMouseEnter={cancelPendingClose}
+          onMouseLeave={scheduleSubmenuClose}
+          trigger={
+            <button
+              className={`context-menu-item${openSubmenu === 'schema' ? ' is-submenu-open' : ''}`}
+              onMouseEnter={() => scheduleSubmenuOpen('schema')}
+              onClick={() => openSubmenuNow('schema')}
+            >
+              <span className="menu-icon">🎨</span>
+              Color scheme for “{agent}”
+              <span className="context-menu-expand-arrow">▸</span>
+            </button>
+          }
+        >
+          <ColorSchemaGrid
+            activeId={agentColorSchemes[agent]}
+            defaultSwatchSchemaId={globalSchemaId}
+            defaultLabel="Use tab / default"
+            onPick={(id) => (id
+              ? dispatch(setAgentColorScheme({ agent, colorSchemaId: id }))
+              : dispatch(removeAgentColorScheme({ agent })))}
+          />
+        </SubmenuFlyoutHost>
       ) : (
-        <button className="context-menu-item" disabled title="No coding agent detected in this pane">
+        <button
+          className="context-menu-item"
+          disabled
+          title="No coding agent detected in this pane"
+          onMouseEnter={scheduleSubmenuClose}
+        >
           <span className="menu-icon">🎨</span>
           Color scheme for agent
         </button>
       )}
       <div className="context-menu-divider" />
-      <button className="context-menu-item" onClick={() => setColorExpanded((v) => !v)}>
-        <span className="menu-icon">🏷️</span>
-        Pane Color
-        <span className="context-menu-expand-arrow">{colorExpanded ? '▾' : '▸'}</span>
-      </button>
-      {colorExpanded && (
-        <div className="context-menu-subpanel">
-          <div className="tab-color-swatches">
-            {TAB_NAME_COLORS.map(({ name, hex }) => (
-              <button
-                key={hex}
-                type="button"
-                title={name}
-                className={`tab-color-dot${currentPaneColor === hex ? ' active' : ''}`}
-                style={{ background: hex }}
-                onClick={() => dispatch(setPaneTitleColor({ paneId, titleColor: hex }))}
-              />
-            ))}
-          </div>
+      <SubmenuFlyoutHost
+        open={openSubmenu === 'color'}
+        onMouseEnter={cancelPendingClose}
+        onMouseLeave={scheduleSubmenuClose}
+        trigger={
           <button
-            type="button"
-            className="tab-color-reset"
-            onClick={() => dispatch(setPaneTitleColor({ paneId, titleColor: undefined }))}
+            className={`context-menu-item${openSubmenu === 'color' ? ' is-submenu-open' : ''}`}
+            onMouseEnter={() => scheduleSubmenuOpen('color')}
+            onClick={() => openSubmenuNow('color')}
           >
-            Reset to Default
+            <span className="menu-icon">🏷️</span>
+            Pane Color
+            <span className="context-menu-expand-arrow">▸</span>
           </button>
+        }
+      >
+        <div className="tab-color-swatches">
+          {TAB_NAME_COLORS.map(({ name, hex }) => (
+            <button
+              key={hex}
+              type="button"
+              title={name}
+              className={`tab-color-dot${currentPaneColor === hex ? ' active' : ''}`}
+              style={{ background: hex }}
+              onClick={() => dispatch(setPaneTitleColor({ paneId, titleColor: hex }))}
+            />
+          ))}
         </div>
-      )}
+        <button
+          type="button"
+          className="tab-color-reset"
+          onClick={() => dispatch(setPaneTitleColor({ paneId, titleColor: undefined }))}
+        >
+          Reset to Default
+        </button>
+      </SubmenuFlyoutHost>
       <div className="context-menu-divider" />
-      <button className="context-menu-item" onClick={() => runAndClose(openNewTabWithDefaultProfile)}>
+      <button
+        className="context-menu-item"
+        onMouseEnter={scheduleSubmenuClose}
+        onClick={() => runAndClose(openNewTabWithDefaultProfile)}
+      >
         <span className="menu-icon">➕</span>
         Open New Tab
       </button>
       {/* Plan 045. Toggle itself always shown (O2) — disabled with a tooltip when
-          unsupported, so unavailability is visible without expanding the subpanel. */}
+          unsupported, so unavailability is visible without opening the flyout. */}
+      <SubmenuFlyoutHost
+        open={openSubmenu === 'admin'}
+        onMouseEnter={cancelPendingClose}
+        onMouseLeave={scheduleSubmenuClose}
+        trigger={
+          <button
+            className={`context-menu-item${openSubmenu === 'admin' ? ' is-submenu-open' : ''}`}
+            disabled={!adminSupport.supported}
+            title={adminSupport.supported ? undefined : adminTabTooltip(adminSupport.reason)}
+            onMouseEnter={() => scheduleSubmenuOpen('admin')}
+            onClick={() => openSubmenuNow('admin')}
+          >
+            <span className="menu-icon">🛡️</span>
+            Open admin Tab
+            <span className="context-menu-expand-arrow">▸</span>
+          </button>
+        }
+      >
+        <AdminProfileList variant="menu" onPick={onClose} />
+      </SubmenuFlyoutHost>
       <button
         className="context-menu-item"
-        disabled={!adminSupport.supported}
-        title={adminSupport.supported ? undefined : adminTabTooltip(adminSupport.reason)}
-        onClick={() => setAdminExpanded((v) => !v)}
+        onMouseEnter={scheduleSubmenuClose}
+        onClick={() => runAndClose(() => { void openNewWindow(); })}
       >
-        <span className="menu-icon">🛡️</span>
-        Open admin Tab
-        <span className="context-menu-expand-arrow">{adminExpanded ? '▾' : '▸'}</span>
-      </button>
-      {adminExpanded && adminSupport.supported && (
-        <div className="context-menu-subpanel">
-          <AdminProfileList variant="menu" onPick={onClose} />
-        </div>
-      )}
-      <button className="context-menu-item" onClick={() => runAndClose(() => { void openNewWindow(); })}>
         <span className="menu-icon">🪟</span>
         Open New Window
       </button>
@@ -335,7 +426,19 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
           a section of its own: all three act on this pane's terminal, unlike the tab/window/split
           items above them. Renders nothing only for a pane with no terminal.
           The component is shared verbatim with `CanvasNodeMenu` — see its header. */}
-      <AutomationMenuSection terminalId={terminalId ?? null} onDismiss={onClose} />
+      <AutomationMenuSection
+        terminalId={terminalId ?? null}
+        onDismiss={onClose}
+        flyout={{
+          open: openSubmenu === 'automation',
+          onTriggerEnter: () => scheduleSubmenuOpen('automation'),
+          onTriggerClick: () => openSubmenuNow('automation'),
+          onHostEnter: cancelPendingClose,
+          onHostLeave: scheduleSubmenuClose,
+          openDelayMs: SUBMENU_HOVER_OPEN_DELAY_MS,
+          closeDelayMs: HOVER_CLOSE_DELAY_MS,
+        }}
+      />
       {/* Mute is the only ENABLED item here with a title, so it is the only one the dwell
           applies to. The two disabled items above keep theirs unconditionally and deliberately: a
           disabled button dispatches no mouse events, so a dwell over one could never be measured,
