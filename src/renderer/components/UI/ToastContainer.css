@@ -1,9 +1,11 @@
-/* The app draws its own 40px title bar (TitleBar.css .title-bar) carrying the tabs, settings
-   and window controls, so the default top-right position must start below it — at `top: 24px`
-   the stack covered the tab strip and the minimize/maximize/close buttons. */
+/* The default top-right position must clear the chrome above the terminal pane: the 40px title bar
+   (TitleBar.css .title-bar), the 35px tab bar (TabBar.css .tab-bar) and the 30px pane header
+   (TerminalPane.css .terminal-pane-header) — 105px in total, plus a small gap. The pane's agent
+   chip (AgentChip.css .agent-chip) sits inside that header's band, so it is covered too if this
+   is any higher. */
 .toast-container {
   position: fixed;
-  top: 56px;
+  top: 112px;
   right: 24px;
   z-index: 10000;
   display: flex;
