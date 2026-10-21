@@ -364,13 +364,15 @@ describe('settingsSlice tabRunningCue', () => {
     (global as any).window = (global as any).window || {};
   });
 
-  it("defaults to 'animated'", () => {
+  it("defaults to 'pulse' — the cheapest cue that still moves", () => {
     const state = settingsReducer(undefined, { type: '@@INIT' } as any);
-    expect(state.tabRunningCue).toBe('animated');
+    expect(state.tabRunningCue).toBe('pulse');
   });
 
-  it("can be switched to 'static', 'off' and back", () => {
-    let state = settingsReducer(undefined, setTabRunningCue('static'));
+  it("can be switched to every cue and back", () => {
+    let state = settingsReducer(undefined, setTabRunningCue('pulse'));
+    expect(state.tabRunningCue).toBe('pulse');
+    state = settingsReducer(state, setTabRunningCue('static'));
     expect(state.tabRunningCue).toBe('static');
     state = settingsReducer(state, setTabRunningCue('off'));
     expect(state.tabRunningCue).toBe('off');
