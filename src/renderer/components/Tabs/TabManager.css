@@ -324,7 +324,20 @@
   animation: tab-running-sweep 1.2s steps(6) infinite;
 }
 
-/* Settings › Appearance › "Busy indicator on tabs" (`tabRunningCue`), set on `.tabs-list`. */
+/* Settings › Appearance › "Busy indicator on tabs" (`tabRunningCue`), set on `.tabs-list`.
+   The base rule above is `animated`; every other cue overrides it here. */
+
+/* `pulse` (the default): the parked band, bright for 1s and dim for 1s — one change a second,
+   a fifth of the sweep's cost. `steps(1, end)` holds each keyframe interval's starting value, and
+   the keyframes name only 50%, so 0%/100% are the rule's own opacity (0.18 idle tab, 0.55 active):
+   no per-state copy of those numbers to drift. A smooth fade here would repaint every frame. */
+.tabs-list[data-running-cue="pulse"] .tab-item.tab-running::after {
+  animation: tab-running-pulse 2s steps(1, end) infinite;
+}
+@keyframes tab-running-pulse {
+  50% { opacity: 0.05; }
+}
+
 .tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
   animation: none;
 }
