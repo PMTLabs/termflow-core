@@ -327,15 +327,34 @@
 /* Settings › Appearance › "Busy indicator on tabs" (`tabRunningCue`), set on `.tabs-list`.
    The base rule above is `animated`; every other cue overrides it here. */
 
-/* `pulse` (the default): the parked band, bright for 1s and dim for 1s — one change a second,
-   a fifth of the sweep's cost. `steps(1, end)` holds each keyframe interval's starting value, and
-   the keyframes name only 50%, so 0%/100% are the rule's own opacity (0.18 idle tab, 0.55 active):
-   no per-state copy of those numbers to drift. A smooth fade here would repaint every frame. */
+/* `pulse` (the default): bright for 1s and dim for 1s — one change a second, a fifth of the
+   sweep's cost. `steps(1, end)` holds each keyframe interval's starting value, and the keyframes
+   name only 50%, so 0%/100% are the rule's own opacity (0.5 idle tab, 0.6 active below): no
+   per-state copy of those numbers to drift. A smooth fade here would repaint every frame.
+
+   NOT the sweep's band. A band covering the back ~45% of a 160px tile at 0.18 was close to
+   invisible on the dark tab background, and a pulse only has its two frames to be seen in. So
+   the whole tab washes with the accent (deepest at the centre) and carries a 2px accent
+   underline — inside the pseudo-element, so it dims with it and never reads as a stray border
+   while the cue is off. Rendered on both themes before choosing these numbers. */
 .tabs-list[data-running-cue="pulse"] .tab-item.tab-running::after {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 35%, transparent) 0%,
+    var(--tab-running-accent, #3aa6ff) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 35%, transparent) 100%
+  );
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  box-shadow: inset 0 -2px 0 var(--tab-running-accent, #3aa6ff);
+  opacity: 0.5;
   animation: tab-running-pulse 2s steps(1, end) infinite;
 }
+.tabs-list[data-running-cue="pulse"] .tab-item.active.tab-running::after {
+  opacity: 0.6;
+}
 @keyframes tab-running-pulse {
-  50% { opacity: 0.05; }
+  50% { opacity: 0.08; }
 }
 
 .tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
