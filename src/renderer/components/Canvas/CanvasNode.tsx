@@ -6,7 +6,7 @@ import { titleColorStyle } from '../../store/titleColor';
 import { CanvasNodeAgent } from './CanvasNodeAgent';
 import { EyeIcon } from './EyeIcon';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
-import type { CanvasBusyCue } from './canvasBusyCue';
+import { isBandCue, type CanvasBusyCue } from './canvasBusyCue';
 import type { CanvasCombos } from './canvasGestures';
 
 /**
@@ -140,14 +140,15 @@ export const CanvasNode: React.FC<{
         dimmed ? 'dimmed' : '',
         linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
-        // `running` is conditional on MORE than `node.isRunning` — it is the sweep cue's own
-        // existence (`plan/023`), so a busy node in `dot` mode deliberately does not carry it.
+        // `running` is conditional on MORE than `node.isRunning` — it is the header band's own
+        // existence (`plan/023`), drawn by both band cues (`pulse`, `sweep`; `data-busy-cue`
+        // below picks which), so a busy node in `dot` mode deliberately does not carry it.
         // The dot below is the mirror of this: exactly one of the two is ever in the DOM, and
         // neither is rendered-then-hidden, so "which cue is this node showing?" stays a
         // question the DOM can answer. The sidebar is untouched by the setting and keeps its
         // own `.running`, because there the icon renders either way and only an ancestor
         // selector can blink it.
-        busyCue === 'sweep' && node.isRunning ? 'running' : '',
+        isBandCue(busyCue) && node.isRunning ? 'running' : '',
         // This terminal's shell has exited (`plan/024` Req 4). Unconditional on tier: zoomed out
         // is exactly where you scan for what is still alive.
         node.exited ? 'ended' : '',
@@ -156,6 +157,7 @@ export const CanvasNode: React.FC<{
       data-terminal-id={node.terminalId}
       data-tab-id={node.tabId}
       data-lod={tier}
+      data-busy-cue={busyCue}
       // `visibility`, never `display` — see the note above.
       style={{
         left: x,
@@ -222,7 +224,7 @@ export const CanvasNode: React.FC<{
 
               Still nothing at the chip tier: there the header IS the node and there is room for
               a title and nothing else. That leaves a collapsed tile with no cue in `dot` mode —
-              a real gap, and the reason `sweep` is the default. It is stated in the Settings
+              a real gap, and the reason a band cue (`pulse`) is the default. It is stated in the Settings
               help text rather than left to be discovered. */}
           {!isChip && busyCue === 'dot' && (
             <span className={node.isRunning ? 'canvas-node-dot running' : 'canvas-node-dot'} />

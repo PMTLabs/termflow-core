@@ -353,15 +353,18 @@
  * THREE surfaces, and they do NOT all follow the setting:
  *
  *  - A canvas NODE draws whichever cue the user's `canvasBusyCue` setting names. `CanvasNode`
- *    renders exactly one of the two — the `running` class for the sweep, the `.canvas-node-dot`
- *    span for the dot — so neither is ever rendered-then-hidden here, and "which cue is this
- *    node showing?" stays answerable from the DOM.
+ *    renders exactly one kind — the `running` class for a header band (`pulse` or `sweep`, told
+ *    apart by `data-busy-cue`), the `.canvas-node-dot` span for the dot — so neither is ever
+ *    rendered-then-hidden here, and "which cue is this node showing?" stays answerable from
+ *    the DOM.
  *  - A SIDEBAR row (Req 6) ignores the setting entirely and always blinks its profile icon.
  *    A list is already scannable in a way nodes scattered across a canvas are not, and its
  *    icon renders busy or not, so the blink is scoped by the row's own `.running` class rather
  *    than by the icon's existence.
  *  - The TAB STRIP is a different stylesheet and a different rule
- *    (`TabManager.css` `.tab-item.tab-running::after`); nothing here touches it.
+ *    (`TabManager.css` `.tab-item.tab-running::after`); nothing here touches it. Its default
+ *    is a 1 Hz pulse too, and the node pulse and the blinks below share its 2s period, so a
+ *    busy terminal reads the same in the tab strip, on the canvas and in the sidebar.
  *
  * `plan/020` deleted the node sweep on the grounds that it "repainted a full-width gradient
  * every frame". That was overstated — the band animates `transform`, which composites, and the
@@ -370,10 +373,10 @@
  * 155 at 2560x1440: a linear `transform` sweep cost +9 points of DWM GPU; the same keyframes
  * under `steps()` were indistinguishable from no animation. So every busy cue below is
  * STEPPED — a handful of changes a second, not sixty. Keep them that way: an agent keeps a node
- * busy for hours. With the steps in place both cues are affordable; the setting is a
- * legibility choice, not a fast-vs-pretty one, which is why `sweep` is the default. */
+ * busy for hours. Each change still costs a full-window composition, though, so the default
+ * is the cue with the fewest: the 1 Hz `pulse`. */
 
-/* ---- The `sweep` cue (default) ------------------------------------------ */
+/* ---- The header band: `sweep`, and the `pulse` below it ----------------- */
 
 /* NOT the tab strip's rule, though it started as a copy of it. TabManager tiles a 160px
    gradient with `repeat-x`, which shows exactly one band on a ~160px tab and THREE on a 1440px
@@ -386,7 +389,7 @@
 
    No chip-tier rule is needed: `.canvas-node[data-lod="chip"] .canvas-node-head` already fills
    the node, so a collapsed tile sweeps as a whole for free. That is the tier where the dot
-   renders nothing at all, and the reason this cue is the default. */
+   renders nothing at all, and the reason a band cue is the default. */
 .canvas-node.running .canvas-node-head::after {
   content: ''; position: absolute; top: 0; bottom: 0; left: 0;
   width: 55%; z-index: -1; pointer-events: none;
@@ -402,6 +405,18 @@
   to   { transform: translateX(182%); }
 }
 
+/* `pulse` (the default): the same band, parked across the whole header, bright for 1s and dim
+   for 1s — the tab strip's `tab-running-pulse`, on a node. The keyframes name only 50%, so the
+   bright value is this rule's own opacity (and the reduced-motion one below), and
+   `steps(1, end)` holds each half: one change a second. A smooth fade would redraw every frame. */
+.canvas-node.running[data-busy-cue="pulse"] .canvas-node-head::after {
+  width: 100%;
+  animation: canvas-node-pulse 2s steps(1, end) infinite;
+}
+@keyframes canvas-node-pulse {
+  50% { opacity: .08; }
+}
+
 /* ---- The `dot` cue, and the sidebar's icon ------------------------------ */
 
 /* ONE keyframe for both, so they cannot drift into two different "busy" looks.
@@ -413,13 +428,14 @@
   background: var(--text-tertiary, #666666);
 }
 /* `steps(1, end)` applies per keyframe interval, so each half holds its value: a two-state
-   blink, two changes per period, instead of an eased fade that redraws every frame. */
+   blink, two changes per period, instead of an eased fade that redraws every frame. The 2s
+   period is the pulses' — one change a second everywhere a busy terminal is shown. */
 .canvas-node-dot.running {
   background: var(--tab-running-accent, #3aa6ff);
-  animation: canvas-busy-blink 1.1s steps(1, end) infinite;
+  animation: canvas-busy-blink 2s steps(1, end) infinite;
 }
 .canvas-srow.running .shell-profile-icon {
-  animation: canvas-busy-blink 1.1s steps(1, end) infinite;
+  animation: canvas-busy-blink 2s steps(1, end) infinite;
 }
 @keyframes canvas-busy-blink {
   0%, 100% { opacity: 1; }

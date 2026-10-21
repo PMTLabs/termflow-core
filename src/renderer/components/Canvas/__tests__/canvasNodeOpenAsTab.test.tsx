@@ -583,11 +583,16 @@ describe('busy cue', () => {
     cue: CanvasBusyCue; running: boolean; tier: LodTier;
     /** `null` = no dot element at all; otherwise whether it carries `.running`. */
     dot: null | 'idle' | 'running';
-    /** Whether `.canvas-node` carries the sweep's `running` class. */
+    /** Whether `.canvas-node` carries the header band's `running` class (`pulse` or `sweep`). */
     sweeps: boolean;
   };
 
   const TABLE: Row[] = [
+    // `pulse` (the default) is a header band too, so it is the `running` class exactly like the
+    // sweep — including on a collapsed tile. `data-busy-cue` (pinned below) is what tells them apart.
+    { cue: 'pulse', running: true,  tier: 'gpu',  dot: null,      sweeps: true  },
+    { cue: 'pulse', running: false, tier: 'gpu',  dot: null,      sweeps: false },
+    { cue: 'pulse', running: true,  tier: 'chip', dot: null,      sweeps: true  },
     { cue: 'sweep', running: true,  tier: 'gpu',  dot: null,      sweeps: true  },
     { cue: 'sweep', running: false, tier: 'gpu',  dot: null,      sweeps: false },
     // The whole reason `sweep` is the default: at the chip tier the header IS the node, so the
@@ -624,6 +629,16 @@ describe('busy cue', () => {
   // The mutation this replaces the old `describe('busy dot')` for: the two cues must be
   // mutually exclusive. Hard-coding `running` onto the node (or the dot into the tree) would
   // leave a node sweeping AND blinking, which no single row above forbids on its own.
+  // `running` alone cannot say WHICH band, so the node publishes the setting itself and the
+  // stylesheet keys the pulse on it. A node that dropped or hard-coded the attribute would draw
+  // the sweep for every band cue, and the table above could not see it.
+  it('publishes the cue it was given as data-busy-cue', () => {
+    for (const cue of ['pulse', 'sweep', 'dot'] as CanvasBusyCue[]) {
+      renderCue(cue, true);
+      expect(node().getAttribute('data-busy-cue')).toBe(cue);
+    }
+  });
+
   it('never shows both cues at once', () => {
     for (const { cue, running, tier } of TABLE) {
       renderCue(cue, running, tier);

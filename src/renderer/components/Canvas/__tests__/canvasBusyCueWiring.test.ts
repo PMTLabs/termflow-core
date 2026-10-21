@@ -105,6 +105,7 @@ describe('the busy cue setting reaches the canvas', () => {
     expect(select).toContain('value={settings.canvasBusyCue}');
     expect(select).toMatch(/dispatch\(setCanvasBusyCue\(/);
     // Both cues are offered, or the setting is only half-reachable however well it is bound.
+    expect(select).toMatch(/<option value="pulse"/);
     expect(select).toMatch(/<option value="sweep"/);
     expect(select).toMatch(/<option value="dot"/);
   });

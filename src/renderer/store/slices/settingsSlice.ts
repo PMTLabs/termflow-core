@@ -184,10 +184,11 @@ interface SettingsState {
   // Canvas Mode only — a wheel in a normal pane is untouched by this setting either way.
   canvasWheelMode: CanvasWheelMode;
   // How a canvas NODE reports that a process inside it is producing output (plan/023):
-  //  - 'sweep' (default): a gradient band crosses the node header once per period. Readable
-  //    at a glance across a canvas, and the only cue that survives the chip tier.
+  //  - 'pulse' (default): the header band, bright/dim once a second — matches the tab strip's
+  //    default. Like the sweep, it survives the chip tier.
+  //  - 'sweep': a gradient band steps across the node header, 5 moves a second.
   //  - 'dot': a small status light in the title area — muted when idle, accent-coloured and
-  //    blinking when busy. Nothing moves, and nothing renders at the chip tier.
+  //    blinking when busy. Nothing renders at the chip tier.
   // Canvas Mode only, and NODES only — the sidebar's row icon blinks either way.
   canvasBusyCue: CanvasBusyCue;
   // How a tab in the strip shows that its process is producing output (see tabRunningCue.ts):
@@ -272,7 +273,7 @@ const initialState: SettingsState = {
   snippetsSortMode: 'lastUsed',
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
-  canvasBusyCue: 'sweep',
+  canvasBusyCue: 'pulse',
   tabRunningCue: 'pulse',
   customKeybindings: {},
   keepRunningInBackground: false,

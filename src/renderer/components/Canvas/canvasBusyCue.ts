@@ -2,12 +2,18 @@
  * How a canvas NODE says "a process inside me is producing output" — the user's
  * `canvasBusyCue` setting (`plan/023`).
  *
- *  - `'sweep'` (default): a gradient band crosses the node's header once per period. Wide,
- *    readable at a glance across a canvas of nodes, and the only cue that survives the chip
- *    tier — where the header IS the node, so a busy chip lights up as a whole tile.
- *  - `'dot'`: a small status light in the title area. Cheaper (nothing moves), and always
- *    present — muted while idle, accent-coloured and blinking while busy. Renders nothing at
- *    the chip tier, which has room for a title and nothing else.
+ *  - `'pulse'` (default): the header band, bright for 1s and dim for 1s — the canvas twin of
+ *    the tab strip's default `pulse` (`tabRunningCue.ts`), so a busy terminal looks the same in
+ *    both places. One change a second; like the sweep, it survives the chip tier, where the
+ *    header IS the node, so a busy chip lights up as a whole tile.
+ *  - `'sweep'`: a gradient band crosses the node's header, stepped (5 moves a second). Easier
+ *    to spot across a canvas, ~5x the redraws of the pulse.
+ *  - `'dot'`: a small status light in the title area — muted while idle, accent-coloured and
+ *    blinking while busy. Renders nothing at the chip tier, which has room for a title and
+ *    nothing else.
+ *
+ * `pulse` and `sweep` are both the node's `running` class (the header band); `CanvasNode`
+ * publishes the cue as `data-busy-cue` and `Canvas.css` picks the band's animation from it.
  *
  * This union lives in its own module rather than in `settingsSlice` because BOTH the setting
  * and the renderer read it; a second copy in the slice is how the two drift into a value the
@@ -17,9 +23,14 @@
  * icon (`plan/020` Req 6) under both settings — a list is already scannable in a way nodes
  * scattered across a canvas are not.
  */
-export type CanvasBusyCue = 'sweep' | 'dot';
+export type CanvasBusyCue = 'pulse' | 'sweep' | 'dot';
 
-export const CANVAS_BUSY_CUES: readonly CanvasBusyCue[] = ['sweep', 'dot'];
+export const CANVAS_BUSY_CUES: readonly CanvasBusyCue[] = ['pulse', 'sweep', 'dot'];
+
+/** The cues drawn as the header band — the node's `running` class. */
+export function isBandCue(cue: CanvasBusyCue): boolean {
+  return cue === 'pulse' || cue === 'sweep';
+}
 
 /**
  * Narrows an untrusted value (a hand-edited or stale `config.json`) to the union.
