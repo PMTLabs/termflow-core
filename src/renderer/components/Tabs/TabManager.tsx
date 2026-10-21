@@ -529,6 +529,9 @@ export const TabManager: React.FC<TabManagerProps> = () => {
   });
   const tabSizingMode = useSelector((state: RootState) => state.settings.tabSizingMode);
   const fixedTabWidth = useSelector((state: RootState) => state.settings.fixedTabWidth);
+  // Read once for the strip and applied as `data-running-cue` on `.tabs-list`; the CSS picks
+  // the cue from there, so no tab carries its own subscription.
+  const tabRunningCue = useSelector((state: RootState) => state.settings.tabRunningCue);
   const tabsArray = [...tabs]; // Convert to array for indexing
 
   // Horizontal scrolling of the tab strip (only used in 'scroll' mode). We track
@@ -887,6 +890,7 @@ export const TabManager: React.FC<TabManagerProps> = () => {
             className={`tabs-list ${tabSizingMode}`}
             style={tabSizingMode === 'fixed' ? { '--fixed-tab-width': `${fixedTabWidth}px` } as React.CSSProperties : undefined}
             data-tauri-drag-region
+            data-running-cue={tabRunningCue}
             onWheel={handleTabsWheel}
             onScroll={updateScrollState}
           >
