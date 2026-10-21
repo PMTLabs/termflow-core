@@ -149,6 +149,8 @@ export const CanvasSidebar: React.FC<{
 }> = ({ model, onFlyToNode }) => {
   const dispatch = useDispatch();
   const width = useSelector((s: RootState) => s.canvas.sidebarWidth);
+  // Published as `data-busy-cue` so `static`/`off` stop the rows' blinking icon (Canvas.css).
+  const busyCue = useSelector((s: RootState) => s.settings.canvasBusyCue);
   const selectedId = useSelector((s: RootState) => s.canvas.selectedId);
   const sidebarZoom = useSelector((s: RootState) => s.canvas.sidebarZoom);
 
@@ -256,6 +258,7 @@ export const CanvasSidebar: React.FC<{
     <div
       ref={sidebarRef}
       className="canvas-sidebar"
+      data-busy-cue={busyCue}
       style={{ width, ['--sidebar-k' as string]: sidebarZoom } as React.CSSProperties}
     >
       <input

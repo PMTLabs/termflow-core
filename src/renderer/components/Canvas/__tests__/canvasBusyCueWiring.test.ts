@@ -26,6 +26,7 @@
  */
 import path from 'path';
 import { readSource } from '../../../utils/readSource';
+import { CANVAS_BUSY_CUES } from '../canvasBusyCue';
 
 function code(file: string): string {
   return readSource(file)
@@ -105,8 +106,39 @@ describe('the busy cue setting reaches the canvas', () => {
     expect(select).toContain('value={settings.canvasBusyCue}');
     expect(select).toMatch(/dispatch\(setCanvasBusyCue\(/);
     // Both cues are offered, or the setting is only half-reachable however well it is bound.
-    expect(select).toMatch(/<option value="pulse"/);
+    for (const cue of CANVAS_BUSY_CUES) expect(select).toContain(`<option value="${cue}"`);
     expect(select).toMatch(/<option value="sweep"/);
     expect(select).toMatch(/<option value="dot"/);
+  });
+
+  /**
+   * Both busy cues live on ONE page. They were split across Appearance (tabs) and Terminal
+   * Behavior (canvas), and turning the tab cue Off left the canvas sweeping with no visible
+   * reason — the user had to know a second setting existed on another page.
+   */
+  it('sits on the Appearance page, next to the tab busy cue', () => {
+    const fnBody = (name: string): string => {
+      const at = SETTINGS.indexOf(`const ${name} = () =>`);
+      if (at < 0) return '';
+      const next = SETTINGS.indexOf('\n    const render', at + 1);
+      return SETTINGS.slice(at, next < 0 ? undefined : next);
+    };
+    const appearance = fnBody('renderAppearance');
+    expect(appearance).toContain('id="tab-running-cue"');
+    expect(appearance).toContain('id="canvas-busy-cue"');
+    expect(fnBody('renderTerminalBehavior')).not.toContain('id="canvas-busy-cue"');
+  });
+
+  /** `static` and `off` must stop the sidebar's blinking icon too, or "Off" is not off. */
+  it('the sidebar publishes the setting so static/off can stop its blink', () => {
+    const SIDEBAR = code(path.resolve(__dirname, '../CanvasSidebar.tsx'));
+    const sb = /const\s+(\w+)\s*=\s*useSelector\(\s*\([^)]*\)\s*=>\s*s\.settings\.canvasBusyCue\s*\)/.exec(SIDEBAR)?.[1];
+    expect({ boundTo: sb }).toEqual({ boundTo: expect.any(String) });
+    expect(SIDEBAR).toContain(`data-busy-cue={${sb}}`);
+    const CSS = readSource(path.resolve(__dirname, '../Canvas.css')).replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const cue of ['static', 'off']) {
+      expect(CSS).toMatch(new RegExp(`\\.canvas-sidebar\\[data-busy-cue="${cue}"\\]\\s+\\.canvas-srow\\.running\\s+\\.shell-profile-icon[^{]*\\{[^}]*animation:\\s*none`));
+    }
+    expect(CSS).toMatch(/\.canvas-node\.running\[data-busy-cue="static"\]\s+\.canvas-node-head::after\s*\{[^}]*animation:\s*none/);
   });
 });

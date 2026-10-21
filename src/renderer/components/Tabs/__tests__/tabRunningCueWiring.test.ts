@@ -54,6 +54,12 @@ describe('the tab busy cue setting reaches the tab strip', () => {
     }
     expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\][^{]*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);
     expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
+    // Contrast: the pulse has only its two frames to be seen in. Inheriting the sweep's narrow
+    // 0.18 band made it near-invisible on the dark tab background, so the pulse owns a full-tab
+    // wash and a bright phase of at least 0.4.
+    const pulse = /\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
+    expect(pulse).toMatch(/background-size:\s*100%\s+100%/);
+    expect(Number(/opacity:\s*([\d.]+)/.exec(pulse)?.[1])).toBeGreaterThanOrEqual(0.4);
     expect(TAB_CSS).toMatch(/\[data-running-cue="static"\][^{]*\{[^}]*animation:\s*none/);
     expect(TAB_CSS).toMatch(/\[data-running-cue="off"\][^{]*\{[^}]*display:\s*none/);
   });
