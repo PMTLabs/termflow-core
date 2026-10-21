@@ -417,6 +417,12 @@
   50% { opacity: .08; }
 }
 
+/* `static`: the same full-width band, lit and still — nothing on the canvas animates. */
+.canvas-node.running[data-busy-cue="static"] .canvas-node-head::after {
+  width: 100%;
+  animation: none;
+}
+
 /* ---- The `dot` cue, and the sidebar's icon ------------------------------ */
 
 /* ONE keyframe for both, so they cannot drift into two different "busy" looks.
@@ -436,6 +442,12 @@
 }
 .canvas-srow.running .shell-profile-icon {
   animation: canvas-busy-blink 2s steps(1, end) infinite;
+}
+/* `static` and `off` mean "nothing moves" — the sidebar icon included (`CanvasSidebar`
+   publishes the setting as `data-busy-cue`). */
+.canvas-sidebar[data-busy-cue="static"] .canvas-srow.running .shell-profile-icon,
+.canvas-sidebar[data-busy-cue="off"] .canvas-srow.running .shell-profile-icon {
+  animation: none;
 }
 @keyframes canvas-busy-blink {
   0%, 100% { opacity: 1; }
