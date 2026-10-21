@@ -191,7 +191,8 @@ interface SettingsState {
   // Canvas Mode only, and NODES only — the sidebar's row icon blinks either way.
   canvasBusyCue: CanvasBusyCue;
   // How a tab in the strip shows that its process is producing output (see tabRunningCue.ts):
-  // 'animated' (default, a stepped sweep), 'static' (the band, parked), or 'off'.
+  // 'pulse' (default, bright/dim once a second), 'animated' (a stepped sweep), 'static' (the
+  // band, parked), or 'off'.
   tabRunningCue: TabRunningCue;
   // Sparse map of shortcutActions.ts actionId -> user-chosen combo string.
   // Absent key = use that action's registry default. See
@@ -272,7 +273,7 @@ const initialState: SettingsState = {
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
-  tabRunningCue: 'animated',
+  tabRunningCue: 'pulse',
   customKeybindings: {},
   keepRunningInBackground: false,
   exemptLoopbackFromProxy: true,

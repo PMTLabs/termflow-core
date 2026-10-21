@@ -46,10 +46,14 @@ describe('the tab busy cue setting reaches the tab strip', () => {
     expect(tag).toContain(`data-running-cue={${bound}}`);
   });
 
-  it('the stylesheet has a rule for every non-default cue, keyed on that attribute', () => {
+  it('the stylesheet has a rule for every cue the base rule does not draw, keyed on that attribute', () => {
+    // The unqualified `.tab-item.tab-running::after` rule IS the animated sweep; every other cue
+    // — including the default, `pulse` — must override it, or it silently renders as the sweep.
     for (const cue of TAB_RUNNING_CUES.filter((c) => c !== 'animated')) {
       expect(TAB_CSS).toMatch(new RegExp(`\\.tabs-list\\[data-running-cue="${cue}"\\]\\s+\\.tab-item\\.tab-running::after\\s*\\{`));
     }
+    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\][^{]*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);
+    expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
     expect(TAB_CSS).toMatch(/\[data-running-cue="static"\][^{]*\{[^}]*animation:\s*none/);
     expect(TAB_CSS).toMatch(/\[data-running-cue="off"\][^{]*\{[^}]*display:\s*none/);
   });
