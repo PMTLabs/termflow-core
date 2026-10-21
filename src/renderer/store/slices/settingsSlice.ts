@@ -7,6 +7,7 @@ import type { CanvasWheelMode } from '../../components/Canvas/canvasGestures';
 // Same arrangement, same reason: the cue names are the node renderer's vocabulary, and a
 // second copy here would let the setting drift into a value the canvas cannot render.
 import type { CanvasBusyCue } from '../../components/Canvas/canvasBusyCue';
+import type { TabRunningCue } from '../../components/Tabs/tabRunningCue';
 
 export interface ShellProfile {
   id: string;
@@ -189,6 +190,9 @@ interface SettingsState {
   //    blinking when busy. Nothing moves, and nothing renders at the chip tier.
   // Canvas Mode only, and NODES only — the sidebar's row icon blinks either way.
   canvasBusyCue: CanvasBusyCue;
+  // How a tab in the strip shows that its process is producing output (see tabRunningCue.ts):
+  // 'animated' (default, a stepped sweep), 'static' (the band, parked), or 'off'.
+  tabRunningCue: TabRunningCue;
   // Sparse map of shortcutActions.ts actionId -> user-chosen combo string.
   // Absent key = use that action's registry default. See
   // docs/041-keyboard-shortcuts-customization-design.md.
@@ -268,6 +272,7 @@ const initialState: SettingsState = {
   commandSuggestions: true,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
+  tabRunningCue: 'animated',
   customKeybindings: {},
   keepRunningInBackground: false,
   exemptLoopbackFromProxy: true,
@@ -497,6 +502,14 @@ const settingsSlice = createSlice({
       }
     },
 
+    setTabRunningCue: (state, action: PayloadAction<TabRunningCue>) => {
+      state.tabRunningCue = action.payload;
+      // Save to config file
+      if (window.electronAPI) {
+        window.electronAPI.setConfigValue('tabRunningCue', state.tabRunningCue);
+      }
+    },
+
     // Bulk-replace the whole agent→schema map. Persists like the other setters
     // (used on config load — re-persisting the loaded value is idempotent, same
     // as setColorSchema/setFontSize — and on Settings "Discard Changes" revert).
@@ -721,6 +734,7 @@ export const {
   setCommandSuggestions,
   setCanvasWheelMode,
   setCanvasBusyCue,
+  setTabRunningCue,
   setAgentColorSchemes,
   setAgentColorScheme,
   removeAgentColorScheme,

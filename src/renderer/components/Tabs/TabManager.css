@@ -314,7 +314,22 @@
   );
   background-size: 160px 100%;
   background-repeat: repeat-x;
-  animation: tab-running-sweep 1.2s linear infinite;
+  /* STEPPED, not `linear`. `background-position` cannot be composited, so a linear sweep
+     repaints the tab every vsync for as long as anything in it is busy — and an agent's
+     spinner keeps a tab busy for hours. Each of those frames is a full-window composition
+     for DWM (worse again across a DisplayLink / second adapter). Measured in Edge 155 at
+     2560x1440: linear ≈ 3.7% renderer GPU and +15–20 points of DWM GPU; `steps(6)` is
+     indistinguishable from no animation, because Blink only invalidates when a step lands.
+     6 steps per 1.2s = 5 moves a second, still readable as motion. Don't put `linear` back. */
+  animation: tab-running-sweep 1.2s steps(6) infinite;
+}
+
+/* Settings › Appearance › "Busy indicator on tabs" (`tabRunningCue`), set on `.tabs-list`. */
+.tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
+  animation: none;
+}
+.tabs-list[data-running-cue="off"] .tab-item.tab-running::after {
+  display: none;
 }
 
 @keyframes tab-running-sweep {

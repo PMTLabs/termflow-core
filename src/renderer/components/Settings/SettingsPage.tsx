@@ -2,10 +2,11 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
-import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration, setExemptLoopbackFromProxy } from '../../store/slices/settingsSlice';
+import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setTabRunningCue, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration, setExemptLoopbackFromProxy } from '../../store/slices/settingsSlice';
 import type { TerminalFontWeight } from '../../store/slices/settingsSlice';
 import type { CanvasWheelMode } from '../Canvas/canvasGestures';
 import type { CanvasBusyCue } from '../Canvas/canvasBusyCue';
+import type { TabRunningCue } from '../Tabs/tabRunningCue';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
 import {
     ShortcutAction, GLOBAL_SHORTCUT_ACTIONS, CANVAS_SHORTCUT_ACTIONS, CANVAS_FIXED_SHORTCUTS,
@@ -388,6 +389,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setFontWeightBold(baseline.fontWeightBold as TerminalFontWeight));
             dispatch(setTabSizingMode(baseline.tabSizingMode as 'shrink' | 'scroll' | 'fixed'));
             dispatch(setFixedTabWidth(baseline.fixedTabWidth));
+            dispatch(setTabRunningCue(baseline.tabRunningCue as TabRunningCue));
             dispatch(setColorSchema(baseline.colorSchemaId));
             dispatch(setNonFocusedPaneOpacity(baseline.nonFocusedPaneOpacity));
             dispatch(setAgentColorSchemes(Object.fromEntries(baseline.agentColorSchemes)));
@@ -1203,6 +1205,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     you reach off-screen tabs with the mouse wheel or the ‹ › arrow buttons.
                     “Fixed width, scroll” gives every tab the same configurable width and
                     scrolls the same way once they overflow.
+                </span>
+            </div>
+            <div className="setting-item">
+                <label className="setting-label" htmlFor="tab-running-cue">
+                    Busy indicator on tabs
+                </label>
+                <select
+                    id="tab-running-cue"
+                    className="setting-input"
+                    value={settings.tabRunningCue}
+                    onChange={(e) => dispatch(setTabRunningCue(e.target.value as TabRunningCue))}
+                >
+                    <option value="animated">Animated sweep (default)</option>
+                    <option value="static">Static highlight</option>
+                    <option value="off">Off</option>
+                </select>
+                <span className="help-text">
+                    How a tab shows that something inside it, such as an agent, is producing
+                    output. “Animated sweep” steps a soft band across the tab a few times a
+                    second. “Static highlight” shows the band without moving it, so busy tabs
+                    cost no redraws at all. “Off” removes the cue from tabs.
                 </span>
             </div>
             <div className="setting-item">
