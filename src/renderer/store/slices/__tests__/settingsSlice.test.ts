@@ -333,9 +333,9 @@ describe('settingsSlice canvasBusyCue', () => {
     (global as any).window = (global as any).window || {};
   });
 
-  it("defaults to 'sweep' — the cue that is readable across a whole canvas", () => {
+  it("defaults to 'pulse' — the same 1 Hz cue busy tabs default to", () => {
     const state = settingsReducer(undefined, { type: '@@INIT' } as any);
-    expect(state.canvasBusyCue).toBe('sweep');
+    expect(state.canvasBusyCue).toBe('pulse');
   });
 
   it("can be switched to 'dot' and back", () => {

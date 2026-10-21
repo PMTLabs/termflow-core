@@ -1608,18 +1608,20 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     value={settings.canvasBusyCue}
                     onChange={(e) => dispatch(setCanvasBusyCue(e.target.value as CanvasBusyCue))}
                 >
-                    <option value="sweep">Sweep across the node (default)</option>
+                    <option value="pulse">Pulse the node header, low power (default)</option>
+                    <option value="sweep">Sweep across the node</option>
                     <option value="dot">Blinking dot in the node title</option>
                 </select>
             </div>
             <span className="help-text">
                 How a node on the canvas shows that something inside it is producing output.
-                “Sweep” runs a soft band across the node header — easy to pick out across a whole
-                canvas, and the only cue that still shows when you zoom out far enough for nodes
-                to collapse to name tiles. “Blinking dot” is quieter and animates less: a small
-                light in the node title, muted while the terminal is idle and blinking while it
-                is busy, with nothing shown on collapsed tiles. The Canvas sidebar list blinks
-                its shell icon either way.
+                “Pulse” switches a soft highlight across the node header between bright and dim
+                once a second, the same as busy tabs by default. “Sweep” steps a band across the
+                header a few times a second; it is easier to spot but redraws the window about
+                five times as often. Both still show when you zoom out far enough for nodes to
+                collapse to name tiles. “Blinking dot” is a small light in the node title, muted
+                while the terminal is idle and blinking while it is busy, with nothing shown on
+                collapsed tiles. The Canvas sidebar list blinks its shell icon either way.
             </span>
             <div className="setting-item setting-item-row">
                 <label className="setting-label" htmlFor="default-editor">

@@ -76,6 +76,9 @@ describe('busy cues animate in steps, never every frame', () => {
     // Guard on the guard: an empty list would pass the next test vacuously.
     expect(infinite(TAB_CSS).join('\n')).toMatch(/tab-running-sweep/);
     expect(infinite(CANVAS_CSS).join('\n')).toMatch(/canvas-node-sweep/);
+    expect(infinite(CANVAS_CSS).join('\n')).toMatch(/canvas-node-pulse/);
+    // The canvas pulse is keyed on the attribute CanvasNode publishes, not on a class.
+    expect(CANVAS_CSS).toMatch(/\.canvas-node\.running\[data-busy-cue="pulse"\]\s+\.canvas-node-head::after\s*\{[^}]*animation:\s*canvas-node-pulse\s+2s\s+steps\(1,\s*end\)/);
     expect(infinite(CANVAS_CSS).join('\n')).toMatch(/canvas-busy-blink/);
   });
 
