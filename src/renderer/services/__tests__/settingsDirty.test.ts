@@ -67,19 +67,22 @@ describe('settingsDirty', () => {
     expect(isCategoryDirty('terminal', { ...base, canvasWheelMode: 'zoom' }, snap)).toBe(false);
   });
 
-  it('terminal tracks the canvas busy cue', () => {
+  it('appearance tracks the canvas busy cue (its control lives on the Appearance page)', () => {
     // Same failure mode as the wheel mode above, and the same reason it is worth its own test:
     // an untracked field makes "Discard changes" quietly not discard this one.
-    const snap = snapshotCategory('terminal', base);
-    expect(isCategoryDirty('terminal', { ...base, canvasBusyCue: 'dot' }, snap)).toBe(true);
-    expect(isCategoryDirty('terminal', { ...base, canvasBusyCue: 'sweep' }, snap)).toBe(false);
+    const snap = snapshotCategory('appearance', base);
+    expect(isCategoryDirty('appearance', { ...base, canvasBusyCue: 'dot' }, snap)).toBe(true);
+    expect(isCategoryDirty('appearance', { ...base, canvasBusyCue: 'sweep' }, snap)).toBe(false);
+    // ...and no longer on Terminal Behavior, where a change would otherwise flag a page that
+    // has no control for it.
+    expect(isCategoryDirty('terminal', { ...base, canvasBusyCue: 'dot' }, snapshotCategory('terminal', base))).toBe(false);
   });
 
   it('the canvas busy cue survives a snapshot/revert round trip', () => {
     // The snapshot is what "Discard changes" replays, so a field that is DIRTY-tracked but not
     // carried in the snapshot object would flag the change and then fail to undo it.
-    const snap = snapshotCategory('terminal', { ...base, canvasBusyCue: 'dot' });
-    expect(snap).toMatchObject({ kind: 'terminal', canvasBusyCue: 'dot' });
+    const snap = snapshotCategory('appearance', { ...base, canvasBusyCue: 'dot' });
+    expect(snap).toMatchObject({ kind: 'appearance', canvasBusyCue: 'dot' });
   });
 
   it('appearance tracks the tab busy cue and carries it in the snapshot', () => {

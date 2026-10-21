@@ -141,8 +141,9 @@ export const CanvasNode: React.FC<{
         linkTarget ? 'link-target' : '',
         overlaid ? 'overlaid' : '',
         // `running` is conditional on MORE than `node.isRunning` — it is the header band's own
-        // existence (`plan/023`), drawn by both band cues (`pulse`, `sweep`; `data-busy-cue`
-        // below picks which), so a busy node in `dot` mode deliberately does not carry it.
+        // existence (`plan/023`), drawn by every band cue (`pulse`, `sweep`, `static`;
+        // `data-busy-cue` below picks which), so a busy node in `dot` or `off` mode
+        // deliberately does not carry it.
         // The dot below is the mirror of this: exactly one of the two is ever in the DOM, and
         // neither is rendered-then-hidden, so "which cue is this node showing?" stays a
         // question the DOM can answer. The sidebar is untouched by the setting and keeps its

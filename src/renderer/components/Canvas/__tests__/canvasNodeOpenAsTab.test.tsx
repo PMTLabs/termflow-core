@@ -18,7 +18,7 @@ import { CanvasNode } from '../CanvasNode';
 import { LodTier, HEAD_H, DEFAULT_METRICS } from '../canvasGeometry';
 import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { CanvasNodeModel } from '../canvasSelectors';
-import type { CanvasBusyCue } from '../canvasBusyCue';
+import { CANVAS_BUSY_CUES, type CanvasBusyCue } from '../canvasBusyCue';
 
 /**
  * The agent chip's data source, stubbed at the hook.
@@ -593,6 +593,11 @@ describe('busy cue', () => {
     { cue: 'pulse', running: true,  tier: 'gpu',  dot: null,      sweeps: true  },
     { cue: 'pulse', running: false, tier: 'gpu',  dot: null,      sweeps: false },
     { cue: 'pulse', running: true,  tier: 'chip', dot: null,      sweeps: true  },
+    // `static` is the band too, parked; `off` is no cue at all, not even an idle dot.
+    { cue: 'static', running: true, tier: 'gpu',  dot: null,      sweeps: true  },
+    { cue: 'static', running: true, tier: 'chip', dot: null,      sweeps: true  },
+    { cue: 'off',   running: true,  tier: 'gpu',  dot: null,      sweeps: false },
+    { cue: 'off',   running: true,  tier: 'chip', dot: null,      sweeps: false },
     { cue: 'sweep', running: true,  tier: 'gpu',  dot: null,      sweeps: true  },
     { cue: 'sweep', running: false, tier: 'gpu',  dot: null,      sweeps: false },
     // The whole reason `sweep` is the default: at the chip tier the header IS the node, so the
@@ -633,7 +638,7 @@ describe('busy cue', () => {
   // stylesheet keys the pulse on it. A node that dropped or hard-coded the attribute would draw
   // the sweep for every band cue, and the table above could not see it.
   it('publishes the cue it was given as data-busy-cue', () => {
-    for (const cue of ['pulse', 'sweep', 'dot'] as CanvasBusyCue[]) {
+    for (const cue of CANVAS_BUSY_CUES) {
       renderCue(cue, true);
       expect(node().getAttribute('data-busy-cue')).toBe(cue);
     }

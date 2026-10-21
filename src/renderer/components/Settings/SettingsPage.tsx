@@ -390,6 +390,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setTabSizingMode(baseline.tabSizingMode as 'shrink' | 'scroll' | 'fixed'));
             dispatch(setFixedTabWidth(baseline.fixedTabWidth));
             dispatch(setTabRunningCue(baseline.tabRunningCue as TabRunningCue));
+            dispatch(setCanvasBusyCue(baseline.canvasBusyCue as CanvasBusyCue));
             dispatch(setColorSchema(baseline.colorSchemaId));
             dispatch(setNonFocusedPaneOpacity(baseline.nonFocusedPaneOpacity));
             dispatch(setAgentColorSchemes(Object.fromEntries(baseline.agentColorSchemes)));
@@ -400,7 +401,6 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             dispatch(setCommandSuggestions(baseline.commandSuggestions));
             dispatch(setActivateTabOnApiCreate(baseline.activateTabOnApiCreate));
             dispatch(setCanvasWheelMode(baseline.canvasWheelMode as CanvasWheelMode));
-            dispatch(setCanvasBusyCue(baseline.canvasBusyCue as CanvasBusyCue));
             dispatch(setDefaultEditor(baseline.defaultEditor));
         } else if (baseline.kind === 'shortcuts') {
             dispatch(setCustomKeybindings(Object.fromEntries(baseline.customKeybindings)));
@@ -1232,6 +1232,31 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 </span>
             </div>
             <div className="setting-item">
+                <label className="setting-label" htmlFor="canvas-busy-cue">
+                    Busy indicator in Canvas Mode
+                </label>
+                <select
+                    id="canvas-busy-cue"
+                    className="setting-input"
+                    value={settings.canvasBusyCue}
+                    onChange={(e) => dispatch(setCanvasBusyCue(e.target.value as CanvasBusyCue))}
+                >
+                    <option value="pulse">Pulse the node header, low power (default)</option>
+                    <option value="sweep">Animated sweep across the node</option>
+                    <option value="dot">Blinking dot in the node title</option>
+                    <option value="static">Static highlight</option>
+                    <option value="off">Off</option>
+                </select>
+                <span className="help-text">
+                    The same choice for nodes on the canvas. “Pulse”, “Animated sweep” and
+                    “Static highlight” light the node header, and still show when you zoom out
+                    far enough for nodes to collapse to name tiles. “Blinking dot” is a small
+                    light in the node title instead, with nothing shown on collapsed tiles. The
+                    Canvas sidebar blinks a busy terminal’s shell icon, except with “Static
+                    highlight” or “Off”, where nothing on the canvas moves.
+                </span>
+            </div>
+            <div className="setting-item">
                 <label className="setting-label">Color Schema</label>
                 <div className="color-schema-grid">
                     {COLOR_SCHEMAS.map((schema) => (
@@ -1597,31 +1622,6 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 pointer and zooms its font. With “Wheel scrolls”, the wheel pans the workspace
                 (Shift+wheel pans sideways) and Ctrl/Cmd+wheel zooms the canvas instead — font
                 zoom then stays on Ctrl/Cmd+wheel in the terminal you are editing.
-            </span>
-            <div className="setting-item">
-                <label className="setting-label" htmlFor="canvas-busy-cue">
-                    Busy indicator in Canvas Mode
-                </label>
-                <select
-                    id="canvas-busy-cue"
-                    className="setting-input"
-                    value={settings.canvasBusyCue}
-                    onChange={(e) => dispatch(setCanvasBusyCue(e.target.value as CanvasBusyCue))}
-                >
-                    <option value="pulse">Pulse the node header, low power (default)</option>
-                    <option value="sweep">Sweep across the node</option>
-                    <option value="dot">Blinking dot in the node title</option>
-                </select>
-            </div>
-            <span className="help-text">
-                How a node on the canvas shows that something inside it is producing output.
-                “Pulse” switches a soft highlight across the node header between bright and dim
-                once a second, the same as busy tabs by default. “Sweep” steps a band across the
-                header a few times a second; it is easier to spot but redraws the window about
-                five times as often. Both still show when you zoom out far enough for nodes to
-                collapse to name tiles. “Blinking dot” is a small light in the node title, muted
-                while the terminal is idle and blinking while it is busy, with nothing shown on
-                collapsed tiles. The Canvas sidebar list blinks its shell icon either way.
             </span>
             <div className="setting-item setting-item-row">
                 <label className="setting-label" htmlFor="default-editor">
