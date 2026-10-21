@@ -15,6 +15,7 @@ const base: TrackedSettings = {
   activateTabOnApiCreate: false,
   canvasWheelMode: 'zoom',
   canvasBusyCue: 'sweep',
+  tabRunningCue: 'animated',
   defaultEditor: '',
   defaultProfile: 'p1',
   shellProfiles: [{ id: 'p1', cwd: 'C:/a' }, { id: 'p2', cwd: undefined }],
@@ -79,6 +80,14 @@ describe('settingsDirty', () => {
     // carried in the snapshot object would flag the change and then fail to undo it.
     const snap = snapshotCategory('terminal', { ...base, canvasBusyCue: 'dot' });
     expect(snap).toMatchObject({ kind: 'terminal', canvasBusyCue: 'dot' });
+  });
+
+  it('appearance tracks the tab busy cue and carries it in the snapshot', () => {
+    // Carried in the snapshot because that object is what "Discard changes" replays.
+    const snap = snapshotCategory('appearance', base);
+    expect(isCategoryDirty('appearance', { ...base, tabRunningCue: 'off' }, snap)).toBe(true);
+    expect(isCategoryDirty('appearance', { ...base, tabRunningCue: 'animated' }, snap)).toBe(false);
+    expect(snapshotCategory('appearance', { ...base, tabRunningCue: 'static' })).toMatchObject({ kind: 'appearance', tabRunningCue: 'static' });
   });
 
   it('profiles tracks cwd and defaultProfile, ignores other fields', () => {

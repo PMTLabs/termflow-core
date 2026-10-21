@@ -13,6 +13,7 @@ export interface TrackedSettings {
   fontWeightBold: string;
   tabSizingMode: string;
   fixedTabWidth: number;
+  tabRunningCue: string;
   colorSchemaId: string;
   nonFocusedPaneOpacity: number;
   agentColorSchemes: Record<string, string>;
@@ -37,6 +38,7 @@ export type CategorySnapshot =
       fontWeightBold: string;
       tabSizingMode: string;
       fixedTabWidth: number;
+      tabRunningCue: string;
       colorSchemaId: string;
       nonFocusedPaneOpacity: number;
       // Stored as a key-sorted [agent, schemaId][] so JSON.stringify comparison is
@@ -67,6 +69,7 @@ export function snapshotCategory(category: TrackedCategory, s: TrackedSettings):
         fontWeightBold: s.fontWeightBold,
         tabSizingMode: s.tabSizingMode,
         fixedTabWidth: s.fixedTabWidth,
+        tabRunningCue: s.tabRunningCue,
         colorSchemaId: s.colorSchemaId,
         nonFocusedPaneOpacity: s.nonFocusedPaneOpacity,
         agentColorSchemes: Object.entries(s.agentColorSchemes).sort((a, b) => a[0].localeCompare(b[0])),

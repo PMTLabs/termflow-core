@@ -1,4 +1,4 @@
-import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setExemptLoopbackFromProxy, setCanvasWheelMode, setCanvasBusyCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
+import settingsReducer, { setCloseTabOnProcessExit, setSmartCtrlC, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setActivateTabOnApiCreate, setColorSchema, setCommandSuggestions, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybinding, resetCustomKeybinding, setCustomKeybindings, setLaunchAtLogin, setExemptLoopbackFromProxy, setCanvasWheelMode, setCanvasBusyCue, setTabRunningCue, setSnippets, addSnippet, updateSnippet, removeSnippet, renameSnippetFolder, recordSnippetUse, setSnippetsSortMode, isValidSnippet, Snippet } from '../settingsSlice';
 
 describe('settingsSlice closeTabOnProcessExit', () => {
   beforeAll(() => {
@@ -353,6 +353,37 @@ describe('settingsSlice canvasBusyCue', () => {
     try {
       settingsReducer(undefined, setCanvasBusyCue('dot'));
       expect(setConfigValue).toHaveBeenCalledWith('canvasBusyCue', 'dot');
+    } finally {
+      delete (global as any).window.electronAPI;
+    }
+  });
+});
+
+describe('settingsSlice tabRunningCue', () => {
+  beforeAll(() => {
+    (global as any).window = (global as any).window || {};
+  });
+
+  it("defaults to 'animated'", () => {
+    const state = settingsReducer(undefined, { type: '@@INIT' } as any);
+    expect(state.tabRunningCue).toBe('animated');
+  });
+
+  it("can be switched to 'static', 'off' and back", () => {
+    let state = settingsReducer(undefined, setTabRunningCue('static'));
+    expect(state.tabRunningCue).toBe('static');
+    state = settingsReducer(state, setTabRunningCue('off'));
+    expect(state.tabRunningCue).toBe('off');
+    state = settingsReducer(state, setTabRunningCue('animated'));
+    expect(state.tabRunningCue).toBe('animated');
+  });
+
+  it('persists the change, so it survives a restart', () => {
+    const setConfigValue = jest.fn();
+    (global as any).window.electronAPI = { setConfigValue };
+    try {
+      settingsReducer(undefined, setTabRunningCue('off'));
+      expect(setConfigValue).toHaveBeenCalledWith('tabRunningCue', 'off');
     } finally {
       delete (global as any).window.electronAPI;
     }

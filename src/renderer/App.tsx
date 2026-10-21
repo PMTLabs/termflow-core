@@ -36,6 +36,7 @@ import {
   setCommandSuggestions,
   setCanvasWheelMode,
   setCanvasBusyCue,
+  setTabRunningCue,
   setColorSchema,
   setNonFocusedPaneOpacity,
   setAgentColorSchemes,
@@ -56,6 +57,7 @@ import {
 } from './store/slices/settingsSlice';
 import type { TerminalFontWeight } from './store/slices/settingsSlice';
 import { isCanvasBusyCue } from './components/Canvas/canvasBusyCue';
+import { isTabRunningCue } from './components/Tabs/tabRunningCue';
 import { openSettingsTab, installSettingsRouting } from './services/openSettings';
 import { SHORTCUT_ACTIONS, findConflict } from './services/shortcutActions';
 import { applyEffectiveThemes, applyActivePaneBackground } from './store/terminalTheme';
@@ -704,6 +706,9 @@ const App: React.FC = () => {
         // every node with no cue at all and a dropdown showing nothing selected.
         if (isCanvasBusyCue(config.canvasBusyCue)) {
           dispatch(setCanvasBusyCue(config.canvasBusyCue));
+        }
+        if (isTabRunningCue(config.tabRunningCue)) {
+          dispatch(setTabRunningCue(config.tabRunningCue));
         }
         if (config.keepRunningInBackground !== undefined) {
           dispatch(setKeepRunningInBackground(config.keepRunningInBackground));

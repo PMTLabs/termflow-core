@@ -365,9 +365,13 @@
  *
  * `plan/020` deleted the node sweep on the grounds that it "repainted a full-width gradient
  * every frame". That was overstated — the band animates `transform`, which composites, and the
- * gradient is painted into its layer once — so the real per-node cost is layer memory, bounded
- * by the number of BUSY nodes. Both cues are affordable; the setting is a legibility choice,
- * not a fast-vs-pretty one, which is why `sweep` is the default. */
+ * gradient is painted into its layer once — but a CONTINUOUS composited animation still emits
+ * a new frame every vsync, and every frame is a window composition for DWM. Measured in Edge
+ * 155 at 2560x1440: a linear `transform` sweep cost +9 points of DWM GPU; the same keyframes
+ * under `steps()` were indistinguishable from no animation. So every busy cue below is
+ * STEPPED — a handful of changes a second, not sixty. Keep them that way: an agent keeps a node
+ * busy for hours. With the steps in place both cues are affordable; the setting is a
+ * legibility choice, not a fast-vs-pretty one, which is why `sweep` is the default. */
 
 /* ---- The `sweep` cue (default) ------------------------------------------ */
 
@@ -388,7 +392,8 @@
   width: 55%; z-index: -1; pointer-events: none;
   opacity: .42;
   background-image: linear-gradient(90deg, transparent 0%, var(--tab-running-accent, #3aa6ff) 50%, transparent 100%);
-  animation: canvas-node-sweep 1.6s linear infinite;
+  /* 8 steps per 1.6s = 5 moves a second (see the cost note above). */
+  animation: canvas-node-sweep 1.6s steps(8) infinite;
 }
 @keyframes canvas-node-sweep {
   /* Percentages here are of the BAND's own width, so -100% is fully off the left edge and
@@ -407,12 +412,14 @@
   width: 7px; height: 7px; border-radius: 50%; flex: none;
   background: var(--text-tertiary, #666666);
 }
+/* `steps(1, end)` applies per keyframe interval, so each half holds its value: a two-state
+   blink, two changes per period, instead of an eased fade that redraws every frame. */
 .canvas-node-dot.running {
   background: var(--tab-running-accent, #3aa6ff);
-  animation: canvas-busy-blink 1.1s ease-in-out infinite;
+  animation: canvas-busy-blink 1.1s steps(1, end) infinite;
 }
 .canvas-srow.running .shell-profile-icon {
-  animation: canvas-busy-blink 1.1s ease-in-out infinite;
+  animation: canvas-busy-blink 1.1s steps(1, end) infinite;
 }
 @keyframes canvas-busy-blink {
   0%, 100% { opacity: 1; }
