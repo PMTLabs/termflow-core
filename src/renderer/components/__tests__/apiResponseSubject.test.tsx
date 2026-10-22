@@ -1,5 +1,5 @@
 /** @jest-environment jsdom */
-jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: new Map(), refreshGlyphAtlases: jest.fn() }));
+jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: new Map(), refreshGlyphAtlases: jest.fn(), setBroadcastSink: jest.fn() }));
 jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn().mockResolvedValue(() => {}) }));
 jest.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ label: 'main' }) }));
 jest.mock('../TitleBar', () => ({ TitleBar: () => null }));

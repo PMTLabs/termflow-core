@@ -1,6 +1,7 @@
 /* TerminalPane.css - Styling for terminal pane component */
 
 .terminal-pane {
+  --broadcast-ring: #e5a832;
   width: 100%;
   height: 100%;
   display: flex;
@@ -21,6 +22,22 @@
 .terminal-pane.active {
   box-shadow: inset 0 0 0 1px var(--pane-active-border, #007acc);
 }
+
+/* The inner amber ring preserves the focused pane's outer accent. */
+.terminal-pane.broadcasting::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  box-shadow: inset 0 0 0 2px var(--broadcast-ring, #e5a832);
+  pointer-events: none;
+  z-index: 2;
+}
+.broadcast-chip {
+  color: var(--broadcast-ring, #e5a832);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.light-theme .terminal-pane { --broadcast-ring: #956000; }
 
 /* Header */
 .terminal-pane-header {

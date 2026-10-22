@@ -14,6 +14,7 @@ import type { Snippet } from '../../../store/slices/settingsSlice';
 import { addTab, setActiveTab } from '../../../store/slices/tabsSlice';
 import { addTabTree, resetPanes, setActiveTabId } from '../../../store/slices/panesSlice';
 import { TerminalDisplay } from '../TerminalDisplay';
+import { stopBroadcast } from '../../../store/slices/broadcastSlice';
 import { splitPaneById } from '../../../services/paneActions';
 import { setSurfaceChrome } from '../../../services/surfaceChrome';
 import { writeClipboardText } from '../../../utils/clipboard';
@@ -46,7 +47,7 @@ jest.mock('@termflow/terminal-core', () => {
     getLinkAt = jest.fn(() => null);
     getCursorPixelPosition = jest.fn(() => null);
   }
-  return { TerminalEngine: FakeTerminalEngine, pasteToTerminal: jest.fn(() => true) };
+  return { TerminalEngine: FakeTerminalEngine, pasteToTerminal: jest.fn(() => true), isBroadcastAvailable: () => true };
 });
 jest.mock('../ContextMenu.css', () => ({}));
 jest.mock('../TerminalDisplay.css', () => ({}));
@@ -222,6 +223,27 @@ function setField(field: HTMLInputElement | HTMLTextAreaElement, value: string) 
 }
 
 describe('mounted TerminalDisplay plan 041 hosts', () => {
+  it('body broadcast menu shares the tab label, live enablement and stop hint', async () => {
+    await rightClickTerminal('term-b');
+    const row = () => [...document.querySelectorAll<HTMLButtonElement>('.context-menu-item')]
+      .find(button => /Focus all panes in this tab|Stop focusing all panes/.test(button.textContent ?? ''))!;
+    expect(row().textContent).toContain('Focus all panes in this tab');
+    expect(row().disabled).toBe(true);
+    await act(async () => {
+      store.dispatch(addTabTree({ tabId: 'shortcut-tab', tree: { id: 'split-b', type: 'split', direction: 'horizontal', children: [
+        { id: 'pane-b', type: 'terminal', terminalId: 'term-b' },
+        { id: 'pane-c', type: 'terminal', terminalId: 'term-c' },
+      ] } }));
+    });
+    await rightClickTerminal('term-b');
+    expect(row().disabled).toBe(false);
+    await act(async () => row().click());
+    expect(store.getState().broadcast).toEqual({ mode: 'tab', tabId: 'shortcut-tab' });
+    await rightClickTerminal('term-b');
+    expect(row().textContent).toContain('Stop focusing all panes');
+    expect(row().textContent).toContain('Ctrl+Shift+B');
+    await act(async () => store.dispatch(stopBroadcast()));
+  });
   it('renders one New Pane row for terminal B and maps all six activation surfaces', async () => {
     const expected = [
       ['vertical', 'after'], ['vertical', 'after'], ['vertical', 'after'],

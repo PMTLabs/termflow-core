@@ -1,4 +1,5 @@
 import { store } from '../store';
+import { selectBroadcastMembers, stopBroadcast } from '../store/slices/broadcastSlice';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../store/slices/panesSlice';
 import { noteUserSplitOf } from './paneActions';
@@ -86,6 +87,7 @@ export class InputHandler {
     this.registerShortcut(this.defaultComboFor('paste'), this.handlePaste);
     this.registerShortcut('Ctrl+Shift+V', this.handlePaste); // fixed secondary fallback, not customizable
     this.registerShortcut(this.defaultComboFor('clearTerminal'), this.handleClearTerminal);
+    this.registerShortcut(this.defaultComboFor('stopBroadcastInput'), this.handleStopBroadcastInput);
 
     // Application
     // Open Settings. The key-combo layer below maps BOTH event.ctrlKey and
@@ -163,6 +165,7 @@ export class InputHandler {
       focusPrevPane: this.handleFocusPrevPane,
       paste: this.handlePaste,
       clearTerminal: this.handleClearTerminal,
+      stopBroadcastInput: this.handleStopBroadcastInput,
       openSettings: openSettingsTab,
       openSnippets: this.handleOpenSnippets,
       toggleFullScreen: this.handleToggleFullScreen,
@@ -475,7 +478,20 @@ export class InputHandler {
     }
   }
 
+  private handleStopBroadcastInput = (): void => {
+    if (store.getState().broadcast?.mode !== 'off') store.dispatch(stopBroadcast());
+  };
+
   private handleClearTerminal = (): void => {
+    const state = store.getState();
+    if (state.broadcast && state.broadcast.mode !== 'off') {
+      for (const member of selectBroadcastMembers(state)) {
+        if (terminalService.getProcessId(member)) {
+          void terminalService.writeToTerminal(member, '\x0c').catch(err => console.error('Failed to clear terminal:', err));
+        }
+      }
+      return;
+    }
     // Same resolution as paste, and for the same reason: this is a global shortcut with no DOM
     // target, so "the active pane" is the wrong question while the canvas holds the keyboard.
     const targetId = resolveKeyboardTerminalId(store.getState()) ?? undefined;
