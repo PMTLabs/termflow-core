@@ -1,5 +1,6 @@
 import { paneIncarnations, accepted, describePanes, type PaneCapture, type CreateMode, type PaneIncarnations } from './paneIncarnations';
 import { termDiag } from '../utils/diag';
+import { earlyOutput } from './earlyOutput';
 import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
@@ -78,6 +79,8 @@ export class TerminalServiceClass {
       // attached the console retains every message, so a long agent session grows the
       // renderer's memory and slows the console down the longer it runs.
       termDiag(() => `[TERM-DIAG] terminal data (processId=${processId} length=${data.length})`);
+      // Held until a pane subscribes to this process (see earlyOutput.ts).
+      earlyOutput.record(processId, data);
       // Always emit the event - let TerminalDisplay filter by processId
       window.dispatchEvent(new CustomEvent('pty:data', {
         detail: { processId, data }
@@ -85,6 +88,7 @@ export class TerminalServiceClass {
     });
 
     window.electronAPI.onTerminalExit((processId: string, exitCode: number, cwd?: string | null) => {
+      earlyOutput.exited(processId);
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
@@ -370,6 +374,7 @@ export class TerminalServiceClass {
       if (admission.status === 'Inert') {
         processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
       } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
+        // This leaf's own process: its held early output stays claimable (earlyOutput.ts).
         processId = admission.pc;
       } else if (admission.status === 'Create' || admission.status === 'Join') {
         const work = protocol.create(admission.cg, {
@@ -569,6 +574,9 @@ export class TerminalServiceClass {
 
   registerExistingTerminal(terminalId: string, processId: string): void {
     console.log(`TerminalService: Registering existing terminal ${terminalId} with process ${processId}`);
+    // Already running when this window learned of it: hydrate it as before, from the screen,
+    // never from output this window happened to hold (earlyOutput.ts).
+    earlyOutput.close(processId);
     this.bindProcess(terminalId, processId);
   }
 
