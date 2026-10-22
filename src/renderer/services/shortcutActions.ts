@@ -45,6 +45,7 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   { id: 'focusNextPane', label: 'Focus Next Pane', defaultCombo: 'Alt+]' },
   { id: 'focusPrevPane', label: 'Focus Previous Pane', defaultCombo: 'Alt+[' },
   { id: 'paste', label: 'Paste', defaultCombo: 'Ctrl+V' },
+  { id: 'stopBroadcastInput', label: 'Stop broadcasting input', defaultCombo: 'Ctrl+Shift+B' },
   { id: 'clearTerminal', label: 'Clear Terminal', defaultCombo: 'Ctrl+Shift+X' },
   { id: 'openSettings', label: 'Open Settings', defaultCombo: 'Ctrl+,' },
   /*

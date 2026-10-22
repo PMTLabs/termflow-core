@@ -22,6 +22,19 @@ beforeEach(() => {
 });
 
 describe('insertTextIntoTerminal', () => {
+  it('snippet insertion through the real cache emits one raw paste unit', () => {
+    const core = jest.requireActual('@termflow/terminal-core');
+    const sink = jest.fn(); const paste = jest.fn();
+    core.terminalCache.set('tm-snippet', { terminal: { paste }, broadcastAvailable: true, processId: 'pid-snippet' });
+    core.setBroadcastSink(sink);
+    (pasteToTerminal as jest.Mock).mockImplementationOnce(core.pasteToTerminal);
+    try {
+      insertTextIntoTerminal('tm-snippet', 'snippet\ntext');
+      expect(sink.mock.calls).toEqual([['tm-snippet', { kind: 'paste', text: 'snippet\ntext' }]]);
+      expect(paste).toHaveBeenCalledWith('snippet\ntext');
+      expect(writeToTerminal).not.toHaveBeenCalled();
+    } finally { core.setBroadcastSink(null); core.terminalCache.delete('tm-snippet'); }
+  });
   it('calls pasteToTerminal with the given terminalId and text', () => {
     insertTextIntoTerminal('tm-1', 'hello world');
     expect(pasteToTerminal).toHaveBeenCalledWith('tm-1', 'hello world');

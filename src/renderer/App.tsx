@@ -1,6 +1,7 @@
 import { paneIncarnations, acceptsTransferNotice, describePanes, type PaneCapture } from './services/paneIncarnations';
 import { captureWorkspace, isCurrentWorkspace } from './services/workspaceReplacement';
 import React, { useEffect, useRef, useState } from 'react';
+import { installInputBroadcast } from './services/inputBroadcast';
 import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
@@ -1848,6 +1849,8 @@ const App: React.FC = () => {
       }
     }
   };
+
+  useEffect(() => installInputBroadcast(store), []);
 
   return (
     <div className="app">

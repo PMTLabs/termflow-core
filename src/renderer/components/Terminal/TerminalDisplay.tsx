@@ -6,6 +6,9 @@ import type { FontWeight } from '@xterm/xterm';
 import { TerminalEngine } from '@termflow/terminal-core';
 import type { TerminalLinkHit } from '@termflow/terminal-core';
 import { ContextMenu } from './ContextMenu';
+import { broadcastMenuItems } from '../Panes/broadcastMenuItems';
+import { selectBroadcastMembers } from '../../store/slices/broadcastSlice';
+import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { automationMenuItems } from '../Automation/AutomationMenuSection';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
@@ -233,6 +236,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
   // Backlog 011: suggest popup state. Routed via a ref so the once-per-terminalId
   // engine options always call the live hook callbacks (same pattern as
   // onTitleChangeRef above).
+  const broadcastActive = useSelector((s: RootState) => selectBroadcastMembers(s).includes(terminalId));
   const suggest = useCommandSuggest(engineRef, () => getCwdSnapshot(terminalId));
   const suggestRef = useRef(suggest);
   suggestRef.current = suggest;
@@ -591,6 +595,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       // Backlog 011: command-history suggestions. Live getter (toggle without
       // remount); popup events routed through the ref to the hook.
       commandSuggestions: () => store.getState().settings.commandSuggestions,
+      broadcastActive: () => selectBroadcastMembers(store.getState()).includes(terminalId),
       // Cross-window detach handoff: this window's terminalCache has no entry for
       // terminalId yet on first mount, so the source window's live prompt-gate
       // (stashed by attachExistingTerminal) fills the gap. Single-use — undefined
@@ -862,6 +867,8 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     selectionText,
   });
 
+  useEffect(() => { if (broadcastActive) suggest.close(); }, [broadcastActive, suggest.close]);
+
   const getContextMenuItems = () => {
     const engine = engineRef.current;
     const actions = engine?.getContextMenuActions();
@@ -876,7 +883,10 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     const selectionMode = engine?.isSelectionMode() ?? false;
     const offerSelectionMode = selectionMode || (engine?.isMouseTrackingActive() ?? false);
 
+    const state = store.getState();
+    const owningTabId = Object.keys(state.panes.treesByTabId).find(id => getAllTerminalIds(state.panes.treesByTabId[id]).includes(terminalId));
     return [
+      ...(paneId && !relocationHost ? broadcastMenuItems(state, owningTabId, dispatch) : []),
       // Pane-tree actions, and ONLY while the surface is actually in its pane (`plan/021` R2).
       //
       // The menu became reachable from the canvas overlay, where these are wrong in a way
@@ -1112,7 +1122,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       />
       <ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />
       {search.open && <TerminalSearchBar search={search} />}
-      {suggest.open && (
+      {suggest.open && !broadcastActive && (
         <CommandSuggestPopup
           suggestions={suggest.items}
           selectedIndex={suggest.selectedIndex}

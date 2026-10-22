@@ -1,4 +1,5 @@
 import { Terminal } from '@xterm/xterm';
+import { describe, emitBroadcast, hasBroadcastSink, isDeliveringBroadcast, subscribeUserInput, withBroadcastPaste, queueBroadcastTargetWrite, type KeyDescriptor } from './broadcast';
 import type { FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -1355,6 +1356,19 @@ export class TerminalEngine {
   // NOT include the cache-lifetime bridge subs (those are Task 4 / R1, disposed
   // only by dispose()/cleanupTerminalCache).
   private disposables: Array<() => void> = [];
+  private pendingKey: KeyDescriptor | null = null;
+  private lastKeydown: KeyDescriptor | null = null;
+  private pendingUserInput = false;
+  private inPointerEvent = false;
+  private inNativePaste = false;
+
+  private emitKeyBroadcast(data: string): void {
+    const key = this.pendingKey;
+    this.pendingKey = null;
+    // The keystroke is broadcast; a trailing keypress must not restore it again.
+    this.lastKeydown = null;
+    if (key) emitBroadcast(this.cacheKey, { kind: 'key', key, srcBytes: data });
+  }
 
   // CONTAINER-LOCAL disposables — the four DOM listeners bound to the container
   // argument (click-to-focus, zoom keydown, Ctrl/Cmd+F, modifier+wheel). Split
@@ -2309,7 +2323,48 @@ export class TerminalEngine {
       this.setPromptGate(prevGate.seen, prevGate.armed);
     }
 
+    const inputSubscription = subscribeUserInput(boundTerm, () => { this.pendingUserInput = true; });
+    if (inputSubscription) this.disposables.push(() => inputSubscription.dispose());
+    else this.opts.onDiag?.(() => '[TERM-DIAG] broadcast unavailable: xterm user-input hook missing');
+    let pointerHeld = false;
+    const pointerGuard = (event: Event) => {
+      const inside = boundTerm.element?.contains(event.target as Node) ?? false;
+      if (event.type === 'mousemove' && (event as MouseEvent).buttons === 0) pointerHeld = false;
+      if (!inside && !pointerHeld) return;
+      if (event.type === 'mousedown') pointerHeld = true;
+      this.inPointerEvent = true;
+      if (event.type === 'mouseup') pointerHeld = false;
+      queueMicrotask(() => { this.inPointerEvent = false; });
+    };
+    for (const name of ['mousedown', 'mousemove', 'mouseup', 'wheel']) {
+      window.addEventListener(name, pointerGuard, true);
+      this.disposables.push(() => window.removeEventListener(name, pointerGuard, true));
+    }
+    // Bubble phase and window-only: a capture listener would also see the element
+    // blur that xterm's own mousedown focus() fires, clearing the guard just before
+    // xterm sends that press's mouse report.
+    const resetPointer = (event: Event) => {
+      if (event.target !== window) return;
+      pointerHeld = false;
+      this.inPointerEvent = false;
+    };
+    window.addEventListener('blur', resetPointer);
+    this.disposables.push(() => window.removeEventListener('blur', resetPointer));
+    const nativePaste = (event: ClipboardEvent) => {
+      // xterm still owns the event (including empty/file paste). Suppress its
+      // onData copy even if it brackets empty text; never cancel the DOM event.
+      this.inNativePaste = true;
+      queueMicrotask(() => { this.inNativePaste = false; });
+      const text = event.clipboardData?.getData('text/plain');
+      if (!text || !this.attachedProcessId || !terminalCache.get(this.cacheKey)?.processId) return;
+      emitBroadcast(this.cacheKey, { kind: 'paste', text });
+    };
+    boundTerm.element?.addEventListener('paste', nativePaste, true);
+    this.disposables.push(() => boundTerm.element?.removeEventListener('paste', nativePaste, true));
+
     const dataDisposable = boundTerm.onData((data) => {
+      const user = this.pendingUserInput;
+      this.pendingUserInput = false;
       // Stamp the most-recent user-input time so the alt-screen heal never reset()s
       // the buffer mid-keystroke (Task 6: RESYNC_SETTLE_MS input-quiet gate).
       const _e = terminalCache.get(this.cacheKey);
@@ -2325,9 +2380,15 @@ export class TerminalEngine {
       if (this.attachedProcessId) {
         // Fire-and-forget: swallow rejection (e.g. PTY already exited) so it
         // never surfaces as an uncaught promise rejection.
-        Promise.resolve(this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
+        Promise.resolve(isDeliveringBroadcast()
+          ? queueBroadcastTargetWrite(this.bridge.write.bind(this.bridge), this.attachedProcessId, data, this.cacheKey)
+          : this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
           this.opts.onDiag?.(() => `[TERM-DIAG] write after exit ignored: ${e}`);
         });
+        if (user && !this.inPointerEvent && !this.inNativePaste && !terminalCache.get(this.cacheKey)?.inBroadcastPaste) {
+          if (this.pendingKey) this.emitKeyBroadcast(data);
+          else emitBroadcast(this.cacheKey, { kind: 'text', data });
+        }
       }
     });
 
@@ -2518,6 +2579,28 @@ export class TerminalEngine {
 
     // --- Keyboard: attachCustomKeyEventHandler (R7 + source 445-504) ---
     boundTerm.attachCustomKeyEventHandler((event) => {
+      // Every key event starts with no pending descriptor, so a keypress that does
+      // not match (dead key, composition) can never inherit the keydown's key.
+      this.pendingKey = null;
+      if (event.type !== 'keypress') this.lastKeydown = null;
+      if (inputSubscription && hasBroadcastSink() && !isDeliveringBroadcast() && !event.isComposing) {
+        if (event.type === 'keypress') {
+          // Uppercase/AltGr input may arrive after keydown's microtask expires.
+          // Consumed once, and expires like keydown's capture if xterm's keypress
+          // then emits nothing.
+          const last = this.lastKeydown;
+          this.lastKeydown = null;
+          if (last && event.key === last.key) {
+            this.pendingKey = last;
+            queueMicrotask(() => { if (this.pendingKey === last) this.pendingKey = null; });
+          }
+        } else if (event.type === 'keydown' || event.type === 'keyup') {
+          const key = describe(event);
+          this.pendingKey = key;
+          if (event.type === 'keydown') this.lastKeydown = key;
+          queueMicrotask(() => { if (this.pendingKey === key) this.pendingKey = null; });
+        }
+      }
       if (event.type === 'keydown') {
         const isModifier = ['Control', 'Shift', 'Alt', 'Meta'].includes(event.key);
         if (!isModifier) {
@@ -2666,6 +2749,7 @@ export class TerminalEngine {
           Promise.resolve(this.bridge.write(this.attachedProcessId, '\n')).catch((e: unknown) => {
             this.opts.onDiag?.(() => `[TERM-DIAG] write after exit ignored: ${e}`);
           });
+          this.emitKeyBroadcast('\n');
         }
         return false;
       }
@@ -2793,6 +2877,7 @@ export class TerminalEngine {
           Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
             this.opts.onDiag?.(() => `[TERM-DIAG] cmd-arrow home/end write ignored: ${e}`);
           });
+          this.emitKeyBroadcast(seq);
         }
         return false;
       }
@@ -2826,6 +2911,7 @@ export class TerminalEngine {
           Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
             this.opts.onDiag?.(() => `[TERM-DIAG] option-arrow word-nav write ignored: ${e}`);
           });
+          this.emitKeyBroadcast(seq);
         }
         return false;
       }
@@ -2859,6 +2945,7 @@ export class TerminalEngine {
             Promise.resolve(this.bridge.write(this.attachedProcessId, shimSeq)).catch((e: unknown) => {
               this.opts.onDiag?.(() => `[TERM-DIAG] word-delete shim write ignored: ${e}`);
             });
+            this.emitKeyBroadcast(shimSeq);
           }
           return false;
         }
@@ -2876,6 +2963,7 @@ export class TerminalEngine {
             Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
               this.opts.onDiag?.(() => `[TERM-DIAG] kb write ignored: ${e}`);
             });
+            this.emitKeyBroadcast(seq);
           }
           return false;
         }
@@ -2910,6 +2998,7 @@ export class TerminalEngine {
             Promise.resolve(this.bridge.write(this.attachedProcessId, seq)).catch((e: unknown) => {
               this.opts.onDiag?.(() => `[TERM-DIAG] win32 kb write ignored: ${e}`);
             });
+            this.emitKeyBroadcast(seq);
           }
           return false;
         }
@@ -3020,6 +3109,21 @@ export class TerminalEngine {
       // than existingCache's) is correct in both cases: if we adopted the cached
       // instance above, this is a no-op re-write of the same object; if this is
       // a genuinely fresh terminal, it seeds the cache with the fresh instance.
+      getBroadcastOptions: () => ({
+        shellType: this.opts.shellType?.(), enhancedKeyboard: this.enhancedKbEnabled(),
+        macOptionIsMeta: this.opts.macOptionIsMeta ?? false,
+        isMac: this.opts.isMac ?? /Mac/.test(globalThis.navigator?.platform ?? ''),
+        isWindows: this.isWindowsPlatform(),
+      }),
+      disarmBroadcastPrompt: () => {
+        this.setPromptGate(this.promptOscSeen, false);
+        this.sawInputWhileDisarmed = false;
+        this.capture?.cancel();
+        this.emitInputLine('');
+      },
+      broadcastAvailable: !!inputSubscription,
+      broadcastWrite: true,
+      broadcastRawWrite: this.bridge.write.bind(this.bridge),
       kbState: this.kbState,
       win32State: this.win32State,
       // Backlog 003: the cache-lifetime protocol handler disposers, created once
@@ -4107,7 +4211,9 @@ export class TerminalEngine {
   }
 
   paste(text: string): void {
-    this.term?.paste(text);
+    if (!this.term) return;
+    if (this.attachedProcessId) withBroadcastPaste(this.cacheKey, text, () => this.term!.paste(text));
+    else this.term.paste(text);
   }
 
   // --- Backlog 011: command capture + suggest popup -------------------------
@@ -4115,6 +4221,7 @@ export class TerminalEngine {
   /** Capture/popup allowed only at a plain shell prompt. */
   private suggestionsAllowed(): boolean {
     if (!this.term) return false;
+    if (this.opts.broadcastActive?.()) return false;
     if (this.term.buffer.active.type === 'alternate') return false;
     if (this.protocolActive()) return false;
     // An app holding mouse tracking (copilot/opencode) owns the terminal even
@@ -4164,6 +4271,11 @@ export class TerminalEngine {
 
   /** Route typed input (pre-echo) into the capture heuristic. */
   private routeCaptureData(data: string): void {
+    // Submitting consumes the shell prompt even when capture/suggestions are disabled.
+    if (/[\r\n]/.test(data)) {
+      this.setPromptGate(this.promptOscSeen, false);
+      this.sawInputWhileDisarmed = false;
+    }
     const capture = this.capture;
     if (!capture || data.length === 0) return;
     if (!this.suggestionsAllowed()) {
@@ -4332,7 +4444,7 @@ export class TerminalEngine {
    *  typed input (Right × suffix, covering mid-line cursors), erase the WHOLE
    *  input with DELs, then write the command. Shell-agnostic; does NOT run it. */
   insertCommand(command: string): void {
-    if (!this.attachedProcessId || !this.term) return;
+    if (!this.attachedProcessId || !this.term || this.opts.broadcastActive?.()) return;
     const total = Array.from(this.capture?.getCurrentInput() ?? '').length;
     const before = this.capture?.charsBeforeCursor(this.term.cols) ?? 0;
     const suffix = Math.max(0, total - before);
@@ -4765,6 +4877,18 @@ export class TerminalEngine {
     // — and a dependency whose disposer is not idempotent threw out of mount().
     // `splice(0)` empties the shared array in place AND hands back what to run, so
     // the entry is already empty before the first disposer is invoked.
+    const broadcastEntry = terminalCache.get(this.cacheKey);
+    if (broadcastEntry) {
+      broadcastEntry.broadcastWrite = false;
+      broadcastEntry.disarmBroadcastPrompt = undefined;
+      // Freeze the live getters so the cache stops pinning this unmounted engine.
+      const frozenOptions = broadcastEntry.getBroadcastOptions?.();
+      broadcastEntry.getBroadcastOptions = frozenOptions ? () => frozenOptions : undefined;
+    }
+    this.pendingKey = null;
+    this.lastKeydown = null;
+    this.inNativePaste = false;
+    this.pendingUserInput = false;
     const localDisposers = this.disposables.splice(0);
     this.disposables = [];
     // design 012 §5.5 site 7: the container listeners are a separate array now.

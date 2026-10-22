@@ -714,7 +714,7 @@ describe('TerminalDisplay wiring (source-derived — see file header for why)', 
 
   it('does not touch useCommandSuggest / CommandSuggestPopup wiring', () => {
     expect(DISPLAY).toMatch(/useCommandSuggest\(engineRef, \(\) => getCwdSnapshot\(terminalId\)\)/);
-    expect(DISPLAY).toMatch(/suggest\.open && \(/);
+    expect(DISPLAY).toMatch(/suggest\.open && !broadcastActive && \(/);
   });
 
   /**

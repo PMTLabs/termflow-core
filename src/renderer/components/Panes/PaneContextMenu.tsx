@@ -21,6 +21,7 @@ import { AutomationMenuSection } from '../Automation/AutomationMenuSection';
 import { useTooltipDwell } from '../../hooks/useTooltipDwell';
 import { useTerminalTitleColor, titleColorStyle, TAB_NAME_COLORS } from '../../store/titleColor';
 import { NewPaneRow } from '../UI/NewPaneRow';
+import { broadcastMenuItems } from './broadcastMenuItems';
 import './PaneContextMenu.css';
 
 type PaneSubmenuKey = 'schema' | 'color' | 'admin' | 'automation';
@@ -51,6 +52,8 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
   onClose,
 }) => {
   const menuRef = useRef<HTMLDivElement>(null);
+  const broadcastState = useSelector((s: RootState) => s.broadcast);
+  void broadcastState;
   const dispatch = useDispatch();
   const globalSchemaId = useSelector((s: RootState) => s.settings.colorSchemaId);
   const agentColorSchemes = useSelector((s: RootState) => s.settings.agentColorSchemes);
@@ -373,6 +376,13 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
         <span className="menu-icon">🪟</span>
         Open New Window
       </button>
+      {broadcastMenuItems(store.getState(), owningTabId, dispatch).map(item => (
+        <button key={item.label} className="context-menu-item" disabled={!item.enabled}
+          onClick={() => { item.click(); onClose(); }}>
+          <span>{item.label}</span>
+          {item.accelerator && <span className="context-menu-shortcut">{item.accelerator}</span>}
+        </button>
+      ))}
       <NewPaneRow
         onSplit={(direction, position) => splitPaneById(paneId, direction, position)}
         onDone={onClose}

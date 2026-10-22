@@ -1,9 +1,11 @@
 import { store } from '../store';
+import { selectBroadcastMembers, stopBroadcast } from '../store/slices/broadcastSlice';
 import { addTab, setActiveTab } from '../store/slices/tabsSlice';
 import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../store/slices/panesSlice';
 import { noteUserSplitOf } from './paneActions';
 import { getAllLeafIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
+import { queueBroadcastTargetWrite } from '@termflow/terminal-core';
 import { insertTextIntoTerminal } from './insertTextIntoTerminal';
 import { readClipboardText } from '../utils/clipboard';
 import { isEditableNonTerminalTarget } from './inputTargets';
@@ -86,6 +88,7 @@ export class InputHandler {
     this.registerShortcut(this.defaultComboFor('paste'), this.handlePaste);
     this.registerShortcut('Ctrl+Shift+V', this.handlePaste); // fixed secondary fallback, not customizable
     this.registerShortcut(this.defaultComboFor('clearTerminal'), this.handleClearTerminal);
+    this.registerShortcut(this.defaultComboFor('stopBroadcastInput'), this.handleStopBroadcastInput);
 
     // Application
     // Open Settings. The key-combo layer below maps BOTH event.ctrlKey and
@@ -163,6 +166,7 @@ export class InputHandler {
       focusPrevPane: this.handleFocusPrevPane,
       paste: this.handlePaste,
       clearTerminal: this.handleClearTerminal,
+      stopBroadcastInput: this.handleStopBroadcastInput,
       openSettings: openSettingsTab,
       openSnippets: this.handleOpenSnippets,
       toggleFullScreen: this.handleToggleFullScreen,
@@ -475,7 +479,25 @@ export class InputHandler {
     }
   }
 
+  private handleStopBroadcastInput = (): void => {
+    if (store.getState().broadcast?.mode !== 'off') store.dispatch(stopBroadcast());
+  };
+
   private handleClearTerminal = (): void => {
+    const state = store.getState();
+    if (state.broadcast && state.broadcast.mode !== 'off') {
+      for (const member of selectBroadcastMembers(state)) {
+        if (terminalService.getProcessId(member)) {
+          // Same per-terminal queue as broadcast keys, so a clear cannot overtake a
+          // paste that is still being written to this member.
+          queueBroadcastTargetWrite(
+            (id, data) => terminalService.writeToTerminal(id, data)
+              .catch(err => console.error('Failed to clear terminal:', err)),
+            member, '\x0c');
+        }
+      }
+      return;
+    }
     // Same resolution as paste, and for the same reason: this is a global shortcut with no DOM
     // target, so "the active pane" is the wrong question while the canvas holds the keyboard.
     const targetId = resolveKeyboardTerminalId(store.getState()) ?? undefined;

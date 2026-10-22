@@ -1171,7 +1171,7 @@ test('engine.paste() routes through xterm.paste and reaches bridge.write', () =>
 
   const term = mockTerm('pa1');
   expect(term.pasted).toEqual(['line1\nline2']); // went THROUGH xterm.paste
-  expect(calls.write).toEqual([['p1', 'line1\nline2']]); // emitted via onData
+  expect(calls.write).toEqual([['p1', 'line1\rline2']]); // xterm normalizes pasted newlines
 });
 
 test('pasteToTerminal(cacheKey) pastes via the cached terminal; false when unmounted', () => {

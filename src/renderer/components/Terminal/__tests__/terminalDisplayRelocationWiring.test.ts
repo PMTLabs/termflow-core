@@ -346,7 +346,7 @@ describe('plan/020 §5 — publishing the surface chrome', () => {
   // A publish that replaced the local render would blank the affordance in every ordinary tab.
   it('still renders its own chrome for the pane', () => {
     expect(SOURCE).toContain('<ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />');
-    expect(SOURCE).toContain('{suggest.open && (');
+    expect(SOURCE).toContain('{suggest.open && !broadcastActive && (');
     expect(SOURCE).not.toContain('createPortal');
   });
 });

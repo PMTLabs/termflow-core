@@ -1,3 +1,4 @@
+import { withBroadcastPaste } from './broadcast';
 import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 import type { SearchAddon } from '@xterm/addon-search';
@@ -23,6 +24,12 @@ export interface TerminalCacheEntry {
   // program's palette/fg/bg/cursor changes so the agent can't overwrite our
   // scheme (set by the renderer via setAgentColorLock; read in TerminalEngine).
   agentColorLocked?: boolean;
+  getBroadcastOptions?: () => { shellType?: string; enhancedKeyboard: boolean; isMac: boolean; isWindows: boolean; macOptionIsMeta: boolean };
+  disarmBroadcastPrompt?: () => void;
+  broadcastAvailable?: boolean;
+  broadcastWrite?: boolean;
+  inBroadcastPaste?: boolean;
+  broadcastRawWrite?: (processId: string, data: string) => void | Promise<void>;
   // Declared now; consumed by Task 4 (R1 output delivery).
   processId?: string;
   fitAddon: FitAddon;
@@ -172,7 +179,7 @@ export const enforceCacheCap = (): void => {
 export const pasteToTerminal = (cacheKey: string, text: string): boolean => {
   const cached = terminalCache.get(cacheKey);
   if (!cached) return false;
-  cached.terminal.paste(text);
+  withBroadcastPaste(cacheKey, text, () => cached.terminal.paste(text));
   return true;
 };
 

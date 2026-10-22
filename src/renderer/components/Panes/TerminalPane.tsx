@@ -1,6 +1,7 @@
 import { paneIncarnations, type PaneCapture } from '../../services/paneIncarnations';
 import React, { useRef, useEffect, useState, useCallback, useSyncExternalStore } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
+import { selectBroadcastMembers, stopBroadcast } from '../../store/slices/broadcastSlice';
 import { TerminalDisplay } from '../Terminal/TerminalDisplay';
 import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
@@ -147,6 +148,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const shellProfiles = useSelector((state: RootState) => state.settings.shellProfiles);
   const fontSize = useSelector((state: RootState) => state.settings.fontSize);
   const nonFocusedPaneOpacity = useSelector((state: RootState) => state.settings.nonFocusedPaneOpacity);
+  const isBroadcastMember = useSelector((state: RootState) => !!terminalId && selectBroadcastMembers(state).includes(terminalId));
+  const broadcastOn = useSelector((state: RootState) => !!state.broadcast && state.broadcast.mode !== 'off');
   // Terminal font family — the startup status must render in the same font as
   // the terminal it stands in for (not a hardcoded stack), so it honours the
   // user's font settings.
@@ -814,14 +817,18 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     shellType,
   });
 
+  const handleBroadcastPointerDown = (event: React.PointerEvent) => {
+    if (event.button === 0 && broadcastOn) dispatch(stopBroadcast());
+  };
+
   return (
     <>
       <div
         ref={paneRef}
-        className={paneClassName({ isActive, solo, closedInfo })}
+        className={`${paneClassName({ isActive, solo, closedInfo })}${isBroadcastMember ? ' broadcasting' : ''}`}
         data-pane-id={paneId}
         onContextMenu={handleContextMenu}
-        style={isActive ? undefined : { opacity: nonFocusedPaneOpacity / 100 }}
+        style={isActive || isBroadcastMember ? undefined : { opacity: nonFocusedPaneOpacity / 100 }}
       >
         <div
           className="terminal-pane-header"
@@ -927,8 +934,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
               ×
             </button>
           </div>
+          {isBroadcastMember && <span className="broadcast-chip">⇉ broadcast</span>}
         </div>
-        <div className="terminal-pane-content">
+        <div className="terminal-pane-content" onPointerDownCapture={handleBroadcastPointerDown}>
           {terminalId && processId ? (
             <TerminalDisplay
               terminalId={terminalId}

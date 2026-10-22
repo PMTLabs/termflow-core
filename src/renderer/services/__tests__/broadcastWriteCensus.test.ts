@@ -1,0 +1,31 @@
+import fs from 'fs';
+import path from 'path';
+
+// Each production write path has an explicit policy. Counts force a new caller,
+// even in a previously classified file, to be reviewed rather than grandfathered.
+const policies: Record<string, { count: number; reason: string }> = {
+  'api/browser-bridge.ts': { count: 2, reason: 'transport implementation and API execute command: not user input' },
+  'api/tauri-bridge.ts': { count: 1, reason: 'transport implementation: engine owns classification' },
+  'components/Terminal/MainBridge.ts': { count: 1, reason: 'engine transport: user/reply classification is above this layer' },
+  'components/Panes/TerminalPane.tsx': { count: 1, reason: 'vestigial onData prop: TerminalDisplay never calls it' },
+  'services/TerminalService.ts': { count: 2, reason: 'transport method and IPC forward: callers own classification' },
+  'services/insertTextIntoTerminal.ts': { count: 1, reason: 'cache paste broadcasts; raw fallback is an unmounted source' },
+  'services/inputBroadcast.ts': { count: 1, reason: 'broadcast target fallback: no source re-emission' },
+  'services/InputHandler.ts': { count: 2, reason: 'clear-terminal explicitly fans out while active; single source while off' },
+};
+test('renderer write census classifies every writeToTerminal caller', () => {
+  const root = path.join(__dirname, '../..'); const found: Record<string, number> = {};
+  function walk(dir: string) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name.startsWith('__') || entry.name === 'node_modules') continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else if (/\.tsx?$/.test(file)) {
+        const count = [...fs.readFileSync(file, 'utf8').matchAll(/\bwriteToTerminal\s*(?:\(|:\s*async\s*\()/g)].length;
+        if (count) found[path.relative(root, file).replace(/\\/g, '/')] = count;
+      }
+    }
+  }
+  walk(root);
+  expect(found).toEqual(Object.fromEntries(Object.entries(policies).map(([file, policy]) => [file, policy.count])));
+});
