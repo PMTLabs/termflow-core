@@ -142,3 +142,26 @@ test('an empty restore snapshot flushes buffered output without a reset (unchang
   expect(term.resetCount).toBe(0);
   expect(term.written).toEqual(['BUFFERED']);
 });
+
+test('output the shell printed BEFORE the subscription, handed over inside onData, follows the replay', async () => {
+  // The main app's bridge delivers what arrived before any pane subscribed synchronously, from
+  // inside onData (src/renderer/services/earlyOutput.ts). Those chunks are a fresh shell's first
+  // prompt: they must be buffered like mid-hydration output, not written ahead of the replay.
+  let resolve!: (v: Partial<TerminalSnapshot>) => void;
+  const pending = new Promise<Partial<TerminalSnapshot>>((r) => { resolve = r; });
+  const bridge = makeFakeBridge(() => pending);
+  const onData = bridge.onData;
+  bridge.onData = (processId, cb) => {
+    cb('\x1b[16;1H');
+    cb('PS D:\\sources\\demo> ');
+    return onData(processId, cb);
+  };
+  const engine = new TerminalEngine(bridge, { cacheKey: 'rr7' });
+  engine.mount(makeContainer());
+  engine.attach('p1');
+  const term = mockTerm('rr7');
+  expect(term.written).toEqual([]);
+  resolve({ snapshot: 'HISTORY', prefixOnly: true, anchorRow: 16 });
+  await flush();
+  expect(term.written).toEqual([wrapRestoreReplay('HISTORY', 16, term.rows), '\x1b[16;1HPS D:\\sources\\demo> ']);
+});

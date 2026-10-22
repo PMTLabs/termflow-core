@@ -1,5 +1,6 @@
 import { paneIncarnations, accepted, describePanes, type PaneCapture, type CreateMode, type PaneIncarnations } from './paneIncarnations';
 import { termDiag } from '../utils/diag';
+import { earlyOutput } from './earlyOutput';
 import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
@@ -78,6 +79,8 @@ export class TerminalServiceClass {
       // attached the console retains every message, so a long agent session grows the
       // renderer's memory and slows the console down the longer it runs.
       termDiag(() => `[TERM-DIAG] terminal data (processId=${processId} length=${data.length})`);
+      // Held until a pane subscribes to this process (see earlyOutput.ts).
+      earlyOutput.record(processId, data);
       // Always emit the event - let TerminalDisplay filter by processId
       window.dispatchEvent(new CustomEvent('pty:data', {
         detail: { processId, data }
@@ -85,6 +88,7 @@ export class TerminalServiceClass {
     });
 
     window.electronAPI.onTerminalExit((processId: string, exitCode: number, cwd?: string | null) => {
+      earlyOutput.forget(processId);
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
