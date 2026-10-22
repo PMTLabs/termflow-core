@@ -6,7 +6,6 @@
  */
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
-import { fireEvent } from '@testing-library/react';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -101,7 +100,7 @@ describe('SnippetPickerButton', () => {
         });
         const search = document.querySelector<HTMLInputElement>('.context-menu-flyout-search')!;
 
-        await act(async () => fireEvent.keyDown(search, { key: 'Escape' }));
+        await act(async () => search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })));
 
         expect(document.querySelector('.context-menu.au-snippet-picker')).toBeNull();
         expect(onInsert).not.toHaveBeenCalled();
@@ -120,7 +119,7 @@ describe('SnippetPickerButton', () => {
         });
         expect(document.querySelector('.context-menu.au-snippet-picker')).not.toBeNull();
 
-        await act(async () => { fireEvent.mouseDown(document.body); });
+        await act(async () => { document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); });
 
         expect(document.querySelector('.context-menu.au-snippet-picker')).toBeNull();
         expect(onInsert).not.toHaveBeenCalled();

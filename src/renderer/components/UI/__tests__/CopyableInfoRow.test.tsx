@@ -1,6 +1,6 @@
 /** @jest-environment jsdom */
-import React from 'react';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
 import { CopyableInfoRow, shortenMiddle } from '../CopyableInfoRow';
 
 const PC = 'pc-bbc0309af3fa4842937dbc0d04313b73';
@@ -18,10 +18,16 @@ describe('CopyableInfoRow', () => {
   it('shows the short form, keeps the full id in the tooltip, and copies the full id', async () => {
     const writeText = jest.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
-    render(<CopyableInfoRow label="Process ID:" value={PC} />);
-    const shown = screen.getByText('pc-bbc0309a…04313b73');
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<CopyableInfoRow label="Process ID:" value={PC} />));
+    const shown = Array.from(container.querySelectorAll<HTMLElement>('*'))
+      .find(el => el.children.length === 0 && el.textContent === 'pc-bbc0309a…04313b73')!;
     expect(shown.getAttribute('title')).toBe(PC);
-    fireEvent.click(screen.getByRole('button', { name: 'Copy Process ID' }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(PC));
+    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Copy Process ID"]')!.click());
+    expect(writeText).toHaveBeenCalledWith(PC);
+    await act(async () => root.unmount());
+    container.remove();
   });
 });
