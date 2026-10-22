@@ -1,3 +1,4 @@
+export * from './broadcast';
 export { TerminalEngine, DEFAULT_THEME } from './TerminalEngine';
 export type { RelocationResult } from './TerminalEngine';
 /** The URL matcher shared by `WebLinksAddon` and `getLinkAt`, and the two line scanners built

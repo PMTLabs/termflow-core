@@ -141,6 +141,20 @@ export class Terminal {
   // Recorded side effects.
   written: string[] = [];
   pasted: string[] = [];
+  private userInputCallbacks: Array<() => void> = [];
+  _core = { coreService: {
+    onUserInput: (cb: () => void) => {
+      this.userInputCallbacks.push(cb);
+      return makeDisposable(() => { this.userInputCallbacks = this.userInputCallbacks.filter(fn => fn !== cb); });
+    },
+    triggerDataEvent: (data: string, user = false) => {
+      if (user) this.userInputCallbacks.forEach(cb => cb());
+      this.dataCallbacks.forEach(cb => cb(data));
+    },
+  } };
+  emitReply(data: string): void { this._core.coreService.triggerDataEvent(data, false); }
+  bracketedPasteMode = false;
+  applicationCursorKeysMode = false;
   loadedAddons: unknown[] = [];
   resetCount = 0;
   clearCount = 0;
@@ -335,7 +349,8 @@ export class Terminal {
   // tests see input reach bridge.write.
   paste(data: string): void {
     this.pasted.push(data);
-    this.dataCallbacks.forEach((cb) => cb(data));
+    const text = data.replace(/\r?\n/g, '\r');
+    this._core.coreService.triggerDataEvent(this.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text, true);
   }
 
   reset(): void {
@@ -345,6 +360,8 @@ export class Terminal {
     // (reset, then the snapshot re-asserts any live input modes).
     this.mouseTrackingMode = 'none';
     this.sendFocusMode = false;
+    this.bracketedPasteMode = false;
+    this.applicationCursorKeysMode = false;
   }
 
   clear(): void {
@@ -445,8 +462,11 @@ export class Terminal {
   get modes(): {
     mouseTrackingMode: 'none' | 'x10' | 'vt200' | 'drag' | 'any';
     sendFocusMode: boolean;
+    bracketedPasteMode: boolean;
+    applicationCursorKeysMode: boolean;
   } {
-    return { mouseTrackingMode: this.mouseTrackingMode, sendFocusMode: this.sendFocusMode };
+    return { mouseTrackingMode: this.mouseTrackingMode, sendFocusMode: this.sendFocusMode,
+      bracketedPasteMode: this.bracketedPasteMode, applicationCursorKeysMode: this.applicationCursorKeysMode };
   }
 
   attachCustomKeyEventHandler(handler: KeyHandler): void {

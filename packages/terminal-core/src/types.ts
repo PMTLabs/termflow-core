@@ -57,6 +57,7 @@ export interface TerminalBridge {
 }
 
 export interface TerminalEngineOptions {
+  broadcastActive?: () => boolean;
   theme?: Record<string, string>;
   fontFamily?: string;
   fontSize?: number;       // default 14
