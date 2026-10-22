@@ -57,6 +57,13 @@ test('border is fixed, non-interactive and below menus; banner is in flow below 
   expect(rule('.broadcast-banner')).not.toMatch(/position:/);
   // --bg-secondary is dark-only; the light banner must bring its own surface.
   expect(rule('.light-theme .broadcast-banner')).toMatch(/background: #f3f3f3;/);
+  // The window scope is violet in both themes, distinct from the amber tab scope (#e5a832 / #956000).
+  expect(border).toMatch(/var\(--broadcast-ring, #c586f0\)/);
+  expect(rule('.light-theme .broadcast-window-border')).toMatch(/--broadcast-ring: #7b2fb5;/);
+  expect(rule('.light-theme .broadcast-banner')).toMatch(/--broadcast-ring: #7b2fb5;/);
+  const pane = fs.readFileSync(path.join(__dirname, '../../Panes/TerminalPane.css'), 'utf8');
+  expect(pane).toMatch(/\.terminal-pane\.broadcast-window \{ --broadcast-ring: #c586f0; \}/);
+  expect(pane).toMatch(/\.light-theme \.terminal-pane\.broadcast-window \{ --broadcast-ring: #7b2fb5; \}/);
   const app = fs.readFileSync(path.join(__dirname, '../../../App.tsx'), 'utf8');
   expect(app).toMatch(/<TitleBar\s*\/>\s*<BroadcastOverlay\s*\/>\s*<div className="app-body">/);
 });
