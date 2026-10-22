@@ -132,15 +132,18 @@ test('never-mounted background fallback receives exact plain Enter/arrow and raw
 });
 test('shared menus start owning tab, stop with shortcut hint, disable single and unavailable', () => {
   const item = () => broadcastMenuItems(store.getState(), 'tb-broadcast', store.dispatch)[0];
-  expect(item().label).toBe('Focus all panes in this tab'); item().click();
+  expect(item()).toMatchObject({ label: 'Focus all panes in this tab', icon: '⌨️' }); item().click();
   expect(store.getState().broadcast).toEqual({ mode: 'tab', tabId: 'tb-broadcast' });
-  expect(item()).toMatchObject({ label: 'Stop focusing all panes', accelerator: 'Ctrl+Shift+B' });
+  expect(item()).toMatchObject({ label: 'Stop focusing all panes', accelerator: 'Ctrl+Shift+B', icon: '⏹️' });
+  expect(broadcastMenuItems(store.getState(), 'tb-broadcast', store.dispatch)[1].icon).toBe('📢');
   item().click(); tree(1); expect(item().enabled).toBe(false);
   const { isBroadcastAvailable } = require('@termflow/terminal-core'); isBroadcastAvailable.mockReturnValueOnce(false);
   expect(item()).toMatchObject({ label: 'Focus all panes in this tab — Unavailable', enabled: false });
   for (const file of ['Panes/PaneContextMenu.tsx', 'Terminal/TerminalDisplay.tsx']) {
     expect(fs.readFileSync(path.join(__dirname, '../../components', file), 'utf8')).toContain('broadcastMenuItems(');
   }
+  // The pane-title menu renders rows by hand; the terminal menu takes `icon` from the item.
+  expect(fs.readFileSync(path.join(__dirname, '../../components/Panes/PaneContextMenu.tsx'), 'utf8')).toContain('<span className="menu-icon">{item.icon}</span>');
 });
 test('clear-terminal fans form-feed to each ready member; stop shortcut is capture-only and never starts broadcast', async () => {
   inputHandler.destroy();

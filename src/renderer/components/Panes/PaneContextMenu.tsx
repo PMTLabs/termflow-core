@@ -379,6 +379,7 @@ export const PaneContextMenu: React.FC<PaneContextMenuProps> = ({
       {broadcastMenuItems(store.getState(), owningTabId, dispatch).map(item => (
         <button key={item.label} className="context-menu-item" disabled={!item.enabled}
           onClick={() => { item.click(); onClose(); }}>
+          <span className="menu-icon">{item.icon}</span>
           <span>{item.label}</span>
           {item.accelerator && <span className="context-menu-shortcut">{item.accelerator}</span>}
         </button>
