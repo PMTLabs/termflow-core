@@ -78,6 +78,23 @@ describe('EarlyOutput', () => {
     expect(early.claim('pc-a')).toEqual([quarter('b'), quarter('c'), half]);
   });
 
+  it('an exited process`s bookkeeping is retired once no late chunk can still arrive', () => {
+    const early = make();
+    early.claim('pc-a');
+    early.exited('pc-a');
+    now += EARLY_OUTPUT_WINDOW_MS - 1;
+    early.record('pc-sweep-1', 'x'); // a sweep inside the grace period keeps pc-a closed
+    early.record('pc-a', 'coalesced past exit');
+    expect(early.claim('pc-a')).toEqual([]);
+
+    early.exited('pc-a');
+    now += EARLY_OUTPUT_WINDOW_MS + 1;
+    early.record('pc-sweep-2', 'x'); // this sweep retires it
+    // Observable only because the tombstone is gone: the id is treated as never seen.
+    early.record('pc-a', 'unseen id');
+    expect(early.claim('pc-a')).toEqual(['unseen id']);
+  });
+
   it('close drops what is held and stops holding', () => {
     const early = make();
     early.record('pc-a', 'held');
@@ -91,6 +108,12 @@ describe('TerminalService -> MainBridge: output before the pane subscribes', () 
   let emitData!: (processId: string, data: string) => void;
   let emitExit!: (processId: string, exitCode: number) => void;
   let service!: TerminalServiceClass;
+  let subs: Array<{ dispose(): void }> = [];
+  const subscribe = (processId: string, got: string[]) => {
+    const sub = createMainBridge().onData(processId, (d) => got.push(d));
+    subs.push(sub);
+    return sub;
+  };
 
   beforeEach(() => {
     (window as any).electronAPI = {
@@ -99,7 +122,11 @@ describe('TerminalService -> MainBridge: output before the pane subscribes', () 
     };
     service = new TerminalServiceClass(() => ({}));
   });
-  afterEach(() => { delete (window as any).electronAPI; });
+  afterEach(() => {
+    subs.forEach((s) => s.dispose());
+    subs = [];
+    delete (window as any).electronAPI;
+  });
 
   it('delivers the shell`s first prompt to the pane that subscribes after it was printed', () => {
     emitData('pc-restored', '\x1b[16;1H');
@@ -107,10 +134,12 @@ describe('TerminalService -> MainBridge: output before the pane subscribes', () 
     emitData('pc-someone-else', 'not mine');
 
     const got: string[] = [];
-    createMainBridge().onData('pc-restored', (d) => got.push(d));
+    subscribe('pc-restored', got);
     expect(got).toEqual(['\x1b[16;1H', 'PS D:\\sources\\demo> ']);
 
-    // Live output after the subscription arrives once, after the early chunks.
+    // Live output after the subscription arrives once, after the early chunks; another
+    // process's live output does not.
+    emitData('pc-someone-else', 'still not mine');
     emitData('pc-restored', 'abd');
     expect(got).toEqual(['\x1b[16;1H', 'PS D:\\sources\\demo> ', 'abd']);
   });
@@ -139,6 +168,23 @@ describe('TerminalService -> MainBridge: output before the pane subscribes', () 
     expect(got).toEqual([]);
   });
 
+  it('the exit event retires a claimed process`s bookkeeping after the grace period', () => {
+    let t = 5_000_000;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => t);
+    try {
+      subscribe('pc-retired', []);
+      emitExit('pc-retired', 0);
+      t += EARLY_OUTPUT_WINDOW_MS + 1;
+      emitData('pc-retire-sweep', 'x'); // a new process sweeps
+      emitData('pc-retired', 'id never seen again');
+      const got: string[] = [];
+      subscribe('pc-retired', got);
+      expect(got).toEqual(['id never seen again']); // held again only because it was retired
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('a shell that exits before its pane subscribes still shows what it printed', () => {
     emitData('pc-failed', 'profile error');
     emitExit('pc-failed', 1);
@@ -151,9 +197,22 @@ describe('TerminalService -> MainBridge: output before the pane subscribes', () 
     // A pane moved in from another window: `terminal:data` is broadcast to every window, so this
     // window saw the process's startup output too.
     emitData('pc-moved', 'startup seen by every window');
+    emitData('pc-fresh', 'a fresh shell`s prompt');
     service.attachExistingTerminal('tm-moved', 'pc-moved');
+    const moved: string[] = [];
+    subscribe('pc-moved', moved);
+    expect(moved).toEqual([]);
+    // Only the registered process is closed: another pane's fresh prompt survives it.
+    const fresh: string[] = [];
+    subscribe('pc-fresh', fresh);
+    expect(fresh).toEqual(['a fresh shell`s prompt']);
+  });
+
+  it('reconcile`s plain registerExistingTerminal closes the process too', () => {
+    emitData('pc-reconciled', 'startup');
+    service.registerExistingTerminal('tm-reconciled', 'pc-reconciled');
     const got: string[] = [];
-    createMainBridge().onData('pc-moved', (d) => got.push(d));
+    subscribe('pc-reconciled', got);
     expect(got).toEqual([]);
   });
 });

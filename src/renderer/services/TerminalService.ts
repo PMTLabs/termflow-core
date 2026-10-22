@@ -88,6 +88,7 @@ export class TerminalServiceClass {
     });
 
     window.electronAPI.onTerminalExit((processId: string, exitCode: number, cwd?: string | null) => {
+      earlyOutput.exited(processId);
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
@@ -373,6 +374,7 @@ export class TerminalServiceClass {
       if (admission.status === 'Inert') {
         processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
       } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
+        // This leaf's own process: its held early output stays claimable (earlyOutput.ts).
         processId = admission.pc;
       } else if (admission.status === 'Create' || admission.status === 'Join') {
         const work = protocol.create(admission.cg, {

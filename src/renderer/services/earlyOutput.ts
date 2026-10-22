@@ -19,19 +19,28 @@
  * snapshot still drops them (already reflected) and a prefix-only one writes them after the
  * replay, in order.
  *
- * Once a process has been claimed or closed it is never held again, for the rest of this
- * window's life: a later remount re-hydrates from a screen snapshot, exactly as before, and a
- * chunk the backend coalesces past the process's exit event is not mistaken for a new
- * process. A process that was already running when this window learned of it (a pane moved
- * in from another window, a reattached or API-created terminal) is closed by
- * `registerExistingTerminal`, so it hydrates exactly as before too.
+ * Once a process has been claimed or closed it is never held again: a later remount
+ * re-hydrates from a screen snapshot, exactly as before, and a chunk the backend coalesces past
+ * the process's exit event is not mistaken for a new process. That bookkeeping is retired
+ * `EARLY_OUTPUT_WINDOW_MS` after the exit event (which every window receives), so it does not
+ * grow with every process a long-lived window ever saw.
+ *
+ * Explicit registration of an existing process — a pane moved in from another window, a
+ * reconciled or API-created terminal, a hidden agent terminal restored — closes it in
+ * `registerExistingTerminal`, so those hydrate exactly as before. A pane's own admission does
+ * NOT: `AlreadyBound` is the same pane copy mounting for the process it just created, and
+ * `Existing` re-binds this leaf's process after a reload or copy change. Their held output is
+ * the process's own; a screen snapshot drops it as already reflected, and a restore that has
+ * not hydrated yet needs it — that is the prompt this module exists to keep.
  *
  * Exit does NOT drop what is held: a shell that fails at startup and exits before its pane
  * subscribes still shows what it printed. Held output is handed over only within
  * `EARLY_OUTPUT_WINDOW_MS` of its first chunk; after that `claim` returns nothing, and the
  * memory is released the next time a new process starts (or it is claimed or closed). Each
- * buffer keeps its newest chunks up to `EARLY_OUTPUT_CAP_BYTES`, evicting the oldest first; a
- * single chunk larger than the cap is kept whole, like the engine's own hydration buffer.
+ * buffer keeps its newest chunks up to `EARLY_OUTPUT_CAP_BYTES` (counted in string length, like
+ * the engine's own hydration buffer), evicting the oldest first; a single chunk larger than the
+ * cap is kept whole. The cap is per process: there is no global bound beyond how many processes
+ * start within one window.
  */
 
 /** How long after a process's first chunk its output is still held for a subscriber. */
@@ -47,10 +56,12 @@ interface Held {
 
 export class EarlyOutput {
   private held = new Map<string, Held>();
-  /** Claimed, closed, or past its window: never held again. One id per process this window saw. */
+  /** Claimed, closed, or past its window: never held again. */
   private closed = new Set<string>();
+  /** When each exited process's bookkeeping may be dropped (exit + the window). */
+  private retireAt = new Map<string, number>();
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(private readonly now: () => number = () => Date.now()) {}
 
   /** Hold `data` for `processId` if no subscriber has claimed it yet. */
   record(processId: string, data: string): void {
@@ -79,10 +90,18 @@ export class EarlyOutput {
     return entry && !this.expired(entry, this.now()) ? entry.chunks : [];
   }
 
-  /** Never hold `processId`'s output, and drop what is held: it was running before we saw it. */
+  /** Never hold `processId`'s output, and drop what is held. */
   close(processId: string): void {
     this.held.delete(processId);
     this.closed.add(processId);
+  }
+
+  /**
+   * The process exited. Held output stays (a pane that subscribes late still shows it); the
+   * bookkeeping is dropped once no chunk coalesced past the exit can still arrive.
+   */
+  exited(processId: string): void {
+    this.retireAt.set(processId, this.now() + EARLY_OUTPUT_WINDOW_MS);
   }
 
   private expired(entry: Held, now: number): boolean {
@@ -92,6 +111,12 @@ export class EarlyOutput {
   private sweep(now: number): void {
     for (const [processId, entry] of this.held) {
       if (this.expired(entry, now)) this.close(processId);
+    }
+    for (const [processId, at] of this.retireAt) {
+      if (now < at) continue;
+      this.retireAt.delete(processId);
+      this.held.delete(processId);
+      this.closed.delete(processId);
     }
   }
 }
