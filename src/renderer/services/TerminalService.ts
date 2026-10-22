@@ -88,7 +88,6 @@ export class TerminalServiceClass {
     });
 
     window.electronAPI.onTerminalExit((processId: string, exitCode: number, cwd?: string | null) => {
-      earlyOutput.forget(processId);
       // Resolve the UI terminalId mapped to this backend process so listeners
       // (e.g. tab close/mark-terminated logic) know which tab/pane exited.
       let exitedTerminalId: string | undefined;
@@ -573,6 +572,9 @@ export class TerminalServiceClass {
 
   registerExistingTerminal(terminalId: string, processId: string): void {
     console.log(`TerminalService: Registering existing terminal ${terminalId} with process ${processId}`);
+    // Already running when this window learned of it: hydrate it as before, from the screen,
+    // never from output this window happened to hold (earlyOutput.ts).
+    earlyOutput.close(processId);
     this.bindProcess(terminalId, processId);
   }
 

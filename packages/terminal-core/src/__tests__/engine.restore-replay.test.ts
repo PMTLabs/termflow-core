@@ -160,8 +160,12 @@ test('output the shell printed BEFORE the subscription, handed over inside onDat
   engine.mount(makeContainer());
   engine.attach('p1');
   const term = mockTerm('rr7');
+  bridge.pushData('p1', 'LIVE-DURING-HYDRATION');
   expect(term.written).toEqual([]);
   resolve({ snapshot: 'HISTORY', prefixOnly: true, anchorRow: 16 });
   await flush();
-  expect(term.written).toEqual([wrapRestoreReplay('HISTORY', 16, term.rows), '\x1b[16;1HPS D:\\sources\\demo> ']);
+  expect(term.written).toEqual([
+    wrapRestoreReplay('HISTORY', 16, term.rows),
+    '\x1b[16;1HPS D:\\sources\\demo> LIVE-DURING-HYDRATION',
+  ]);
 });

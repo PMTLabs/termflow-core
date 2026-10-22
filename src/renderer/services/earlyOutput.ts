@@ -19,10 +19,19 @@
  * snapshot still drops them (already reflected) and a prefix-only one writes them after the
  * replay, in order.
  *
- * Once a process has been claimed it is never buffered again: a later remount re-hydrates
- * from a screen snapshot, exactly as before. A process no pane ever claims (an API-created
- * terminal, or one owned by another window) stops being buffered `EARLY_OUTPUT_WINDOW_MS`
- * after its first chunk, and each buffer keeps only its newest `EARLY_OUTPUT_CAP_BYTES`.
+ * Once a process has been claimed or closed it is never held again, for the rest of this
+ * window's life: a later remount re-hydrates from a screen snapshot, exactly as before, and a
+ * chunk the backend coalesces past the process's exit event is not mistaken for a new
+ * process. A process that was already running when this window learned of it (a pane moved
+ * in from another window, a reattached or API-created terminal) is closed by
+ * `registerExistingTerminal`, so it hydrates exactly as before too.
+ *
+ * Exit does NOT drop what is held: a shell that fails at startup and exits before its pane
+ * subscribes still shows what it printed. Held output is handed over only within
+ * `EARLY_OUTPUT_WINDOW_MS` of its first chunk; after that `claim` returns nothing, and the
+ * memory is released the next time a new process starts (or it is claimed or closed). Each
+ * buffer keeps its newest chunks up to `EARLY_OUTPUT_CAP_BYTES`, evicting the oldest first; a
+ * single chunk larger than the cap is kept whole, like the engine's own hydration buffer.
  */
 
 /** How long after a process's first chunk its output is still held for a subscriber. */
@@ -38,7 +47,7 @@ interface Held {
 
 export class EarlyOutput {
   private held = new Map<string, Held>();
-  /** Claimed by a subscriber, or past its window: never buffered again. */
+  /** Claimed, closed, or past its window: never held again. One id per process this window saw. */
   private closed = new Set<string>();
 
   constructor(private readonly now: () => number = Date.now) {}
@@ -52,9 +61,8 @@ export class EarlyOutput {
       this.sweep(now);
       entry = { chunks: [], bytes: 0, firstAt: now };
       this.held.set(processId, entry);
-    } else if (now - entry.firstAt > EARLY_OUTPUT_WINDOW_MS) {
-      this.held.delete(processId);
-      this.closed.add(processId);
+    } else if (this.expired(entry, now)) {
+      this.close(processId);
       return;
     }
     entry.chunks.push(data);
@@ -64,26 +72,26 @@ export class EarlyOutput {
     }
   }
 
-  /** Take what is held for `processId`, oldest first, and stop holding its output. */
+  /** Take what is held for `processId` (oldest first, nothing once its window has passed). */
   claim(processId: string): string[] {
-    this.closed.add(processId);
     const entry = this.held.get(processId);
-    this.held.delete(processId);
-    return entry ? entry.chunks : [];
+    this.close(processId);
+    return entry && !this.expired(entry, this.now()) ? entry.chunks : [];
   }
 
-  /** The process is gone: its ids are never reused, so drop the bookkeeping. */
-  forget(processId: string): void {
+  /** Never hold `processId`'s output, and drop what is held: it was running before we saw it. */
+  close(processId: string): void {
     this.held.delete(processId);
-    this.closed.delete(processId);
+    this.closed.add(processId);
+  }
+
+  private expired(entry: Held, now: number): boolean {
+    return now - entry.firstAt > EARLY_OUTPUT_WINDOW_MS;
   }
 
   private sweep(now: number): void {
     for (const [processId, entry] of this.held) {
-      if (now - entry.firstAt > EARLY_OUTPUT_WINDOW_MS) {
-        this.held.delete(processId);
-        this.closed.add(processId);
-      }
+      if (this.expired(entry, now)) this.close(processId);
     }
   }
 }

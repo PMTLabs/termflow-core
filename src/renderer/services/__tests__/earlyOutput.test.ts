@@ -35,42 +35,54 @@ describe('EarlyOutput', () => {
     expect(early.claim('pc-a')).toEqual([]);
   });
 
-  it('stops holding a process nobody claims once its window has passed', () => {
+  it('hands output over up to the window`s last millisecond, and not one after', () => {
+    const early = make();
+    early.record('pc-edge', 'first');
+    now += EARLY_OUTPUT_WINDOW_MS;
+    early.record('pc-edge', 'still inside');
+    expect(early.claim('pc-edge')).toEqual(['first', 'still inside']);
+
+    // A process that went quiet inside its window and is claimed after it: nothing, even though
+    // no later chunk or new process ever triggered a sweep.
+    early.record('pc-quiet', 'startup');
+    now += EARLY_OUTPUT_WINDOW_MS + 1;
+    expect(early.claim('pc-quiet')).toEqual([]);
+  });
+
+  it('a chunk arriving after the window closes the process for good', () => {
     const early = make();
     early.record('pc-a', 'first');
-    now += EARLY_OUTPUT_WINDOW_MS;
-    early.record('pc-a', 'still inside');
-    now += 1;
+    now += EARLY_OUTPUT_WINDOW_MS + 1;
     early.record('pc-a', 'past the window');
+    now = 1_000; // were it still held, a claim inside its window would now return it
     expect(early.claim('pc-a')).toEqual([]);
   });
 
-  it('drops an unclaimed process that went quiet when another one starts', () => {
+  it('a sweep closes an expired process: later chunks for it are not held as a new one', () => {
     const early = make();
     early.record('pc-quiet', 'once');
     now += EARLY_OUTPUT_WINDOW_MS + 1;
-    early.record('pc-new', 'hello');
+    early.record('pc-new', 'hello'); // sweeps pc-quiet
+    early.record('pc-quiet', 'after the sweep');
     expect(early.claim('pc-quiet')).toEqual([]);
     expect(early.claim('pc-new')).toEqual(['hello']);
   });
 
-  it('keeps only the newest bytes past the cap', () => {
+  it('keeps exactly the newest chunks that fit the cap', () => {
     const early = make();
-    const big = 'x'.repeat(EARLY_OUTPUT_CAP_BYTES / 2);
-    early.record('pc-a', 'oldest');
-    early.record('pc-a', big);
-    early.record('pc-a', big);
-    early.record('pc-a', 'newest');
-    const held = early.claim('pc-a');
-    expect(held[0]).not.toBe('oldest');
-    expect(held[held.length - 1]).toBe('newest');
-    expect(held.join('').length).toBeLessThanOrEqual(EARLY_OUTPUT_CAP_BYTES);
+    const quarter = (c: string) => c.repeat(EARLY_OUTPUT_CAP_BYTES / 4);
+    const half = 'd'.repeat(EARLY_OUTPUT_CAP_BYTES / 2);
+    for (const c of ['a', 'b', 'c']) early.record('pc-a', quarter(c));
+    // 1.25x the cap: exactly the oldest quarter goes, and the two after it still fit.
+    early.record('pc-a', half);
+    expect(early.claim('pc-a')).toEqual([quarter('b'), quarter('c'), half]);
   });
 
-  it('forgets an exited process entirely', () => {
+  it('close drops what is held and stops holding', () => {
     const early = make();
-    early.record('pc-a', 'bye');
-    early.forget('pc-a');
+    early.record('pc-a', 'held');
+    early.close('pc-a');
+    early.record('pc-a', 'after close');
     expect(early.claim('pc-a')).toEqual([]);
   });
 });
@@ -78,13 +90,14 @@ describe('EarlyOutput', () => {
 describe('TerminalService -> MainBridge: output before the pane subscribes', () => {
   let emitData!: (processId: string, data: string) => void;
   let emitExit!: (processId: string, exitCode: number) => void;
+  let service!: TerminalServiceClass;
 
   beforeEach(() => {
     (window as any).electronAPI = {
       onTerminalData: jest.fn((cb) => { emitData = cb; }),
       onTerminalExit: jest.fn((cb) => { emitExit = cb; }),
     };
-    new TerminalServiceClass(() => ({}));
+    service = new TerminalServiceClass(() => ({}));
   });
   afterEach(() => { delete (window as any).electronAPI; });
 
@@ -114,11 +127,33 @@ describe('TerminalService -> MainBridge: output before the pane subscribes', () 
     expect(got).toEqual(['live']);
   });
 
-  it('drops what was held for a process that exits before any pane subscribes', () => {
-    emitData('pc-gone', 'output');
-    emitExit('pc-gone', 0);
+  it('a chunk coalesced past the exit event is not held again for a remount', () => {
+    // The backend emits `terminal:exit` at once but defers data by a few ms, so the last
+    // chunk can arrive after the exit; the pane's live listener already wrote it.
+    createMainBridge().onData('pc-exiting', () => {}).dispose();
+    emitExit('pc-exiting', 0);
+    emitData('pc-exiting', 'logout\r\n');
+
     const got: string[] = [];
-    createMainBridge().onData('pc-gone', (d) => got.push(d));
+    createMainBridge().onData('pc-exiting', (d) => got.push(d));
+    expect(got).toEqual([]);
+  });
+
+  it('a shell that exits before its pane subscribes still shows what it printed', () => {
+    emitData('pc-failed', 'profile error');
+    emitExit('pc-failed', 1);
+    const got: string[] = [];
+    createMainBridge().onData('pc-failed', (d) => got.push(d));
+    expect(got).toEqual(['profile error']);
+  });
+
+  it('a process already running when this window registers it hydrates as before, with nothing held', () => {
+    // A pane moved in from another window: `terminal:data` is broadcast to every window, so this
+    // window saw the process's startup output too.
+    emitData('pc-moved', 'startup seen by every window');
+    service.attachExistingTerminal('tm-moved', 'pc-moved');
+    const got: string[] = [];
+    createMainBridge().onData('pc-moved', (d) => got.push(d));
     expect(got).toEqual([]);
   });
 });
