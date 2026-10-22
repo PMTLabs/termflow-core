@@ -148,7 +148,12 @@ test('R1.8 key then mounted paste then text preserve order across an in-flight w
   expect(write.mock.calls).toEqual([['pid-target', 'a'], ['pid-target', '\x1b[200~b\rc\x1b[201~'], ['pid-target', 'd']]);
 });
 test.each(['zero-buttons', 'blur'])('R1.9 lost mouseup resets pointer ownership via %s and listeners do not leak', async reset => {
+  const add = jest.spyOn(window, 'addEventListener');
   const { engine, term } = makeEngine(); const sink = jest.fn(); setBroadcastSink(sink);
+  // The exact handler and options registered per event, so removal is checked
+  // against the same reference (review r2 finding 3), not any function.
+  const added = new Map(add.mock.calls.map(([name, handler, options]) => [name, [handler, options]] as const));
+  add.mockRestore();
   term.element!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, buttons: 1 }));
   await Promise.resolve();
   if (reset === 'blur') window.dispatchEvent(new Event('blur'));
@@ -160,7 +165,10 @@ test.each(['zero-buttons', 'blur'])('R1.9 lost mouseup resets pointer ownership 
   const remove = jest.spyOn(window, 'removeEventListener');
   engine.unmount();
   for (const name of ['mousedown', 'mousemove', 'mouseup', 'wheel', 'blur']) {
-    expect(remove).toHaveBeenCalledWith(name, expect.any(Function), true);
+    const [handler, options] = added.get(name)!;
+    expect(handler).toEqual(expect.any(Function));
+    if (options === undefined) expect(remove).toHaveBeenCalledWith(name, handler);
+    else expect(remove).toHaveBeenCalledWith(name, handler, options);
   }
   remove.mockRestore();
 });

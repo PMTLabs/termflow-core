@@ -140,15 +140,20 @@ export function withBroadcastPaste(source: string, text: string, paste: () => vo
 }
 // Serialize each PTY's broadcast writes, including paste's engine onData path.
 // Start an idle writer synchronously; only pending asynchronous writes need a queue.
+// Queues are keyed by terminal id (`queueKey`), never by process id: the fallback
+// writer addresses an unmounted terminal by its terminal id, and a write in flight
+// across that terminal's mount must stay in the same queue as the next one.
 const targetQueues = new Map<string, Promise<void>>();
-export function queueBroadcastTargetWrite(writer: Fallback | null | undefined, target: string, data: string): void {
-  const previous = targetQueues.get(target);
+export function queueBroadcastTargetWrite(
+  writer: Fallback | null | undefined, target: string, data: string, queueKey: string = target,
+): void {
+  const previous = targetQueues.get(queueKey);
   try {
     const result = previous ? previous.then(() => writer?.(target, data)) : writer?.(target, data);
     if (!result) return;
     const next = Promise.resolve(result).then(() => {}, () => {});
-    targetQueues.set(target, next);
-    void next.then(() => { if (targetQueues.get(target) === next) targetQueues.delete(target); });
+    targetQueues.set(queueKey, next);
+    void next.then(() => { if (targetQueues.get(queueKey) === next) targetQueues.delete(queueKey); });
   } catch { /* target exited between membership resolution and write */ }
 }
 export function deliverBroadcast(target: string, unit: BroadcastUnit): void {
@@ -171,7 +176,11 @@ export function deliverBroadcast(target: string, unit: BroadcastUnit): void {
     : /[\r\n]/.test(unit.kind === 'paste' ? unit.text : unit.data);
   if (entry && submits) {
     if (entry.disarmBroadcastPrompt) entry.disarmBroadcastPrompt();
-    else if (entry.promptGate) entry.promptGate = { ...entry.promptGate, armed: false };
+    else {
+      // Unmounted: the remount restores both, so drop the pre-submit mark with the gate.
+      if (entry.promptGate) entry.promptGate = { ...entry.promptGate, armed: false };
+      entry.captureMark = null;
+    }
   }
   delivering++;
   try {
@@ -179,14 +188,14 @@ export function deliverBroadcast(target: string, unit: BroadcastUnit): void {
       // Background cached terminals have no mounted onData listener.
       if (entry.broadcastWrite) pasteToTerminal(target, unit.text);
       else {
-        const subscription = entry.terminal.onData(data => queueBroadcastTargetWrite(entry.broadcastRawWrite, entry.processId!, data));
+        const subscription = entry.terminal.onData(data => queueBroadcastTargetWrite(entry.broadcastRawWrite, entry.processId!, data, target));
         try { pasteToTerminal(target, unit.text); } finally { subscription.dispose(); }
       }
       return;
     }
     const data = unit.kind === 'key' ? decideKeyBytes(unit.key, ctx) : unit.kind === 'paste' ? unit.text : unit.data;
     if (data === null) return;
-    if (entry?.broadcastRawWrite) queueBroadcastTargetWrite(entry.broadcastRawWrite, entry.processId!, data);
+    if (entry?.broadcastRawWrite) queueBroadcastTargetWrite(entry.broadcastRawWrite, entry.processId!, data, target);
     else queueBroadcastTargetWrite(fallback, target, data);
   } finally { delivering--; }
 }

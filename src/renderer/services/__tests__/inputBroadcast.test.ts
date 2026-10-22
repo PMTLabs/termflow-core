@@ -17,7 +17,11 @@ jest.mock('../paneOwnership', () => ({ attachPaneOwnershipSync: jest.fn() }));
 jest.mock('../terminalLabelSync', () => ({ attachTerminalLabelSync: jest.fn() }));
 jest.mock('../terminalTitleColorSync', () => ({ attachTerminalTitleColorSync: jest.fn() }));
 jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn().mockResolvedValue(() => {}) }));
-jest.mock('@termflow/terminal-core', () => ({ setBroadcastSink: jest.fn(), deliverBroadcast: jest.fn(), isBroadcastAvailable: jest.fn(() => true) }));
+jest.mock('@termflow/terminal-core', () => ({
+  setBroadcastSink: jest.fn(), deliverBroadcast: jest.fn(), isBroadcastAvailable: jest.fn(() => true),
+  // The real per-terminal queue, so Ctrl+L's ordering path runs as in production.
+  queueBroadcastTargetWrite: jest.requireActual('@termflow/terminal-core').queueBroadcastTargetWrite,
+}));
 jest.mock('../TerminalService', () => ({ terminalService: { getProcessId: jest.fn(() => 'pid'), writeToTerminal: jest.fn().mockResolvedValue(undefined) } }));
 const leaves = (n: number): any => ({ id: 'root', type: 'split', direction: 'horizontal', children: Array.from({ length: n }, (_, i) => ({ id: `pn-${i}`, type: 'terminal', terminalId: `tm-${i}` })) });
 function tree(n: number) { store.dispatch(addTabTree({ tabId: 'tb-broadcast', tree: leaves(n) })); }
@@ -88,6 +92,8 @@ test('clear-terminal fans form-feed to each ready member; stop shortcut is captu
   for (let i = 0; i < 4; i++) expect(terminalService.writeToTerminal).toHaveBeenCalledWith(`tm-${i}`, '\x0c');
   jest.mocked(terminalService.getProcessId).mockReturnValueOnce(undefined);
   press('l', 'KeyL', false);
+  // The second clear queues behind the first one's in-flight writes per member.
+  for (let i = 0; i < 6; i++) await Promise.resolve();
   expect(terminalService.writeToTerminal).toHaveBeenCalledTimes(7);
   press('B', 'KeyB'); expect(store.getState().broadcast.mode).toBe('off');
   press('B', 'KeyB'); expect(store.getState().broadcast.mode).toBe('off');

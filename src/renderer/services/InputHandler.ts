@@ -5,6 +5,7 @@ import { splitPane, toggleMaximizePane, resizeFocusedPane, focusPane } from '../
 import { noteUserSplitOf } from './paneActions';
 import { getAllLeafIds } from '../store/slices/paneTreeOps';
 import { terminalService } from './TerminalService';
+import { queueBroadcastTargetWrite } from '@termflow/terminal-core';
 import { insertTextIntoTerminal } from './insertTextIntoTerminal';
 import { readClipboardText } from '../utils/clipboard';
 import { isEditableNonTerminalTarget } from './inputTargets';
@@ -487,7 +488,12 @@ export class InputHandler {
     if (state.broadcast && state.broadcast.mode !== 'off') {
       for (const member of selectBroadcastMembers(state)) {
         if (terminalService.getProcessId(member)) {
-          void terminalService.writeToTerminal(member, '\x0c').catch(err => console.error('Failed to clear terminal:', err));
+          // Same per-terminal queue as broadcast keys, so a clear cannot overtake a
+          // paste that is still being written to this member.
+          queueBroadcastTargetWrite(
+            (id, data) => terminalService.writeToTerminal(id, data)
+              .catch(err => console.error('Failed to clear terminal:', err)),
+            member, '\x0c');
         }
       }
       return;

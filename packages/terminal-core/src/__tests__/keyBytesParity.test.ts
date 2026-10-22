@@ -9,6 +9,8 @@ const cases: Array<[string, KeyboardEventInit]> = [
   ...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('').map(key => [key, { shiftKey: /^[A-Z]$/.test(key) }] as [string, KeyboardEventInit]),
   ...['Enter', 'Backspace', 'Tab', 'Escape', ...navigation].map(key => [key, {}] as [string, KeyboardEventInit]),
   ...'abcdefghijklmnopqrstuvwxyz '.split('').map(key => [key, { ctrlKey: true }] as [string, KeyboardEventInit]),
+  // Ctrl+_ is absent on purpose: Ctrl+-/_ is the zoom-out shortcut, so the engine
+  // swallows it and a source never broadcasts it (R2.4 zoom test pins that).
   ...['[', '\\', ']', '^'].map(key => [key, { ctrlKey: true }] as [string, KeyboardEventInit]),
   ['Enter', { shiftKey: true }], ['Enter', { ctrlKey: true }], ['Enter', { altKey: true }],
   ['Tab', { shiftKey: true }], ['Tab', { altKey: true, shiftKey: true }],
@@ -30,6 +32,21 @@ test('R1.10 parity inventory is 458 cases with every nonzero modifier mask for a
   }
 });
 afterEach(() => { for (const entry of terminalCache.values()) entry.disposables.forEach(fn => fn()); terminalCache.clear(); document.body.innerHTML = ''; });
+
+// macOptionIsMeta flips Option from a third-level shift (xterm defers the
+// composed character to keypress) to ESC-prefixed Meta. Review r2 finding 4.
+test.each([false, true])('R2.4 mac Option keys follow macOptionIsMeta=%s like the real xterm', macOptionIsMeta => {
+  const real = realXtermKeyboard(true, macOptionIsMeta);
+  const ctx: KeyCtx = { kbSnapshot: { kittyFlags: 0, modifyOtherKeys: 0 }, protocolActive: false, win32Active: false,
+    isMac: true, isWindows: false, macOptionIsMeta, applicationCursorKeys: false, normalBuffer: true };
+  try {
+    for (const key of ['a', 'e', 'x', '1', 'Enter', 'Backspace']) {
+      const down = event(key, { altKey: true });
+      expect({ key, macOptionIsMeta, bytes: decideKeyBytes(describeKey(down), ctx) })
+        .toEqual({ key, macOptionIsMeta, bytes: real.bytes(down, false) });
+    }
+  } finally { real.dispose(); }
+});
 
 describe.each(['pwsh', 'bash'])('%s engine parity', shell => {
   describe.each([false, true])('isMac=%s', isMac => {

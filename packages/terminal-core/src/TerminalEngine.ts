@@ -1365,6 +1365,8 @@ export class TerminalEngine {
   private emitKeyBroadcast(data: string): void {
     const key = this.pendingKey;
     this.pendingKey = null;
+    // The keystroke is broadcast; a trailing keypress must not restore it again.
+    this.lastKeydown = null;
     if (key) emitBroadcast(this.cacheKey, { kind: 'key', key, srcBytes: data });
   }
 
@@ -2338,9 +2340,16 @@ export class TerminalEngine {
       window.addEventListener(name, pointerGuard, true);
       this.disposables.push(() => window.removeEventListener(name, pointerGuard, true));
     }
-    const resetPointer = () => { pointerHeld = false; this.inPointerEvent = false; };
-    window.addEventListener('blur', resetPointer, true);
-    this.disposables.push(() => window.removeEventListener('blur', resetPointer, true));
+    // Bubble phase and window-only: a capture listener would also see the element
+    // blur that xterm's own mousedown focus() fires, clearing the guard just before
+    // xterm sends that press's mouse report.
+    const resetPointer = (event: Event) => {
+      if (event.target !== window) return;
+      pointerHeld = false;
+      this.inPointerEvent = false;
+    };
+    window.addEventListener('blur', resetPointer);
+    this.disposables.push(() => window.removeEventListener('blur', resetPointer));
     const nativePaste = (event: ClipboardEvent) => {
       // xterm still owns the event (including empty/file paste). Suppress its
       // onData copy even if it brackets empty text; never cancel the DOM event.
@@ -2372,7 +2381,7 @@ export class TerminalEngine {
         // Fire-and-forget: swallow rejection (e.g. PTY already exited) so it
         // never surfaces as an uncaught promise rejection.
         Promise.resolve(isDeliveringBroadcast()
-          ? queueBroadcastTargetWrite(this.bridge.write.bind(this.bridge), this.attachedProcessId, data)
+          ? queueBroadcastTargetWrite(this.bridge.write.bind(this.bridge), this.attachedProcessId, data, this.cacheKey)
           : this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
           this.opts.onDiag?.(() => `[TERM-DIAG] write after exit ignored: ${e}`);
         });
@@ -2570,15 +2579,21 @@ export class TerminalEngine {
 
     // --- Keyboard: attachCustomKeyEventHandler (R7 + source 445-504) ---
     boundTerm.attachCustomKeyEventHandler((event) => {
-      if (event.type !== 'keypress') {
-        this.pendingKey = null;
-        this.lastKeydown = null;
-      }
+      // Every key event starts with no pending descriptor, so a keypress that does
+      // not match (dead key, composition) can never inherit the keydown's key.
+      this.pendingKey = null;
+      if (event.type !== 'keypress') this.lastKeydown = null;
       if (inputSubscription && hasBroadcastSink() && !isDeliveringBroadcast() && !event.isComposing) {
         if (event.type === 'keypress') {
           // Uppercase/AltGr input may arrive after keydown's microtask expires.
-          if (event.key === this.lastKeydown?.key) this.pendingKey = this.lastKeydown;
+          // Consumed once, and expires like keydown's capture if xterm's keypress
+          // then emits nothing.
+          const last = this.lastKeydown;
           this.lastKeydown = null;
+          if (last && event.key === last.key) {
+            this.pendingKey = last;
+            queueMicrotask(() => { if (this.pendingKey === last) this.pendingKey = null; });
+          }
         } else if (event.type === 'keydown' || event.type === 'keyup') {
           const key = describe(event);
           this.pendingKey = key;
@@ -4866,6 +4881,9 @@ export class TerminalEngine {
     if (broadcastEntry) {
       broadcastEntry.broadcastWrite = false;
       broadcastEntry.disarmBroadcastPrompt = undefined;
+      // Freeze the live getters so the cache stops pinning this unmounted engine.
+      const frozenOptions = broadcastEntry.getBroadcastOptions?.();
+      broadcastEntry.getBroadcastOptions = frozenOptions ? () => frozenOptions : undefined;
     }
     this.pendingKey = null;
     this.lastKeydown = null;

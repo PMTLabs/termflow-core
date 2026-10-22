@@ -2,9 +2,9 @@ import { join } from 'path';
 
 // Use the installed browser terminal's actual keyboard implementation, not a
 // second encoding table. Supply only the DOM/composition host normally made by open().
-export function realXtermKeyboard(isMac = false) {
+export function realXtermKeyboard(isMac = false, macOptionIsMeta = false) {
   const { Terminal } = require(join(process.cwd(), '../../node_modules/@xterm/xterm/lib/xterm.js'));
-  const terminal = new Terminal();
+  const terminal = new Terminal({ macOptionIsMeta });
   const core = terminal._core;
   core.element = document.createElement('div');
   core.textarea = document.createElement('textarea');
@@ -20,7 +20,7 @@ export function realXtermKeyboard(isMac = false) {
       core.coreService.decPrivateModes.applicationCursorKeys = applicationCursorKeys;
       core._keyDown(event);
       // The browser sends uppercase ASCII and third-level-shift text via keypress.
-      const thirdLevel = isMac ? event.altKey && !event.ctrlKey : event.altKey && event.ctrlKey;
+      const thirdLevel = isMac ? !macOptionIsMeta && event.altKey && !event.ctrlKey : event.altKey && event.ctrlKey;
       if (!output.length && [...event.key].length === 1 && !event.metaKey
         && ((/^[A-Z]$/.test(event.key) && !event.ctrlKey && !event.altKey) || thirdLevel)) {
         core._keyPress(new KeyboardEvent('keypress', { key: event.key, charCode: event.key.charCodeAt(0),
