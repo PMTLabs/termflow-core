@@ -9,8 +9,9 @@
  * byte — but a RESTORED terminal hydrates from a prefix-only snapshot (the previous
  * session's scrollback, not the screen), so its shell's first prompt was simply gone: the
  * cursor sat on the prompt row ConPTY was told about, with nothing on it, and typing
- * appeared mid-screen after an invisible prompt. Startup restores make that window wide —
- * every tab is created at once while the others hydrate their replays.
+ * appeared mid-screen after an invisible prompt. Seen on a startup restore of nine tabs, where
+ * every tab is created at once while the others hydrate their replays (the width of the window
+ * in that case was not measured).
  *
  * So chunks for a process nobody has claimed yet are held here and handed to the FIRST
  * subscriber (`MainBridge.onData`), which feeds them to the engine before any live chunk.
