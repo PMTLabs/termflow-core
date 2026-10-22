@@ -4,6 +4,7 @@ import { addTab, setActiveTab, removeTab, clearAllTabs } from '../../store/slice
 import { findLeafByTerminalId } from '../../store/slices/paneTreeOps';
 import { addTabTree, resetPanes, splitPaneInTab, removePaneFromTab } from '../../store/slices/panesSlice';
 import { startTabBroadcast, startWindowBroadcast, stopBroadcast, selectBroadcastMembers } from '../../store/slices/broadcastSlice';
+import { setCustomKeybindings } from '../../store/slices/settingsSlice';
 import { installInputBroadcast } from '../inputBroadcast';
 import { deliverBroadcast, setBroadcastSink, type BroadcastUnit } from '@termflow/terminal-core';
 import { terminalService } from '../TerminalService';
@@ -66,10 +67,16 @@ test('window membership includes background by ID, ignores orphan trees, stays m
   expect(store.getState().broadcast).toEqual({ mode: 'tab', tabId: 'tb-background' });
   store.dispatch(startWindowBroadcast());
   expect(store.getState().broadcast.mode).toBe('window');
-  store.dispatch(removeTab('tb-background')); tree(0);
+  // Closing a background tab only shrinks the window scope.
+  store.dispatch(removeTab('tb-background'));
+  expect(store.getState().broadcast.mode).toBe('window');
+  expect(selectBroadcastMembers(store.getState())).toEqual(['tm-0', 'tm-1', 'tm-2', 'tm-3']);
+  tree(0);
   expect(store.getState().broadcast.mode).toBe('off');
-  tree(4); store.dispatch(startWindowBroadcast());
-  store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: 'canvas' }));
+  // An open but inactive Canvas tab is harmless; only entering it stops broadcast.
+  tree(4); store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: 'canvas' }));
+  store.dispatch(setActiveTab('tb-broadcast')); store.dispatch(startWindowBroadcast());
+  expect(store.getState().broadcast.mode).toBe('window');
   store.dispatch(setActiveTab('tb-canvas'));
   expect(store.getState().broadcast.mode).toBe('off');
 });
@@ -79,7 +86,17 @@ test('window menu replaces tab mode, tab row never says stop in window mode, win
   expect(store.getState().broadcast.mode).toBe('window');
   expect(rows()[0].label).toBe('Focus all panes in this tab');
   expect(rows()[1]).toMatchObject({ label: 'Stop focusing all panes', accelerator: 'Ctrl+Shift+B' });
+  // The tab row in window mode starts tab mode for its own tab.
+  rows()[0].click();
+  expect(store.getState().broadcast).toEqual({ mode: 'tab', tabId: 'tb-broadcast' });
+  rows()[1].click(); store.dispatch(setCustomKeybindings({ stopBroadcastInput: 'Alt+B' }));
+  expect(rows()[1]).toMatchObject({ label: 'Stop focusing all panes', accelerator: 'Alt+B' });
+  store.dispatch(setCustomKeybindings({}));
   rows()[1].click(); tree(1); expect(rows()[1].enabled).toBe(false);
+  // Two single-pane tabs: nothing to share inside the tab, but the window has two terminals.
+  store.dispatch(addTab({ id: 'tb-second', title: 'Second' }));
+  store.dispatch(addTabTree({ tabId: 'tb-second', tree: { id: 'pn-second', type: 'terminal', terminalId: 'tm-second' } }));
+  expect(rows().map(row => row.enabled)).toEqual([false, true]);
   const { isBroadcastAvailable } = require('@termflow/terminal-core'); isBroadcastAvailable.mockReturnValueOnce(false);
   expect(rows()[1]).toMatchObject({ label: 'Focus all panes in all tabs — Unavailable', enabled: false });
 });
@@ -103,6 +120,8 @@ test('never-mounted background fallback receives exact plain Enter/arrow and raw
   const core = jest.requireActual('@termflow/terminal-core');
   store.dispatch(addTab({ id: 'tb-background', title: 'Background' }));
   store.dispatch(addTabTree({ tabId: 'tb-background', tree: { id: 'pn-background', type: 'terminal', terminalId: 'tm-background' } }));
+  store.dispatch(addTab({ id: 'tb-background-2', title: 'Background 2' }));
+  store.dispatch(addTabTree({ tabId: 'tb-background-2', tree: { id: 'pn-background-2', type: 'terminal', terminalId: 'tm-background-2' } }));
   store.dispatch(setActiveTab('tb-broadcast'));
   expect(core.terminalCache.has('tm-background')).toBe(false);
   const dispose = installInputBroadcast(store);
@@ -112,19 +131,20 @@ test('never-mounted background fallback receives exact plain Enter/arrow and raw
   jest.mocked(deliverBroadcast).mockImplementation(core.deliverBroadcast);
   let release!: () => void;
   jest.mocked(terminalService.writeToTerminal).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
-  // Only the background target is ready, so the assertions identify its queue exactly.
-  jest.mocked(terminalService.getProcessId).mockImplementation(id => id === 'tm-background' ? 'pid-background' : undefined);
+  // Only the two background targets are ready, so the assertions identify their queues exactly.
+  jest.mocked(terminalService.getProcessId).mockImplementation(id => id.startsWith('tm-background') ? `pid-${id}` : undefined);
+  const callsTo = (id: string) => jest.mocked(terminalService.writeToTerminal).mock.calls.filter(([target]) => target === id).map(([, data]) => data);
   try {
     const key = (name: string, code: string, keyCode: number) => core.describe(new KeyboardEvent('keydown', { key: name, code, keyCode }));
     sink!('tm-0', { kind: 'key', key: key('Enter', 'Enter', 13), srcBytes: '\x1b[13u' });
     sink!('tm-0', { kind: 'key', key: key('ArrowUp', 'ArrowUp', 38), srcBytes: '\x1bOA' });
     sink!('tm-0', { kind: 'paste', text: 'x\ny' });
-    expect(terminalService.writeToTerminal).toHaveBeenCalledTimes(1);
-    expect(terminalService.writeToTerminal).toHaveBeenNthCalledWith(1, 'tm-background', '\r');
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    // tm-background's first write is still pending; it must hold back only its own queue.
+    expect(callsTo('tm-background')).toEqual(['\r']);
+    expect(callsTo('tm-background-2')).toEqual(['\r', '\x1b[A', 'x\ny']);
     release(); for (let i = 0; i < 12; i++) await Promise.resolve();
-    expect(jest.mocked(terminalService.writeToTerminal).mock.calls).toEqual([
-      ['tm-background', '\r'], ['tm-background', '\x1b[A'], ['tm-background', 'x\ny'],
-    ]);
+    expect(callsTo('tm-background')).toEqual(['\r', '\x1b[A', 'x\ny']);
   } finally {
     dispose(); core.setBroadcastSink(null); jest.mocked(deliverBroadcast).mockReset();
     jest.mocked(terminalService.getProcessId).mockReset().mockReturnValue('pid');

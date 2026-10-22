@@ -28,5 +28,9 @@
   cursor: pointer;
 }
 
-.light-theme .broadcast-window-border,
-.light-theme .broadcast-banner { --broadcast-ring: #956000; }
+.light-theme .broadcast-window-border { --broadcast-ring: #956000; }
+/* --bg-secondary has no light value, so the light banner needs its own surface. */
+.light-theme .broadcast-banner {
+  --broadcast-ring: #956000;
+  background: #f3f3f3;
+}

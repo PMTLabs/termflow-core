@@ -26,9 +26,12 @@ test('renderer write census classifies every writeToTerminal caller', () => {
         const relative = path.relative(root, file).replace(/\\/g, '/');
         const count = [...source.matchAll(/\bwriteToTerminal\s*(?:\(|:\s*async\s*\()/g)].length;
         if (count) found[relative] = count;
+        // A commented-out call is not wiring. Stripping `//` to end of line can only drop
+        // a real call that shares a line with a URL, which fails this census loudly.
+        const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
         for (const name of Object.keys(wiring)) {
           // Exclude the function declaration itself, but count each production call.
-          const calls = [...source.matchAll(new RegExp(`(?<!function )\\b${name}\\s*\\(`, 'g'))].length;
+          const calls = [...code.matchAll(new RegExp(`(?<!function )\\b${name}\\s*\\(`, 'g'))].length;
           for (let i = 0; i < calls; i++) wiring[name].push(relative);
         }
       }

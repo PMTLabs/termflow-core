@@ -15,7 +15,8 @@ jest.mock('../../../services/paneOwnership', () => ({ attachPaneOwnershipSync: j
 jest.mock('../../../services/terminalLabelSync', () => ({ attachTerminalLabelSync: jest.fn() }));
 jest.mock('../../../services/terminalTitleColorSync', () => ({ attachTerminalTitleColorSync: jest.fn() }));
 jest.mock('@tauri-apps/api/event', () => ({ listen: jest.fn().mockResolvedValue(() => {}) }));
-jest.mock('../../../services/TerminalService', () => ({ terminalService: { getProcessId: (id: string) => id === 'tm-no-process' ? undefined : 'pid' } }));
+const live = new Set<string>();
+jest.mock('../../../services/TerminalService', () => ({ terminalService: { getProcessId: (id: string) => live.has(id) ? 'pid' : undefined } }));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 test('window banner counts only process-backed members across tabs, custom stop hint and button; hidden off/tab', () => {
   store.dispatch(stopBroadcast()); store.dispatch(clearAllTabs()); store.dispatch(resetPanes());
@@ -24,6 +25,7 @@ test('window banner counts only process-backed members across tabs, custom stop 
     store.dispatch(addTabTree({ tabId: id, tree: { id: `pn-${id}`, type: 'terminal', terminalId } }));
   }
   store.dispatch(setActiveTab('tb-one'));
+  live.clear(); live.add('tm-one'); live.add('tm-two');
   const container = document.createElement('div'); document.body.appendChild(container); const root = createRoot(container);
   act(() => root.render(<Provider store={store}><BroadcastOverlay /></Provider>));
   try {
@@ -31,6 +33,13 @@ test('window banner counts only process-backed members across tabs, custom stop 
     act(() => store.dispatch(startTabBroadcast('tb-one'))); expect(container.textContent).toBe('');
     act(() => store.dispatch(startWindowBroadcast()));
     expect(container.textContent).toBe('Typing into all 2 open terminals across tabs · Ctrl+Shift+B to stopStop');
+    expect(container.querySelector('.broadcast-window-border')!.getAttribute('aria-hidden')).toBe('true');
+    expect(container.querySelector('.broadcast-banner')!.getAttribute('role')).toBe('status');
+    // A process starting or exiting changes no store state; the service's events must re-count.
+    live.add('tm-no-process'); act(() => { window.dispatchEvent(new CustomEvent('pty:spawn')); });
+    expect(container.textContent).toContain('all 3 open terminals');
+    live.delete('tm-two'); act(() => { window.dispatchEvent(new CustomEvent('pty:exit')); });
+    expect(container.textContent).toContain('all 2 open terminals');
     act(() => store.dispatch(setCustomKeybindings({ stopBroadcastInput: 'Alt+B' })));
     expect(container.textContent).toContain('Alt+B to stop');
     expect(container.querySelector('.broadcast-window-border')).not.toBeNull();
@@ -42,8 +51,12 @@ test('window banner counts only process-backed members across tabs, custom stop 
 });
 test('border is fixed, non-interactive and below menus; banner is in flow below titlebar', () => {
   const css = fs.readFileSync(path.join(__dirname, '../BroadcastOverlay.css'), 'utf8');
-  expect(css).toMatch(/position: fixed/); expect(css).toMatch(/pointer-events: none/); expect(css).toMatch(/z-index: 90/);
-  expect(css.split('.broadcast-banner {')[1].split('}')[0]).not.toMatch(/position:/);
+  const rule = (selector: string) => `\n${css.replace(/\r/g, '')}`.split(`\n${selector} {`)[1].split('}')[0];
+  const border = rule('.broadcast-window-border');
+  for (const decl of [/position: fixed;/, /inset: 0;/, /pointer-events: none;/, /z-index: 90;/]) expect(border).toMatch(decl);
+  expect(rule('.broadcast-banner')).not.toMatch(/position:/);
+  // --bg-secondary is dark-only; the light banner must bring its own surface.
+  expect(rule('.light-theme .broadcast-banner')).toMatch(/background: #f3f3f3;/);
   const app = fs.readFileSync(path.join(__dirname, '../../../App.tsx'), 'utf8');
   expect(app).toMatch(/<TitleBar\s*\/>\s*<BroadcastOverlay\s*\/>\s*<div className="app-body">/);
 });
