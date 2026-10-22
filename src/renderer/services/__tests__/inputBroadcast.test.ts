@@ -3,7 +3,7 @@ import { store } from '../../store';
 import { addTab, setActiveTab, removeTab, clearAllTabs } from '../../store/slices/tabsSlice';
 import { findLeafByTerminalId } from '../../store/slices/paneTreeOps';
 import { addTabTree, resetPanes, splitPaneInTab, removePaneFromTab } from '../../store/slices/panesSlice';
-import { startTabBroadcast, stopBroadcast, selectBroadcastMembers } from '../../store/slices/broadcastSlice';
+import { startTabBroadcast, startWindowBroadcast, stopBroadcast, selectBroadcastMembers } from '../../store/slices/broadcastSlice';
 import { installInputBroadcast } from '../inputBroadcast';
 import { deliverBroadcast, setBroadcastSink, type BroadcastUnit } from '@termflow/terminal-core';
 import { terminalService } from '../TerminalService';
@@ -51,6 +51,38 @@ test('live membership 4 → split 5 → close 4, switch/remove/empty/Canvas auto
   store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: 'canvas' })); store.dispatch(setActiveTab('tb-canvas'));
   expect(store.getState().broadcast.mode).toBe('off');
 });
+test('window membership includes background by ID, ignores orphan trees, stays memoised and survives tab switch', () => {
+  store.dispatch(addTab({ id: 'tb-background', title: 'Background' }));
+  store.dispatch(addTabTree({ tabId: 'tb-background', tree: { id: 'pn-background', type: 'terminal', terminalId: 'tm-background' } }));
+  store.dispatch(addTabTree({ tabId: 'tb-orphan', tree: { id: 'pn-orphan', type: 'terminal', terminalId: 'tm-orphan' } }));
+  store.dispatch(setActiveTab('tb-broadcast'));
+  store.dispatch(startWindowBroadcast());
+  const members = selectBroadcastMembers(store.getState());
+  expect(members).toEqual(['tm-0', 'tm-1', 'tm-2', 'tm-3', 'tm-background']);
+  expect(selectBroadcastMembers(store.getState())).toBe(members);
+  store.dispatch(setActiveTab('tb-background'));
+  expect(store.getState().broadcast.mode).toBe('window');
+  store.dispatch(startTabBroadcast('tb-background'));
+  expect(store.getState().broadcast).toEqual({ mode: 'tab', tabId: 'tb-background' });
+  store.dispatch(startWindowBroadcast());
+  expect(store.getState().broadcast.mode).toBe('window');
+  store.dispatch(removeTab('tb-background')); tree(0);
+  expect(store.getState().broadcast.mode).toBe('off');
+  tree(4); store.dispatch(startWindowBroadcast());
+  store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: 'canvas' }));
+  store.dispatch(setActiveTab('tb-canvas'));
+  expect(store.getState().broadcast.mode).toBe('off');
+});
+test('window menu replaces tab mode, tab row never says stop in window mode, window stop has hint', () => {
+  const rows = () => broadcastMenuItems(store.getState(), 'tb-broadcast', store.dispatch);
+  store.dispatch(startTabBroadcast('tb-broadcast')); rows()[1].click();
+  expect(store.getState().broadcast.mode).toBe('window');
+  expect(rows()[0].label).toBe('Focus all panes in this tab');
+  expect(rows()[1]).toMatchObject({ label: 'Stop focusing all panes', accelerator: 'Ctrl+Shift+B' });
+  rows()[1].click(); tree(1); expect(rows()[1].enabled).toBe(false);
+  const { isBroadcastAvailable } = require('@termflow/terminal-core'); isBroadcastAvailable.mockReturnValueOnce(false);
+  expect(rows()[1]).toMatchObject({ label: 'Focus all panes in all tabs — Unavailable', enabled: false });
+});
 test('sink uses live members, excludes source and outsiders, skips processless targets and unsets when off', () => {
   const dispose = installInputBroadcast(store);
   expect(setBroadcastSink).toHaveBeenLastCalledWith(null, null);
@@ -66,6 +98,37 @@ test('sink uses live members, excludes source and outsiders, skips processless t
   expect(deliverBroadcast).toHaveBeenCalledTimes(3);
   store.dispatch(stopBroadcast()); expect(setBroadcastSink).toHaveBeenLastCalledWith(null, null);
   dispose(); expect(setBroadcastSink).toHaveBeenLastCalledWith(null);
+});
+test('never-mounted background fallback receives exact plain Enter/arrow and raw paste in per-terminal order', async () => {
+  const core = jest.requireActual('@termflow/terminal-core');
+  store.dispatch(addTab({ id: 'tb-background', title: 'Background' }));
+  store.dispatch(addTabTree({ tabId: 'tb-background', tree: { id: 'pn-background', type: 'terminal', terminalId: 'tm-background' } }));
+  store.dispatch(setActiveTab('tb-broadcast'));
+  expect(core.terminalCache.has('tm-background')).toBe(false);
+  const dispose = installInputBroadcast(store);
+  store.dispatch(startWindowBroadcast());
+  const [sink, fallback] = jest.mocked(setBroadcastSink).mock.calls.at(-1)!;
+  core.setBroadcastSink(sink, fallback);
+  jest.mocked(deliverBroadcast).mockImplementation(core.deliverBroadcast);
+  let release!: () => void;
+  jest.mocked(terminalService.writeToTerminal).mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+  // Only the background target is ready, so the assertions identify its queue exactly.
+  jest.mocked(terminalService.getProcessId).mockImplementation(id => id === 'tm-background' ? 'pid-background' : undefined);
+  try {
+    const key = (name: string, code: string, keyCode: number) => core.describe(new KeyboardEvent('keydown', { key: name, code, keyCode }));
+    sink!('tm-0', { kind: 'key', key: key('Enter', 'Enter', 13), srcBytes: '\x1b[13u' });
+    sink!('tm-0', { kind: 'key', key: key('ArrowUp', 'ArrowUp', 38), srcBytes: '\x1bOA' });
+    sink!('tm-0', { kind: 'paste', text: 'x\ny' });
+    expect(terminalService.writeToTerminal).toHaveBeenCalledTimes(1);
+    expect(terminalService.writeToTerminal).toHaveBeenNthCalledWith(1, 'tm-background', '\r');
+    release(); for (let i = 0; i < 12; i++) await Promise.resolve();
+    expect(jest.mocked(terminalService.writeToTerminal).mock.calls).toEqual([
+      ['tm-background', '\r'], ['tm-background', '\x1b[A'], ['tm-background', 'x\ny'],
+    ]);
+  } finally {
+    dispose(); core.setBroadcastSink(null); jest.mocked(deliverBroadcast).mockReset();
+    jest.mocked(terminalService.getProcessId).mockReset().mockReturnValue('pid');
+  }
 });
 test('shared menus start owning tab, stop with shortcut hint, disable single and unavailable', () => {
   const item = () => broadcastMenuItems(store.getState(), 'tb-broadcast', store.dispatch)[0];
@@ -95,6 +158,8 @@ test('clear-terminal fans form-feed to each ready member; stop shortcut is captu
   // The second clear queues behind the first one's in-flight writes per member.
   for (let i = 0; i < 6; i++) await Promise.resolve();
   expect(terminalService.writeToTerminal).toHaveBeenCalledTimes(7);
+  press('B', 'KeyB'); expect(store.getState().broadcast.mode).toBe('off');
+  store.dispatch(startWindowBroadcast());
   press('B', 'KeyB'); expect(store.getState().broadcast.mode).toBe('off');
   press('B', 'KeyB'); expect(store.getState().broadcast.mode).toBe('off');
   expect(ptyKey).not.toHaveBeenCalled();

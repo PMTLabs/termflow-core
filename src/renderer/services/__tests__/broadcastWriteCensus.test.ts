@@ -15,17 +15,30 @@ const policies: Record<string, { count: number; reason: string }> = {
 };
 test('renderer write census classifies every writeToTerminal caller', () => {
   const root = path.join(__dirname, '../..'); const found: Record<string, number> = {};
+  const wiring: Record<string, string[]> = { installInputBroadcast: [], setBroadcastSink: [], broadcastMenuItems: [] };
   function walk(dir: string) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.name.startsWith('__') || entry.name === 'node_modules') continue;
       const file = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(file);
       else if (/\.tsx?$/.test(file)) {
-        const count = [...fs.readFileSync(file, 'utf8').matchAll(/\bwriteToTerminal\s*(?:\(|:\s*async\s*\()/g)].length;
-        if (count) found[path.relative(root, file).replace(/\\/g, '/')] = count;
+        const source = fs.readFileSync(file, 'utf8');
+        const relative = path.relative(root, file).replace(/\\/g, '/');
+        const count = [...source.matchAll(/\bwriteToTerminal\s*(?:\(|:\s*async\s*\()/g)].length;
+        if (count) found[relative] = count;
+        for (const name of Object.keys(wiring)) {
+          // Exclude the function declaration itself, but count each production call.
+          const calls = [...source.matchAll(new RegExp(`(?<!function )\\b${name}\\s*\\(`, 'g'))].length;
+          for (let i = 0; i < calls; i++) wiring[name].push(relative);
+        }
       }
     }
   }
   walk(root);
   expect(found).toEqual(Object.fromEntries(Object.entries(policies).map(([file, policy]) => [file, policy.count])));
+  expect(wiring).toEqual({
+    installInputBroadcast: ['App.tsx'],
+    setBroadcastSink: ['services/inputBroadcast.ts', 'services/inputBroadcast.ts'],
+    broadcastMenuItems: ['components/Panes/PaneContextMenu.tsx', 'components/Terminal/TerminalDisplay.tsx'],
+  });
 });

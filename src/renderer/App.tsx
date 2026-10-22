@@ -2,6 +2,7 @@ import { paneIncarnations, acceptsTransferNotice, describePanes, type PaneCaptur
 import { captureWorkspace, isCurrentWorkspace } from './services/workspaceReplacement';
 import React, { useEffect, useRef, useState } from 'react';
 import { installInputBroadcast } from './services/inputBroadcast';
+import { BroadcastOverlay } from './components/Broadcast/BroadcastOverlay';
 import { listen } from '@tauri-apps/api/event';
 import { useDispatch, useSelector } from 'react-redux';
 import { TitleBar } from './components/TitleBar';
@@ -1856,6 +1857,7 @@ const App: React.FC = () => {
     <div className="app">
       <PaneDragProvider>
         <TitleBar />
+        <BroadcastOverlay />
         <div className="app-body">
           {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
               by TerminalContainer alongside every other tab — see services/openCanvas.ts
