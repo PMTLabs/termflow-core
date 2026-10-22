@@ -42,7 +42,7 @@ test('B3 pointerdown then microtask then mousedown report is suppressed; documen
   await Promise.resolve();
   for (const type of ['mousemove', 'mouseup']) {
     document.addEventListener(type, report, { once: true });
-    document.dispatchEvent(new MouseEvent(type, { bubbles: true }));
+    document.dispatchEvent(new MouseEvent(type, { bubbles: true, buttons: type === 'mousemove' ? 1 : 0 }));
     await Promise.resolve();
   }
   element.addEventListener('wheel', report);

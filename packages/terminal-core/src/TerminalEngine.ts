@@ -1,5 +1,5 @@
 import { Terminal } from '@xterm/xterm';
-import { describe, emitBroadcast, hasBroadcastSink, isDeliveringBroadcast, subscribeUserInput, withBroadcastPaste, type KeyDescriptor } from './broadcast';
+import { describe, emitBroadcast, hasBroadcastSink, isDeliveringBroadcast, subscribeUserInput, withBroadcastPaste, queueBroadcastTargetWrite, type KeyDescriptor } from './broadcast';
 import type { FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -1357,8 +1357,10 @@ export class TerminalEngine {
   // only by dispose()/cleanupTerminalCache).
   private disposables: Array<() => void> = [];
   private pendingKey: KeyDescriptor | null = null;
+  private lastKeydown: KeyDescriptor | null = null;
   private pendingUserInput = false;
   private inPointerEvent = false;
+  private inNativePaste = false;
 
   private emitKeyBroadcast(data: string): void {
     const key = this.pendingKey;
@@ -2325,6 +2327,7 @@ export class TerminalEngine {
     let pointerHeld = false;
     const pointerGuard = (event: Event) => {
       const inside = boundTerm.element?.contains(event.target as Node) ?? false;
+      if (event.type === 'mousemove' && (event as MouseEvent).buttons === 0) pointerHeld = false;
       if (!inside && !pointerHeld) return;
       if (event.type === 'mousedown') pointerHeld = true;
       this.inPointerEvent = true;
@@ -2335,15 +2338,17 @@ export class TerminalEngine {
       window.addEventListener(name, pointerGuard, true);
       this.disposables.push(() => window.removeEventListener(name, pointerGuard, true));
     }
+    const resetPointer = () => { pointerHeld = false; this.inPointerEvent = false; };
+    window.addEventListener('blur', resetPointer, true);
+    this.disposables.push(() => window.removeEventListener('blur', resetPointer, true));
     const nativePaste = (event: ClipboardEvent) => {
+      // xterm still owns the event (including empty/file paste). Suppress its
+      // onData copy even if it brackets empty text; never cancel the DOM event.
+      this.inNativePaste = true;
+      queueMicrotask(() => { this.inNativePaste = false; });
       const text = event.clipboardData?.getData('text/plain');
-      if (text === undefined) return;
+      if (!text || !this.attachedProcessId || !terminalCache.get(this.cacheKey)?.processId) return;
       emitBroadcast(this.cacheKey, { kind: 'paste', text });
-      const entry = terminalCache.get(this.cacheKey);
-      if (entry) {
-        entry.inBroadcastPaste = true;
-        queueMicrotask(() => { entry.inBroadcastPaste = false; });
-      }
     };
     boundTerm.element?.addEventListener('paste', nativePaste, true);
     this.disposables.push(() => boundTerm.element?.removeEventListener('paste', nativePaste, true));
@@ -2366,10 +2371,12 @@ export class TerminalEngine {
       if (this.attachedProcessId) {
         // Fire-and-forget: swallow rejection (e.g. PTY already exited) so it
         // never surfaces as an uncaught promise rejection.
-        Promise.resolve(this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
+        Promise.resolve(isDeliveringBroadcast()
+          ? queueBroadcastTargetWrite(this.bridge.write.bind(this.bridge), this.attachedProcessId, data)
+          : this.bridge.write(this.attachedProcessId, data)).catch((e: unknown) => {
           this.opts.onDiag?.(() => `[TERM-DIAG] write after exit ignored: ${e}`);
         });
-        if (user && !this.inPointerEvent && !terminalCache.get(this.cacheKey)?.inBroadcastPaste) {
+        if (user && !this.inPointerEvent && !this.inNativePaste && !terminalCache.get(this.cacheKey)?.inBroadcastPaste) {
           if (this.pendingKey) this.emitKeyBroadcast(data);
           else emitBroadcast(this.cacheKey, { kind: 'text', data });
         }
@@ -2563,12 +2570,21 @@ export class TerminalEngine {
 
     // --- Keyboard: attachCustomKeyEventHandler (R7 + source 445-504) ---
     boundTerm.attachCustomKeyEventHandler((event) => {
-      this.pendingKey = null;
-      if (inputSubscription && hasBroadcastSink() && !isDeliveringBroadcast()
-        && !event.isComposing && (event.type === 'keydown' || event.type === 'keyup')) {
-        const key = describe(event);
-        this.pendingKey = key;
-        queueMicrotask(() => { if (this.pendingKey === key) this.pendingKey = null; });
+      if (event.type !== 'keypress') {
+        this.pendingKey = null;
+        this.lastKeydown = null;
+      }
+      if (inputSubscription && hasBroadcastSink() && !isDeliveringBroadcast() && !event.isComposing) {
+        if (event.type === 'keypress') {
+          // Uppercase/AltGr input may arrive after keydown's microtask expires.
+          if (event.key === this.lastKeydown?.key) this.pendingKey = this.lastKeydown;
+          this.lastKeydown = null;
+        } else if (event.type === 'keydown' || event.type === 'keyup') {
+          const key = describe(event);
+          this.pendingKey = key;
+          if (event.type === 'keydown') this.lastKeydown = key;
+          queueMicrotask(() => { if (this.pendingKey === key) this.pendingKey = null; });
+        }
       }
       if (event.type === 'keydown') {
         const isModifier = ['Control', 'Shift', 'Alt', 'Meta'].includes(event.key);
@@ -3078,12 +3094,21 @@ export class TerminalEngine {
       // than existingCache's) is correct in both cases: if we adopted the cached
       // instance above, this is a no-op re-write of the same object; if this is
       // a genuinely fresh terminal, it seeds the cache with the fresh instance.
-      shellType: this.opts.shellType?.(),
+      getBroadcastOptions: () => ({
+        shellType: this.opts.shellType?.(), enhancedKeyboard: this.enhancedKbEnabled(),
+        macOptionIsMeta: this.opts.macOptionIsMeta ?? false,
+        isMac: this.opts.isMac ?? /Mac/.test(globalThis.navigator?.platform ?? ''),
+        isWindows: this.isWindowsPlatform(),
+      }),
+      disarmBroadcastPrompt: () => {
+        this.setPromptGate(this.promptOscSeen, false);
+        this.sawInputWhileDisarmed = false;
+        this.capture?.cancel();
+        this.emitInputLine('');
+      },
       broadcastAvailable: !!inputSubscription,
       broadcastWrite: true,
       broadcastRawWrite: this.bridge.write.bind(this.bridge),
-      broadcastIsMac: this.opts.isMac ?? /Mac/.test(globalThis.navigator?.platform ?? ''),
-      broadcastIsWindows: this.isWindowsPlatform(),
       kbState: this.kbState,
       win32State: this.win32State,
       // Backlog 003: the cache-lifetime protocol handler disposers, created once
@@ -4171,7 +4196,9 @@ export class TerminalEngine {
   }
 
   paste(text: string): void {
-    if (this.term) withBroadcastPaste(this.cacheKey, text, () => this.term!.paste(text));
+    if (!this.term) return;
+    if (this.attachedProcessId) withBroadcastPaste(this.cacheKey, text, () => this.term!.paste(text));
+    else this.term.paste(text);
   }
 
   // --- Backlog 011: command capture + suggest popup -------------------------
@@ -4229,6 +4256,11 @@ export class TerminalEngine {
 
   /** Route typed input (pre-echo) into the capture heuristic. */
   private routeCaptureData(data: string): void {
+    // Submitting consumes the shell prompt even when capture/suggestions are disabled.
+    if (/[\r\n]/.test(data)) {
+      this.setPromptGate(this.promptOscSeen, false);
+      this.sawInputWhileDisarmed = false;
+    }
     const capture = this.capture;
     if (!capture || data.length === 0) return;
     if (!this.suggestionsAllowed()) {
@@ -4831,8 +4863,13 @@ export class TerminalEngine {
     // `splice(0)` empties the shared array in place AND hands back what to run, so
     // the entry is already empty before the first disposer is invoked.
     const broadcastEntry = terminalCache.get(this.cacheKey);
-    if (broadcastEntry) broadcastEntry.broadcastWrite = false;
+    if (broadcastEntry) {
+      broadcastEntry.broadcastWrite = false;
+      broadcastEntry.disarmBroadcastPrompt = undefined;
+    }
     this.pendingKey = null;
+    this.lastKeydown = null;
+    this.inNativePaste = false;
     this.pendingUserInput = false;
     const localDisposers = this.disposables.splice(0);
     this.disposables = [];

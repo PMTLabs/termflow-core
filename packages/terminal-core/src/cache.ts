@@ -24,11 +24,10 @@ export interface TerminalCacheEntry {
   // program's palette/fg/bg/cursor changes so the agent can't overwrite our
   // scheme (set by the renderer via setAgentColorLock; read in TerminalEngine).
   agentColorLocked?: boolean;
-  shellType?: string;
+  getBroadcastOptions?: () => { shellType?: string; enhancedKeyboard: boolean; isMac: boolean; isWindows: boolean; macOptionIsMeta: boolean };
+  disarmBroadcastPrompt?: () => void;
   broadcastAvailable?: boolean;
   broadcastWrite?: boolean;
-  broadcastIsMac?: boolean;
-  broadcastIsWindows?: boolean;
   inBroadcastPaste?: boolean;
   broadcastRawWrite?: (processId: string, data: string) => void | Promise<void>;
   // Declared now; consumed by Task 4 (R1 output delivery).

@@ -12,10 +12,12 @@ test.each([['a', 'a'], ['Enter', '\r'], ['Backspace', '\x7f'], ['ArrowUp', '\x1b
   deliverBroadcast('target', { kind: 'key', key: describe(event(key)), srcBytes: 'win32 record' });
   expect(write).toHaveBeenCalledWith('pid-target', bytes);
 });
-test('descriptor retains virtual key and lock state for Win32', () => {
-  const key = describe(event('c', { ctrlKey: true }));
+test('descriptor retains vk67 and CapsLock/NumLock bits in the full Win32 record', () => {
+  const e = event('c', { ctrlKey: true });
+  Object.defineProperty(e, 'getModifierState', { value: (name: string) => name === 'CapsLock' || name === 'NumLock' });
+  const key = describe(e);
   expect(key.keyCode).toBe(67);
-  expect(encodeWin32Key(toEventLike(key), true)).toMatch(/^\x1b\[67;/);
+  expect(encodeWin32Key(toEventLike(key), true)).toBe('\x1b[67;46;3;1;168;1_');
   // Ctrl+C must remain the engine's raw interrupt escape hatch, not a Win32 record.
   expect(decideKeyBytes(key, { ...plain, win32Active: true })).toBe('\x03');
 });

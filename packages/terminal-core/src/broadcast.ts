@@ -20,6 +20,7 @@ export interface KeyCtx {
   shellType?: string;
   isMac: boolean;
   isWindows: boolean;
+  macOptionIsMeta?: boolean;
   applicationCursorKeys: boolean;
   normalBuffer?: boolean;
 }
@@ -36,9 +37,17 @@ export const toEventLike = (key: KeyDescriptor): KeyboardEvent => ({
 
 export function plainEncode(k: KeyDescriptor, applicationCursorKeys = false): string | null {
   if (k.type !== 'keydown') return null;
-  if (k.locks.AltGraph && k.key.length === 1) return k.key;
+  const singleChar = [...k.key].length === 1;
+  if (singleChar && k.metaKey) return null;
+  if (k.locks.AltGraph && singleChar) return k.key;
   const mod = 1 + Number(k.shiftKey) + 2 * Number(k.altKey) + 4 * Number(k.ctrlKey) + 8 * Number(k.metaKey);
   const nav: Record<string, string> = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D', Home: 'H', End: 'F' };
+  if (k.metaKey && k.key.startsWith('Arrow')) return null;
+  if (k.key === 'Insert') return k.ctrlKey || k.shiftKey ? null : '\x1b[2~';
+  if (k.key === 'PageUp' || k.key === 'PageDown') {
+    if (k.shiftKey) return null; // xterm scrolls the viewport, even on the alternate buffer.
+    return `\x1b[${k.key === 'PageUp' ? 5 : 6}${k.ctrlKey ? `;${mod}` : ''}~`;
+  }
   if (nav[k.key]) return mod > 1 ? `\x1b[1;${mod}${nav[k.key]}` : `\x1b${applicationCursorKeys ? 'O' : '['}${nav[k.key]}`;
   const tilde: Record<string, number> = { Insert: 2, Delete: 3, PageUp: 5, PageDown: 6, F5: 15, F6: 17, F7: 18, F8: 19, F9: 20, F10: 21, F11: 23, F12: 24 };
   if (tilde[k.key]) return `\x1b[${tilde[k.key]}${mod > 1 ? `;${mod}` : ''}~`;
@@ -46,9 +55,9 @@ export function plainEncode(k: KeyDescriptor, applicationCursorKeys = false): st
   let data: string | null = null;
   if (k.key === 'Enter') data = '\r';
   else if (k.key === 'Backspace') data = k.ctrlKey ? '\x08' : '\x7f';
-  else if (k.key === 'Tab') data = k.shiftKey ? '\x1b[Z' : '\t';
+  else if (k.key === 'Tab') return k.shiftKey ? '\x1b[Z' : '\t';
   else if (k.key === 'Escape') data = '\x1b';
-  else if (k.key.length === 1) {
+  else if (singleChar) {
     data = k.key;
     if (k.ctrlKey) {
       const ch = k.key.toUpperCase().charCodeAt(0);
@@ -59,6 +68,8 @@ export function plainEncode(k: KeyDescriptor, applicationCursorKeys = false): st
 }
 
 export function decideKeyBytes(k: KeyDescriptor, ctx: KeyCtx): string | null {
+  if ((k.key === 'PageUp' || k.key === 'PageDown') && !k.ctrlKey && !k.altKey && !k.shiftKey && !k.metaKey
+    && ctx.normalBuffer !== false && !ctx.protocolActive) return null;
   if (k.type === 'keyup' && !ctx.protocolActive) {
     if (k.ctrlKey && !k.shiftKey && k.key === 'c') return null;
     if (decideWordDeleteShim(k.key, k, ctx.normalBuffer !== false, false, ctx.shellType) !== null) return null;
@@ -82,7 +93,15 @@ export function decideKeyBytes(k: KeyDescriptor, ctx: KeyCtx): string | null {
     const seq = encodeKey(event, ctx.kbSnapshot);
     if (seq !== null) return seq;
   }
-  if (ctx.win32Active && !ctx.protocolActive) return encodeWin32Key(event, true);
+  if (ctx.win32Active && !ctx.protocolActive) {
+    const seq = encodeWin32Key(event, true);
+    if (seq !== null) return seq; // AltGr defers to xterm's text/keypress path.
+  }
+  if (k.type === 'keydown' && !k.metaKey && (!k.keyCode || k.keyCode > 47)) {
+    const thirdLevel = (ctx.isMac && !ctx.macOptionIsMeta && k.altKey && !k.ctrlKey)
+      || (ctx.isWindows && ((k.altKey && k.ctrlKey) || k.locks.AltGraph));
+    if (thirdLevel) return [...k.key].length === 1 ? k.key : null;
+  }
   return plainEncode(k, ctx.applicationCursorKeys);
 }
 
@@ -115,40 +134,59 @@ export function isBroadcastAvailable(): boolean {
 }
 export function withBroadcastPaste(source: string, text: string, paste: () => void): void {
   const entry = terminalCache.get(source);
-  emitBroadcast(source, { kind: 'paste', text });
+  if (text && entry?.processId) emitBroadcast(source, { kind: 'paste', text });
   if (entry) entry.inBroadcastPaste = true;
   try { paste(); } finally { if (entry) entry.inBroadcastPaste = false; }
 }
-// A target can exit between membership resolution and its queued write.
-function queueTargetWrite(writer: Fallback | null | undefined, target: string, data: string): void {
-  try { void Promise.resolve(writer?.(target, data)).catch(() => {}); } catch { /* exited target */ }
+// Serialize each PTY's broadcast writes, including paste's engine onData path.
+// Start an idle writer synchronously; only pending asynchronous writes need a queue.
+const targetQueues = new Map<string, Promise<void>>();
+export function queueBroadcastTargetWrite(writer: Fallback | null | undefined, target: string, data: string): void {
+  const previous = targetQueues.get(target);
+  try {
+    const result = previous ? previous.then(() => writer?.(target, data)) : writer?.(target, data);
+    if (!result) return;
+    const next = Promise.resolve(result).then(() => {}, () => {});
+    targetQueues.set(target, next);
+    void next.then(() => { if (targetQueues.get(target) === next) targetQueues.delete(target); });
+  } catch { /* target exited between membership resolution and write */ }
 }
 export function deliverBroadcast(target: string, unit: BroadcastUnit): void {
   const entry = terminalCache.get(target);
   if (entry && !entry.processId) return;
+  const options = entry?.getBroadcastOptions?.();
+  const enhanced = options?.enhancedKeyboard ?? true;
   const snapshot = entry?.kbState?.snapshot() ?? { kittyFlags: 0, modifyOtherKeys: 0 };
+  const isWindows = options?.isWindows ?? /Win/.test(globalThis.navigator?.platform ?? '');
   const ctx: KeyCtx = {
-    kbSnapshot: snapshot, protocolActive: !!(snapshot.kittyFlags || snapshot.modifyOtherKeys),
-    win32Active: entry?.win32State?.isActive() ?? false, shellType: entry?.shellType,
-    isMac: entry?.broadcastIsMac ?? /Mac/.test(globalThis.navigator?.platform ?? ''),
-    isWindows: entry?.broadcastIsWindows ?? /Win/.test(globalThis.navigator?.platform ?? ''),
+    kbSnapshot: snapshot, protocolActive: enhanced && !!(snapshot.kittyFlags || snapshot.modifyOtherKeys),
+    win32Active: enhanced && isWindows && (entry?.win32State?.isActive() ?? false), shellType: options?.shellType,
+    isMac: options?.isMac ?? /Mac/.test(globalThis.navigator?.platform ?? ''),
+    isWindows, macOptionIsMeta: options?.macOptionIsMeta,
     applicationCursorKeys: entry?.terminal.modes.applicationCursorKeysMode ?? false,
     normalBuffer: entry?.terminal.buffer.active.type !== 'alternate',
   };
+  const submits = unit.kind === 'key'
+    ? unit.key.type === 'keydown' && unit.key.key === 'Enter' && !unit.key.shiftKey
+    : /[\r\n]/.test(unit.kind === 'paste' ? unit.text : unit.data);
+  if (entry && submits) {
+    if (entry.disarmBroadcastPrompt) entry.disarmBroadcastPrompt();
+    else if (entry.promptGate) entry.promptGate = { ...entry.promptGate, armed: false };
+  }
   delivering++;
   try {
     if (unit.kind === 'paste' && entry) {
       // Background cached terminals have no mounted onData listener.
       if (entry.broadcastWrite) pasteToTerminal(target, unit.text);
       else {
-        const subscription = entry.terminal.onData(data => queueTargetWrite(entry.broadcastRawWrite, entry.processId!, data));
+        const subscription = entry.terminal.onData(data => queueBroadcastTargetWrite(entry.broadcastRawWrite, entry.processId!, data));
         try { pasteToTerminal(target, unit.text); } finally { subscription.dispose(); }
       }
       return;
     }
     const data = unit.kind === 'key' ? decideKeyBytes(unit.key, ctx) : unit.kind === 'paste' ? unit.text : unit.data;
     if (data === null) return;
-    if (entry?.broadcastRawWrite) queueTargetWrite(entry.broadcastRawWrite, entry.processId!, data);
-    else queueTargetWrite(fallback, target, data);
+    if (entry?.broadcastRawWrite) queueBroadcastTargetWrite(entry.broadcastRawWrite, entry.processId!, data);
+    else queueBroadcastTargetWrite(fallback, target, data);
   } finally { delivering--; }
 }

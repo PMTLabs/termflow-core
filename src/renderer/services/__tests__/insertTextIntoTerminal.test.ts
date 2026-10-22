@@ -25,7 +25,7 @@ describe('insertTextIntoTerminal', () => {
   it('snippet insertion through the real cache emits one raw paste unit', () => {
     const core = jest.requireActual('@termflow/terminal-core');
     const sink = jest.fn(); const paste = jest.fn();
-    core.terminalCache.set('tm-snippet', { terminal: { paste }, broadcastAvailable: true });
+    core.terminalCache.set('tm-snippet', { terminal: { paste }, broadcastAvailable: true, processId: 'pid-snippet' });
     core.setBroadcastSink(sink);
     (pasteToTerminal as jest.Mock).mockImplementationOnce(core.pasteToTerminal);
     try {

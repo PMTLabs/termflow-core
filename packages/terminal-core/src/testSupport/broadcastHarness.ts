@@ -17,9 +17,9 @@ export function makeEngine(id = 'source', shellType = 'pwsh', isMac = false) {
   return { engine, term, write, container };
 }
 export function event(key: string, options: KeyboardEventInit & { type?: string } = {}) {
-  const codes: Record<string, number> = { Enter: 13, Backspace: 8, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Tab: 9, Escape: 27, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34, Insert: 45 };
+  const codes: Record<string, number> = { Enter: 13, Backspace: 8, ArrowUp: 38, ArrowDown: 40, ArrowLeft: 37, ArrowRight: 39, Tab: 9, Escape: 27, Delete: 46, Home: 36, End: 35, PageUp: 33, PageDown: 34, Insert: 45, ' ': 32, '[': 219, '\\': 220, ']': 221, '^': 54, '_': 189 };
   return new KeyboardEvent(options.type ?? 'keydown', {
     key, code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
-    keyCode: codes[key] ?? key.toUpperCase().charCodeAt(0), ...options,
+    keyCode: codes[key] ?? (/^F\d+$/.test(key) ? 111 + Number(key.slice(1)) : key.toUpperCase().charCodeAt(0)), ...options,
   });
 }
