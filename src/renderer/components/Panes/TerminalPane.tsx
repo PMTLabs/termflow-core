@@ -150,6 +150,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   const nonFocusedPaneOpacity = useSelector((state: RootState) => state.settings.nonFocusedPaneOpacity);
   const isBroadcastMember = useSelector((state: RootState) => !!terminalId && selectBroadcastMembers(state).includes(terminalId));
   const broadcastOn = useSelector((state: RootState) => !!state.broadcast && state.broadcast.mode !== 'off');
+  const windowScope = useSelector((state: RootState) => state.broadcast?.mode === 'window');
   // Terminal font family — the startup status must render in the same font as
   // the terminal it stands in for (not a hardcoded stack), so it honours the
   // user's font settings.
@@ -825,7 +826,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     <>
       <div
         ref={paneRef}
-        className={`${paneClassName({ isActive, solo, closedInfo })}${isBroadcastMember ? ' broadcasting' : ''}`}
+        className={`${paneClassName({ isActive, solo, closedInfo })}${isBroadcastMember ? (windowScope ? ' broadcasting broadcast-window' : ' broadcasting') : ''}`}
         data-pane-id={paneId}
         onContextMenu={handleContextMenu}
         style={isActive || isBroadcastMember ? undefined : { opacity: nonFocusedPaneOpacity / 100 }}

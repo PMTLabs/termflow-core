@@ -50,6 +50,8 @@ test.each(['tab', 'window'] as const)('%s member ring/chip and undim; primary co
   try {
     const [pane, outsider] = container.querySelectorAll<HTMLElement>('.terminal-pane');
     expect(pane.classList.contains('broadcasting')).toBe(true);
+    // All-tabs scope gets its own ring colour; single-tab keeps the default.
+    expect(pane.classList.contains('broadcast-window')).toBe(mode === 'window');
     expect(pane.style.opacity).toBe('');
     expect(pane.querySelector('.broadcast-chip')!.textContent).toContain('broadcast');
     const outsiderIsMember = mode === 'window';
