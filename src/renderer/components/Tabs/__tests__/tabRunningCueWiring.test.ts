@@ -56,14 +56,18 @@ describe('the tab busy cue setting reaches the tab strip', () => {
     const pulseBand = /\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
     expect(pulseBand).toMatch(/display:\s*none/);
     // ...and never on the active tab, whose output the user is already watching.
-    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running:not\(\.active\)\s+\.shell-profile-icon\s*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);    expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
-    // Static has no motion to be noticed by, so it owns a full-tab wash at full opacity with a
-    // solid underline. Inheriting the sweep's narrow 0.18 band read as a smudge.
+    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running:not\(\.active\)\s+\.shell-profile-icon\s*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);
+    expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
+    // Static has no motion to be noticed by, so it owns a full-tab wash at full opacity.
+    // Inheriting the sweep's narrow 0.18 band read as a smudge.
     const stat = /\[data-running-cue="static"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
     expect(stat).toMatch(/animation:\s*none/);
     expect(stat).toMatch(/background-size:\s*100%\s+100%/);
-    expect(stat).toMatch(/box-shadow:\s*inset\s+0\s+-2px/);
     expect(Number(/opacity:\s*([\d.]+)/.exec(stat)?.[1])).toBe(1);
+    // No busy cue draws an edge line: one along the tab reads as the active-tab marker.
+    const busyRules = TAB_CSS.match(/[^{}]*\.tab-running[^{}]*\{[^}]*\}/g) ?? [];
+    expect(busyRules.length).toBeGreaterThan(3);
+    for (const rule of busyRules) expect(rule).not.toMatch(/box-shadow|border(-bottom)?\s*:/);
     expect(TAB_CSS).toMatch(/\[data-running-cue="off"\][^{]*\{[^}]*display:\s*none/);
   });
 
