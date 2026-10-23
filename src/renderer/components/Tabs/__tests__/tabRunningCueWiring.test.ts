@@ -55,8 +55,8 @@ describe('the tab busy cue setting reaches the tab strip', () => {
     // Pulse blinks the shell icon only: the tab's band is hidden, the icon carries the animation.
     const pulseBand = /\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
     expect(pulseBand).toMatch(/display:\s*none/);
-    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running\s+\.shell-profile-icon\s*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);
-    expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
+    // ...and never on the active tab, whose output the user is already watching.
+    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running:not\(\.active\)\s+\.shell-profile-icon\s*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);    expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
     // Static has no motion to be noticed by, so it owns a full-tab wash at full opacity with a
     // solid underline. Inheriting the sweep's narrow 0.18 band read as a smudge.
     const stat = /\[data-running-cue="static"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';

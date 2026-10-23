@@ -333,11 +333,13 @@
    values: no second copy of the glow to drift. A smooth fade here would repaint every frame.
 
    The icon, not the tab. A whole-tab wash was easy to see but too loud with several agents
-   working at once; the Canvas sidebar already blinks the same icon for the same state. */
+   working at once; the Canvas sidebar already blinks the same icon for the same state.
+
+   Not on the active tab: you are looking at its output already, so a blink there is noise. */
 .tabs-list[data-running-cue="pulse"] .tab-item.tab-running::after {
   display: none;
 }
-.tabs-list[data-running-cue="pulse"] .tab-item.tab-running .shell-profile-icon {
+.tabs-list[data-running-cue="pulse"] .tab-item.tab-running:not(.active) .shell-profile-icon {
   filter: drop-shadow(0 0 3px var(--tab-running-accent, #3aa6ff))
     drop-shadow(0 0 1px var(--tab-running-accent, #3aa6ff));
   animation: tab-running-pulse 2s steps(1, end) infinite;
@@ -354,9 +356,9 @@
 .tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
   background-image: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 0%,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 32%, transparent) 50%,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 100%
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 8%, transparent) 0%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 20%, transparent) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 8%, transparent) 100%
   );
   background-size: 100% 100%;
   background-repeat: no-repeat;
@@ -368,9 +370,9 @@
 .tabs-list[data-running-cue="static"] .tab-item.active.tab-running::after {
   background-image: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 18%, transparent) 0%,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 42%, transparent) 50%,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 18%, transparent) 100%
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 0%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 28%, transparent) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 100%
   );
 }
 .tabs-list[data-running-cue="off"] .tab-item.tab-running::after {
