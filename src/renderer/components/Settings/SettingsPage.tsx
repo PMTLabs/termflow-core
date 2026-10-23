@@ -1217,15 +1217,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                     value={settings.tabRunningCue}
                     onChange={(e) => dispatch(setTabRunningCue(e.target.value as TabRunningCue))}
                 >
-                    <option value="pulse">Pulse, low power (default)</option>
+                    <option value="pulse">Pulse the tab icon, low power (default)</option>
                     <option value="animated">Animated sweep</option>
                     <option value="static">Static highlight</option>
                     <option value="off">Off</option>
                 </select>
                 <span className="help-text">
                     How a tab shows that something inside it, such as an agent, is producing
-                    output. “Pulse” switches a soft highlight between bright and dim once a
-                    second. “Animated sweep” steps a band across the tab a few times a second;
+                    output. “Pulse” makes the tab’s icon glow and dim once a second.
+                    “Animated sweep” steps a band across the tab a few times a second;
                     it is easier to spot but redraws the window about five times as often.
                     “Static highlight” keeps the highlight still, so busy tabs cost no redraws
                     at all. “Off” removes the cue from tabs.
