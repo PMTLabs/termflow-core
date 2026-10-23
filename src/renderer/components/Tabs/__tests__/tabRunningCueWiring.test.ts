@@ -52,16 +52,25 @@ describe('the tab busy cue setting reaches the tab strip', () => {
     for (const cue of TAB_RUNNING_CUES.filter((c) => c !== 'animated')) {
       expect(TAB_CSS).toMatch(new RegExp(`\\.tabs-list\\[data-running-cue="${cue}"\\]\\s+\\.tab-item\\.tab-running::after\\s*\\{`));
     }
-    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\][^{]*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);
+    // Pulse blinks the shell icon only: the tab's band is hidden, the icon carries the animation.
+    const pulseBand = /\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
+    expect(pulseBand).toMatch(/display:\s*none/);
+    expect(TAB_CSS).toMatch(/\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running\s+\.shell-profile-icon\s*\{[^}]*animation:\s*tab-running-pulse\s+2s\s+steps\(1,\s*end\)/);
     expect(TAB_CSS).toMatch(/@keyframes\s+tab-running-pulse\s*\{/);
-    // Contrast: the pulse has only its two frames to be seen in. Inheriting the sweep's narrow
-    // 0.18 band made it near-invisible on the dark tab background, so the pulse owns a full-tab
-    // wash and a bright phase of at least 0.4.
-    const pulse = /\[data-running-cue="pulse"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
-    expect(pulse).toMatch(/background-size:\s*100%\s+100%/);
-    expect(Number(/opacity:\s*([\d.]+)/.exec(pulse)?.[1])).toBeGreaterThanOrEqual(0.4);
-    expect(TAB_CSS).toMatch(/\[data-running-cue="static"\][^{]*\{[^}]*animation:\s*none/);
+    // Static has no motion to be noticed by, so it owns a full-tab wash at full opacity with a
+    // solid underline. Inheriting the sweep's narrow 0.18 band read as a smudge.
+    const stat = /\[data-running-cue="static"\]\s+\.tab-item\.tab-running::after\s*\{([^}]*)\}/.exec(TAB_CSS)?.[1] ?? '';
+    expect(stat).toMatch(/animation:\s*none/);
+    expect(stat).toMatch(/background-size:\s*100%\s+100%/);
+    expect(stat).toMatch(/box-shadow:\s*inset\s+0\s+-2px/);
+    expect(Number(/opacity:\s*([\d.]+)/.exec(stat)?.[1])).toBe(1);
     expect(TAB_CSS).toMatch(/\[data-running-cue="off"\][^{]*\{[^}]*display:\s*none/);
+  });
+
+  it('the tab icon carries the class the pulse rule targets', () => {
+    const icon = code(path.resolve(__dirname, '../../Terminal/ShellProfileIcon.tsx'));
+    expect(icon.match(/className="shell-profile-icon\b/g)).toHaveLength(2); // <img> and emoji
+    expect(MANAGER).toMatch(/<ShellProfileIcon\b/);
   });
 
   it('the Settings control is bound to the setting in both directions and offers every cue', () => {
@@ -81,6 +90,7 @@ describe('busy cues animate in steps, never every frame', () => {
   it('finds the busy cue animations it is going to check', () => {
     // Guard on the guard: an empty list would pass the next test vacuously.
     expect(infinite(TAB_CSS).join('\n')).toMatch(/tab-running-sweep/);
+    expect(infinite(TAB_CSS).join('\n')).toMatch(/tab-running-pulse/);
     expect(infinite(CANVAS_CSS).join('\n')).toMatch(/canvas-node-sweep/);
     expect(infinite(CANVAS_CSS).join('\n')).toMatch(/canvas-node-pulse/);
     // The canvas pulse is keyed on the attribute CanvasNode publishes, not on a class.

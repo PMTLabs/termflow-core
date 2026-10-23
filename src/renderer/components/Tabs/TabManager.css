@@ -327,38 +327,51 @@
 /* Settings › Appearance › "Busy indicator on tabs" (`tabRunningCue`), set on `.tabs-list`.
    The base rule above is `animated`; every other cue overrides it here. */
 
-/* `pulse` (the default): bright for 1s and dim for 1s — one change a second, a fifth of the
-   sweep's cost. `steps(1, end)` holds each keyframe interval's starting value, and the keyframes
-   name only 50%, so 0%/100% are the rule's own opacity (0.5 idle tab, 0.6 active below): no
-   per-state copy of those numbers to drift. A smooth fade here would repaint every frame.
+/* `pulse` (the default): the tab's shell icon blinks — lit with an accent glow for 1s, dimmed
+   for 1s. One change a second, a fifth of the sweep's cost. `steps(1, end)` holds each keyframe
+   interval's starting value, and the keyframes name only 50%, so 0%/100% are the rule's own
+   values: no second copy of the glow to drift. A smooth fade here would repaint every frame.
 
-   NOT the sweep's band. A band covering the back ~45% of a 160px tile at 0.18 was close to
-   invisible on the dark tab background, and a pulse only has its two frames to be seen in. So
-   the whole tab washes with the accent (deepest at the centre) and carries a 2px accent
-   underline — inside the pseudo-element, so it dims with it and never reads as a stray border
-   while the cue is off. Rendered on both themes before choosing these numbers. */
+   The icon, not the tab. A whole-tab wash was easy to see but too loud with several agents
+   working at once; the Canvas sidebar already blinks the same icon for the same state. */
 .tabs-list[data-running-cue="pulse"] .tab-item.tab-running::after {
+  display: none;
+}
+.tabs-list[data-running-cue="pulse"] .tab-item.tab-running .shell-profile-icon {
+  filter: drop-shadow(0 0 3px var(--tab-running-accent, #3aa6ff))
+    drop-shadow(0 0 1px var(--tab-running-accent, #3aa6ff));
+  animation: tab-running-pulse 2s steps(1, end) infinite;
+}
+@keyframes tab-running-pulse {
+  50% { opacity: 0.3; filter: none; }
+}
+
+/* `static`: no motion, so it has to be seen at a glance. The sweep's band held still (back ~45%
+   of a 160px tile at 0.18) read as a smudge. A soft accent wash across the whole tab, deepest at
+   the centre, over a solid 2px accent underline; the alpha is in the colours so the underline
+   stays crisp. The wash next to it keeps the underline from reading as a stray border.
+   Rendered on both themes before choosing these numbers. */
+.tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
   background-image: linear-gradient(
     90deg,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 35%, transparent) 0%,
-    var(--tab-running-accent, #3aa6ff) 50%,
-    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 35%, transparent) 100%
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 0%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 32%, transparent) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 12%, transparent) 100%
   );
   background-size: 100% 100%;
   background-repeat: no-repeat;
   box-shadow: inset 0 -2px 0 var(--tab-running-accent, #3aa6ff);
-  opacity: 0.5;
-  animation: tab-running-pulse 2s steps(1, end) infinite;
-}
-.tabs-list[data-running-cue="pulse"] .tab-item.active.tab-running::after {
-  opacity: 0.6;
-}
-@keyframes tab-running-pulse {
-  50% { opacity: 0.08; }
-}
-
-.tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
+  opacity: 1;
   animation: none;
+}
+/* The active tab's near-black background needs a deeper wash to show the same. */
+.tabs-list[data-running-cue="static"] .tab-item.active.tab-running::after {
+  background-image: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 18%, transparent) 0%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 42%, transparent) 50%,
+    color-mix(in srgb, var(--tab-running-accent, #3aa6ff) 18%, transparent) 100%
+  );
 }
 .tabs-list[data-running-cue="off"] .tab-item.tab-running::after {
   display: none;
