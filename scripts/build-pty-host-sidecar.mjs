@@ -56,12 +56,19 @@ function main() {
     process.exit(build.status ?? 1);
   }
 
-  // cargo with an explicit --target always emits under target/<triple>/release.
+  // cargo with an explicit --target always emits under <target_directory>/<triple>/release.
+  // Ask cargo for target_directory: a user-level `build.target-dir` or CARGO_TARGET_DIR
+  // moves it away from the crate's own target/.
+  const meta = spawnSync(
+    'cargo',
+    ['metadata', '--format-version', '1', '--no-deps', '--manifest-path', manifest],
+    { encoding: 'utf8', cwd: rootDir, maxBuffer: 64 * 1024 * 1024 },
+  );
+  if (meta.status !== 0) {
+    throw new Error(meta.stderr || 'cargo metadata failed');
+  }
   const built = join(
-    rootDir,
-    'src-tauri',
-    'pty-host',
-    'target',
+    JSON.parse(meta.stdout).target_directory,
     targetTriple,
     'release',
     `termflow-pty-host${ext}`,
