@@ -3,7 +3,7 @@ import type { Terminal } from '@xterm/xterm';
 import type { FitAddon } from '@xterm/addon-fit';
 import type { SearchAddon } from '@xterm/addon-search';
 import type { WebglAddon } from '@xterm/addon-webgl';
-import type { Disposable, PromptGate } from './types';
+import type { Disposable, PromptGate, PromptMarkKind } from './types';
 // import cycle is safe: cross-refs are call-time only (never at module load)
 import { setWebGLGloballyDisabled } from './webgl';
 // same rule: renderPolicy.ts imports this module back, but only for call-time use
@@ -122,6 +122,9 @@ export interface TerminalCacheEntry {
   // persistence a remount mid-CLI-session would forget the gate and capture
   // agent-CLI input again.
   promptGate?: PromptGate | null;
+  // Who rendered the latest prompt mark (local pwsh hook vs ssh host); kept next
+  // to the gate so a remount does not forget that the host already signalled.
+  lastPromptMarkKind?: PromptMarkKind;
   // Enhanced keyboard protocol state, carried across remounts so a mid-session
   // protocol handshake (Kitty flags pushed once, Win32-Input-Mode's ?9001h sent
   // once per PTY session) isn't lost on a tab switch / pane split. Without this,

@@ -620,6 +620,151 @@ test('OSC 9 progress (9;4) from a LIVE TUI does not heal (only the cwd form is a
   expect(submitted).toEqual([]); // still suppressed — the TUI is alive
 });
 
+// --- Plan 061: a remote host's OSC 133;A prompt mark re-arms the gate. After
+// `ssh host` from a hooked pwsh tab the gate is disarmed by Enter and the remote
+// shell emits neither OSC 9;9 nor OSC 7, so without this the popup never opens
+// over ssh. The backend never reads 133, so it cannot rewrite the tab's cwd. ---
+
+/** Type `cmd` at a `$ ` prompt on `row`, let the echo land, press Enter. */
+function typeCommand(term: MockTerminal, row: number, cmd: string): void {
+  term.__setLine(row, '$ ');
+  term.__setCursor(2, row);
+  term.emitData(cmd[0]);
+  term.__setLine(row, `$ ${cmd}`);
+  term.__setCursor(2 + cmd.length, row);
+  term.emitWriteParsed();
+  term.emitData('\r');
+}
+
+/** Hooked local shell proves itself, then the user runs `ssh host`. Returns the disarmed engine. */
+function engineAfterSsh() {
+  const made = makeEngine();
+  made.term.oscHandlers[9]('9;C:\\repo');
+  typeCommand(made.term, 0, 'ssh host');
+  expect(made.submitted).toEqual(['ssh host']);
+  return made;
+}
+
+test('OSC 133;A from the ssh host re-arms the gate: popup path and history work (AC1)', () => {
+  const { term, inputLines, submitted } = engineAfterSsh();
+  const base = inputLines.length; // `ssh host` itself was echoed above
+  term.oscHandlers[133]('A'); // remote prompt rendered
+  term.__setLine(1, '$ ');
+  term.__setCursor(2, 1);
+  term.emitData('l');
+  term.__setLine(1, '$ ls');
+  term.__setCursor(4, 1);
+  term.emitWriteParsed();
+  expect(inputLines.slice(base)).toEqual(['ls']); // the popup is fed
+  term.emitData('\r');
+  expect(submitted).toEqual(['ssh host', 'ls']); // and history
+});
+
+test('without a host mark, input at the ssh host is not captured (AC2: remote claude stays suppressed)', () => {
+  const { term, inputLines, submitted } = engineAfterSsh();
+  const base = inputLines.length;
+  // claude (or the bare remote shell with no hook) owns the pty; no mark arrives.
+  typeCommand(term, 1, 'fix the bug');
+  expect(submitted).toEqual(['ssh host']);
+  typeCommand(term, 2, 'and another');
+  expect(submitted).toEqual(['ssh host']);
+  expect(inputLines.slice(base).filter((l) => l !== '')).toEqual([]);
+});
+
+test.each(['A', 'A;aid=42'])('OSC 133 payload %j re-arms the gate', (payload) => {
+  const { term, submitted } = engineAfterSsh();
+  expect(term.oscHandlers[133](payload)).toBe(false); // other handlers still run
+  typeCommand(term, 1, 'ls');
+  expect(submitted).toEqual(['ssh host', 'ls']);
+});
+
+test.each(['Anything', 'B', 'C', 'D', 'D;0', '', ';A', 'a', 'AA'])(
+  'OSC 133 payload %j is not a prompt render and does not re-arm',
+  (payload) => {
+    const { term, submitted } = engineAfterSsh();
+    expect(term.oscHandlers[133](payload)).toBe(false);
+    typeCommand(term, 1, 'ls');
+    expect(submitted).toEqual(['ssh host']);
+  },
+);
+
+test.each<[string, (t: MockTerminal) => void]>([
+  ['Kitty flags', (t) => { t.csiHandlers['>u']([1]); }],
+  ['modifyOtherKeys', (t) => { t.csiHandlers['>m']([4, 2]); }],
+  ['focus reporting', (t) => { t.write('\x1b[?1004h'); }],
+])('OSC 133;A heals stuck %s independently (AC3)', (_name, stick) => {
+  const { term, submitted } = makeEngine();
+  term.oscHandlers[9]('9;C:\\repo');
+  stick(term); // a remote TUI dies without cleaning up
+  typeCommand(term, 0, 'x');
+  expect(submitted).toEqual([]); // suppressed while stuck
+  term.oscHandlers[133]('A'); // remote shell prompt returns
+  typeCommand(term, 1, 'ls');
+  expect(submitted).toEqual(['ls']);
+});
+
+test('OSC 133;A after disarmed type-ahead skips exactly one command, then capture resumes (AC4)', () => {
+  const { term, submitted } = makeEngine();
+  term.oscHandlers[9]('9;C:\\repo');
+  typeCommand(term, 0, 'sleep 5');
+  expect(submitted).toEqual(['sleep 5']);
+  term.emitData('git st'); // type-ahead while the remote command still runs
+  term.oscHandlers[133]('A'); // remote prompt renders; the shell echoes "git st"
+  term.__setLine(1, '$ git st');
+  term.__setCursor(8, 1);
+  term.emitData('a');
+  term.__setLine(1, '$ git sta');
+  term.__setCursor(9, 1);
+  term.emitData('\r');
+  expect(submitted).toEqual(['sleep 5']); // clean miss, no "a" tail fragment
+  term.oscHandlers[133]('A');
+  typeCommand(term, 2, 'ls');
+  expect(submitted).toEqual(['sleep 5', 'ls']); // the NEXT command is captured
+});
+
+test('repeated OSC 133;A before any key leaves capture working (no spurious skip)', () => {
+  const { term, submitted } = engineAfterSsh();
+  term.oscHandlers[133]('A');
+  term.oscHandlers[133]('A');
+  typeCommand(term, 1, 'ls');
+  expect(submitted).toEqual(['ssh host', 'ls']);
+});
+
+test('onPromptMark reports who rendered the latest prompt mark (plan 061 chip input)', () => {
+  const { engine, term } = makeEngine();
+  const seen: Array<{ seen: boolean; kind: string }> = [];
+  const dispose = engine.onPromptMark((s) => seen.push({ ...s }));
+  expect(seen).toEqual([{ seen: false, kind: 'local' }]); // fires on subscribe
+  term.oscHandlers[9]('9;C:\\repo');
+  expect(seen[seen.length - 1]).toEqual({ seen: true, kind: 'local' });
+  term.oscHandlers[133]('A');
+  expect(seen[seen.length - 1]).toEqual({ seen: true, kind: 'host' });
+  term.oscHandlers[9]('9;C:\\repo'); // ssh ended, local prompt back
+  expect(seen[seen.length - 1]).toEqual({ seen: true, kind: 'local' });
+  term.oscHandlers[7]('file://host/home/u'); // a host that only speaks OSC 7
+  expect(seen[seen.length - 1]).toEqual({ seen: true, kind: 'host' });
+  const before = seen.length;
+  term.oscHandlers[133]('B'); // not a prompt render
+  term.oscHandlers[9]('4;1;50'); // progress from a live TUI
+  expect(seen.length).toBe(before);
+  dispose();
+  term.oscHandlers[9]('9;C:\\repo');
+  expect(seen.length).toBe(before); // disposed listeners hear nothing
+});
+
+test('prompt mark kind survives a same-terminal remount; a new pty process resets it', () => {
+  const cacheKey = 'mark-kind-remount';
+  const first = makeEngine({ cacheKey });
+  first.term.oscHandlers[9]('9;C:\\repo');
+  first.term.oscHandlers[133]('A');
+  const second = makeEngine({ cacheKey }); // React remount: fresh engine, same cache entry
+  const states: Array<{ seen: boolean; kind: string }> = [];
+  second.engine.onPromptMark((s) => states.push({ ...s }));
+  expect(states[states.length - 1]).toEqual({ seen: true, kind: 'host' });
+  second.engine.attach('pid-2'); // different backend process = new shell
+  expect(states[states.length - 1]).toEqual({ seen: false, kind: 'local' });
+});
+
 test('cross-window detach: initialPromptGate suppresses agent-CLI input on first mount in a new window', () => {
   const cacheKey = 'detach-shared-key';
   // Window A: shell prompt renders, user launches claude while the gate is armed.

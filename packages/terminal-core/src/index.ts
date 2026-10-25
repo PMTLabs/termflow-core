@@ -57,6 +57,8 @@ export type {
   ContextMenuActions,
   TerminalLinkHit,
   PromptGate,
+  PromptMarkKind,
+  PromptMarkState,
 } from './types';
 export type { KeyboardProtocolStateData } from './keyboardProtocol';
 export {
