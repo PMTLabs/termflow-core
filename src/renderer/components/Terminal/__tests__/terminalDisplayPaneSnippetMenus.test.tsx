@@ -93,7 +93,7 @@ jest.mock('../../../services/commandHistoryService', () => ({
 jest.mock('../../../services/cwdSnapshot', () => ({ getCwdSnapshot: jest.fn(() => undefined) }));
 jest.mock('../../../services/AgentSchemeTracker', () => ({
   agentSchemeTracker: {
-    getAgentForTerminal: jest.fn(() => undefined), getDetectedAgentForTerminal: jest.fn(() => undefined),
+    getAgentForTerminal: jest.fn(() => undefined), getDetectedAgentForTerminal: jest.fn(() => undefined), isSshForeground: jest.fn(() => false),
     subscribe: jest.fn(() => jest.fn()), refreshNow: jest.fn(() => Promise.resolve()),
   },
 }));

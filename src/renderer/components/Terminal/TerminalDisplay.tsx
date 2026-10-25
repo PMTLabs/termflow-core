@@ -12,6 +12,8 @@ import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import { automationMenuItems } from '../Automation/AutomationMenuSection';
 import { TerminalSearchBar } from './TerminalSearchBar';
 import { CommandSuggestPopup } from './CommandSuggestPopup';
+import { RemoteSuggestChip } from './RemoteSuggestChip';
+import { useRemoteSuggestHint } from './useRemoteSuggestHint';
 import { ScrollToBottomButton } from './ScrollToBottomButton';
 import { SnippetDialog } from '../UI/SnippetDialog';
 import { ConfirmDialog } from '../UI/ConfirmDialog';
@@ -508,6 +510,11 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
     engineGeneration,
     closePopup: () => suggestRef.current.close(),
   });
+
+  // Plan 061: offer a copy-only prompt hook while ssh is the foreground program in a tab whose
+  // local shell proved it renders prompt marks. Declared after `useSurfaceRelocation` because
+  // `engineGeneration` is what tells it a new engine exists to subscribe to.
+  const remoteHint = useRemoteSuggestHint(terminalId, engineRef, engineGeneration);
 
   // Create the engine + mount it once per terminalId. Reattach existing process
   // when available. Cleanup → unmount() (NOT dispose — preserve the cache).
@@ -1122,6 +1129,7 @@ export const TerminalDisplay: React.FC<TerminalDisplayProps> = ({
       />
       <ScrollToBottomButton visible={!atBottom} onClick={scrollToBottomCb} />
       {search.open && <TerminalSearchBar search={search} />}
+      {remoteHint.show && !broadcastActive && <RemoteSuggestChip onDismiss={remoteHint.dismiss} />}
       {suggest.open && !broadcastActive && (
         <CommandSuggestPopup
           suggestions={suggest.items}
