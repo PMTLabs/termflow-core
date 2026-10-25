@@ -350,8 +350,9 @@
 
 /* `static`: no motion, so it has to be seen at a glance. The sweep's band held still (back ~45%
    of a 160px tile at 0.18) read as a smudge. A soft accent wash across the whole tab, deepest at
-   the centre, with the alpha in the colours. No underline: a line along the tab's edge reads as
-   the active-tab marker. Rendered on both themes before choosing these numbers. */
+   the centre, with the alpha in the colours. A 1px accent line along the bottom edge marks the
+   busy tab; it is thinner than the active tab's marker so the two stay distinguishable. Rendered
+   on both themes before choosing these numbers. */
 .tabs-list[data-running-cue="static"] .tab-item.tab-running::after {
   background-image: linear-gradient(
     90deg,
@@ -361,6 +362,7 @@
   );
   background-size: 100% 100%;
   background-repeat: no-repeat;
+  box-shadow: inset 0 -1px 0 var(--tab-running-accent, #3aa6ff);
   opacity: 1;
   animation: none;
 }

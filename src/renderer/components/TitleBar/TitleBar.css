@@ -245,17 +245,16 @@
   background-color: #141414;
 }
 
-/* Active tab accent indicator */
+/* Active tab top line: full width and solid, so the active tab is the only tab with a line
+   along its edge that spans the whole tab. The busy tab's line is 1px along the bottom. */
 .title-bar-tabs .tab-item.active::before {
   content: '';
   position: absolute;
   top: 0;
-  left: 8px;
-  right: 8px;
+  left: 0;
+  right: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, #0078d4, transparent);
-  border-radius: 0 0 2px 2px;
-  opacity: 0.8;
+  background: #0078d4;
 }
 
 /* New tab and layout buttons styling */

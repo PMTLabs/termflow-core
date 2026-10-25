@@ -64,10 +64,13 @@ describe('the tab busy cue setting reaches the tab strip', () => {
     expect(stat).toMatch(/animation:\s*none/);
     expect(stat).toMatch(/background-size:\s*100%\s+100%/);
     expect(Number(/opacity:\s*([\d.]+)/.exec(stat)?.[1])).toBe(1);
-    // No busy cue draws an edge line: one along the tab reads as the active-tab marker.
-    const busyRules = TAB_CSS.match(/[^{}]*\.tab-running[^{}]*\{[^}]*\}/g) ?? [];
-    expect(busyRules.length).toBeGreaterThan(3);
-    for (const rule of busyRules) expect(rule).not.toMatch(/box-shadow|border(-bottom)?\s*:/);
+    // The busy line is 1px: a 2px line along the tab's bottom edge read as the active-tab marker.
+    expect(stat).toMatch(/box-shadow:\s*inset\s+0\s+-1px\s+0\s/);
+    // Only the static cue draws that line; the other busy rules must not, or they would all show it.
+    const otherBusyRules = (TAB_CSS.match(/[^{}]*\.tab-running[^{}]*\{[^}]*\}/g) ?? [])
+      .filter((rule) => !/data-running-cue="static"/.test(rule));
+    expect(otherBusyRules.length).toBeGreaterThan(3);
+    for (const rule of otherBusyRules) expect(rule).not.toMatch(/box-shadow|border(-bottom)?\s*:/);
     expect(TAB_CSS).toMatch(/\[data-running-cue="off"\][^{]*\{[^}]*display:\s*none/);
   });
 
