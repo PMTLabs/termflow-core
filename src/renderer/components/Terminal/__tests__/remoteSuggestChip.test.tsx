@@ -18,6 +18,19 @@ jest.mock('../../../utils/clipboard', () => ({
   writeClipboardText: (text: string) => mockWrite(text),
 }));
 
+// Every way this renderer writes to a pty ends in one of these two surfaces. They are
+// replaced by recorders so a click that reaches either, however the call is spelled
+// or whichever helper makes it, shows up here.
+const mockPtyCalls: string[] = [];
+jest.mock('@tauri-apps/api/core', () => ({
+  invoke: (cmd: string) => { mockPtyCalls.push(`invoke:${cmd}`); return Promise.resolve(); },
+}));
+jest.mock('../../../services/TerminalService', () => ({
+  terminalService: new Proxy({}, {
+    get: (_t, name) => (...args: unknown[]) => { mockPtyCalls.push(`terminalService.${String(name)}`); return Promise.resolve(args); },
+  }),
+}));
+
 import { RemoteSuggestChip } from '../RemoteSuggestChip';
 
 let container: HTMLDivElement;
@@ -40,6 +53,8 @@ beforeAll(() => {
 });
 beforeEach(() => {
   mockWrite.mockReset();
+  mockPtyCalls.length = 0;
+  delete (window as unknown as { electronAPI?: unknown }).electronAPI;
   mockWrite.mockResolvedValue(undefined);
   actions = [];
   container = document.createElement('div');
@@ -80,6 +95,19 @@ describe('RemoteSuggestChip', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
     expect(mockWrite).not.toHaveBeenCalled();
     expect(toasts()).toHaveLength(0);
+  });
+
+  it('reaches no pty write surface when every button is clicked', async () => {
+    const electronCalls: string[] = [];
+    (window as unknown as { electronAPI: unknown }).electronAPI = new Proxy({}, {
+      get: (_t, name) => (...a: unknown[]) => { electronCalls.push(String(name)); return Promise.resolve(a); },
+    });
+    renderChip();
+    for (const shell of REMOTE_HOOK_SHELLS) await act(async () => { button(shell).click(); });
+    act(() => { button('×').click(); });
+    expect(mockWrite).toHaveBeenCalledTimes(REMOTE_HOOK_SHELLS.length); // the clicks did reach the copy path
+    expect(mockPtyCalls).toEqual([]);
+    expect(electronCalls).toEqual([]);
   });
 
   // The component is the whole write surface of this feature. A negative census over its

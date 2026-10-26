@@ -21,6 +21,28 @@ function available(shell: string): boolean {
   return !r.error && r.status === 0;
 }
 
+// zsh and fish are rarely installed on a Windows dev box but usually are in WSL, so
+// on win32 they run there. A pty is required: neither shell runs its prompt hooks
+// on piped stdin, so `script` supplies one.
+const viaWsl = process.platform === 'win32';
+function ptyAvailable(shell: string): boolean {
+  const r = viaWsl
+    ? spawnSync('wsl', ['--', shell, '--version'], { encoding: 'utf8' })
+    : spawnSync(shell, ['--version'], { encoding: 'utf8' });
+  const ok = !r.error && r.status === 0;
+  if (!ok) console.warn(`remoteHookSnippets: ${shell} not found${viaWsl ? ' (native or WSL)' : ''}; its behavioural tests are SKIPPED`);
+  return ok;
+}
+
+function runPty(shellCommand: string, lines: string[]): string {
+  const script = ['script', '-qec', shellCommand, '/dev/null'];
+  const r = viaWsl
+    ? spawnSync('wsl', ['--', ...script], { input: lines.join('\n') + '\n', encoding: 'utf8', timeout: 30000 })
+    : spawnSync(script[0], script.slice(1), { input: lines.join('\n') + '\n', encoding: 'utf8', timeout: 30000 });
+  if (r.error) throw r.error;
+  return r.stdout;
+}
+
 function bashAtLeast51(): boolean {
   const r = spawnSync('bash', ['-c', 'echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"'], { encoding: 'utf8' });
   if (r.error || r.status !== 0) return false;
@@ -60,6 +82,13 @@ describe('snippet shape', () => {
   });
 });
 
+// bash is the one shell CI must have; a missing bash must not turn the suite green.
+if (process.env.CI) {
+  test('bash is available in CI', () => {
+    expect(available('bash')).toBe(true);
+  });
+}
+
 describe('bash', () => {
   const run = available('bash') ? describe : describe.skip;
   run('against the real shell', () => {
@@ -67,6 +96,7 @@ describe('bash', () => {
       ['unset PROMPT_COMMAND', "PS1='<<P''>>'; unset PROMPT_COMMAND", false],
       ['string PROMPT_COMMAND', "PS1='<<P''>>'; PROMPT_COMMAND='echo EXISTING:$?'", true],
       ['multi-command string', "PS1='<<P''>>'; PROMPT_COMMAND='echo EXISTING:$?;echo SECOND'", true],
+      ['hook text quoted inside the existing command is not mistaken for the hook', "PS1='<<P''>>'; PROMPT_COMMAND='echo EXISTING:$?; printf %s \";__tf_pm;\" >/dev/null'", true],
       ['lookalike token is not mistaken for the hook', "PS1='<<P''>>'; PROMPT_COMMAND='echo EXISTING:$?; : not__tf_pm_really'", true],
     ];
     if (bashAtLeast51()) {
@@ -97,36 +127,53 @@ describe('bash', () => {
   });
 });
 
-// zsh and fish are not installed everywhere (including this repo's dev machine, where
-// these have never been run). They are skipped with a visible reason rather than
-// silently passing; run them wherever the shell exists.
 describe('zsh', () => {
-  const run = available('zsh') ? describe : describe.skip;
+  const run = ptyAvailable('zsh') ? describe : describe.skip;
   run('against the real shell', () => {
-    test('one mark per prompt, pasted twice, existing precmd still runs with $?', () => {
-      const lines = [
-        "PS1='<<P''>>'",
-        'precmd() { echo EXISTING:$? }',
+    // Sentinel prompt `<<P>>` is typed as <<P''>> so the echoed input never matches.
+    const setup = (existing: string[]) => ["PS1='<<P''>>'", ...existing];
+    const sentinel = /<<P>>/g;
+
+    test('mark comes before an existing precmd function and precmd_functions hook, both still see $?', () => {
+      const out = runPty('zsh -f -i', [
+        ...setup(['precmd() { echo EXISTING:$? }', 'precmd_functions+=(late); late() { echo LATE:$? }']),
         ...cycle('zsh'),
-      ];
-      const r = spawnSync('zsh', ['-f', '-i'], { input: lines.join('\n') + '\n', encoding: 'utf8', timeout: 20000 });
-      if (r.error) throw r.error;
-      const prompts = count(r.stderr + r.stdout, /<<P>>/g);
-      expect(count(r.stdout, MARK_RE)).toBe(prompts - 1);
-      expect(count(r.stdout, /EXISTING:7/g)).toBe(1);
+        'exit',
+      ]);
+      // Sentinel prompts: before precmd def, late def, paste, paste, A, exit 7, B, exit = 8.
+      expect(count(out, sentinel)).toBe(8);
+      // Marks: every prompt after the first paste, exactly once despite the second paste.
+      expect(count(out, MARK_RE)).toBe(5);
+      expect(count(out, /EXISTING:7/g)).toBe(1);
+      expect(count(out, /LATE:7/g)).toBe(1);
+      expect(out).toMatch(new RegExp(`${MARK_RE.source}EXISTING:7`));
+    });
+
+    test('mark is emitted when no precmd exists', () => {
+      const out = runPty('zsh -f -i', [...setup([]), ...cycle('zsh'), 'exit']);
+      expect(count(out, sentinel)).toBe(6);
+      expect(count(out, MARK_RE)).toBe(5);
     });
   });
 });
 
 describe('fish', () => {
-  const run = available('fish') ? describe : describe.skip;
+  const run = ptyAvailable('fish') ? describe : describe.skip;
   run('against the real shell', () => {
-    test('a defined handler emits one mark per prompt event, pasted twice', () => {
-      const s = REMOTE_HOOK_SNIPPETS.fish;
-      const script = [s, s, 'emit fish_prompt', 'emit fish_prompt'].join('\n');
-      const r = spawnSync('fish', ['--no-config', '-c', script], { encoding: 'utf8', timeout: 20000 });
-      if (r.error) throw r.error;
-      expect(count(r.stdout, MARK_RE)).toBe(2);
+    test('one mark per prompt, the user prompt and its $status survive, pasted twice', () => {
+      const out = runPty('fish --no-config -i', [
+        'function fish_prompt; echo -n "<<P:$status>>"; end',
+        ...cycle('fish').slice(0, 2),
+        'echo A',
+        'false',
+        'echo B',
+        'exit',
+      ]);
+      // Sentinel prompts: before paste, paste, echo A, false, echo B, exit = 6.
+      expect(count(out, /<<P:\d+>>/g)).toBe(6);
+      expect(count(out, MARK_RE)).toBe(5);
+      // The prompt still reads the failing command's status.
+      expect(count(out, /<<P:1>>/g)).toBe(1);
     });
   });
 });

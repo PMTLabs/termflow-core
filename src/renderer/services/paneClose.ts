@@ -52,6 +52,9 @@ export interface ClosePaneDeps {
    *  was meant to remove. (The same early return means `clearZoom` already misses an exited
    *  terminal's entry — pre-existing, and not this plan's to fix.) */
   clearSessionExit: (terminalId: string) => void;
+  /** Drops the remote-hook chip dismissal (plan 061): per-terminal renderer memory, drained
+   *  here with the other per-terminal maps so it only ever holds open terminals. */
+  forgetRemoteHint: (terminalId: string) => void;
 }
 
 /**
@@ -67,6 +70,7 @@ export interface ClosePaneDeps {
 export function closePaneNonBlocking(deps: ClosePaneDeps): void {
   const {
     terminalId, removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface, clearSessionExit,
+    forgetRemoteHint,
   } = deps;
 
   // The differ must see a close, not a disappearance. Capture while this copy still exists.
@@ -83,6 +87,9 @@ export function closePaneNonBlocking(deps: ClosePaneDeps): void {
   // ...and the session-closed record, for the same reason and in the same place. Three
   // per-terminal maps are now cleared here; a fourth added elsewhere is the one that leaks.
   clearSessionExit(terminalId);
+
+  // ...and the remote-hook chip dismissal (plan 061), so the set only holds open terminals.
+  forgetRemoteHint(terminalId);
 
   // ...and dispose the cached xterm engine for the same reason, in the same place.
   // The cache is keyed by terminalId, so this is per TERMINAL, exactly as the

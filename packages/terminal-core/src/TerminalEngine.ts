@@ -2347,6 +2347,8 @@ export class TerminalEngine {
     // carries only the gate, so the kind falls back to 'local' there and
     // corrects itself at the next prompt mark.
     this.lastPromptMarkKind = terminalCache.get(this.cacheKey)?.lastPromptMarkKind ?? 'local';
+    // A listener subscribed before this mount only holds the pre-restore defaults.
+    this.notifyPromptMark();
 
     const inputSubscription = subscribeUserInput(boundTerm, () => { this.pendingUserInput = true; });
     if (inputSubscription) this.disposables.push(() => inputSubscription.dispose());
@@ -2528,7 +2530,7 @@ export class TerminalEngine {
       // exited without cleaning up (claude/copilot exit paths vary) — reset so
       // enhanced-key encoding and command suggestions return to plain-prompt
       // behavior. Observe-only: cwd parsing stays in the Rust pipeline.
-      const promptOscHeal = (kind: PromptMarkKind): boolean => {
+      const promptOscHeal = (kind: PromptMarkKind, source: string): boolean => {
         // Every rendered prompt closes one command's span and opens the next —
         // the boundary the ended-region marks are anchored to. Recorded first,
         // so it is independent of whether the heal branches below fire.
@@ -2555,24 +2557,25 @@ export class TerminalEngine {
         this.lastPromptMarkKind = kind;
         const markEntry = terminalCache.get(this.cacheKey);
         if (markEntry) markEntry.lastPromptMarkKind = kind;
-        this.opts.onDiag?.(() => `[TERM-DIAG] prompt mark kind=${kind} rearmed=${!wasArmed}`);
+        this.opts.onDiag?.(() => `[TERM-DIAG] prompt mark source=${source} kind=${kind} rearmed=${!wasArmed}`);
         this.notifyPromptMark();
         return false;
       };
       const osc9 = boundTerm.parser.registerOscHandler(9, (data: string) => {
         // OSC 9 is overloaded (9;9=cwd, 9;4=progress, notifications): only the
         // cwd form is a prompt signal — progress can be emitted by a LIVE TUI.
-        if (data.startsWith('9;')) return promptOscHeal('local');
+        if (data.startsWith('9;')) return promptOscHeal('local', 'osc9;9');
         return false;
       });
-      const osc7 = boundTerm.parser.registerOscHandler(7, () => promptOscHeal('host'));
+      const osc7 = boundTerm.parser.registerOscHandler(7, () => promptOscHeal('host', 'osc7'));
       // OSC 133 (semantic prompt): only the prompt-start mark `A` / `A;…` is a
       // prompt render. B/C/D mark the command's own start, output and end, and a
       // TUI may emit those mid-run — they must not re-arm the gate. Unlike OSC 7
       // and 9;9 the backend never reads 133, so a remote host can send it without
       // overwriting the tab's cwd with a remote path.
       const osc133 = boundTerm.parser.registerOscHandler(133, (data: string) => {
-        if (data === 'A' || data.startsWith('A;')) return promptOscHeal('host');
+        if (data === 'A' || data.startsWith('A;')) return promptOscHeal('host', `osc133 payload=${JSON.stringify(data.slice(0, 32))}`);
+        this.opts.onDiag?.(() => `[TERM-DIAG] osc133 ignored payload=${JSON.stringify(data.slice(0, 32))} (not a prompt start)`);
         return false;
       });
       this.disposables.push(() => osc9.dispose(), () => osc7.dispose(), () => osc133.dispose());

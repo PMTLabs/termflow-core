@@ -16,6 +16,7 @@ describe('closePaneNonBlocking', () => {
       clearCwdSnapshot,
       releaseSurface,
       clearSessionExit,
+      forgetRemoteHint: jest.fn(),
     });
 
     expect(removeFromUi).toHaveBeenCalledTimes(1);
@@ -44,6 +45,7 @@ describe('closePaneNonBlocking', () => {
     closePaneNonBlocking({
       terminalId: 'term-3', removeFromUi, closeTerminal, clearCwdSnapshot, releaseSurface,
       clearSessionExit,
+      forgetRemoteHint: jest.fn(),
     });
 
     expect(releaseSurface).toHaveBeenCalledTimes(1);
@@ -67,6 +69,7 @@ describe('closePaneNonBlocking', () => {
       clearCwdSnapshot: jest.fn(),
       releaseSurface,
       clearSessionExit,
+      forgetRemoteHint: jest.fn(),
     });
     expect(releaseSurface).not.toHaveBeenCalled();
   });
@@ -85,6 +88,7 @@ describe('closePaneNonBlocking', () => {
       clearCwdSnapshot,
       releaseSurface,
       clearSessionExit,
+      forgetRemoteHint: jest.fn(),
     });
 
     expect(removeFromUi).toHaveBeenCalledTimes(1);
@@ -107,6 +111,7 @@ describe('closePaneNonBlocking', () => {
         clearCwdSnapshot,
         releaseSurface,
         clearSessionExit,
+        forgetRemoteHint: jest.fn(),
       }),
     ).not.toThrow();
 
@@ -134,6 +139,7 @@ describe('closePaneNonBlocking — session-exit record', () => {
     clearCwdSnapshot: jest.fn(),
     releaseSurface: jest.fn(),
     clearSessionExit: jest.fn(),
+    forgetRemoteHint: jest.fn(),
     ...over,
   });
 
@@ -158,5 +164,31 @@ describe('closePaneNonBlocking — session-exit record', () => {
     const d = deps({ terminalId: null });
     closePaneNonBlocking(d);
     expect(d.clearSessionExit).not.toHaveBeenCalled();
+  });
+});
+
+describe('closePaneNonBlocking — remote-hook chip dismissal (plan 061)', () => {
+  const deps = (over: Record<string, unknown> = {}) => ({
+    terminalId: 'term-7',
+    removeFromUi: jest.fn(),
+    closeTerminal: jest.fn(() => new Promise<void>(() => {})),
+    clearCwdSnapshot: jest.fn(),
+    releaseSurface: jest.fn(),
+    clearSessionExit: jest.fn(),
+    forgetRemoteHint: jest.fn(),
+    ...over,
+  });
+
+  it('forgets the dismissal for the closed terminal, synchronously', () => {
+    const d = deps();
+    closePaneNonBlocking(d);
+    expect(d.forgetRemoteHint).toHaveBeenCalledTimes(1);
+    expect(d.forgetRemoteHint).toHaveBeenCalledWith('term-7');
+  });
+
+  it('forgets nothing when the pane has no terminal', () => {
+    const d = deps({ terminalId: null });
+    closePaneNonBlocking(d);
+    expect(d.forgetRemoteHint).not.toHaveBeenCalled();
   });
 });

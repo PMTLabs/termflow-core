@@ -296,7 +296,7 @@ test('the real pane close captures before synchronous removal and never emits de
   });
   closePaneNonBlocking({ terminalId: a.leaf, paneId: a.paneId,
     removeFromUi: () => { order.push('remove'); store.dispatch(removePaneFromTab({ tabId: 'tb-a', paneId: a.paneId })); },
-    closeTerminal, clearCwdSnapshot: jest.fn(), releaseSurface: jest.fn(), clearSessionExit: jest.fn(),
+    closeTerminal, clearCwdSnapshot: jest.fn(), releaseSurface: jest.fn(), clearSessionExit: jest.fn(), forgetRemoteHint: jest.fn(),
   });
   expect(order).toEqual(['capture', 'remove', 'close']);
   expect(capture).toHaveBeenCalledTimes(1);

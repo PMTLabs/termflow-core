@@ -35,8 +35,8 @@ export function shouldShowRemoteHint(i: RemoteHintInputs): boolean {
 
 // Dismissal is per tab and lives in renderer memory: it survives the TerminalDisplay
 // remounts that tab switches and splits cause, and resets when the app restarts.
-// Terminal ids are never reused within a session, so the set is only as large as the
-// number of tabs a user dismissed the chip on.
+// A closed terminal is forgotten (forgetRemoteHint, called where its other per-terminal
+// state is cleared), so the set holds only terminals that are still open.
 const dismissedTerminals = new Set<string>();
 
 export function isRemoteHintDismissed(terminalId: string): boolean {
@@ -45,6 +45,11 @@ export function isRemoteHintDismissed(terminalId: string): boolean {
 
 export function dismissRemoteHint(terminalId: string): void {
   dismissedTerminals.add(terminalId);
+}
+
+/** The terminal is gone for good: drop its dismissal. */
+export function forgetRemoteHint(terminalId: string): void {
+  dismissedTerminals.delete(terminalId);
 }
 
 /** Test seam: forget every dismissal. */
