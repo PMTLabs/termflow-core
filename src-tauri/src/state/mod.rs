@@ -50,6 +50,8 @@ pub(crate) mod live_call_census;
 #[cfg(test)]
 pub(crate) mod mcp_hold_census_tests;
 #[cfg(test)]
+mod permissions_census_tests;
+#[cfg(test)]
 mod mcp_launch_census_tests;
 #[cfg(test)]
 pub(crate) mod mcp_exit_census_tests;
