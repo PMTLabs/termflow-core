@@ -140,6 +140,7 @@ export interface PermissionView {
   screenRecording: PermState;
   otherHosts: { pid: number; generation?: string; reason: 'legacy' | 'differentIdentity' | 'unverified' }[];
   appSessions: boolean;
+  error?: string | null;
 }
 
 export interface ElectronAPI {

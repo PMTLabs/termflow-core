@@ -123,7 +123,9 @@ async fn identity_verdicts_and_failed_or_stale_status_never_become_a_subject() {
     }
     let mut fake = fixture(Some(current), vec![host(current, 1, true)]);
     fake.replies.insert(1, Err(()));
-    assert_eq!(resolve(&fake, &verifier()).await.target, PermissionTarget::Unresolved);
+    let (view, host, status, failed) = resolve_snapshot(&fake, fake.snapshot(), &verifier()).await;
+    assert_eq!(view.target, PermissionTarget::Unresolved);
+    assert!(host.is_none() && status.is_none() && failed);
     fake.replies.insert(1, Ok(Some(true)));
     fake.still_selected = false;
     assert_eq!(resolve(&fake, &verifier()).await.target, PermissionTarget::Unresolved);

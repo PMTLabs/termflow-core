@@ -35,8 +35,10 @@ export function PermissionsSection() {
                     if (!alive.current || operation !== epoch.current) return;
                     current.current = result;
                     setView(result);
-                } catch {
+                    if (result.error) dispatch(addToast({ message: `Permission request failed: ${result.error}`, type: 'error' }));
+                } catch (err) {
                     if (!alive.current || operation !== epoch.current) return;
+                    dispatch(addToast({ message: `Permission request failed: ${String(err)}`, type: 'error' }));
                     if (current.current) {
                         const next = { ...current.current, accessibility: 'unknown' as const, screenRecording: 'unknown' as const };
                         current.current = next;
@@ -71,16 +73,23 @@ export function PermissionsSection() {
         setBusy(kind);
         setPaneError('');
         const operation = ++epoch.current;
-        const valid = () => alive.current && operation === epoch.current && !!current.current && sameSubject(subject, current.current);
+        const valid = () => alive.current && !!current.current && sameSubject(subject, current.current);
+        const latest = () => operation === epoch.current;
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
             const result = await Promise.race([
                 api.requestMacosPermission(kind),
                 new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Permission request timed out')), REQUEST_TIMEOUT_MS); }),
             ]);
-            if (!valid() || !sameSubject(subject, result)) return;
-            current.current = result;
-            setView(result);
+            if (!valid()) return;
+            const matches = sameSubject(subject, result);
+            if (!matches && !(result.error && result.target === 'unresolved')) return;
+            if (latest()) {
+                current.current = result;
+                setView(result);
+            }
+            if (result.error) dispatch(addToast({ message: `Permission request failed: ${result.error}`, type: 'error' }));
+            if (!matches) return;
             try {
                 await api.openMacosPermissionPane(kind);
             } catch (err) {
@@ -88,9 +97,11 @@ export function PermissionsSection() {
             }
         } catch (err) {
             if (valid()) {
-                const next = { ...current.current!, [kind]: 'unknown' as const };
-                current.current = next;
-                setView(next);
+                if (latest()) {
+                    const next = { ...current.current!, accessibility: 'unknown' as const, screenRecording: 'unknown' as const };
+                    current.current = next;
+                    setView(next);
+                }
                 dispatch(addToast({ message: `Permission request failed: ${String(err)}`, type: 'error' }));
             }
         } finally {

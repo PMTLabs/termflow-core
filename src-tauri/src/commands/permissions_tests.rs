@@ -13,7 +13,7 @@ impl PermissionPort for Fake {
     async fn subject(&self) -> Subject<u32> {
         self.calls.lock().unwrap().push("resolve");
         if self.target == PermissionTarget::Host { self.calls.lock().unwrap().push("host-status"); }
-        Subject { view: PermissionSubject { target: self.target, subject: SubjectIdentity { pid: Some(11), generation: Some("one".into()), bundle_id: None }, other_hosts: vec![], app_sessions: false }, host: (self.target == PermissionTarget::Host).then_some(11), status: Some((PermState::NotGranted, PermState::Granted)) }
+        Subject { view: PermissionSubject { target: self.target, subject: SubjectIdentity { pid: Some(11), generation: Some("one".into()), bundle_id: None }, other_hosts: vec![], app_sessions: false }, host: (self.target == PermissionTarget::Host).then_some(11), status: Some((PermState::NotGranted, PermState::Granted)), resolution_failed: false }
     }
     async fn host_status(&self, host: &u32) -> Result<(PermState, PermState), ()> {
         assert_eq!(*host, 11);
@@ -61,11 +61,40 @@ async fn dispatch_table_uses_one_subject_and_never_falls_back() {
     let fake = Fake { target: PermissionTarget::Host, calls: Mutex::new(vec![]), fail: true, fail_status: false };
     let result = execute(&fake, Some(PermissionKind::ScreenRecording), 1).await;
     assert_eq!((result.accessibility, result.screen_recording), (PermState::Unknown, PermState::Unknown));
+    assert!(result.error.is_some());
     assert_eq!(*fake.calls.lock().unwrap(), ["resolve", "host-status", "host-request"]);
     let fake = Fake { target: PermissionTarget::Host, calls: Mutex::new(vec![]), fail: false, fail_status: true };
     let result = execute(&fake, Some(PermissionKind::ScreenRecording), 2).await;
     assert_eq!((result.accessibility, result.screen_recording), (PermState::Unknown, PermState::Unknown));
+    assert!(result.error.is_some());
     assert_eq!(*fake.calls.lock().unwrap(), ["resolve", "host-status", "host-request", "host-status"]);
+    let fake = Fake { target: PermissionTarget::App, calls: Mutex::new(vec![]), fail: true, fail_status: false };
+    for kind in [None, Some(PermissionKind::ScreenRecording)] {
+        let result = execute(&fake, kind, 3).await;
+        assert!(result.error.is_some());
+        assert_eq!((result.accessibility, result.screen_recording), (PermState::Unknown, PermState::Unknown));
+    }
+}
+
+struct ResolutionFailure;
+impl PermissionPort for ResolutionFailure {
+    type Host = ();
+    async fn subject(&self) -> Subject<()> {
+        Subject { view: PermissionSubject { target: PermissionTarget::Unresolved, subject: SubjectIdentity::default(), other_hosts: vec![], app_sessions: false }, host: None, status: None, resolution_failed: true }
+    }
+    async fn host_status(&self, _: &()) -> Result<(PermState, PermState), ()> { panic!("unexpected host call") }
+    async fn host_request(&self, _: &(), _: PermissionKind) -> Result<(), ()> { panic!("unexpected host call") }
+    async fn app_status(&self) -> Result<(PermState, PermState), ()> { panic!("unexpected app fallback") }
+    async fn app_request(&self, _: PermissionKind) -> Result<(), ()> { panic!("unexpected app fallback") }
+}
+
+#[tokio::test]
+async fn resolution_failure_surfaces_without_fallback() {
+    for kind in [None, Some(PermissionKind::Accessibility)] {
+        let result = execute(&ResolutionFailure, kind, 1).await;
+        assert!(result.error.is_some());
+        assert_eq!((result.accessibility, result.screen_recording), (PermState::Unknown, PermState::Unknown));
+    }
 }
 
 struct WirePort { client: PtyHostClient, target: PermissionTarget }
@@ -75,7 +104,7 @@ impl PermissionPort for WirePort {
         let status = if self.target == PermissionTarget::Host {
             match self.client.permission_status().await { Ok(PermissionOutcome::Reply(s)) => Some(host_states(s)), _ => None }
         } else { None };
-        Subject { view: PermissionSubject { target: self.target, subject: SubjectIdentity::default(), other_hosts: vec![], app_sessions: false }, host: Some(self.client.clone()), status }
+        Subject { view: PermissionSubject { target: self.target, subject: SubjectIdentity::default(), other_hosts: vec![], app_sessions: false }, host: Some(self.client.clone()), status, resolution_failed: false }
     }
     async fn host_status(&self, client: &PtyHostClient) -> Result<(PermState, PermState), ()> {
         match client.permission_status().await { Ok(PermissionOutcome::Reply(s)) => Ok(host_states(s)), _ => Err(()) }
@@ -123,7 +152,7 @@ fn epoch_and_contract() {
     assert_eq!(stub.target, PermissionTarget::App);
     assert_eq!((stub.accessibility, stub.screen_recording), (PermState::Unsupported, PermState::Unsupported));
     assert!(stub.app_sessions);
-    let view = PermissionView { epoch: b, target: PermissionTarget::HostLegacy, subject: SubjectIdentity { pid: Some(1), generation: None, bundle_id: Some("id".into()) }, accessibility: PermState::NotGranted, screen_recording: PermState::Unknown, other_hosts: vec![OtherHost { pid: 2, generation: None, reason: OtherHostReason::DifferentIdentity }], app_sessions: true };
+    let view = PermissionView { epoch: b, target: PermissionTarget::HostLegacy, subject: SubjectIdentity { pid: Some(1), generation: None, bundle_id: Some("id".into()) }, accessibility: PermState::NotGranted, screen_recording: PermState::Unknown, other_hosts: vec![OtherHost { pid: 2, generation: None, reason: OtherHostReason::DifferentIdentity }], app_sessions: true, error: Some("failed".into()) };
     let json = serde_json::to_value(view).unwrap();
     assert_eq!(json["target"], "hostLegacy");
     assert_eq!(json["accessibility"], "notGranted");
@@ -131,6 +160,8 @@ fn epoch_and_contract() {
     assert_eq!(json["subject"]["bundleId"], "id");
     assert_eq!(json["otherHosts"][0]["reason"], "differentIdentity");
     assert_eq!(json["appSessions"], true);
+    assert_eq!(json["error"], "failed");
+    assert!(serde_json::to_value(stub).unwrap().get("error").is_none());
     assert_eq!(serde_json::from_str::<PermissionKind>("\"screenRecording\"").unwrap(), PermissionKind::ScreenRecording);
 }
 

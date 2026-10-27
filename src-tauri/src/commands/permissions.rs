@@ -48,6 +48,8 @@ pub struct PermissionView {
     screen_recording: PermState,
     other_hosts: Vec<OtherHost>,
     app_sessions: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 static EPOCH: AtomicU64 = AtomicU64::new(0);
@@ -62,6 +64,7 @@ struct Subject<H> {
     // The host status used to establish responsibility also supplies the
     // initial state; status commands must not issue a second query.
     status: Option<(PermState, PermState)>,
+    resolution_failed: bool,
 }
 trait PermissionPort {
     type Host;
@@ -75,30 +78,35 @@ trait PermissionPort {
 async fn execute<P: PermissionPort>(port: &P, kind: Option<PermissionKind>, epoch: u64) -> PermissionView {
     let subject = port.subject().await;
     let mut states = (PermState::Unknown, PermState::Unknown);
-    match subject.view.target {
+    let mut error = subject.resolution_failed.then(|| "Permission subject resolution failed".to_string());
+    let result = match subject.view.target {
         PermissionTarget::Host => {
             if let Some(host) = &subject.host {
-                states = match kind {
-                    None => subject.status.unwrap_or(states),
+                match kind {
+                    None => subject.status.ok_or(()),
                     Some(kind) => match port.host_request(host, kind).await {
-                        Ok(()) => port.host_status(host).await.unwrap_or(states),
-                        Err(()) => states,
+                        Ok(()) => port.host_status(host).await,
+                        Err(()) => Err(()),
                     },
-                };
-            }
+                }
+            } else { Err(()) }
         }
         PermissionTarget::App => {
-            states = match kind {
-                None => port.app_status().await.unwrap_or(states),
+            match kind {
+                None => port.app_status().await,
                 Some(kind) => match port.app_request(kind).await {
-                    Ok(()) => port.app_status().await.unwrap_or(states),
-                    Err(()) => states,
+                    Ok(()) => port.app_status().await,
+                    Err(()) => Err(()),
                 },
-            };
+            }
         }
-        PermissionTarget::HostLegacy | PermissionTarget::Unresolved => {}
+        PermissionTarget::HostLegacy | PermissionTarget::Unresolved => Ok(states),
+    };
+    match result {
+        Ok(value) => states = value,
+        Err(()) => error = Some("Permission operation failed".into()),
     }
-    PermissionView { epoch, target: subject.view.target, subject: subject.view.subject, accessibility: states.0, screen_recording: states.1, other_hosts: subject.view.other_hosts, app_sessions: subject.view.app_sessions }
+    PermissionView { epoch, target: subject.view.target, subject: subject.view.subject, accessibility: states.0, screen_recording: states.1, other_hosts: subject.view.other_hosts, app_sessions: subject.view.app_sessions, error }
 }
 
 struct SystemPort<'a>(&'a AppState);
@@ -106,7 +114,7 @@ impl PermissionPort for SystemPort<'_> {
     type Host = PtyHostClient;
     async fn subject(&self) -> Subject<Self::Host> {
         let resolved = crate::state::permissions::permission_subject(self.0).await;
-        Subject { view: resolved.view, host: resolved.host, status: resolved.status.map(host_states) }
+        Subject { view: resolved.view, host: resolved.host, status: resolved.status.map(host_states), resolution_failed: resolved.resolution_failed }
     }
     async fn host_status(&self, host: &PtyHostClient) -> Result<(PermState, PermState), ()> {
         match host.permission_status().await { Ok(PermissionOutcome::Reply(status)) => Ok(host_states(status)), _ => Err(()) }
@@ -121,8 +129,10 @@ impl PermissionPort for SystemPort<'_> {
         tokio::task::spawn_blocking(|| {
             use termflow_macos_tcc::Tcc;
             let (a, s) = termflow_macos_tcc::SystemTcc.status();
-            (a.into(), s.into())
-        }).await.map_err(|_| ())
+            if a == termflow_macos_tcc::PermissionState::Unknown || s == termflow_macos_tcc::PermissionState::Unknown {
+                Err(())
+            } else { Ok((a.into(), s.into())) }
+        }).await.map_err(|_| ())?
     }
     async fn app_request(&self, kind: PermissionKind) -> Result<(), ()> {
         tokio::task::spawn_blocking(move || {
@@ -136,7 +146,7 @@ fn host_states(status: PermissionStatus) -> (PermState, PermState) {
 }
 
 fn unsupported(epoch: u64, app_sessions: bool) -> PermissionView {
-    PermissionView { epoch, target: PermissionTarget::App, subject: SubjectIdentity { pid: Some(std::process::id()), generation: None, bundle_id: Some("app.termflow.desktop".into()) }, accessibility: PermState::Unsupported, screen_recording: PermState::Unsupported, other_hosts: vec![], app_sessions }
+    PermissionView { epoch, target: PermissionTarget::App, subject: SubjectIdentity { pid: Some(std::process::id()), generation: None, bundle_id: Some("app.termflow.desktop".into()) }, accessibility: PermState::Unsupported, screen_recording: PermState::Unsupported, other_hosts: vec![], app_sessions, error: None }
 }
 
 fn in_process_sessions(state: &AppState) -> bool {

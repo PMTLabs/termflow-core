@@ -74,6 +74,23 @@ describe('PermissionsSection', () => {
         await focus(); await focus(); await act(async () => newer.resolve(base({ target: 'app' })));
         await act(async () => old.resolve(base())); expect(container.textContent).toContain('Permission target: TermFlow'); expect(container.textContent).not.toContain('Permission target: TermFlow Host');
     });
+    it.each(['focus', 'pty-host:state'])('opens the pane after a same-subject %s refresh without overwriting it', async event => {
+        await render(); const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await click(1);
+        jest.spyOn(document, 'hasFocus').mockReturnValue(true);
+        api.macosPermissionStatus.mockResolvedValue(base({ accessibility: 'granted' }));
+        await act(async () => window.dispatchEvent(new Event(event)));
+        await act(async () => pending.resolve(base()));
+        expect(api.openMacosPermissionPane.mock.calls).toEqual([['screenRecording']]);
+        expect(container.textContent).not.toContain('Not granted');
+    });
+    it.each(['focus', 'pty-host:state'])('shows a request error after a same-subject %s refresh', async event => {
+        await render(); const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await click(0);
+        jest.spyOn(document, 'hasFocus').mockReturnValue(true);
+        await act(async () => window.dispatchEvent(new Event(event)));
+        await act(async () => pending.resolve(base({ error: 'disconnected', accessibility: 'unknown', screenRecording: 'unknown' })));
+        expect(actions.some(a => a.type === 'ui/addToast' && a.payload.message.includes('disconnected'))).toBe(true);
+        expect(api.openMacosPermissionPane.mock.calls).toEqual([['accessibility']]);
+    });
     it('does not publish a slow request for an old subject', async () => {
         await render(); const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await click(0);
         api.macosPermissionStatus.mockResolvedValue(base({ subject: { pid: 2 }, target: 'app' })); await focus();
@@ -89,6 +106,11 @@ describe('PermissionsSection', () => {
         if (event === 'unmount') await act(async () => root.unmount()); else await act(async () => window.dispatchEvent(new Event(event)));
         await act(async () => pending.reject(new Error('gone'))); expect(api.openMacosPermissionPane).not.toHaveBeenCalled(); expect(actions.some(a => a.type === 'ui/addToast')).toBe(false);
     });
+    it('does not open a pane when a successful request completes after unmount', async () => {
+        await render(); const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await click(0);
+        await act(async () => root.unmount()); await act(async () => pending.resolve(base()));
+        expect(api.openMacosPermissionPane).not.toHaveBeenCalled();
+    });
     it('times out to Unknown', async () => {
         jest.useFakeTimers(); await render(); api.requestMacosPermission.mockReturnValue(new Promise(() => {})); await click(0);
         await act(async () => { jest.advanceTimersByTime(30000); }); expect(container.textContent).toContain('Unknown'); expect(button(0).disabled).toBe(false);
@@ -100,6 +122,21 @@ describe('PermissionsSection', () => {
     it('reports request errors as toast and Unknown', async () => {
         api.requestMacosPermission.mockRejectedValue(new Error('disconnected')); await render(); await click(0);
         expect(container.textContent).toContain('Unknown'); expect(actions.some(a => a.type === 'ui/addToast' && a.payload.message.includes('disconnected'))).toBe(true); expect(api.openMacosPermissionPane).not.toHaveBeenCalled();
+    });
+    it.each(['request', 'status'])('shows a resolved %s error and Unknown states', async operation => {
+        const failed = base({ error: 'disconnected', accessibility: 'unknown', screenRecording: 'unknown' });
+        if (operation === 'status') api.macosPermissionStatus.mockResolvedValue(failed);
+        else api.requestMacosPermission.mockResolvedValue(failed);
+        await render(); if (operation === 'request') await click(0);
+        expect(container.textContent?.match(/Unknown/g)).toHaveLength(2);
+        expect(actions.some(a => a.type === 'ui/addToast' && a.payload.message.includes('disconnected'))).toBe(true);
+    });
+    it('publishes a resolution error instead of the old subject', async () => {
+        api.requestMacosPermission.mockResolvedValue(base({ target: 'unresolved', subject: {}, error: 'resolution failed', accessibility: 'unknown', screenRecording: 'unknown' }));
+        await render(); await click(0);
+        expect(container.textContent?.match(/Unknown/g)).toHaveLength(2);
+        expect(actions.some(a => a.type === 'ui/addToast')).toBe(true);
+        expect(api.openMacosPermissionPane).not.toHaveBeenCalled();
     });
     it('shows opener failure separately without changing the result', async () => {
         api.requestMacosPermission.mockResolvedValue(base({ accessibility: 'granted' })); api.openMacosPermissionPane.mockRejectedValue(new Error('open failed'));

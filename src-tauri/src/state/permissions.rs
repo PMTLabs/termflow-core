@@ -109,12 +109,13 @@ async fn resolve<S: SubjectSource>(source: &S, verifier: &impl HostIdentityVerif
     resolve_snapshot(source, source.snapshot(), verifier).await.0
 }
 
-async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Handle>, verifier: &impl HostIdentityVerifier) -> (PermissionSubject, Option<S::Handle>, Option<PermissionStatus>) {
+async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Handle>, verifier: &impl HostIdentityVerifier) -> (PermissionSubject, Option<S::Handle>, Option<PermissionStatus>, bool) {
     let selected = snapshot.selected.and_then(|c| snapshot.hosts.iter().find(|h| h.channel == c));
     let mut result = PermissionSubject { target: PermissionTarget::Unresolved, subject: SubjectIdentity::default(), other_hosts: Vec::new(), app_sessions: snapshot.app_sessions };
     let mut covered = None;
     let mut selected_handle = None;
     let mut status = None;
+    let mut resolution_failed = false;
     if snapshot.disabled {
         result.target = PermissionTarget::App;
         result.subject.pid = Some(std::process::id());
@@ -145,6 +146,8 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
                         None => {}
                     }
                 }
+            } else {
+                resolution_failed = true;
             }
         }
     } else if snapshot.helper_unavailable && !snapshot.reconnecting {
@@ -161,7 +164,7 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
             result.other_hosts.push(OtherHost { pid, generation: host.generation.clone(), reason });
         }
     }
-    (result, selected_handle, status)
+    (result, selected_handle, status, resolution_failed)
 }
 
 fn host_snapshot(channel: HostChannel, client: PtyHostClient, generation: Option<String>) -> Host<PtyHostClient> {
@@ -232,13 +235,14 @@ pub(crate) struct ResolvedPermissionSubject {
     pub view: PermissionSubject,
     pub host: Option<PtyHostClient>,
     pub status: Option<PermissionStatus>,
+    pub resolution_failed: bool,
 }
 
 pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>) -> ResolvedPermissionSubject {
     let snapshot = state.snapshot();
     let verifier = host_identity::ProductionVerifier::new(snapshot.hosts.iter().map(|host| host.handle.clone()));
-    let (view, host, status) = resolve_snapshot(state, snapshot, &verifier).await;
-    ResolvedPermissionSubject { view, host, status }
+    let (view, host, status, resolution_failed) = resolve_snapshot(state, snapshot, &verifier).await;
+    ResolvedPermissionSubject { view, host, status, resolution_failed }
 }
 
 #[cfg(test)]
