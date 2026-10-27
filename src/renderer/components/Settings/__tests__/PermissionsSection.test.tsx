@@ -57,6 +57,20 @@ describe('PermissionsSection', () => {
         api.macosPermissionStatus.mockResolvedValue(base({ otherHosts: [{ pid: 42, generation: 'old', reason: 'legacy' }], appSessions: true }));
         await render(); expect(container.textContent).toContain('PID 42 (old)'); expect(container.textContent).toContain('app sessions');
     });
+    it.each([
+        { target: 'app', otherHosts: [], note: false, sessions: false },
+        { target: 'app', otherHosts: [{ pid: 42, reason: 'legacy' }], note: true, sessions: false },
+        { target: 'host', otherHosts: [], note: true, sessions: true },
+        { target: 'hostLegacy', otherHosts: [], note: true, sessions: true },
+    ] as const)('shows uncovered identities for $target with $otherHosts', async ({ target, otherHosts, note, sessions }) => {
+        api.macosPermissionStatus.mockResolvedValue(base({ target, otherHosts: [...otherHosts], appSessions: true }));
+        await render();
+        const text = container.querySelector('[role=note]')?.textContent;
+        expect(!!text).toBe(note);
+        if (otherHosts.length) expect(text).toContain('PID 42');
+        if (sessions) expect(text).toContain('TermFlow app sessions');
+        else if (note) expect(text).not.toContain('TermFlow app sessions');
+    });
     it('labels app-attributed other hosts', async () => {
         api.macosPermissionStatus.mockResolvedValue(base({ otherHosts: [{ pid: 43, reason: 'appAttributed' }] }));
         await render();
