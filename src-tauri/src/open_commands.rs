@@ -545,6 +545,20 @@ fn open_in_text_editor(path: &str) -> Result<(), String> {
     }
 }
 
+fn open_permission_pane_with(kind: crate::commands::permissions::PermissionKind, opener: impl FnOnce(&str) -> Result<(), String>) -> Result<(), String> {
+    use crate::commands::permissions::PermissionKind;
+    let url = match kind {
+        PermissionKind::Accessibility => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+        PermissionKind::ScreenRecording => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+    };
+    opener(url)
+}
+
+#[tauri::command]
+pub async fn open_permission_pane(kind: crate::commands::permissions::PermissionKind) -> Result<(), String> {
+    open_permission_pane_with(kind, os_open)
+}
+
 #[tauri::command]
 pub async fn open_external(url: String) -> Result<(), String> {
     let lower = url.to_ascii_lowercase();
@@ -694,6 +708,21 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn permission_panes_are_fixed_and_external_guard_is_unchanged() {
+        use crate::commands::permissions::PermissionKind;
+        for (kind, expected) in [
+            (PermissionKind::Accessibility, "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"),
+            (PermissionKind::ScreenRecording, "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+        ] {
+            let seen = std::cell::RefCell::new(String::new());
+            assert_eq!(super::open_permission_pane_with(kind, |url| { *seen.borrow_mut() = url.into(); Ok(()) }), Ok(()));
+            assert_eq!(*seen.borrow(), expected);
+            assert_eq!(super::open_permission_pane_with(kind, |_| Err("opener failed".into())), Err("opener failed".into()));
+            assert!(super::open_external(expected.into()).await.unwrap_err().contains("non-http(s)"));
+        }
+    }
 
     // Unique temp dir per call (no tempfile dep): pid + monotonic counter.
     static COUNTER: AtomicUsize = AtomicUsize::new(0);

@@ -8,8 +8,11 @@ mod detach;
 mod logging;
 mod manager;
 mod mcp_hold;
+mod permissions;
 mod ring;
 mod session;
+mod tcc_child;
+mod tcc_runner;
 mod transport;
 mod util;
 
@@ -235,6 +238,12 @@ async fn run_dial_out_mode(_args: DialArgs) {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match tcc_child::entry(&args, &termflow_macos_tcc::SystemTcc, &mut std::io::stdout().lock()) {
+        Ok(true) => return,
+        Ok(false) => {},
+        Err(error) => { eprintln!("termflow-pty-host: {error}"); std::process::exit(2); }
+    }
     // First, so the `log::` lines of everything below (ConPTY preload, the MCP
     // hold, token rejections) are written rather than dropped (plan 054 review 295 F2).
     if let Err(e) = logging::init_logging() {
@@ -334,6 +343,7 @@ fn host_capabilities(inherit_cursor: bool) -> u32 {
         | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
         | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
         | termflow_pty_protocol::CAP_MCP_HOLD
+        | if cfg!(target_os = "macos") { termflow_pty_protocol::CAP_PERMISSIONS } else { 0 }
         | if inherit_cursor { termflow_pty_protocol::CAP_INHERIT_CURSOR } else { 0 }
 }
 
@@ -376,11 +386,31 @@ mod tests {
 
     #[test]
     fn host_capabilities_include_mcp_hold() {
-        let base = CAP_ATTACH_ACK | CAP_LIFECYCLE_CONTRACT | CAP_SHUTDOWN_CONTROL | CAP_MCP_HOLD;
+        let base = CAP_ATTACH_ACK | CAP_LIFECYCLE_CONTRACT | CAP_SHUTDOWN_CONTROL | CAP_MCP_HOLD
+            | if cfg!(target_os = "macos") { termflow_pty_protocol::CAP_PERMISSIONS } else { 0 };
         assert_eq!(host_capabilities(false), base);
         assert_eq!(host_capabilities(true), base | CAP_INHERIT_CURSOR);
         assert_eq!(host_capabilities(false) & CAP_DRAIN, 0);
         assert_eq!(host_capabilities(true) & CAP_DRAIN, 0);
+    }
+
+    #[test]
+    fn permission_capability_is_advertised_only_on_macos() {
+        let advertised = host_capabilities(false) & termflow_pty_protocol::CAP_PERMISSIONS != 0;
+        #[cfg(target_os = "macos")]
+        assert!(advertised);
+        #[cfg(not(target_os = "macos"))]
+        assert!(!advertised);
+    }
+
+    #[test]
+    fn tcc_child_entry_precedes_logging_socket_and_record_setup() {
+        let source = include_str!("main.rs").replace("\r\n", "\n");
+        let body = source.split("async fn main() {").nth(1).unwrap();
+        let child = body.find("tcc_child::entry(").unwrap();
+        for later in ["logging::init_logging()", "resolve_endpoint()", "TERMFLOW_PTY_RECORD", "transport::serve("] {
+            assert!(child < body.find(later).unwrap(), "{later}");
+        }
     }
 
     /// `init_logging` is tested in `logging.rs`; this pins that `main` calls it,

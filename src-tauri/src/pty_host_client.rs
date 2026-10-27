@@ -14,6 +14,14 @@
 //! The client depends on a few concrete pieces (not `AppState`) so it is
 //! testable without the Windows `mock_app` crash and avoids an Arc cycle.
 
+// Wired into the launch resolver in plan 060 Task 3 step B.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+#[allow(dead_code)]
+mod bundle_staging;
+#[cfg(target_os = "macos")]
+mod macos_spawn;
+#[cfg(target_os = "macos")]
+pub use macos_spawn::HostPermissionIdentity;
 mod conn;
 mod endpoints;
 mod discovery;
@@ -119,6 +127,27 @@ pub enum McpClaimOutcome {
     Held(Option<termflow_pty_protocol::McpHeld>),
 }
 
+/// Permission replies retain the host's responsibility evidence for adopted hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionOutcome<T> {
+    NotCapable,
+    Reply(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionStatus {
+    pub accessibility: termflow_pty_protocol::PermissionState,
+    pub screen_recording: termflow_pty_protocol::PermissionState,
+    pub self_responsible: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+    pub kind: termflow_pty_protocol::PermissionKind,
+    pub state: termflow_pty_protocol::PermissionState,
+    pub self_responsible: Option<bool>,
+}
+
 /// Map a pty-host session key to the process id our maps are keyed by.
 ///
 /// Returns `None` for an unknown session, and every caller DROPS that frame.
@@ -135,6 +164,11 @@ pub(crate) fn route_inbound(
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
     lookup(session_key)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn unix_peer_token(stream: &tokio::net::UnixStream) -> Option<crate::state::permissions::host_identity::AuditToken> {
+    macos_spawn::peer_token(stream)
 }
 
 /// True when the PTY-host sidecar path is active.
@@ -236,6 +270,10 @@ pub struct PtyHostClient {
     /// `HoldMcp`/`ReleaseMcp` may be sent to it. A legacy host fails to decode those
     /// variants and drops the connection, so the senders refuse without this bit.
     mcp_hold: Arc<std::sync::atomic::AtomicBool>,
+    /// Permission controls are unsafe to send unless this connection advertised them.
+    permissions: Arc<std::sync::atomic::AtomicBool>,
+    identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
+    peer_token: Arc<Mutex<Option<crate::state::permissions::host_identity::AuditToken>>>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -250,6 +288,10 @@ pub struct PtyHostClient {
     conn: Arc<ConnState>,
     /// Where the host behind this connection runs from; see `exe_in_payload`.
     exe_origin: Arc<exe_origin::ExeOrigin>,
+    /// Verified spawn identity for this connection; adopted or unmatched peers
+    /// are unknown rather than guessed from a build ID or capability.
+    #[cfg(target_os = "macos")]
+    permission_identity: Arc<Mutex<Option<(u32, HostPermissionIdentity)>>>,
     #[cfg(test)]
     before_stdout: ReaderHook,
     #[cfg(test)]
@@ -334,6 +376,15 @@ impl PtyHostClient {
         self.req_ctr.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).ok()
     }
 
+    /// Identity of the host we spawned and matched to this socket's peer PID.
+    /// `None` means adopted/unverified; callers must not infer a Helper grant.
+    #[cfg(target_os = "macos")]
+    pub fn host_permission_identity(&self) -> Option<HostPermissionIdentity> {
+        self.permission_identity.lock().unwrap_or_else(|e| e.into_inner())
+            .filter(|(pid, _)| Some(*pid) == self.server_pid())
+            .map(|(_, identity)| identity)
+    }
+
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
     pub fn survives_hotswap(&self) -> bool {
         self.survives_hotswap.load(Ordering::Acquire)
@@ -373,6 +424,14 @@ impl PtyHostClient {
         self.mcp_hold.load(Ordering::Acquire)
     }
 
+    pub fn set_permissions(&self, v: bool) {
+        self.permissions.store(v, Ordering::Release);
+    }
+
+    pub fn permissions(&self) -> bool {
+        self.permissions.load(Ordering::Acquire)
+    }
+
     /// The process id serving this connection, asked of the live connection (Windows). `None`
     /// off Windows, and when the lookup failed.
     pub fn server_pid(&self) -> Option<u32> {
@@ -381,7 +440,24 @@ impl PtyHostClient {
 
     /// Set the peer PID for inbound connections where GUI acts as server.
     pub fn set_peer_pid(&self, pid: u32) {
+        if self.server_pid() != Some(pid) {
+            self.identity_cache.clear();
+            *self.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         self.exe_origin.set_server_pid(Some(pid));
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn test_peer_token(&self) -> Option<crate::state::permissions::host_identity::AuditToken> {
+        *self.peer_token.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub(crate) fn host_identity_verdict(&self, pid: u32) -> crate::state::permissions::IdentityVerdict {
+        use crate::state::permissions::{host_identity::verify_token, IdentityVerdict};
+        if !self.is_alive() || self.server_pid() != Some(pid) { return IdentityVerdict::Unverifiable; }
+        let token = *self.peer_token.lock().unwrap_or_else(|e| e.into_inner());
+        let verdict = self.identity_cache.verify(token.filter(|t| t.pid() == pid), verify_token);
+        if self.is_alive() && self.server_pid() == Some(pid) { verdict } else { IdentityVerdict::Unverifiable }
     }
 
     /// Whether an intentional exit must announce itself to this host.
@@ -406,6 +482,7 @@ impl PtyHostClient {
         const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
         if self.conn.begin_close() {
             self.alive.store(false, Ordering::Release);
+            self.identity_cache.clear();
             self.conn.cancel();
         }
         self.pending.lock().unwrap().clear();
@@ -663,6 +740,27 @@ impl PtyHostClient {
         }
     }
 
+    /// Query the host without ever sending a new control to a legacy connection.
+    pub async fn permission_status(&self) -> Result<PermissionOutcome<PermissionStatus>, String> {
+        if !self.permissions() { return Ok(PermissionOutcome::NotCapable); }
+        let token = self.lifecycle_token.to_string();
+        match self.request_within(std::time::Duration::from_secs(35), move |req| Control::PermissionStatus { req, token }).await {
+            Some(Response::PermissionStatusReply { accessibility, screen_recording, self_responsible, .. }) =>
+                Ok(PermissionOutcome::Reply(PermissionStatus { accessibility, screen_recording, self_responsible })),
+            _ => Err("pty-host: no PermissionStatusReply".into()),
+        }
+    }
+
+    pub async fn request_permission(&self, kind: termflow_pty_protocol::PermissionKind) -> Result<PermissionOutcome<PermissionRequest>, String> {
+        if !self.permissions() { return Ok(PermissionOutcome::NotCapable); }
+        let token = self.lifecycle_token.to_string();
+        match self.request_within(std::time::Duration::from_secs(35), move |req| Control::RequestPermission { req, token, kind }).await {
+            Some(Response::PermissionRequested { kind: reply_kind, state, self_responsible, .. }) if reply_kind == kind =>
+                Ok(PermissionOutcome::Reply(PermissionRequest { kind: reply_kind, state, self_responsible })),
+            _ => Err("pty-host: no matching PermissionRequested".into()),
+        }
+    }
+
     /// Spawn a session; returns the child PID on success.
     pub async fn spawn_session(&self, tab_id: &str, spec: &SpawnSpec) -> Result<u32, String> {
         self.spawn_session_inner(tab_id, spec, None).await
@@ -877,7 +975,9 @@ where
     let stdout_observer: StdoutObserver = Arc::default();
     #[cfg(test)]
     let stdout_observer_r = stdout_observer.clone();
+    let identity_cache = Arc::new(crate::state::permissions::host_identity::IdentityCache::default());
     let end = Arc::new(ConnLoss {
+        identity_cache: identity_cache.clone(),
         conn: conn.clone(),
         alive: alive.clone(),
         pending: pending.clone(),
@@ -1014,11 +1114,16 @@ where
         shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        identity_cache,
+        peer_token: Arc::default(),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
         conn,
         exe_origin: Arc::default(),
+        #[cfg(target_os = "macos")]
+        permission_identity: Arc::default(),
         #[cfg(test)]
         before_stdout,
         #[cfg(test)]
@@ -1035,6 +1140,7 @@ where
 /// compare-exchange acts, so `on_disconnect` fires at most once.
 #[cfg(any(windows, unix))]
 struct ConnLoss {
+    identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
     conn: Arc<ConnState>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pending: PendingMap,
@@ -1052,6 +1158,7 @@ impl ConnLoss {
         // to publish it), stop the other task, fail waiting requests, and only
         // then surface the loss.
         self.alive.store(false, Ordering::Release);
+        self.identity_cache.clear();
         self.conn.cancel();
         self.pending.lock().unwrap().clear();
         let binding = self.sessions.lock().unwrap().clone();
@@ -1146,16 +1253,18 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
             last_alive = sys
                 .process(target)
                 .map(|p| {
-                    p.name().to_string_lossy().starts_with("termflow-pty-ho")
-                        || p.exe()
-                            .and_then(|e| e.file_name())
-                            .map(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
-                            .unwrap_or(false)
+                    host_image_matches(p.name(), p.exe())
                 })
                 .unwrap_or(false);
         }
         last_alive
     }
+}
+
+fn host_image_matches(name: &std::ffi::OsStr, exe: Option<&std::path::Path>) -> bool {
+    name.to_string_lossy().starts_with("termflow-pty-ho")
+        || exe.and_then(|p| p.file_name())
+            .is_some_and(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
 }
 
 /// Connect to the sidecar's pipe, spawning it (detached, breaking away from any
@@ -1339,6 +1448,21 @@ fn spawn_sidecar_detached(
     }
 }
 
+/// Capture kernel evidence before splitting any outbound host socket.
+#[cfg(unix)]
+pub(crate) fn wire_unix_host_client(conn: tokio::net::UnixStream, deps: PtyHostDeps) -> PtyHostClient {
+    #[cfg(target_os = "macos")]
+    let (peer_pid, peer_token) = (macos_spawn::peer_pid(&conn), macos_spawn::peer_token(&conn));
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    #[cfg(target_os = "macos")]
+    {
+        client.exe_origin.set_server_pid(peer_pid);
+        *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
+    }
+    client
+}
+
 /// Connect to the sidecar's Unix socket, spawning it (detached into its own
 /// session via `setsid`) if it isn't already running. Mirrors the Windows path:
 /// grace-window try-connect (never duplicating a live advertised host) → spawn
@@ -1355,7 +1479,12 @@ pub async fn connect_or_spawn(
     use std::time::Duration;
     use tokio::net::UnixStream;
 
+    #[cfg(not(target_os = "macos"))]
     let mut survives = true;
+    #[cfg(target_os = "macos")]
+    let survives = true;
+    #[cfg(target_os = "macos")]
+    let mut spawned = None;
     let outcome = open_with_grace(
         || UnixStream::connect(pipe),
         live_host_probe(record_pid),
@@ -1386,8 +1515,16 @@ pub async fn connect_or_spawn(
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
             let paths = current_host_paths();
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
-                paths.record.as_deref(), paths.log.as_deref())?;
+            #[cfg(target_os = "macos")]
+            {
+                spawned = Some(macos_spawn::spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                    paths.record.as_deref(), paths.log.as_deref())?);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                    paths.record.as_deref(), paths.log.as_deref())?;
+            }
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1404,8 +1541,13 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
-    let (rd, wr) = tokio::io::split(conn);
-    let client = wire_client(rd, wr, deps);
+    let client = wire_unix_host_client(conn, deps);
+    #[cfg(target_os = "macos")]
+    {
+        let peer_pid = client.server_pid();
+        let permission_identity = macos_spawn::identity_for_peer(spawned, peer_pid);
+        *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = peer_pid.zip(permission_identity);
+    }
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
@@ -1419,7 +1561,7 @@ pub async fn connect_or_spawn(
 /// implies a successful `setsid`, so survival is trusted (and the sidecar
 /// re-verifies via `assert_survivable` and refuses to arm if it somehow isn't a
 /// session leader).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
     build_id: Option<&str>,
@@ -1661,7 +1803,7 @@ mod runtime_dir_tests;
 mod discovery_tests;
 
 #[cfg(test)]
-mod conn_tests;
+pub(crate) mod conn_tests;
 #[cfg(test)]
 mod counter_tests;
 #[cfg(test)]
@@ -1891,12 +2033,16 @@ pub struct HostLaunch {
 
 pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
+    #[cfg(target_os = "macos")]
+    let launch = resolve_macos_launch(src, runtime_host_dir().as_deref())?;
+    #[cfg(not(target_os = "macos"))]
     let launch = resolve_launch_from(src, runtime_host_dir().as_deref());
     endpoints::pin_current_paths(launch.generation.as_deref());
     endpoints::pin_current_generation(launch.generation.as_deref());
     Some(launch)
 }
 
+#[cfg(any(not(target_os = "macos"), debug_assertions, test))]
 fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) -> HostLaunch {
     let mut generation = None;
     let path = match base {
@@ -1927,6 +2073,54 @@ fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) 
         e
     }).ok();
     HostLaunch { path, build_id, generation }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_launch(src: std::path::PathBuf, base: Option<&std::path::Path>) -> Option<HostLaunch> {
+    let bundle = src.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        .filter(|p| p.file_name() == Some(std::ffi::OsStr::new("TermFlow Host.app")));
+    match bundle {
+        Some(bundle) => resolve_bundle_launch(&src, bundle, base, bundle_staging::validate_source, bundle_staging::install_host_bundle_into),
+        None => {
+            #[cfg(debug_assertions)]
+            {
+                log::warn!("[HOTSWAP] debug bare host override: bundle validation skipped");
+                Some(resolve_launch_from(src, base))
+            }
+            #[cfg(not(debug_assertions))]
+            { None }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_bundle_launch(
+    src: &std::path::Path,
+    bundle: &std::path::Path,
+    base: Option<&std::path::Path>,
+    validate: impl Fn(&std::path::Path) -> std::io::Result<String>,
+    install: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<bundle_staging::StagedHost>,
+) -> Option<HostLaunch> {
+    // Never fall back to a source which has not itself passed the full check.
+    let build_id = match validate(bundle) {
+        Ok(id) => id,
+        Err(e) => { log::warn!("[HOTSWAP] helper rejected: {e}"); return None; }
+    };
+    if let Some(base) = base {
+        match install(bundle, base) {
+            Ok(staged) => return Some(HostLaunch { path: staged.exe, build_id: Some(staged.build_id), generation: Some(staged.generation) }),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                log::warn!("[HOTSWAP] helper validation failed: {e}");
+                return None;
+            }
+            Err(e) => log::warn!("[HOTSWAP] staging I/O failed ({e}); validating bundled fallback"),
+        }
+    }
+    // The source may have changed during staging; verify again before using it.
+    let current_id = validate(bundle).ok()?;
+    if current_id != build_id { return None; }
+    log::warn!("[HOTSWAP] running bundled helper; host cannot survive payload replacement");
+    Some(HostLaunch { path: src.to_path_buf(), build_id: Some(current_id), generation: None })
 }
 
 fn hex_full(digest: &[u8; 32]) -> String {
@@ -2113,10 +2307,23 @@ pub fn connection_mcp_hold(
     server_pid: Option<u32>,
     spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
 ) -> bool {
+    connection_capability(origin, planned, candidate_pid, server_pid, termflow_pty_protocol::CAP_MCP_HOLD, spawned_record)
+}
+
+/// Resolve a connection capability using the selected record for adoption and the
+/// serving process's freshly advertised record for a spawn.
+pub fn connection_capability(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    candidate_pid: Option<u32>,
+    server_pid: Option<u32>,
+    capability: u32,
+    spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
+) -> bool {
     connected_host_advertises(
         origin,
         adopted_host_advertises(planned, candidate_pid, server_pid),
-        || host_advertises_served_by(spawned_record().as_ref(), server_pid, termflow_pty_protocol::CAP_MCP_HOLD),
+        || host_advertises_served_by(spawned_record().as_ref(), server_pid, capability),
     )
 }
 
@@ -2202,6 +2409,16 @@ pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> Con
 /// user no way to notice a substitution. A debug build's own `cfg!` gate is
 /// the whole mitigation; there is no runtime check that could substitute for
 /// it here without also breaking the dev workflow the override exists for.
+/// Check the release helper without staging, pinning endpoints, or starting a host.
+/// Debug builds remain unresolved at cold boot, since they may use bare overrides.
+#[cfg(target_os = "macos")]
+pub(crate) fn release_helper_unavailable() -> bool {
+    if cfg!(debug_assertions) { return false; }
+    let Some(exe) = resolve_bundled_host_path() else { return true; };
+    let Some(bundle) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else { return true; };
+    bundle_staging::validate_source(bundle).is_err()
+}
+
 pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) {
         "termflow-pty-host.exe"
@@ -2217,6 +2434,15 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
                 return Some(pb);
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    let helper = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| {
+        dir.join("..").join("Helpers").join("TermFlow Host.app").join("Contents/MacOS/termflow-pty-host")
+    }));
+    #[cfg(target_os = "macos")]
+    if !cfg!(debug_assertions) {
+        return select_macos_host(helper, false, Vec::new());
     }
 
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -2252,7 +2478,19 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        select_macos_host(helper, true, candidates)
+    }
+    #[cfg(not(target_os = "macos"))]
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn select_macos_host(helper: Option<std::path::PathBuf>, debug: bool, candidates: Vec<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    helper.filter(|p| p.exists()).or_else(|| {
+        if debug { candidates.into_iter().find(|p| p.exists()) } else { None }
+    })
 }
 
 #[cfg(test)]
@@ -2260,6 +2498,8 @@ mod plan_tests;
 
 #[cfg(test)]
 mod mcp_hold_tests;
+#[cfg(test)]
+mod permission_tests;
 
 #[cfg(test)]
 mod install_tests;
@@ -2281,7 +2521,9 @@ fn resp_req(r: &Response) -> u64 {
         | Response::AttachAck { req, .. }
         | Response::McpHoldAck { req, .. }
         | Response::McpClaimAck { req, .. }
-        | Response::McpReleaseAck { req, .. } => *req,
+        | Response::McpReleaseAck { req, .. }
+        | Response::PermissionStatusReply { req, .. }
+        | Response::PermissionRequested { req, .. } => *req,
     }
 }
 

@@ -28,6 +28,7 @@ import { SplitButton } from '../UI/SplitButton';
 import { connectionStatus } from './connectionStatus';
 import { PeersPanel } from './PeersPanel';
 import { SnippetsPanel } from './SnippetsPanel';
+import { PermissionsSection } from './PermissionsSection';
 import { AboutLegalPanel } from './AboutLegalPanel';
 import { AutomationsPanel } from './Automations/AutomationsPanel';
 import { offloadRetentionCopy } from './offloadRetentionCopy';
@@ -110,6 +111,7 @@ interface SettingsPageProps {
 export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) => {
     const dispatch = useDispatch<AppDispatch>();
     const settings = useSelector((state: RootState) => state.settings);
+    const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
 
     // Local state for font size input to allow typing
     const [localFontSize, setLocalFontSize] = useState<string>(settings.fontSize.toString());
@@ -147,7 +149,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // duplicate union, renderActiveCategory's switch, and (for Automations) the editor's
     // dirty-guard hook-up in requestCategoryChange. Plan 028 §5.1 and plan 029 §7.1 both
     // list them — the two features landed independently and each hit all seven.
-    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'updates' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'permissions' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
     const [snippetsEntry, setSnippetsEntry] = useState(0);
 
@@ -212,10 +214,10 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         notifications: 'Notifications', startup: 'Startup & Integration',
         profiles: 'Shell Profiles', automations: 'Automations',
         shortcuts: 'Shortcuts', connections: 'Connections',
-        peers: 'Peers', snippets: 'Snippets', updates: 'Updates', about: 'About & Legal',
+        peers: 'Peers', snippets: 'Snippets', permissions: 'Permissions', updates: 'Updates', about: 'About & Legal',
     };
-    // Peers/Connections own their own live flow; About & Legal and Updates are
-    // action-only (no saved fields); Startup and Notifications apply live
+    // Peers/Connections own their own live flow; About & Legal, Updates and
+    // Permissions are action-only (no saved fields); Startup and Notifications apply live
     // (persisted on change) — none are dirty-tracked.
     //
     // `isTracked` is an EXCLUSION list, so a new category is dirty-tracked BY DEFAULT. Left out,
@@ -228,7 +230,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Snippets is excluded for the neighbouring reason: it applies live, persisting per mutation
     // with no Save button (plan/029 §7.1), so it too has nothing to snapshot and nothing to revert.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations' && c !== 'snippets';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations' && c !== 'snippets' && c !== 'permissions';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -464,10 +466,14 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
             c === 'profiles' || c === 'automations' || c === 'shortcuts' || c === 'connections' ||
-            c === 'peers' || c === 'snippets' || c === 'updates' || c === 'about';
+            c === 'peers' || c === 'snippets' || c === 'permissions' || c === 'updates' || c === 'about';
+        // A known but unavailable category falls back even for an explicit deep link,
+        // rather than restoring some unrelated saved category or leaving a blank page.
+        const availableCategory = (c: SettingsCategory): SettingsCategory =>
+            c === 'permissions' && !isMac ? 'appearance' : c;
         const pending = consumePendingSettingsCategory();
         if (pending && isCategory(pending)) {
-            requestCategoryChange(pending);
+            requestCategoryChange(availableCategory(pending));
             categoryAttemptedRef.current = true;
             setCategoryHydrated(true);
         } else if (!categoryAttemptedRef.current) {
@@ -479,7 +485,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                 try {
                     const saved = await window.electronAPI?.getConfigValue?.('settingsLastCategory');
                     if (typeof saved === 'string' && isCategory(saved)) {
-                        requestCategoryChange(saved);
+                        requestCategoryChange(availableCategory(saved));
                     }
                 } catch { /* keep the default */ }
                 finally { setCategoryHydrated(true); }
@@ -488,13 +494,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         const handler = (e: Event) => {
             const cat = (e as CustomEvent).detail;
             if (typeof cat === 'string' && isCategory(cat)) {
-                requestCategoryChange(cat);
+                requestCategoryChange(availableCategory(cat));
                 setSnippetsEntry((entry) => entry + 1);
             }
         };
         window.addEventListener('settings:goto-category', handler);
         return () => window.removeEventListener('settings:goto-category', handler);
-    }, [requestCategoryChange]);
+    }, [requestCategoryChange, isMac]);
 
     // Persist the active category on every change, so the restore above has something
     // to read next launch. Gated on `categoryHydrated` — otherwise the very first
@@ -1099,6 +1105,15 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="8" y1="13" x2="16" y2="13" /><line x1="8" y1="17" x2="16" y2="17" />
+                </svg>
+            ),
+        },
+        {
+            id: 'permissions',
+            label: 'Permissions',
+            icon: (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11z" /><path d="m9 12 2 2 4-4" />
                 </svg>
             ),
         },
@@ -2205,6 +2220,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'connections': return renderConnections();
             case 'peers': return <PeersPanel />;
             case 'snippets': return <SnippetsPanel focusSearchSignal={snippetsEntry} />;
+            case 'permissions': return isMac ? <PermissionsSection /> : renderAppearance();
             case 'updates': return renderUpdates();
             case 'about': return <AboutLegalPanel />;
             default: return null;
@@ -2225,7 +2241,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             <aside className="settings-sidebar">
                 <div className="settings-sidebar-title">Settings</div>
                 <nav className="settings-nav">
-                    {categories.map((cat) => (
+                    {categories.filter((cat) => cat.id !== 'permissions' || isMac).map((cat) => (
                         <button
                             key={cat.id}
                             className={`settings-nav-item ${activeCategory === cat.id ? 'active' : ''}`}

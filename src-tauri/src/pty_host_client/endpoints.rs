@@ -146,6 +146,13 @@ fn pin_from_env(cell: &OnceLock<HostPaths>, generation: Option<&str>, env: impl 
 
 /// Pin the paths a launch with `generation` runs on; `naming_enabled` is the
 /// naming gate, which decides whether the generation appears in them at all.
+#[cfg(test)]
+pub(super) fn test_pinned_paths(generation: Option<&str>) -> HostPaths {
+    let cell = OnceLock::new();
+    pin_generation_paths(&cell, generation, true);
+    cell.get().unwrap().clone()
+}
+
 fn pin_generation_paths(cell: &OnceLock<HostPaths>, generation: Option<&str>, naming_enabled: bool) {
     pin_paths(cell, || paths_for(named_generation(generation, naming_enabled)));
 }

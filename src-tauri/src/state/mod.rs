@@ -27,6 +27,7 @@ mod host_port;
 mod host_routing;
 pub(crate) use host_routing::prepare_elevated_process;
 mod host_generation;
+pub(crate) mod permissions;
 mod update_survival;
 mod update_full;
 mod windows;
@@ -48,6 +49,8 @@ pub(crate) mod source_scan;
 pub(crate) mod live_call_census;
 #[cfg(test)]
 pub(crate) mod mcp_hold_census_tests;
+#[cfg(test)]
+mod permissions_census_tests;
 #[cfg(test)]
 mod mcp_launch_census_tests;
 #[cfg(test)]

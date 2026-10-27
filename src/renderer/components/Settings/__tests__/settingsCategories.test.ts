@@ -61,6 +61,12 @@ function siteDeepLinkUnion(): string[] {
     return ids;
 }
 
+function siteRenderCases(): string[] {
+    const m = /const renderActiveCategory = \(\) => \{([\s\S]+?)\n    \};/.exec(SETTINGS);
+    if (!m) throw new Error('site 6 (renderActiveCategory) not found');
+    return [...m[1].matchAll(/case '(\w+)'/g)].map((match) => match[1]);
+}
+
 const sorted = (a: string[]) => [...a].sort();
 
 describe('SettingsPage category enumeration sites (plan/029 §7.1)', () => {
@@ -98,6 +104,20 @@ describe('SettingsPage category enumeration sites (plan/029 §7.1)', () => {
         const m = /const isTracked = \(c: SettingsCategory\): c is TrackedCategory =>([\s\S]+?);/.exec(SETTINGS);
         if (!m) throw new Error('site 3 (isTracked) not found in source');
         expect(m[1]).toContain("c !== 'snippets'");
+    });
+
+    it('renderActiveCategory cases agree with the union', () => {
+        expect(sorted(siteRenderCases())).toEqual(sorted(siteUnion()));
+    });
+
+    it('includes permissions at every site and excludes it from tracking', () => {
+        for (const site of [siteUnion(), siteLabels(), siteCategoriesArray(), siteDeepLinkUnion(), siteRenderCases()]) {
+            expect(site).toContain('permissions');
+        }
+        const tracked = /const isTracked = \(c: SettingsCategory\): c is TrackedCategory =>([\s\S]+?);/.exec(SETTINGS);
+        expect(tracked?.[1]).toContain("c !== 'permissions'");
+        expect(SETTINGS).toMatch(/case 'permissions': return isMac \? <PermissionsSection/);
+        expect(SETTINGS).toContain("cat.id !== 'permissions' || isMac");
     });
 
     it('renderActiveCategory() (site 6) has a case for snippets', () => {

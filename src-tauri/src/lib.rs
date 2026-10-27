@@ -27,6 +27,7 @@ pub mod canvas_endpoints;
 pub mod network_commands;
 pub mod pty_manager;
 pub mod pty_host_client;
+mod helper_identity;
 // Elevated ("Open admin Tab") sidecar (plan 045). GUI-hosted reversed-dial
 // pipe + UAC launch — see the module doc for why the direction is inverted.
 pub mod elevated_host;
@@ -947,6 +948,9 @@ pub fn run() {
         commands::get_terminal_cwds,
         commands::resolve_terminal_path,
         commands::get_os_build_number,
+        commands::macos_permission_status,
+        commands::request_macos_permission,
+        open_commands::open_permission_pane,
         open_commands::open_external,
         open_commands::open_path,
         open_commands::open_in_editor,

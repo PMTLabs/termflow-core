@@ -78,6 +78,7 @@ fn every_primary_client_access_has_a_scope() {
         ("state/terminals.rs", "client_for_channel"), // routed: Primary arm only
         ("state/host_port.rs", "current_client"), // primary-only port; callers merge or route
         ("state/host_generation.rs", "serving_hosts"), // merged with frozen snapshot
+        ("state/permissions.rs", "snapshot"), // non-spawning inventory merged with frozen hosts
     ]);
 }
 
@@ -139,6 +140,7 @@ fn every_frozen_channel_expression_is_classified() {
         ("state/host_routing.rs", "spawn_target"),
         ("state/host_routing.rs", "spawn_target"),
         ("state/mcp_handover.rs", "choose_holder"), // routed: one MCP holder, Primary first
+        ("state/permissions.rs", "snapshot"), // merged inventory, no session creation
         ("state/terminals.rs", "client_for_channel"),
         ("state/terminals.rs", "forget_host_terminal"),
     ]);

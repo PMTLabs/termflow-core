@@ -85,7 +85,18 @@ pub enum Control {
     /// Stop holding. Acked at once; the holder closes within its stop bound.
     /// Same `CAP_MCP_HOLD` gate as [`Control::HoldMcp`].
     ReleaseMcp { req: u64, token: String },
+    /// Send only when CAP_PERMISSIONS was advertised.
+    PermissionStatus { req: u64, token: String },
+    RequestPermission { req: u64, token: String, kind: PermissionKind },
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PermissionKind { Accessibility, ScreenRecording }
+
+/// `Unknown` reports an indeterminate result (for example a child timeout),
+/// distinct from the platform explicitly reporting `Unsupported`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionState { Granted, NotGranted, Unsupported, Unknown }
 
 /// Why the GUI asked the host to hold its MCP port; selects the wording of the
 /// message the holder serves to agents.
@@ -148,6 +159,11 @@ pub enum Response {
     McpClaimAck { req: u64, held: Option<McpHeld> },
     /// Reply to [`Control::ReleaseMcp`]: stop has been ORDERED (not completed).
     McpReleaseAck { req: u64, was_holding: bool },
+    /// `self_responsible` is whether the host is its own TCC responsible process;
+    /// `None` means the answer is unavailable (including non-macOS hosts).
+    PermissionStatusReply { req: u64, accessibility: PermissionState, screen_recording: PermissionState, self_responsible: Option<bool> },
+    /// The responsibility result describes the host, not its one-shot child.
+    PermissionRequested { req: u64, kind: PermissionKind, state: PermissionState, self_responsible: Option<bool> },
 }
 
 /// One surviving session as reported by `ListSessions`.
@@ -530,10 +546,9 @@ mod tests {
             assert_eq!(tags(&Frame::Data(d.clone())), (2, index), "{d:?}");
         }
 
-        // "Last three": the enums have exactly 12 / 10 variants, so index 11 /
-        // 9 is the last and the next index is refused as out of range.
-        assert!(variant_count_error(0, 12).contains("0 <= i < 12"), "{}", variant_count_error(0, 12));
-        assert!(variant_count_error(1, 10).contains("0 <= i < 10"), "{}", variant_count_error(1, 10));
+        // Additive permission variants occupy indices 12–13 and 10–11.
+        assert!(variant_count_error(0, 14).contains("0 <= i < 14"), "{}", variant_count_error(0, 14));
+        assert!(variant_count_error(1, 12).contains("0 <= i < 12"), "{}", variant_count_error(1, 12));
         assert!(variant_count_error(2, 4).contains("0 <= i < 4"), "{}", variant_count_error(2, 4));
         assert!(variant_count_error(3, 0).contains("0 <= i < 3"), "{}", variant_count_error(3, 0));
 

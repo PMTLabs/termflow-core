@@ -427,10 +427,7 @@ pub(crate) async fn connect_only(
     #[cfg(windows)]
     let client = wire_pipe_client(stream, deps);
     #[cfg(unix)]
-    let client = {
-        let (rd, wr) = tokio::io::split(stream);
-        wire_client(rd, wr, deps)
-    };
+    let client = wire_unix_host_client(stream, deps);
     Ok(client)
 }
 
