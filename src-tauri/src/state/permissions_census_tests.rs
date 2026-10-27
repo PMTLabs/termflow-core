@@ -36,6 +36,9 @@ fn check_connection_sites(host_port: &str) -> Result<(), String> {
 }
 
 fn check_unix_evidence(client: &str, host: &str) -> Result<(), String> {
+    // The anchors below span a newline; a Windows checkout has CRLF (as `mutate` already allows for).
+    let (client, host) = (client.replace("\r\n", "\n"), host.replace("\r\n", "\n"));
+    let (client, host) = (client.as_str(), host.as_str());
     let unix_start = client.find("#[cfg(unix)]\npub async fn connect_or_spawn(").ok_or("missing Unix connect")?;
     let unix_end = client[unix_start..].find("/// Spawn the sidecar detached").ok_or("missing Unix connect end")? + unix_start;
     let unix = Src::production(&client[unix_start..unix_end]);
