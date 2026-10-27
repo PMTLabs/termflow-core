@@ -87,6 +87,44 @@ fn unix_host_evidence_census_and_mutations() {
     assert_eq!(wires, ["pty_host_client.rs", "pty_host_client.rs", "terminals.rs"]);
 }
 
+const COMMANDS: &str = include_str!("../commands/permissions.rs");
+const STATE_PERMISSIONS: &str = include_str!("permissions.rs");
+
+/// The single-flight behaviour test drives a test inventory, so this pins the production links it
+/// cannot see: the status command joins the flight, the request command does not, and the
+/// AppState inventory reaches `StatusFlight::resolve`. Each body must be exactly the one expression.
+fn check_status_flight_wiring(commands: &str, state: &str) -> Result<(), String> {
+    fn body_is(src: &Src, signature: &str, expected: &str) -> Result<(), String> {
+        let body = src.try_function(signature)?;
+        let actual = src.norm(&(body.open..body.close + 1));
+        let expected: String = expected.split_whitespace().collect();
+        if actual != expected { return Err(format!("{signature} body is {actual}")); }
+        Ok(())
+    }
+    let src = Src::production(commands);
+    let status = src.norm(&{ let b = src.try_function("pub async fn macos_permission_status(")?; b.open..b.close + 1 });
+    if !status.contains("Ok(execute(&SystemPort(&*state,true),None,epoch).await)") { return Err("status command must join the flight".into()); }
+    let request = src.norm(&{ let b = src.try_function("pub async fn request_macos_permission(")?; b.open..b.close + 1 });
+    if !request.contains("execute_expected(&SystemPort(&*state,false),Some(kind),epoch,expected)") { return Err("request command must bypass the flight".into()); }
+    let start = commands.find("impl Inventory for AppState {").ok_or("missing AppState inventory")?;
+    let end = commands[start..].find("// Only read-only status commands").ok_or("missing AppState inventory end")? + start;
+    let app = Src::production(&commands[start..end]);
+    body_is(&app, "async fn resolve_status(", "{ crate::state::permissions::permission_status_subject(self).await }")?;
+    body_is(&Src::production(state), "pub(crate) async fn permission_status_subject(",
+        "{ let owned = state.clone(); state.permission_status_flight.resolve(move || async move { permission_subject(&owned).await }).await }")
+}
+
+#[test]
+fn status_flight_wiring_census_and_mutations() {
+    check_status_flight_wiring(COMMANDS, STATE_PERMISSIONS).unwrap();
+    for (c, s) in [
+        (mutate(COMMANDS, "execute(&SystemPort(&*state, true), None, epoch)", "execute(&SystemPort(&*state, false), None, epoch)"), STATE_PERMISSIONS.to_owned()),
+        (mutate(COMMANDS, "SystemPort(&*state, false), Some(kind)", "SystemPort(&*state, true), Some(kind)"), STATE_PERMISSIONS.to_owned()),
+        (mutate(COMMANDS, "crate::state::permissions::permission_status_subject(self).await", "crate::state::permissions::permission_subject(self).await"), STATE_PERMISSIONS.to_owned()),
+        (COMMANDS.to_owned(), mutate(STATE_PERMISSIONS, "state.permission_status_flight.resolve(move || async move { permission_subject(&owned).await }).await", "permission_subject(&owned).await")),
+    ] { assert!(check_status_flight_wiring(&c, &s).is_err()); }
+}
+
 #[test]
 fn both_connection_sites_install_the_permissions_bit() {
     check_connection_sites(HOST_PORT).unwrap();
