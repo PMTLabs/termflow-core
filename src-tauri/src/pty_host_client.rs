@@ -289,7 +289,7 @@ pub struct PtyHostClient {
     /// Verified spawn identity for this connection; adopted or unmatched peers
     /// are unknown rather than guessed from a build ID or capability.
     #[cfg(target_os = "macos")]
-    permission_identity: Arc<Mutex<Option<HostPermissionIdentity>>>,
+    permission_identity: Arc<Mutex<Option<(u32, HostPermissionIdentity)>>>,
     #[cfg(test)]
     before_stdout: ReaderHook,
     #[cfg(test)]
@@ -378,7 +378,9 @@ impl PtyHostClient {
     /// `None` means adopted/unverified; callers must not infer a Helper grant.
     #[cfg(target_os = "macos")]
     pub fn host_permission_identity(&self) -> Option<HostPermissionIdentity> {
-        *self.permission_identity.lock().unwrap_or_else(|e| e.into_inner())
+        self.permission_identity.lock().unwrap_or_else(|e| e.into_inner())
+            .filter(|(pid, _)| Some(*pid) == self.server_pid())
+            .map(|(_, identity)| identity)
     }
 
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
@@ -1507,7 +1509,7 @@ pub async fn connect_or_spawn(
     #[cfg(target_os = "macos")]
     {
         client.exe_origin.set_server_pid(peer_pid);
-        *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = permission_identity;
+        *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = peer_pid.zip(permission_identity);
     }
     client
         .survives_hotswap
@@ -2370,6 +2372,16 @@ pub fn plan_connection(record: Option<termflow_pty_protocol::HostRecord>) -> Con
 /// user no way to notice a substitution. A debug build's own `cfg!` gate is
 /// the whole mitigation; there is no runtime check that could substitute for
 /// it here without also breaking the dev workflow the override exists for.
+/// Check the release helper without staging, pinning endpoints, or starting a host.
+/// Debug builds remain unresolved at cold boot, since they may use bare overrides.
+#[cfg(target_os = "macos")]
+pub(crate) fn release_helper_unavailable() -> bool {
+    if cfg!(debug_assertions) { return false; }
+    let Some(exe) = resolve_bundled_host_path() else { return true; };
+    let Some(bundle) = exe.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) else { return true; };
+    bundle_staging::validate_source(bundle).is_err()
+}
+
 pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
     let name = if cfg!(windows) {
         "termflow-pty-host.exe"

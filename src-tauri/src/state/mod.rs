@@ -27,6 +27,7 @@ mod host_port;
 mod host_routing;
 pub(crate) use host_routing::prepare_elevated_process;
 mod host_generation;
+pub(crate) mod permissions;
 mod update_survival;
 mod update_full;
 mod windows;

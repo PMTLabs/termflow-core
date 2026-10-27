@@ -38,10 +38,13 @@ fn permission_identity_is_shared_per_connection_and_unknown_by_default() {
     let (client, _rx) = client();
     let clone = client.clone();
     assert_eq!(client.host_permission_identity(), None);
-    *client.permission_identity.lock().unwrap() = Some(HostPermissionIdentity::App);
+    client.set_peer_pid(42);
+    *client.permission_identity.lock().unwrap() = Some((42, HostPermissionIdentity::App));
     assert_eq!(clone.host_permission_identity(), Some(HostPermissionIdentity::App));
-    *client.permission_identity.lock().unwrap() = Some(HostPermissionIdentity::Helper);
+    *client.permission_identity.lock().unwrap() = Some((42, HostPermissionIdentity::Helper));
     assert_eq!(clone.host_permission_identity(), Some(HostPermissionIdentity::Helper));
+    client.set_peer_pid(43);
+    assert_eq!(clone.host_permission_identity(), None, "spawn evidence is invalid for a different peer PID");
 }
 
 /// Ack every `Disarm` / `Shutdown` after ignoring the first `ignore_first` of
