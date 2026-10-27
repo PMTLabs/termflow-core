@@ -67,3 +67,29 @@ async fn cancelled_leader_does_not_strand_joiners() {
     release.add_permits(1);
     assert_eq!(result(joined).await, 2);
 }
+
+// The queued wave belongs to the worker, not to the caller whose resolver it runs (review r4, R4-02).
+#[tokio::test]
+async fn cancelled_queued_owner_and_promoted_caller_do_not_strand_peers() {
+    let flight = StatusFlight::default();
+    let count = Arc::new(AtomicUsize::new(0));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let release = Arc::new(Semaphore::new(0));
+    let make = || call(flight.clone(), count.clone(), tx.clone(), release.clone());
+    let leader = make();
+    assert_eq!(start(&mut rx).await, 1);
+    let owner = make();
+    settle().await;
+    let cancelled_after_promotion = make();
+    let survivor = make();
+    settle().await;
+    owner.abort();
+    release.add_permits(1);
+    assert_eq!(start(&mut rx).await, 2);
+    assert_eq!(result(leader).await, 1);
+    cancelled_after_promotion.abort();
+    settle().await;
+    release.add_permits(1);
+    assert_eq!(result(survivor).await, 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+}
