@@ -43,7 +43,7 @@ describe('PermissionsSection', () => {
         expect(container.textContent).toContain('TermFlow Host');
         expect(container.textContent).toContain('Not granted');
         expect(container.textContent).toContain('Restart the program that needs this permission');
-        expect(container.textContent).toContain('If you previously allowed TermFlow');
+        expect(container.textContent).toContain("Programs in terminals now use the 'TermFlow Host' permission. If you previously allowed TermFlow, allow TermFlow Host once.");
         await click(0); await click(1);
         expect(api.requestMacosPermission.mock.calls).toEqual([['accessibility'], ['screenRecording']]);
         expect(api.openMacosPermissionPane.mock.calls).toEqual([['accessibility'], ['screenRecording']]);

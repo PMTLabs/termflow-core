@@ -113,7 +113,7 @@ export function PermissionsSection() {
             </button>
             <span> {labels[unsupported ? 'unsupported' : view?.[kind] ?? 'unknown']}</span>
             <p>Restart the program that needs this permission (for example InkSpoke). Terminals can stay open.</p>
-            {view?.target === 'host' && view[kind] === 'notGranted' && <p>Since TermFlow x.y, programs in terminals use the 'TermFlow Host' permission. If you previously allowed TermFlow, allow TermFlow Host once.</p>}
+            {view?.target === 'host' && view[kind] === 'notGranted' && <p>Programs in terminals now use the 'TermFlow Host' permission. If you previously allowed TermFlow, allow TermFlow Host once.</p>}
         </div>)}
         {paneError && <p role="alert">{paneError}</p>}
     </section>;
