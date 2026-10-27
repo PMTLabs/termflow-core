@@ -141,6 +141,56 @@ pub(super) async fn assert_different_dr(first: IdentityVerdict, second: Identity
     assert_eq!(result.other_hosts[0].reason, OtherHostReason::DifferentIdentity);
 }
 
+#[tokio::test]
+async fn every_serving_host_resolves_effective_responsibility() {
+    let current = HostChannel::Primary;
+    let frozen = HostChannel::Frozen(FrozenId(1));
+    for selected_helper in [true, false] {
+        for responsible in [Some(true), Some(false), None] {
+            for fallback in [Some(SpawnIdentity::Helper), Some(SpawnIdentity::App), None] {
+                let mut other = host(frozen, 2, true);
+                other.spawn_identity = fallback;
+                let mut fake = fixture(Some(current), vec![host(current, 1, true), other]);
+                fake.replies.insert(1, Ok(Some(selected_helper)));
+                fake.replies.insert(2, Ok(responsible));
+                let effective = identity(responsible, fallback);
+                let expected = match (selected_helper, effective) {
+                    (_, None) => Some(OtherHostReason::Unverified),
+                    (true, Some(SpawnIdentity::App)) => Some(OtherHostReason::AppAttributed),
+                    (false, Some(SpawnIdentity::Helper)) => Some(OtherHostReason::DifferentIdentity),
+                    _ => None,
+                };
+                let result = resolve(&fake, &verifier()).await;
+                assert_eq!(result.other_hosts.first().map(|h| h.reason), expected, "{selected_helper} {responsible:?} {fallback:?}");
+                // Status failure cannot be rescued by remembered spawn identity.
+                fake.replies.insert(2, Err(()));
+                assert_eq!(resolve(&fake, &verifier()).await.other_hosts[0].reason, OtherHostReason::Unverified);
+            }
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn stalled_other_status_is_bounded_and_unverified() {
+    struct Stalled(Fake);
+    impl SubjectSource for Stalled {
+        type Handle = u32;
+        fn snapshot(&self) -> Snapshot<u32> { self.0.snapshot() }
+        async fn status(&self, handle: &u32) -> Result<(Option<bool>, Option<PermissionStatus>), ()> {
+            if *handle == 2 { std::future::pending().await } else { self.0.status(handle).await }
+        }
+        fn still_selected(&self, _: &Host<u32>) -> bool { true }
+    }
+    let current = HostChannel::Primary;
+    let frozen = HostChannel::Frozen(FrozenId(1));
+    let fake = Stalled(fixture(Some(current), vec![host(current, 1, true), host(frozen, 2, true)]));
+    let start = tokio::time::Instant::now();
+    let result = resolve(&fake, &verifier()).await;
+    assert_eq!(result.target, PermissionTarget::Host);
+    assert_eq!(result.other_hosts[0].reason, OtherHostReason::Unverified);
+    assert_eq!(start.elapsed(), std::time::Duration::from_secs(3));
+}
+
 #[test]
 fn serialization_contract_and_production_adapter_are_non_spawning() {
     let view = PermissionSubject { target: PermissionTarget::HostLegacy, subject: SubjectIdentity { pid: Some(1), generation: None, bundle_id: None }, other_hosts: vec![OtherHost { pid: 2, generation: None, reason: OtherHostReason::DifferentIdentity }], app_sessions: true };

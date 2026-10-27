@@ -138,7 +138,7 @@ export interface PermissionView {
   subject: { pid?: number; generation?: string; bundleId?: string };
   accessibility: PermState;
   screenRecording: PermState;
-  otherHosts: { pid: number; generation?: string; reason: 'legacy' | 'differentIdentity' | 'unverified' }[];
+  otherHosts: { pid: number; generation?: string; reason: 'legacy' | 'differentIdentity' | 'appAttributed' | 'unverified' }[];
   appSessions: boolean;
   error?: string | null;
 }

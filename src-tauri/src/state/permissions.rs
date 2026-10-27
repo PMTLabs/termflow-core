@@ -37,7 +37,7 @@ pub(crate) struct SubjectIdentity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum OtherHostReason { Legacy, DifferentIdentity, Unverified }
+pub(crate) enum OtherHostReason { Legacy, DifferentIdentity, AppAttributed, Unverified }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -89,6 +89,7 @@ trait SubjectSource {
     fn snapshot(&self) -> Snapshot<Self::Handle>;
     async fn status(&self, handle: &Self::Handle) -> Result<(Option<bool>, Option<PermissionStatus>), ()>;
     fn still_selected(&self, host: &Host<Self::Handle>) -> bool;
+    fn connected(&self, _host: &Host<Self::Handle>) -> bool { true }
 }
 
 fn identity(responsible: Option<bool>, fallback: Option<SpawnIdentity>) -> Option<SpawnIdentity> {
@@ -110,6 +111,13 @@ async fn resolve<S: SubjectSource>(source: &S, verifier: &impl HostIdentityVerif
 }
 
 async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Handle>, verifier: &impl HostIdentityVerifier) -> (PermissionSubject, Option<S::Handle>, Option<PermissionStatus>, bool) {
+    // Query every capable serving connection in this snapshot concurrently;
+    // a stalled old host must not multiply the snapshot's timeout.
+    let replies = futures::future::join_all(snapshot.hosts.iter().map(|host| async {
+        if !host.capable || !source.connected(host) { return Err(()); }
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(3), source.status(&host.handle)).await.unwrap_or(Err(()));
+        if source.connected(host) { reply } else { Err(()) }
+    })).await;
     let selected = snapshot.selected.and_then(|c| snapshot.hosts.iter().find(|h| h.channel == c));
     let mut result = PermissionSubject { target: PermissionTarget::Unresolved, subject: SubjectIdentity::default(), other_hosts: Vec::new(), app_sessions: snapshot.app_sessions };
     let mut covered = None;
@@ -127,7 +135,8 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
             covered = Some(host.channel);
         } else if other_reason(host, verifier).is_none() {
             // A failed or disconnected request never falls back to the app.
-            if let Ok((responsible, evidence)) = source.status(&host.handle).await {
+            let index = snapshot.hosts.iter().position(|h| h.channel == host.channel).unwrap();
+            if let Ok((responsible, evidence)) = replies[index].clone() {
                 if source.still_selected(host) {
                     match identity(responsible, host.spawn_identity) {
                         Some(SpawnIdentity::Helper) => {
@@ -158,14 +167,23 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
     let selected_dr = selected.and_then(|h| h.pid).and_then(|pid| match verifier.verify(pid) {
         IdentityVerdict::Matches(dr) => Some(dr), _ => None,
     });
-    for host in &snapshot.hosts {
+    for (host, reply) in snapshot.hosts.iter().zip(&replies) {
         if Some(host.channel) == covered { continue; }
+        let effective = reply.as_ref().ok().and_then(|(responsible, _)| identity(*responsible, host.spawn_identity));
         let reason = other_reason(host, verifier).or_else(|| {
-            let different_dr = host.pid.is_some_and(|pid| match verifier.verify(pid) {
-                IdentityVerdict::Matches(dr) => selected_dr.as_ref().is_some_and(|selected| *selected != dr),
-                _ => false,
-            });
-            (different_dr || (result.target == PermissionTarget::App && host.capable)).then_some(OtherHostReason::DifferentIdentity)
+            match effective {
+                None => Some(OtherHostReason::Unverified),
+                Some(SpawnIdentity::App) => {
+                    (result.target == PermissionTarget::Host).then_some(OtherHostReason::AppAttributed)
+                }
+                Some(SpawnIdentity::Helper) => {
+                    let different_dr = host.pid.is_some_and(|pid| match verifier.verify(pid) {
+                        IdentityVerdict::Matches(dr) => selected_dr.as_ref().is_some_and(|selected| *selected != dr),
+                        _ => false,
+                    });
+                    (different_dr || result.target == PermissionTarget::App).then_some(OtherHostReason::DifferentIdentity)
+                }
+            }
         });
         if let (Some(pid), Some(reason)) = (host.pid, reason) {
             result.other_hosts.push(OtherHost { pid, generation: host.generation.clone(), reason });
@@ -227,6 +245,9 @@ impl<R: Runtime> SubjectSource for AppState<R> {
             Ok(PermissionOutcome::Reply(status)) => Ok((status.self_responsible, Some(status))),
             _ => Err(()),
         }
+    }
+    fn connected(&self, host: &Host<PtyHostClient>) -> bool {
+        host.handle.is_alive() && host.handle.server_pid() == host.pid
     }
     fn still_selected(&self, host: &Host<PtyHostClient>) -> bool {
         spawn_target(self).is_some_and(|(channel, client)| {

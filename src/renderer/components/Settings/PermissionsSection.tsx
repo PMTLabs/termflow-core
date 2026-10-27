@@ -117,7 +117,7 @@ export function PermissionsSection() {
         {target && <p>Permission target: {target}</p>}
         {view?.target === 'unresolved' && <p>Open a terminal to determine which program needs permission. No permission request can be sent yet.</p>}
         {view?.target === 'hostLegacy' && <p>New terminals will use TermFlow Host after the next app update; terminals already open keep their current identity until closed.</p>}
-        {view && (view.otherHosts.length > 0 || view.appSessions) && <p role="note">Other terminal identities are not covered by this permission: {view.otherHosts.map(host => `PID ${host.pid}${host.generation ? ` (${host.generation})` : ''} — ${host.reason}`).join(', ')}{view.appSessions ? `${view.otherHosts.length ? ', ' : ''}TermFlow app sessions` : ''}.</p>}
+        {view && (view.otherHosts.length > 0 || view.appSessions) && <p role="note">Other terminal identities are not covered by this permission: {view.otherHosts.map(host => `PID ${host.pid}${host.generation ? ` (${host.generation})` : ''} — ${host.reason === 'appAttributed' ? "uses TermFlow's permission" : host.reason}`).join(', ')}{view.appSessions ? `${view.otherHosts.length ? ', ' : ''}TermFlow app sessions` : ''}.</p>}
         {(['accessibility', 'screenRecording'] as const).map(kind => <div key={kind}>
             <button type="button" disabled={unsupported || !view || view.target === 'unresolved' || busy !== null} onClick={() => void request(kind)}>
                 Allow {kind === 'accessibility' ? 'Accessibility' : 'Screen Recording'}

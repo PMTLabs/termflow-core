@@ -57,6 +57,11 @@ describe('PermissionsSection', () => {
         api.macosPermissionStatus.mockResolvedValue(base({ otherHosts: [{ pid: 42, generation: 'old', reason: 'legacy' }], appSessions: true }));
         await render(); expect(container.textContent).toContain('PID 42 (old)'); expect(container.textContent).toContain('app sessions');
     });
+    it('labels app-attributed other hosts', async () => {
+        api.macosPermissionStatus.mockResolvedValue(base({ otherHosts: [{ pid: 43, reason: 'appAttributed' }] }));
+        await render();
+        expect(container.textContent).toContain("PID 43 — uses TermFlow's permission");
+    });
     it('disables both buttons during a request', async () => {
         const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await render(); await click(0);
         expect(button(0).disabled && button(1).disabled).toBe(true);
