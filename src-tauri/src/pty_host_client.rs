@@ -2394,7 +2394,9 @@ fn resp_req(r: &Response) -> u64 {
         | Response::AttachAck { req, .. }
         | Response::McpHoldAck { req, .. }
         | Response::McpClaimAck { req, .. }
-        | Response::McpReleaseAck { req, .. } => *req,
+        | Response::McpReleaseAck { req, .. }
+        | Response::PermissionStatusReply { req, .. }
+        | Response::PermissionRequested { req, .. } => *req,
     }
 }
 

@@ -8,6 +8,7 @@ mod detach;
 mod logging;
 mod manager;
 mod mcp_hold;
+mod permissions;
 mod ring;
 mod session;
 mod transport;

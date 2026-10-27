@@ -387,6 +387,8 @@ fn control_label(c: &termflow_pty_protocol::Control) -> &'static str {
         HoldMcp { .. } => "HoldMcp",
         ClaimMcp { .. } => "ClaimMcp",
         ReleaseMcp { .. } => "ReleaseMcp",
+        PermissionStatus { .. } => "PermissionStatus",
+        RequestPermission { .. } => "RequestPermission",
     }
 }
 
@@ -422,6 +424,7 @@ async fn run_connection<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    mgr.begin_connection();
     let (mut rd, mut wr) = tokio::io::split(stream);
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
 
@@ -535,12 +538,16 @@ where
         }
     };
 
+    mgr.end_connection();
     let _ = stop_tx.send(());
-    let (events_rx, resp_rx) = writer.await.unwrap_or_else(|_| {
+    let (events_rx, mut resp_rx) = writer.await.unwrap_or_else(|_| {
         let (_e_tx, e_rx) = tokio::sync::mpsc::channel(CHAN_CAP);
         let (_r_tx, r_rx) = tokio::sync::mpsc::channel(CHAN_CAP);
         (e_rx, r_rx)
     });
+    // A worker can enqueue immediately before end_connection. Drain after the
+    // writer stops and before any replacement connection starts.
+    while resp_rx.try_recv().is_ok() {}
     (events_rx, resp_rx, result)
 }
 

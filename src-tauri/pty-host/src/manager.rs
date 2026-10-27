@@ -93,6 +93,7 @@ pub struct SessionManager {
     shutdown_requested: bool,
     events: Sender<Data>,
     responses: Sender<Response>,
+    permissions: crate::permissions::Permissions,
     /// Teardown's kill-wait budget. A field rather than a bare constant so a
     /// test can assert the *waiting* without also depending on how fast the
     /// host machine's `taskkill` happens to be — see `TEARDOWN_KILL_GRACE`,
@@ -153,6 +154,7 @@ impl SessionManager {
             survivable,
             shutdown_requested: false,
             events,
+            permissions: crate::permissions::Permissions::new(responses.clone()),
             responses,
             teardown_grace: TEARDOWN_KILL_GRACE,
             mcp: McpHold::new(spawn_holder),
@@ -226,8 +228,21 @@ impl SessionManager {
             .collect()
     }
 
+    #[cfg(test)]
+    pub fn set_permission_backend(&mut self, backend: Arc<dyn crate::permissions::Backend>) {
+        self.permissions.set_backend(backend);
+    }
+    pub fn begin_connection(&self) { self.permissions.begin(); }
+    pub fn end_connection(&self) { self.permissions.end(); }
+
     pub fn handle_control(&mut self, ctrl: Control) {
         match ctrl {
+            Control::PermissionStatus { req, token } => {
+                if self.expected_token.as_deref() == Some(token.as_str()) { self.permissions.status(req); }
+            }
+            Control::RequestPermission { req, token, kind } => {
+                if self.expected_token.as_deref() == Some(token.as_str()) { self.permissions.request(req, kind); }
+            }
             Control::Spawn { req, tab_id, spec } => {
                 // Spawn only arrives while a GUI is connected → attach from
                 // byte 0 so early startup output is streamed, not lost.
