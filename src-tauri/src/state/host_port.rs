@@ -40,25 +40,27 @@ struct HostFlags {
     /// record-less host is a "no": an MCP frame it cannot decode drops its connection, and
     /// nothing is lost by not sending one.
     mcp_hold: bool,
+    permissions: bool,
 }
 
 fn host_flags(plan: &ConnectPlan, record_less_endpoint: &str) -> Result<HostFlags, String> {
     match plan {
         ConnectPlan::LegacyOrNone => {
             log::info!("[HOTSWAP] no host discovery record — legacy/none; using {record_less_endpoint}");
-            Ok(HostFlags { endpoint: record_less_endpoint.to_owned(), attach_acks: false, shutdown_control: true, inherit_cursor: false, mcp_hold: false })
+            Ok(HostFlags { endpoint: record_less_endpoint.to_owned(), attach_acks: false, shutdown_control: true, inherit_cursor: false, mcp_hold: false, permissions: false })
         }
         ConnectPlan::Bootstrap { endpoint, version, instance_id, host_caps, lifecycle: _ } => {
             let attach_acks = host_caps & termflow_pty_protocol::CAP_ATTACH_ACK != 0;
             let shutdown_control = host_caps & termflow_pty_protocol::CAP_SHUTDOWN_CONTROL != 0;
             let inherit_cursor = host_caps & termflow_pty_protocol::CAP_INHERIT_CURSOR != 0;
             let mcp_hold = host_caps & termflow_pty_protocol::CAP_MCP_HOLD != 0;
+            let permissions = host_caps & termflow_pty_protocol::CAP_PERMISSIONS != 0;
             log::info!(
                 "[HOTSWAP] discovered host instance={instance_id:x} proto=v{version} \
                  caps={host_caps:#x} endpoint={endpoint} (attach_acks={attach_acks}, \
-                 shutdown_control={shutdown_control}, inherit_cursor={inherit_cursor}, mcp_hold={mcp_hold})"
+                 shutdown_control={shutdown_control}, inherit_cursor={inherit_cursor}, mcp_hold={mcp_hold}, permissions={permissions})"
             );
-            Ok(HostFlags { endpoint: endpoint.clone(), attach_acks, shutdown_control, inherit_cursor, mcp_hold })
+            Ok(HostFlags { endpoint: endpoint.clone(), attach_acks, shutdown_control, inherit_cursor, mcp_hold, permissions })
         }
         ConnectPlan::Incompatible { instance_id } => {
             // C3: NEVER kill or shadow sessions we can't speak to. Refuse the
@@ -219,6 +221,7 @@ impl<R: Runtime> AppState<R> {
         ));
         // The same rule for the MCP-hold bit, through the one installer both connection sites use.
         client.set_mcp_hold(connection_mcp_hold(origin, flags.mcp_hold, candidate.pid, client.server_pid(), || crate::pty_host_client::read_advertised_record()));
+        client.set_permissions(crate::pty_host_client::connection_capability(origin, flags.permissions, candidate.pid, client.server_pid(), termflow_pty_protocol::CAP_PERMISSIONS, || crate::pty_host_client::read_advertised_record()));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })
@@ -248,6 +251,7 @@ impl<R: Runtime> AppState<R> {
             client.server_pid(),
         ));
         client.set_mcp_hold(connection_mcp_hold(HostConnectionOrigin::Adopted, flags.mcp_hold, candidate.pid, client.server_pid(), || None));
+        client.set_permissions(crate::pty_host_client::connection_capability(HostConnectionOrigin::Adopted, flags.permissions, candidate.pid, client.server_pid(), termflow_pty_protocol::CAP_PERMISSIONS, || None));
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
         let build_id = candidate.record.as_ref().and_then(|r| r.build_id.clone());
         client.set_advertised_build_id(build_id.clone());
@@ -442,6 +446,37 @@ mod flag_tests {
         assert!(!host_flags(&without, "fallback").unwrap().mcp_hold, "a record without the bit");
         let only = plan_connection(Some(record(CAP_MCP_HOLD)));
         assert!(host_flags(&only, "fallback").unwrap().mcp_hold, "independent of every other capability");
+    }
+
+    #[test]
+    fn permissions_connection_table() {
+        use crate::pty_host_client::{connection_capability, HostConnectionOrigin};
+        use termflow_pty_protocol::CAP_PERMISSIONS;
+        for frozen in [false, true] {
+            for advertised in [false, true] {
+                let caps = if advertised { CAP_PERMISSIONS } else { 0 };
+                for case in ["fresh", "adopted", "stale", "missing", "mismatch"] {
+                    // Frozen connections only adopt; model a fresh record as the selected
+                    // frozen host, never as a spawn at that site.
+                    let origin = if !frozen && matches!(case, "fresh" | "stale") { HostConnectionOrigin::SpawnedHere } else { HostConnectionOrigin::Adopted };
+                    let selected = if case == "missing" { None } else { Some(record(if case == "stale" { CAP_PERMISSIONS } else { caps })) };
+                    let flags = host_flags(&plan_connection(selected), "fallback").unwrap();
+                    // A stale adopted record names a different server. A fresh spawn instead
+                    // must ignore its stale pre-launch record and re-read the new one.
+                    let server = if case == "mismatch" || (case == "stale" && frozen) { Some(12) } else { Some(11) };
+                    let installed = connection_capability(origin, flags.permissions, Some(11), server, CAP_PERMISSIONS, || Some(record(caps)));
+                    let expected = match case {
+                        "missing" | "mismatch" => false,
+                        "stale" if frozen => false,
+                        _ => advertised,
+                    };
+                    assert_eq!(installed, expected, "frozen={frozen} advertised={advertised} case={case}");
+                }
+            }
+        }
+        // A replacement must not inherit the pre-spawn stale positive record.
+        assert!(!connection_capability(HostConnectionOrigin::SpawnedHere, true, Some(11), Some(11), CAP_PERMISSIONS, || Some(record(0))));
+        assert!(!connection_capability(HostConnectionOrigin::SpawnedHere, true, Some(11), Some(11), CAP_PERMISSIONS, || None));
     }
 
     /// `LegacyOrNone` defaults `shutdown_control` to TRUE (announcing costs one dropped frame); an

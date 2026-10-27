@@ -127,6 +127,27 @@ pub enum McpClaimOutcome {
     Held(Option<termflow_pty_protocol::McpHeld>),
 }
 
+/// Permission replies retain the host's responsibility evidence for adopted hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionOutcome<T> {
+    NotCapable,
+    Reply(T),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionStatus {
+    pub accessibility: termflow_pty_protocol::PermissionState,
+    pub screen_recording: termflow_pty_protocol::PermissionState,
+    pub self_responsible: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+    pub kind: termflow_pty_protocol::PermissionKind,
+    pub state: termflow_pty_protocol::PermissionState,
+    pub self_responsible: Option<bool>,
+}
+
 /// Map a pty-host session key to the process id our maps are keyed by.
 ///
 /// Returns `None` for an unknown session, and every caller DROPS that frame.
@@ -244,6 +265,8 @@ pub struct PtyHostClient {
     /// `HoldMcp`/`ReleaseMcp` may be sent to it. A legacy host fails to decode those
     /// variants and drops the connection, so the senders refuse without this bit.
     mcp_hold: Arc<std::sync::atomic::AtomicBool>,
+    /// Permission controls are unsafe to send unless this connection advertised them.
+    permissions: Arc<std::sync::atomic::AtomicBool>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -390,6 +413,14 @@ impl PtyHostClient {
     /// Whether this connection may be sent `HoldMcp`/`ReleaseMcp` (see field doc).
     pub fn mcp_hold(&self) -> bool {
         self.mcp_hold.load(Ordering::Acquire)
+    }
+
+    pub fn set_permissions(&self, v: bool) {
+        self.permissions.store(v, Ordering::Release);
+    }
+
+    pub fn permissions(&self) -> bool {
+        self.permissions.load(Ordering::Acquire)
     }
 
     /// The process id serving this connection, asked of the live connection (Windows). `None`
@@ -679,6 +710,27 @@ impl PtyHostClient {
         match self.request_within(MCP_REQUEST_TIMEOUT, move |req| Control::ReleaseMcp { req, token }).await {
             Some(Response::McpReleaseAck { was_holding, .. }) => Ok(McpReleaseOutcome::Released { was_holding }),
             _ => Err("pty-host: no McpReleaseAck".to_string()),
+        }
+    }
+
+    /// Query the host without ever sending a new control to a legacy connection.
+    pub async fn permission_status(&self) -> Result<PermissionOutcome<PermissionStatus>, String> {
+        if !self.permissions() { return Ok(PermissionOutcome::NotCapable); }
+        let token = self.lifecycle_token.to_string();
+        match self.request_within(std::time::Duration::from_secs(35), move |req| Control::PermissionStatus { req, token }).await {
+            Some(Response::PermissionStatusReply { accessibility, screen_recording, self_responsible, .. }) =>
+                Ok(PermissionOutcome::Reply(PermissionStatus { accessibility, screen_recording, self_responsible })),
+            _ => Err("pty-host: no PermissionStatusReply".into()),
+        }
+    }
+
+    pub async fn request_permission(&self, kind: termflow_pty_protocol::PermissionKind) -> Result<PermissionOutcome<PermissionRequest>, String> {
+        if !self.permissions() { return Ok(PermissionOutcome::NotCapable); }
+        let token = self.lifecycle_token.to_string();
+        match self.request_within(std::time::Duration::from_secs(35), move |req| Control::RequestPermission { req, token, kind }).await {
+            Some(Response::PermissionRequested { kind: reply_kind, state, self_responsible, .. }) if reply_kind == kind =>
+                Ok(PermissionOutcome::Reply(PermissionRequest { kind: reply_kind, state, self_responsible })),
+            _ => Err("pty-host: no matching PermissionRequested".into()),
         }
     }
 
@@ -1033,6 +1085,7 @@ where
         shutdown_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
@@ -2205,10 +2258,23 @@ pub fn connection_mcp_hold(
     server_pid: Option<u32>,
     spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
 ) -> bool {
+    connection_capability(origin, planned, candidate_pid, server_pid, termflow_pty_protocol::CAP_MCP_HOLD, spawned_record)
+}
+
+/// Resolve a connection capability using the selected record for adoption and the
+/// serving process's freshly advertised record for a spawn.
+pub fn connection_capability(
+    origin: HostConnectionOrigin,
+    planned: bool,
+    candidate_pid: Option<u32>,
+    server_pid: Option<u32>,
+    capability: u32,
+    spawned_record: impl FnOnce() -> Option<termflow_pty_protocol::HostRecord>,
+) -> bool {
     connected_host_advertises(
         origin,
         adopted_host_advertises(planned, candidate_pid, server_pid),
-        || host_advertises_served_by(spawned_record().as_ref(), server_pid, termflow_pty_protocol::CAP_MCP_HOLD),
+        || host_advertises_served_by(spawned_record().as_ref(), server_pid, capability),
     )
 }
 
@@ -2373,6 +2439,8 @@ mod plan_tests;
 
 #[cfg(test)]
 mod mcp_hold_tests;
+#[cfg(test)]
+mod permission_tests;
 
 #[cfg(test)]
 mod install_tests;
