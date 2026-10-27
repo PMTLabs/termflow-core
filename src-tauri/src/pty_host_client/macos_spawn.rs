@@ -272,6 +272,17 @@ pub(super) fn identity_for_peer(
 ) -> Option<HostPermissionIdentity> {
     spawned.filter(|s| Some(s.pid) == peer).map(|s| s.identity)
 }
+pub(super) fn peer_token(stream: &tokio::net::UnixStream) -> Option<crate::state::permissions::host_identity::AuditToken> {
+    use crate::state::permissions::host_identity::AuditToken;
+    // Darwin SOL_LOCAL / LOCAL_PEERTOKEN. Never substitute a PID lookup.
+    // A same-user process retaining a forked copy of the descriptor is outside
+    // this boundary: that user can already modify the staged bundle/app data.
+    let mut token = AuditToken([0; 8]);
+    let mut len = std::mem::size_of_val(&token) as libc::socklen_t;
+    let rc = unsafe { libc::getsockopt(stream.as_raw_fd(), 0, 6, token.0.as_mut_ptr().cast(), &mut len) };
+    (rc == 0 && len as usize == std::mem::size_of_val(&token) && token.pid() > 0).then_some(token)
+}
+
 pub(super) fn peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     // Darwin <sys/un.h>: SOL_LOCAL=0, LOCAL_PEERPID=2.
     let mut pid: libc::pid_t = 0;

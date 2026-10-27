@@ -167,6 +167,11 @@ pub(crate) fn route_inbound(
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn unix_peer_token(stream: &tokio::net::UnixStream) -> Option<crate::state::permissions::host_identity::AuditToken> {
+    macos_spawn::peer_token(stream)
+}
+
+#[cfg(target_os = "macos")]
 pub(crate) fn unix_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
     macos_spawn::peer_pid(stream)
 }
@@ -273,6 +278,7 @@ pub struct PtyHostClient {
     /// Permission controls are unsafe to send unless this connection advertised them.
     permissions: Arc<std::sync::atomic::AtomicBool>,
     identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
+    peer_token: Arc<Mutex<Option<crate::state::permissions::host_identity::AuditToken>>>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -439,14 +445,18 @@ impl PtyHostClient {
 
     /// Set the peer PID for inbound connections where GUI acts as server.
     pub fn set_peer_pid(&self, pid: u32) {
-        if self.server_pid() != Some(pid) { self.identity_cache.clear(); }
+        if self.server_pid() != Some(pid) {
+            self.identity_cache.clear();
+            *self.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
         self.exe_origin.set_server_pid(Some(pid));
     }
 
     pub(crate) fn host_identity_verdict(&self, pid: u32) -> crate::state::permissions::IdentityVerdict {
-        use crate::state::permissions::{host_identity::verify_pid, IdentityVerdict};
+        use crate::state::permissions::{host_identity::verify_token, IdentityVerdict};
         if !self.is_alive() || self.server_pid() != Some(pid) { return IdentityVerdict::Unverifiable; }
-        let verdict = self.identity_cache.verify(pid, verify_pid);
+        let token = *self.peer_token.lock().unwrap_or_else(|e| e.into_inner());
+        let verdict = self.identity_cache.verify(token.filter(|t| t.pid() == pid), verify_token);
         if self.is_alive() && self.server_pid() == Some(pid) { verdict } else { IdentityVerdict::Unverifiable }
     }
 
@@ -1106,6 +1116,7 @@ where
         mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         identity_cache,
+        peer_token: Arc::default(),
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
@@ -1518,12 +1529,15 @@ pub async fn connect_or_spawn(
     #[cfg(target_os = "macos")]
     let peer_pid = macos_spawn::peer_pid(&conn);
     #[cfg(target_os = "macos")]
+    let peer_token = macos_spawn::peer_token(&conn);
+    #[cfg(target_os = "macos")]
     let permission_identity = macos_spawn::identity_for_peer(spawned, peer_pid);
     let (rd, wr) = tokio::io::split(conn);
     let client = wire_client(rd, wr, deps);
     #[cfg(target_os = "macos")]
     {
         client.exe_origin.set_server_pid(peer_pid);
+        *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
         *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = peer_pid.zip(permission_identity);
     }
     client
