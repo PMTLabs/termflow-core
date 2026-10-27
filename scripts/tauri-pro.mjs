@@ -4,7 +4,7 @@
 import { spawnSync } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const pro = 'src-tauri/tauri.pro.conf.json';
 const macos = 'src-tauri/tauri.pro.macos.conf.json';
@@ -55,8 +55,9 @@ function main() {
   const target = targetFor(args, process.env, nativeTarget);
   const forwarded = proArgs(args, target);
   if (target.endsWith('-apple-darwin')) validateHelper(target);
-  const cli = process.platform === 'win32' ? 'node_modules/.bin/tauri.cmd' : 'node_modules/.bin/tauri';
-  const result = spawnSync(cli, forwarded, { stdio: 'inherit', shell: process.platform === 'win32' });
+  // Run the CLI entry with this node: no .bin shim (Bun writes tauri.exe/.bunx, not tauri.cmd) and no cmd.exe.
+  const cli = fileURLToPath(new URL('../node_modules/@tauri-apps/cli/tauri.js', import.meta.url));
+  const result = spawnSync(process.execPath, [cli, ...forwarded], { stdio: 'inherit' });
   process.exit(result.status ?? 1);
 }
 
