@@ -83,7 +83,12 @@ function main() {
     const template = readFileSync(join(rootDir, 'src-tauri', 'pty-host', 'macos', 'Info.plist'), 'utf8');
     writeFileSync(join(contents, 'Info.plist'), template.replaceAll('@VERSION@', version));
     copyFileSync(join(rootDir, 'src-tauri', 'icons', 'icon.icns'), join(contents, 'Resources', 'icon.icns'));
-    console.log(`Assembled helper: ${bundle}`);
+    const sign = spawnSync('codesign', [
+      '--force', '--sign', '-', '--identifier', 'app.termflow.desktop.pty-host',
+      '--entitlements', join(rootDir, 'src-tauri', 'pty-host', 'macos', 'host.entitlements'), bundle,
+    ], { stdio: 'inherit' });
+    if (sign.status !== 0) throw new Error('Failed to ad-hoc sign the macOS host helper');
+    console.log(`Assembled and ad-hoc signed helper: ${bundle}`);
   }
   console.log(`Staged PTY-host sidecar: ${staged}`);
 }
