@@ -10,6 +10,9 @@ use tauri::Runtime;
 
 pub(crate) mod host_identity;
 mod status_flight;
+#[cfg(test)]
+#[path = "permissions/status_flight_tests.rs"]
+mod status_flight_tests;
 pub(crate) use status_flight::StatusFlight;
 pub(crate) const HELPER_BUNDLE_ID: &str = crate::helper_identity::HELPER_IDENTIFIER;
 const APP_BUNDLE_ID: &str = "app.termflow.desktop";

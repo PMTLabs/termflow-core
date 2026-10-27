@@ -241,32 +241,46 @@ async fn system_status_single_flight_and_trailing_wave() {
         peers.push(peer);
     }
     let inventory = FlightInventory { clients, flight: Default::default() };
-    let mut epochs = std::collections::HashSet::new();
-    for _wave in 0..2 {
-        let mut calls = vec![status_call(inventory.clone())];
-        let mut reqs = vec![];
-        for peer in &mut peers {
-            match read_frame(peer).await.unwrap().unwrap() {
-                Frame::Ctrl(Control::PermissionStatus { req, .. }) => reqs.push(req),
-                other => panic!("unexpected frame: {other:?}"),
-            }
-        }
-        calls.extend((0..15).map(|_| status_call(inventory.clone())));
-        // Let every caller join while both host replies are held back.
-        for _ in 0..100 { tokio::task::yield_now().await; }
-        for peer in &mut peers {
-            assert!(tokio::time::timeout(std::time::Duration::from_millis(20), read_frame(peer)).await.is_err(), "duplicate status frame while active");
-        }
-        for (peer, req) in peers.iter_mut().zip(reqs) {
-            write_frame(peer, &Frame::Resp(Response::PermissionStatusReply { req, accessibility: P::Granted, screen_recording: P::Granted, self_responsible: Some(true) })).await.unwrap();
-        }
-        for call in calls {
-            let view = call.await.unwrap();
-            assert!(view.error.is_none());
-            assert!(epochs.insert(view.epoch), "each caller must retain its own epoch");
+    let deadline = std::time::Duration::from_secs(2);
+    let leader = status_call(inventory.clone());
+    let mut reqs = vec![];
+    for peer in &mut peers {
+        match tokio::time::timeout(deadline, read_frame(peer)).await.unwrap().unwrap().unwrap() {
+            Frame::Ctrl(Control::PermissionStatus { req, .. }) => reqs.push(req),
+            other => panic!("unexpected frame: {other:?}"),
         }
     }
-    assert_eq!(epochs.len(), 32);
+    let calls: Vec<_> = (0..15).map(|_| status_call(inventory.clone())).collect();
+    for _ in 0..100 { tokio::task::yield_now().await; }
+    for peer in &mut peers {
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), read_frame(peer)).await.is_err(), "duplicate status frame while active");
+    }
+    for (peer, req) in peers.iter_mut().zip(reqs) {
+        write_frame(peer, &Frame::Resp(Response::PermissionStatusReply { req, accessibility: P::NotGranted, screen_recording: P::Granted, self_responsible: Some(true) })).await.unwrap();
+    }
+    let mut reqs = vec![];
+    for peer in &mut peers {
+        match tokio::time::timeout(deadline, read_frame(peer)).await.unwrap().unwrap().unwrap() {
+            Frame::Ctrl(Control::PermissionStatus { req, .. }) => reqs.push(req),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    for peer in &mut peers {
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(20), read_frame(peer)).await.is_err(), "third status frame");
+    }
+    for (peer, req) in peers.iter_mut().zip(reqs) {
+        write_frame(peer, &Frame::Resp(Response::PermissionStatusReply { req, accessibility: P::Granted, screen_recording: P::NotGranted, self_responsible: Some(true) })).await.unwrap();
+    }
+    let mut epochs = std::collections::HashSet::new();
+    let view = tokio::time::timeout(deadline, leader).await.unwrap().unwrap();
+    assert_eq!((view.accessibility, view.screen_recording), (PermState::NotGranted, PermState::Granted));
+    assert!(epochs.insert(view.epoch));
+    for call in calls {
+        let view = tokio::time::timeout(deadline, call).await.unwrap().unwrap();
+        assert_eq!((view.accessibility, view.screen_recording), (PermState::Granted, PermState::NotGranted));
+        assert!(epochs.insert(view.epoch), "each caller must retain its own epoch");
+    }
+    assert_eq!(epochs.len(), 16);
 }
 
 #[tokio::test]
