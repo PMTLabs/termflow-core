@@ -121,7 +121,8 @@ async fn system_wire_case(case: u8) {
     let task = tokio::spawn(async move {
         let inventory = crate::state::permissions::WireInventory(vec![client]);
         let expected = (case == 2).then(|| ExpectedSubject { target: PermissionTarget::Host, subject: SubjectIdentity { pid: Some(999), ..Default::default() } });
-        execute_expected(&SystemPort(&inventory), Some(PermissionKind::Accessibility), 17, expected).await
+        let kind = (case != 0).then_some(PermissionKind::Accessibility);
+        execute_expected(&SystemPort(&inventory, false), kind, 17, expected).await
     });
     let mut requests = 0;
     let mut statuses = 0;
@@ -132,7 +133,7 @@ async fn system_wire_case(case: u8) {
                 let response = match frame.unwrap().unwrap() {
                     Frame::Ctrl(Control::PermissionStatus { req, .. }) => {
                         statuses += 1;
-                        let state = if case == 0 || statuses == 2 { P::Unknown } else { P::Granted };
+                        let state = if case == 0 || case == 3 || statuses == 2 { P::Unknown } else { P::Granted };
                         Response::PermissionStatusReply { req, accessibility: state, screen_recording: state, self_responsible: Some(true) }
                     }
                     Frame::Ctrl(Control::RequestPermission { req, kind, .. }) => {
@@ -157,6 +158,8 @@ async fn system_wire_case(case: u8) {
 async fn system_initial_unknown() { system_wire_case(0).await; }
 #[tokio::test]
 async fn system_followup_unknown() { system_wire_case(1).await; }
+#[tokio::test]
+async fn system_initial_unknown_request_writes_nothing() { system_wire_case(3).await; }
 #[tokio::test]
 async fn system_expected_mismatch() { system_wire_case(2).await; }
 
@@ -204,6 +207,122 @@ async fn captured_wire_frames_are_exact_and_legacy_writes_nothing() {
     assert_eq!(view.target, PermissionTarget::HostLegacy);
     let mut bytes = [0u8; 512];
     assert!(tokio::time::timeout(std::time::Duration::from_millis(100), peer.read(&mut bytes)).await.is_err(), "legacy host received bytes");
+}
+
+#[derive(Clone)]
+struct FlightInventory {
+    clients: Vec<PtyHostClient>,
+    flight: crate::state::permissions::StatusFlight,
+}
+impl Inventory for FlightInventory {
+    async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject {
+        crate::state::permissions::WireInventory(self.clients.clone()).resolve().await
+    }
+    async fn resolve_status(&self) -> crate::state::permissions::ResolvedPermissionSubject {
+        let owned = self.clone();
+        self.flight.resolve(move || async move { owned.resolve().await }).await
+    }
+    fn app_call(&self) { panic!("unexpected app FFI") }
+}
+
+fn status_call(inventory: FlightInventory) -> tokio::task::JoinHandle<PermissionView> {
+    tokio::spawn(async move { execute(&SystemPort(&inventory, true), None, next_epoch().unwrap()).await })
+}
+
+#[tokio::test]
+async fn system_status_single_flight_and_trailing_wave() {
+    use termflow_pty_protocol::{read_frame, write_frame, Control, Frame, Response, PermissionState as P};
+    let mut peers = vec![];
+    let mut clients = vec![];
+    for _ in 0..2 {
+        let (client, peer, _) = crate::pty_host_client::conn_tests::wired();
+        client.set_permissions(true);
+        clients.push(client);
+        peers.push(peer);
+    }
+    let inventory = FlightInventory { clients, flight: Default::default() };
+    let mut epochs = std::collections::HashSet::new();
+    for _wave in 0..2 {
+        let mut calls = vec![status_call(inventory.clone())];
+        let mut reqs = vec![];
+        for peer in &mut peers {
+            match read_frame(peer).await.unwrap().unwrap() {
+                Frame::Ctrl(Control::PermissionStatus { req, .. }) => reqs.push(req),
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+        calls.extend((0..15).map(|_| status_call(inventory.clone())));
+        // Let every caller join while both host replies are held back.
+        for _ in 0..100 { tokio::task::yield_now().await; }
+        for peer in &mut peers {
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(20), read_frame(peer)).await.is_err(), "duplicate status frame while active");
+        }
+        for (peer, req) in peers.iter_mut().zip(reqs) {
+            write_frame(peer, &Frame::Resp(Response::PermissionStatusReply { req, accessibility: P::Granted, screen_recording: P::Granted, self_responsible: Some(true) })).await.unwrap();
+        }
+        for call in calls {
+            let view = call.await.unwrap();
+            assert!(view.error.is_none());
+            assert!(epochs.insert(view.epoch), "each caller must retain its own epoch");
+        }
+    }
+    assert_eq!(epochs.len(), 32);
+}
+
+#[tokio::test]
+async fn system_request_does_not_join_status_flight() {
+    use termflow_pty_protocol::{read_frame, write_frame, Control, Frame, Response, PermissionState as P};
+    let (client, mut peer, _) = crate::pty_host_client::conn_tests::wired();
+    client.set_permissions(true);
+    let inventory = FlightInventory { clients: vec![client], flight: Default::default() };
+    let status = status_call(inventory.clone());
+    let status_req = match read_frame(&mut peer).await.unwrap().unwrap() {
+        Frame::Ctrl(Control::PermissionStatus { req, .. }) => req,
+        other => panic!("{other:?}"),
+    };
+    let request = tokio::spawn(async move {
+        execute(&SystemPort(&inventory, false), Some(PermissionKind::Accessibility), next_epoch().unwrap()).await
+    });
+    // Request resolution has its own status even while a status flight stalls.
+    for step in 0..3 {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), read_frame(&mut peer)).await.unwrap().unwrap().unwrap();
+        let response = match (step, frame) {
+            (0 | 2, Frame::Ctrl(Control::PermissionStatus { req, .. })) => Response::PermissionStatusReply { req, accessibility: P::Granted, screen_recording: P::Granted, self_responsible: Some(true) },
+            (1, Frame::Ctrl(Control::RequestPermission { req, kind, .. })) => Response::PermissionRequested { req, kind, state: P::Granted, self_responsible: Some(true) },
+            (_, other) => panic!("{other:?}"),
+        };
+        write_frame(&mut peer, &Frame::Resp(response)).await.unwrap();
+    }
+    assert!(request.await.unwrap().error.is_none());
+    assert!(!status.is_finished());
+    write_frame(&mut peer, &Frame::Resp(Response::PermissionStatusReply { req: status_req, accessibility: P::Granted, screen_recording: P::Granted, self_responsible: Some(true) })).await.unwrap();
+    assert!(status.await.unwrap().error.is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn system_two_stalled_hosts_share_three_second_deadline() {
+    use termflow_pty_protocol::{read_frame, Control, Frame};
+    let mut clients = vec![];
+    let mut peers = vec![];
+    for _ in 0..2 {
+        let (client, peer, _) = crate::pty_host_client::conn_tests::wired();
+        client.set_permissions(true);
+        clients.push(client);
+        peers.push(peer);
+    }
+    let inventory = FlightInventory { clients, flight: Default::default() };
+    let start = tokio::time::Instant::now();
+    let call = status_call(inventory);
+    for peer in &mut peers {
+        assert!(matches!(read_frame(peer).await.unwrap().unwrap(), Frame::Ctrl(Control::PermissionStatus { .. })));
+    }
+    tokio::time::advance(std::time::Duration::from_millis(2999)).await;
+    assert!(!call.is_finished());
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    let view = call.await.unwrap();
+    assert_eq!(start.elapsed(), std::time::Duration::from_secs(3));
+    assert!(view.error.is_some());
+    assert_eq!(view.target, PermissionTarget::Unresolved);
 }
 
 #[test]

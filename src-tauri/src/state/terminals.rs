@@ -279,6 +279,7 @@ impl<R: Runtime> AppState<R> {
             frozen_host_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             host_table: super::host_table::HostTable::new(),
             host_barrier: super::host_adoption::Barrier::new(),
+            permission_status_flight: super::permissions::StatusFlight::default(),
             mcp_reclaim: super::mcp_reclaim::McpReclaim::new(),
             sibling_hold: Arc::default(),
             elevated_host: Arc::new(crate::elevated_host::ElevatedHost::new()),

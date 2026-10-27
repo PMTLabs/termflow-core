@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use tauri::Runtime;
 
 pub(crate) mod host_identity;
+mod status_flight;
+pub(crate) use status_flight::StatusFlight;
 pub(crate) const HELPER_BUNDLE_ID: &str = crate::helper_identity::HELPER_IDENTIFIER;
 const APP_BUNDLE_ID: &str = "app.termflow.desktop";
 
@@ -263,11 +265,17 @@ async fn wire_status(client: &PtyHostClient) -> Result<(Option<bool>, Option<Per
 }
 
 /// Selects only among existing connections and never starts a host.
+#[derive(Clone)]
 pub(crate) struct ResolvedPermissionSubject {
     pub view: PermissionSubject,
     pub host: Option<PtyHostClient>,
     pub status: Option<PermissionStatus>,
     pub resolution_failed: bool,
+}
+
+pub(crate) async fn permission_status_subject(state: &AppState) -> ResolvedPermissionSubject {
+    let owned = state.clone();
+    state.permission_status_flight.resolve(move || async move { permission_subject(&owned).await }).await
 }
 
 pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>) -> ResolvedPermissionSubject {
@@ -281,37 +289,8 @@ pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>) -> Resol
 #[path = "permissions/subject_tests.rs"]
 mod tests;
 
-// An injected, non-spawning inventory still uses the production resolver and
-// wire-status adapter. No AppState, host process, or TCC service is needed.
 #[cfg(test)]
-pub(crate) struct WireInventory(pub Vec<PtyHostClient>);
+#[path = "permissions/wire_inventory_tests.rs"]
+mod wire_inventory;
 #[cfg(test)]
-impl SubjectSource for WireInventory {
-    type Handle = PtyHostClient;
-    fn snapshot(&self) -> Snapshot<PtyHostClient> {
-        Snapshot {
-            selected: Some(HostChannel::Primary),
-            hosts: self.0.iter().enumerate().map(|(i, client)| Host {
-                channel: if i == 0 { HostChannel::Primary } else { HostChannel::Frozen(crate::elevated_host::FrozenId(i as u64)) },
-                handle: client.clone(), pid: Some(100 + i as u32),
-                generation: Some(format!("g{i}")), capable: true, spawn_identity: None,
-            }).collect(),
-            disabled: false, helper_unavailable: false, reconnecting: false, app_sessions: false,
-        }
-    }
-    async fn status(&self, client: &PtyHostClient) -> Result<(Option<bool>, Option<PermissionStatus>), ()> {
-        wire_status(client).await
-    }
-    fn still_selected(&self, _: &Host<PtyHostClient>) -> bool { true }
-}
-#[cfg(test)]
-impl WireInventory {
-    pub async fn resolve(&self) -> ResolvedPermissionSubject {
-        struct Verified;
-        impl HostIdentityVerifier for Verified {
-            fn verify(&self, _: u32) -> IdentityVerdict { IdentityVerdict::Matches("test-DR".into()) }
-        }
-        let (view, host, status, resolution_failed) = resolve_snapshot(self, self.snapshot(), &Verified).await;
-        ResolvedPermissionSubject { view, host, status, resolution_failed }
-    }
-}
+pub(crate) use wire_inventory::WireInventory;

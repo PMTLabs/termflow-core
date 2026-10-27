@@ -136,18 +136,23 @@ async fn execute_expected<P: PermissionPort>(port: &P, kind: Option<PermissionKi
 
 trait Inventory {
     async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject;
+    async fn resolve_status(&self) -> crate::state::permissions::ResolvedPermissionSubject { self.resolve().await }
     fn app_call(&self) {}
 }
 impl Inventory for AppState {
     async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject {
         crate::state::permissions::permission_subject(self).await
     }
+    async fn resolve_status(&self) -> crate::state::permissions::ResolvedPermissionSubject {
+        crate::state::permissions::permission_status_subject(self).await
+    }
 }
-struct SystemPort<'a, S>(&'a S);
+// Only read-only status commands may join an inventory resolution.
+struct SystemPort<'a, S>(&'a S, bool);
 impl<S: Inventory> PermissionPort for SystemPort<'_, S> {
     type Host = PtyHostClient;
     async fn subject(&self) -> Subject<Self::Host> {
-        let resolved = self.0.resolve().await;
+        let resolved = if self.1 { self.0.resolve_status().await } else { self.0.resolve().await };
         Subject { view: resolved.view, host: resolved.host, status: resolved.status.map(host_states), resolution_failed: resolved.resolution_failed }
     }
     async fn host_status(&self, host: &PtyHostClient) -> Result<(PermState, PermState), ()> {
@@ -191,14 +196,14 @@ fn in_process_sessions(state: &AppState) -> bool {
 pub async fn macos_permission_status(state: State<'_, AppState>) -> Result<PermissionView, String> {
     let epoch = next_epoch()?;
     if !cfg!(target_os = "macos") { return Ok(unsupported(epoch, in_process_sessions(&state))); }
-    Ok(execute(&SystemPort(&*state), None, epoch).await)
+    Ok(execute(&SystemPort(&*state, true), None, epoch).await)
 }
 
 #[tauri::command]
 pub async fn request_macos_permission(state: State<'_, AppState>, kind: PermissionKind, expected: Option<ExpectedSubject>) -> Result<PermissionView, String> {
     let epoch = next_epoch()?;
     if !cfg!(target_os = "macos") { return Ok(unsupported(epoch, in_process_sessions(&state))); }
-    Ok(execute_expected(&SystemPort(&*state), Some(kind), epoch, expected).await)
+    Ok(execute_expected(&SystemPort(&*state, false), Some(kind), epoch, expected).await)
 }
 
 #[cfg(test)]
