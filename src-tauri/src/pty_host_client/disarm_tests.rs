@@ -20,6 +20,8 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             lifecycle_token: Arc::new("tok".into()),
             conn: conn::ConnState::new(),
             exe_origin: Arc::default(),
+            #[cfg(target_os = "macos")]
+            permission_identity: Arc::default(),
             before_stdout: Arc::default(),
             claim_observer: Arc::default(),
             release_observer: Arc::default(),
@@ -27,6 +29,18 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
         },
         out_rx,
     )
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn permission_identity_is_shared_per_connection_and_unknown_by_default() {
+    let (client, _rx) = client();
+    let clone = client.clone();
+    assert_eq!(client.host_permission_identity(), None);
+    *client.permission_identity.lock().unwrap() = Some(HostPermissionIdentity::App);
+    assert_eq!(clone.host_permission_identity(), Some(HostPermissionIdentity::App));
+    *client.permission_identity.lock().unwrap() = Some(HostPermissionIdentity::Helper);
+    assert_eq!(clone.host_permission_identity(), Some(HostPermissionIdentity::Helper));
 }
 
 /// Ack every `Disarm` / `Shutdown` after ignoring the first `ignore_first` of

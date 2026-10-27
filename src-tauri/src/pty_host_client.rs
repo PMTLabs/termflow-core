@@ -18,6 +18,10 @@
 #[cfg(any(target_os = "macos", all(test, unix)))]
 #[allow(dead_code)]
 mod bundle_staging;
+#[cfg(target_os = "macos")]
+mod macos_spawn;
+#[cfg(target_os = "macos")]
+pub use macos_spawn::HostPermissionIdentity;
 mod conn;
 mod endpoints;
 mod discovery;
@@ -254,6 +258,10 @@ pub struct PtyHostClient {
     conn: Arc<ConnState>,
     /// Where the host behind this connection runs from; see `exe_in_payload`.
     exe_origin: Arc<exe_origin::ExeOrigin>,
+    /// Verified spawn identity for this connection; adopted or unmatched peers
+    /// are unknown rather than guessed from a build ID or capability.
+    #[cfg(target_os = "macos")]
+    permission_identity: Arc<Mutex<Option<HostPermissionIdentity>>>,
     #[cfg(test)]
     before_stdout: ReaderHook,
     #[cfg(test)]
@@ -336,6 +344,13 @@ impl PtyHostClient {
     }
     fn next_req(&self) -> Option<u64> {
         self.req_ctr.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1)).ok()
+    }
+
+    /// Identity of the host we spawned and matched to this socket's peer PID.
+    /// `None` means adopted/unverified; callers must not infer a Helper grant.
+    #[cfg(target_os = "macos")]
+    pub fn host_permission_identity(&self) -> Option<HostPermissionIdentity> {
+        *self.permission_identity.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Whether a hot-swap can be trusted to keep sessions alive (see field doc).
@@ -1023,6 +1038,8 @@ where
         lifecycle_token,
         conn,
         exe_origin: Arc::default(),
+        #[cfg(target_os = "macos")]
+        permission_identity: Arc::default(),
         #[cfg(test)]
         before_stdout,
         #[cfg(test)]
@@ -1361,7 +1378,12 @@ pub async fn connect_or_spawn(
     use std::time::Duration;
     use tokio::net::UnixStream;
 
+    #[cfg(not(target_os = "macos"))]
     let mut survives = true;
+    #[cfg(target_os = "macos")]
+    let survives = true;
+    #[cfg(target_os = "macos")]
+    let mut spawned = None;
     let outcome = open_with_grace(
         || UnixStream::connect(pipe),
         live_host_probe(record_pid),
@@ -1392,8 +1414,16 @@ pub async fn connect_or_spawn(
             // No sidecar yet → spawn it, then retry-connect with backoff.
             log::info!("[HOTSWAP] no pty-host on {pipe}; spawning {}", sidecar.display());
             let paths = current_host_paths();
-            survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
-                paths.record.as_deref(), paths.log.as_deref())?;
+            #[cfg(target_os = "macos")]
+            {
+                spawned = Some(macos_spawn::spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                    paths.record.as_deref(), paths.log.as_deref())?);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                survives = spawn_sidecar_detached(sidecar, build_id, pipe, token,
+                    paths.record.as_deref(), paths.log.as_deref())?;
+            }
             let mut conn = None;
             for _ in 0..40 {
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1410,8 +1440,12 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
+    #[cfg(target_os = "macos")]
+    let permission_identity = macos_spawn::identity_for_peer(spawned, macos_spawn::peer_pid(&conn));
     let (rd, wr) = tokio::io::split(conn);
     let client = wire_client(rd, wr, deps);
+    #[cfg(target_os = "macos")]
+    { *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = permission_identity; }
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);
@@ -1425,7 +1459,7 @@ pub async fn connect_or_spawn(
 /// implies a successful `setsid`, so survival is trusted (and the sidecar
 /// re-verifies via `assert_survivable` and refuses to arm if it somehow isn't a
 /// session leader).
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn spawn_sidecar_detached(
     sidecar: &std::path::Path,
     build_id: Option<&str>,
