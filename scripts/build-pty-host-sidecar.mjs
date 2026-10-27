@@ -1,17 +1,9 @@
-// Build the PTY-host sidecar (Rust) and STAGE it as a Tauri externalBin, i.e.
-// `src-tauri/binaries/termflow-pty-host-<rust-triple>[.exe]`. This is the
-// packaging counterpart to `build-pty-host.sh` (which only builds into the
-// crate's own target/ for `TERMFLOW_PTY_HOST_BIN` dev use).
-//
-// Wire-up (deferred — decide the dev-flow tradeoff first): add
-// `"binaries/termflow-pty-host"` to `tauri.conf.json > bundle.externalBin`, add
-// a `build:pty-host-sidecar` package.json script running this file, and call it
-// from `beforeBuildCommand`. NOTE: Tauri resolves externalBin for `tauri dev`
-// too, so either also stage it in `beforeDevCommand` or keep dev on
-// TERMFLOW_PTY_HOST_BIN and only add externalBin for release bundles.
+// Build the PTY-host sidecar and stage the target-suffixed externalBin.
+// On macOS also assemble the helper bundle used by the Pro macOS overlay.
+// build-pty-host.sh remains the standalone development build.
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 function getHostTriple() {
@@ -78,6 +70,21 @@ function main() {
   mkdirSync(outDir, { recursive: true });
   copyFileSync(built, staged);
 
+  if (targetTriple.endsWith('-apple-darwin')) {
+    const bundle = join(outDir, 'macos', 'TermFlow Host.app');
+    rmSync(bundle, { recursive: true, force: true });
+    const contents = join(bundle, 'Contents');
+    mkdirSync(join(contents, 'MacOS'), { recursive: true });
+    mkdirSync(join(contents, 'Resources'), { recursive: true });
+    const exe = join(contents, 'MacOS', 'termflow-pty-host');
+    copyFileSync(built, exe);
+    chmodSync(exe, 0o755);
+    const version = JSON.parse(readFileSync(join(rootDir, 'src-tauri', 'tauri.conf.json'), 'utf8')).version;
+    const template = readFileSync(join(rootDir, 'src-tauri', 'pty-host', 'macos', 'Info.plist'), 'utf8');
+    writeFileSync(join(contents, 'Info.plist'), template.replaceAll('@VERSION@', version));
+    copyFileSync(join(rootDir, 'src-tauri', 'icons', 'icon.icns'), join(contents, 'Resources', 'icon.icns'));
+    console.log(`Assembled helper: ${bundle}`);
+  }
   console.log(`Staged PTY-host sidecar: ${staged}`);
 }
 

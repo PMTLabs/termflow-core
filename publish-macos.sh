@@ -68,9 +68,11 @@ echo "=== Stage 1: bun run publish:tauri:pro ==="
 bun run publish:tauri:pro
 [ -d "$APP_BUNDLE" ] || { echo "❌ app bundle not found: $APP_BUNDLE" >&2; exit 1; }
 # The pty-host sidecar MUST be inside the bundle or the installed app can't hot-swap.
-[ -f "$APP_BUNDLE/Contents/MacOS/termflow-pty-host" ] \
-  || { echo "❌ termflow-pty-host missing from the .app — hot-swap would break." >&2; exit 1; }
-echo "    Built + pty-host present."
+[ -x "$APP_BUNDLE/Contents/Helpers/TermFlow Host.app/Contents/MacOS/termflow-pty-host" ] \
+  || { echo "❌ TermFlow Host helper missing from the .app." >&2; exit 1; }
+[ ! -e "$APP_BUNDLE/Contents/MacOS/termflow-pty-host" ] \
+  || { echo "❌ Unexpected bare pty-host in the .app." >&2; exit 1; }
+echo "    Built + helper present."
 
 # NOTE: no startup smoke test here — it launches a GUI (WebView) window that needs
 # an Aqua session, which an SSH build host does not have. Smoke the x64/arm64

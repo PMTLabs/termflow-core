@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/termflow-mcp-server", "binaries/termflow-fabric"],
+    "macOS": {
+      "files": { "Helpers/TermFlow Host.app": "binaries/macos/TermFlow Host.app" }
+    }
+  }
+}
