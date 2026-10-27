@@ -156,6 +156,7 @@ dependencies = [
  "mac-notification-sys",
  "notify-rust",
  "parking_lot",
+ "plist",
  "portable-pty",
  "regex",
  "reqwest 0.12.28",

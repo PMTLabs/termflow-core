@@ -14,6 +14,10 @@
 //! The client depends on a few concrete pieces (not `AppState`) so it is
 //! testable without the Windows `mock_app` crash and avoids an Arc cycle.
 
+// Wired into the launch resolver in plan 060 Task 3 step B.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+#[allow(dead_code)]
+mod bundle_staging;
 mod conn;
 mod endpoints;
 mod discovery;
