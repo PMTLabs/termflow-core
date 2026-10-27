@@ -143,6 +143,8 @@ export interface PermissionView {
   error?: string | null;
 }
 
+export type ExpectedPermissionSubject = PermissionView['subject'] & { target: PermissionView['target'] };
+
 export interface ElectronAPI {
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
@@ -342,7 +344,7 @@ export interface ElectronAPI {
    *  with the reason if it would currently be refused. */
   hotswapAvailable?: () => Promise<void>;
   macosPermissionStatus?: () => Promise<PermissionView>;
-  requestMacosPermission?: (kind: PermissionKind) => Promise<PermissionView>;
+  requestMacosPermission?: (kind: PermissionKind, expected?: ExpectedPermissionSubject) => Promise<PermissionView>;
   openMacosPermissionPane?: (kind: PermissionKind) => Promise<void>;
   /** Move persisted scrollback between renderer leaves (design 014 migration). */
   renameTerminalHistory?: (from: string, to: string) => Promise<void>;

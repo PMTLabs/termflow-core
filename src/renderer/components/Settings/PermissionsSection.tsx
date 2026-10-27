@@ -78,12 +78,12 @@ export function PermissionsSection() {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
             const result = await Promise.race([
-                api.requestMacosPermission(kind),
+                api.requestMacosPermission(kind, { target: subject.target, ...subject.subject }),
                 new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('Permission request timed out')), REQUEST_TIMEOUT_MS); }),
             ]);
             if (!valid()) return;
             const matches = sameSubject(subject, result);
-            if (!matches && !(result.error && result.target === 'unresolved')) return;
+            if (!matches && !result.error) return;
             if (latest()) {
                 current.current = result;
                 setView(result);

@@ -76,6 +76,15 @@ async fn dispatch_table_uses_one_subject_and_never_falls_back() {
     }
 }
 
+#[tokio::test]
+async fn changed_expected_subject_never_requests() {
+    let fake = Fake { target: PermissionTarget::Unresolved, calls: Mutex::new(vec![]), fail: false, fail_status: false };
+    let view = execute_expected(&fake, Some(PermissionKind::ScreenRecording), 1, Some(ExpectedSubject { target: PermissionTarget::Host, subject: SubjectIdentity::default() })).await;
+    assert_eq!(view.error.as_deref(), Some("The permission target changed; nothing was requested"));
+    assert_eq!(*fake.calls.lock().unwrap(), ["resolve"]);
+    assert!(execute(&fake, None, 2).await.error.is_none());
+}
+
 struct ResolutionFailure;
 impl PermissionPort for ResolutionFailure {
     type Host = ();

@@ -5,7 +5,7 @@ use super::host_routing::spawn_target;
 use super::types::AppState;
 use crate::elevated_host::HostChannel;
 use crate::pty_host_client::{PermissionOutcome, PermissionStatus, PtyHostClient};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Runtime;
 
 pub(crate) mod host_identity;
@@ -20,11 +20,11 @@ pub(crate) trait HostIdentityVerifier {
     fn verify(&self, pid: u32) -> IdentityVerdict;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum PermissionTarget { Host, HostLegacy, App, Unresolved }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SubjectIdentity {
     #[serde(skip_serializing_if = "Option::is_none")]

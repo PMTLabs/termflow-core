@@ -4,7 +4,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open as openFileDialog, save as saveFileDialog } from '@tauri-apps/plugin-dialog';
 import type { HostGeneration, TerminalSnapshot, ActiveProcess, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel, AutomationCriterion, AutomationRule, AutomationLogEntry, AutomationSaveResult, WatchableTerminal, AutomationTargetPreview, DryRunReport } from '../types/electron';
-import type { PermissionKind, PermissionView } from '../types/electron';
+import type { ExpectedPermissionSubject, PermissionKind, PermissionView } from '../types/electron';
 import type { AutomationStatePayload } from '../services/automationEvents';
 import { shouldHandleForWindow } from './windowRouting';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -209,7 +209,7 @@ interface ElectronAPI {
   /// pty-host and exits this process, so it cannot reach one (design 014 B1.2).
   hotswapAvailable: () => Promise<void>;
   macosPermissionStatus: () => Promise<PermissionView>;
-  requestMacosPermission: (kind: PermissionKind) => Promise<PermissionView>;
+  requestMacosPermission: (kind: PermissionKind, expected?: ExpectedPermissionSubject) => Promise<PermissionView>;
   openMacosPermissionPane: (kind: PermissionKind) => Promise<void>;
   /// Move persisted scrollback from an old renderer leaf to a new one, for the
   /// design-014 migration of pre-014 tb- root leaves (StateManager restore).
@@ -811,7 +811,7 @@ const tauriBridge: ElectronAPI = {
 
   hotswapAvailable: async () => { await invoke('hotswap_available'); },
   macosPermissionStatus: () => invoke('macos_permission_status'),
-  requestMacosPermission: (kind) => invoke('request_macos_permission', { kind }),
+  requestMacosPermission: (kind, expected) => invoke('request_macos_permission', { kind, expected }),
   openMacosPermissionPane: async (kind) => { await invoke('open_permission_pane', { kind }); },
   renameTerminalHistory: async (from: string, to: string) => {
     await invoke('rename_terminal_history', { from, to });

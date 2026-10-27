@@ -45,7 +45,7 @@ describe('PermissionsSection', () => {
         expect(container.textContent).toContain('Restart the program that needs this permission');
         expect(container.textContent).toContain("Programs in terminals now use the 'TermFlow Host' permission. If you previously allowed TermFlow, allow TermFlow Host once.");
         await click(0); await click(1);
-        expect(api.requestMacosPermission.mock.calls).toEqual([['accessibility'], ['screenRecording']]);
+        expect(api.requestMacosPermission.mock.calls).toEqual([['accessibility', { target: 'host', ...base().subject }], ['screenRecording', { target: 'host', ...base().subject }]]);
         expect(api.openMacosPermissionPane.mock.calls).toEqual([['accessibility'], ['screenRecording']]);
     });
     it.each([['hostLegacy', 'legacy host'], ['app', 'TermFlow'], ['host', 'TermFlow Host']] as const)('labels %s', async (target, label) => {
@@ -141,6 +141,14 @@ describe('PermissionsSection', () => {
         await render(); await click(0);
         expect(container.textContent?.match(/Unknown/g)).toHaveLength(2);
         expect(actions.some(a => a.type === 'ui/addToast')).toBe(true);
+        expect(api.openMacosPermissionPane).not.toHaveBeenCalled();
+    });
+    it('publishes an error from a different resolved target', async () => {
+        api.requestMacosPermission.mockResolvedValue(base({ target: 'app', subject: { pid: 2 }, error: 'target changed', accessibility: 'unknown' }));
+        await render(); await click(0);
+        expect(container.textContent).toContain('Permission target: TermFlow');
+        expect(container.textContent).not.toContain('Permission target: TermFlow Host');
+        expect(actions.some(a => a.type === 'ui/addToast' && a.payload.message.includes('target changed'))).toBe(true);
         expect(api.openMacosPermissionPane).not.toHaveBeenCalled();
     });
     it('shows opener failure separately without changing the result', async () => {

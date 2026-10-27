@@ -75,8 +75,23 @@ trait PermissionPort {
     async fn app_request(&self, kind: PermissionKind) -> Result<(), ()>;
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedSubject {
+    target: PermissionTarget,
+    #[serde(flatten)]
+    subject: SubjectIdentity,
+}
+
 async fn execute<P: PermissionPort>(port: &P, kind: Option<PermissionKind>, epoch: u64) -> PermissionView {
+    execute_expected(port, kind, epoch, None).await
+}
+
+async fn execute_expected<P: PermissionPort>(port: &P, kind: Option<PermissionKind>, epoch: u64, expected: Option<ExpectedSubject>) -> PermissionView {
     let subject = port.subject().await;
+    if kind.is_some() && expected.is_some_and(|expected| expected.target != subject.view.target || expected.subject != subject.view.subject) {
+        return PermissionView { epoch, target: subject.view.target, subject: subject.view.subject, accessibility: PermState::Unknown, screen_recording: PermState::Unknown, other_hosts: subject.view.other_hosts, app_sessions: subject.view.app_sessions, error: Some("The permission target changed; nothing was requested".into()) };
+    }
     let mut states = (PermState::Unknown, PermState::Unknown);
     let mut error = subject.resolution_failed.then(|| "Permission subject resolution failed".to_string());
     let result = match subject.view.target {
@@ -84,6 +99,7 @@ async fn execute<P: PermissionPort>(port: &P, kind: Option<PermissionKind>, epoc
             if let Some(host) = &subject.host {
                 match kind {
                     None => subject.status.ok_or(()),
+                    Some(_) if subject.status.is_some_and(|(a, s)| a == PermState::Unknown || s == PermState::Unknown) => subject.status.ok_or(()),
                     Some(kind) => match port.host_request(host, kind).await {
                         Ok(()) => port.host_status(host).await,
                         Err(()) => Err(()),
@@ -103,7 +119,16 @@ async fn execute<P: PermissionPort>(port: &P, kind: Option<PermissionKind>, epoc
         PermissionTarget::HostLegacy | PermissionTarget::Unresolved => Ok(states),
     };
     match result {
-        Ok(value) => states = value,
+        Ok(value) => {
+            states = value;
+            if value.0 == PermState::Unknown || value.1 == PermState::Unknown {
+                match subject.view.target {
+                    PermissionTarget::Host => error = Some("TermFlow Host could not read the permission status".into()),
+                    PermissionTarget::App => error = Some("TermFlow could not read the permission status".into()),
+                    _ => {}
+                }
+            }
+        },
         Err(()) => error = Some("Permission operation failed".into()),
     }
     PermissionView { epoch, target: subject.view.target, subject: subject.view.subject, accessibility: states.0, screen_recording: states.1, other_hosts: subject.view.other_hosts, app_sessions: subject.view.app_sessions, error }
@@ -129,9 +154,7 @@ impl PermissionPort for SystemPort<'_> {
         tokio::task::spawn_blocking(|| {
             use termflow_macos_tcc::Tcc;
             let (a, s) = termflow_macos_tcc::SystemTcc.status();
-            if a == termflow_macos_tcc::PermissionState::Unknown || s == termflow_macos_tcc::PermissionState::Unknown {
-                Err(())
-            } else { Ok((a.into(), s.into())) }
+            Ok((a.into(), s.into()))
         }).await.map_err(|_| ())?
     }
     async fn app_request(&self, kind: PermissionKind) -> Result<(), ()> {
@@ -161,10 +184,10 @@ pub async fn macos_permission_status(state: State<'_, AppState>) -> Result<Permi
 }
 
 #[tauri::command]
-pub async fn request_macos_permission(state: State<'_, AppState>, kind: PermissionKind) -> Result<PermissionView, String> {
+pub async fn request_macos_permission(state: State<'_, AppState>, kind: PermissionKind, expected: Option<ExpectedSubject>) -> Result<PermissionView, String> {
     let epoch = next_epoch()?;
     if !cfg!(target_os = "macos") { return Ok(unsupported(epoch, in_process_sessions(&state))); }
-    Ok(execute(&SystemPort(&state), Some(kind), epoch).await)
+    Ok(execute_expected(&SystemPort(&state), Some(kind), epoch, expected).await)
 }
 
 #[cfg(test)]
