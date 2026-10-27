@@ -171,11 +171,6 @@ pub(crate) fn unix_peer_token(stream: &tokio::net::UnixStream) -> Option<crate::
     macos_spawn::peer_token(stream)
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn unix_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
-    macos_spawn::peer_pid(stream)
-}
-
 /// True when the PTY-host sidecar path is active.
 ///
 /// **Default-on** on every supported OS, in dev and release, so shells are
@@ -450,6 +445,11 @@ impl PtyHostClient {
             *self.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = None;
         }
         self.exe_origin.set_server_pid(Some(pid));
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn test_peer_token(&self) -> Option<crate::state::permissions::host_identity::AuditToken> {
+        *self.peer_token.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub(crate) fn host_identity_verdict(&self, pid: u32) -> crate::state::permissions::IdentityVerdict {
@@ -1448,6 +1448,21 @@ fn spawn_sidecar_detached(
     }
 }
 
+/// Capture kernel evidence before splitting any outbound host socket.
+#[cfg(unix)]
+pub(crate) fn wire_unix_host_client(conn: tokio::net::UnixStream, deps: PtyHostDeps) -> PtyHostClient {
+    #[cfg(target_os = "macos")]
+    let (peer_pid, peer_token) = (macos_spawn::peer_pid(&conn), macos_spawn::peer_token(&conn));
+    let (rd, wr) = tokio::io::split(conn);
+    let client = wire_client(rd, wr, deps);
+    #[cfg(target_os = "macos")]
+    {
+        client.exe_origin.set_server_pid(peer_pid);
+        *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
+    }
+    client
+}
+
 /// Connect to the sidecar's Unix socket, spawning it (detached into its own
 /// session via `setsid`) if it isn't already running. Mirrors the Windows path:
 /// grace-window try-connect (never duplicating a live advertised host) → spawn
@@ -1526,18 +1541,11 @@ pub async fn connect_or_spawn(
             })?, HostConnectionOrigin::SpawnedHere)
         }
     };
-    #[cfg(target_os = "macos")]
-    let peer_pid = macos_spawn::peer_pid(&conn);
-    #[cfg(target_os = "macos")]
-    let peer_token = macos_spawn::peer_token(&conn);
-    #[cfg(target_os = "macos")]
-    let permission_identity = macos_spawn::identity_for_peer(spawned, peer_pid);
-    let (rd, wr) = tokio::io::split(conn);
-    let client = wire_client(rd, wr, deps);
+    let client = wire_unix_host_client(conn, deps);
     #[cfg(target_os = "macos")]
     {
-        client.exe_origin.set_server_pid(peer_pid);
-        *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
+        let peer_pid = client.server_pid();
+        let permission_identity = macos_spawn::identity_for_peer(spawned, peer_pid);
         *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = peer_pid.zip(permission_identity);
     }
     client

@@ -50,19 +50,13 @@ pub(super) async fn connect_existing(
     grace: Duration,
     deps: PtyHostDeps,
 ) -> std::io::Result<PtyHostClient> {
-    use crate::pty_host_client::wire_client;
+    use crate::pty_host_client::wire_unix_host_client;
     use tokio::net::UnixStream;
     let start = tokio::time::Instant::now();
     loop {
         match UnixStream::connect(endpoint).await {
             Ok(conn) => {
-                #[cfg(target_os = "macos")]
-                let peer_pid = crate::pty_host_client::unix_peer_pid(&conn);
-                let (rd, wr) = tokio::io::split(conn);
-                let client = wire_client(rd, wr, deps);
-                #[cfg(target_os = "macos")]
-                if let Some(pid) = peer_pid { client.set_peer_pid(pid); }
-                return Ok(client);
+                return Ok(wire_unix_host_client(conn, deps));
             }
             Err(e) if start.elapsed() >= grace => return Err(e),
             Err(_) => tokio::time::sleep(RETRY_STEP).await,

@@ -35,6 +35,58 @@ fn check_connection_sites(host_port: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_unix_evidence(client: &str, host: &str) -> Result<(), String> {
+    let unix_start = client.find("#[cfg(unix)]\npub async fn connect_or_spawn(").ok_or("missing Unix connect")?;
+    let unix_end = client[unix_start..].find("/// Spawn the sidecar detached").ok_or("missing Unix connect end")? + unix_start;
+    let unix = Src::production(&client[unix_start..unix_end]);
+    let body = unix.try_function("pub async fn connect_or_spawn(")?;
+    require_top_statement(&unix, &body, "let client = wire_unix_host_client(conn, deps);")?;
+    let src = Src::production(client);
+    let helper = src.try_function("pub(crate) fn wire_unix_host_client(")?;
+    let normalized = src.norm(&(helper.open..helper.close + 1));
+    let evidence = normalized.find("let(peer_pid,peer_token)=(macos_spawn::peer_pid(&conn),macos_spawn::peer_token(&conn));").ok_or("missing evidence")?;
+    let split = normalized.find("let(rd,wr)=tokio::io::split(conn);").ok_or("missing split")?;
+    let wire = normalized.find("letclient=wire_client(rd,wr,deps);").ok_or("missing wire")?;
+    if !(evidence < split && split < wire) { return Err("evidence must precede split and wiring".into()); }
+    if !normalized.contains("client.exe_origin.set_server_pid(peer_pid);") || !normalized.contains("*client.peer_token.lock().unwrap_or_else(|e|e.into_inner())=peer_token;") {
+        return Err("helper must install both pieces of evidence".into());
+    }
+    let start = host.find("#[cfg(unix)]\npub(super) async fn connect_existing(").ok_or("missing Unix adoption")?;
+    let end = host[start..].find("#[cfg(not(any(windows, unix)))]").ok_or("missing next platform")? + start;
+    let host = Src::production(&host[start..end]);
+    if !host.masked.contains("return Ok(wire_unix_host_client(conn, deps));") { return Err("adoption must use helper".into()); }
+    Ok(())
+}
+
+#[test]
+fn unix_host_evidence_census_and_mutations() {
+    let client = include_str!("../pty_host_client.rs");
+    let host = include_str!("host_connect.rs");
+    check_unix_evidence(client, host).unwrap();
+    for (c, h) in [
+        (mutate(client, "let client = wire_unix_host_client(conn, deps);", "let client = other(conn, deps);"), host.to_owned()),
+        (client.to_owned(), mutate(host, "return Ok(wire_unix_host_client(conn, deps));", "return Ok(other(conn, deps));")),
+        (mutate(client, "macos_spawn::peer_token(&conn)", "None"), host.to_owned()),
+        (mutate(client, "*client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;", ""), host.to_owned()),
+    ] { assert!(check_unix_evidence(&c, &h).is_err()); }
+    let mut connects = Vec::new();
+    let mut wires = Vec::new();
+    for (path, text) in super::mcp_hold_census_tests::production_sources() {
+        let src = Src::production(&text);
+        for _ in find_calls(&src.masked, "UnixStream::connect(") {
+            connects.push(path.file_name().unwrap().to_string_lossy().to_string());
+        }
+        for _ in find_calls(&src.masked, "wire_client(") {
+            wires.push(path.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    connects.sort();
+    wires.sort();
+    assert_eq!(connects, ["host_connect.rs", "pty_host_client.rs", "pty_host_client.rs"]);
+    // Windows named-pipe client and elevated inbound pipe, plus the Unix helper.
+    assert_eq!(wires, ["pty_host_client.rs", "pty_host_client.rs", "terminals.rs"]);
+}
+
 #[test]
 fn both_connection_sites_install_the_permissions_bit() {
     check_connection_sites(HOST_PORT).unwrap();

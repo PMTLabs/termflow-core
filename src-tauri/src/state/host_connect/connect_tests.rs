@@ -66,6 +66,49 @@ async fn adopted_socket_preserves_kernel_peer_pid() {
     std::fs::remove_file(path).unwrap();
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn adopted_signed_socket_has_verified_audit_evidence() {
+    use std::process::{Command, Stdio};
+    use std::io::Read;
+    use crate::state::permissions::{host_identity::ProductionVerifier, HostIdentityVerifier, IdentityVerdict};
+    let dir = std::env::temp_dir().join(format!("tf-fixture-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&dir).unwrap();
+    let source = dir.join("server.c");
+    let exe = dir.join("server");
+    let path = missing_endpoint();
+    std::fs::write(&source, r#"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+ int s=socket(AF_UNIX, SOCK_STREAM, 0); struct sockaddr_un a={0};
+ a.sun_family=AF_UNIX; strcpy(a.sun_path, argv[1]);
+ if(bind(s,(struct sockaddr*)&a,sizeof(a)) || listen(s,1)) return 1;
+ puts("ready"); fflush(stdout); int c=accept(s,0,0); if(c<0) return 2;
+ sleep(3); close(c); close(s); return 0;
+}
+"#).unwrap();
+    assert!(Command::new("/usr/bin/cc").arg(&source).arg("-o").arg(&exe).status().unwrap().success());
+    assert!(Command::new("/usr/bin/codesign").args(["--force", "-s", "-", "--identifier", "app.termflow.desktop.pty-host"]).arg(&exe).status().unwrap().success());
+    let mut child = Command::new(&exe).arg(&path).stdout(Stdio::piped()).spawn().unwrap();
+    let mut ready = [0u8; 6];
+    child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"ready\n");
+    let client = connect_existing(&path, GRACE_ENDPOINT_ONLY, deps()).await.unwrap();
+    let token = client.test_peer_token().expect("kernel audit token");
+    assert_eq!(token.pid(), child.id());
+    assert_eq!(client.server_pid(), Some(child.id()));
+    let verifier = ProductionVerifier::new([client.clone()]);
+    assert!(matches!(verifier.verify(child.id()), IdentityVerdict::Matches(_)));
+    client.close_transport().await;
+    assert!(child.wait().unwrap().success());
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[cfg(windows)]
 mod windows_pipe {
     use super::*;

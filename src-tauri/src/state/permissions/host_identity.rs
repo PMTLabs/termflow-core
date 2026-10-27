@@ -32,11 +32,11 @@ impl IdentityCache {
 
 /// A snapshot's PID-to-connection map; the cache itself survives subsequent
 /// snapshots with the client and is invalidated with that connection.
-pub(super) struct ProductionVerifier {
+pub(crate) struct ProductionVerifier {
     clients: HashMap<u32, PtyHostClient>,
 }
 impl ProductionVerifier {
-    pub(super) fn new(clients: impl IntoIterator<Item = PtyHostClient>) -> Self {
+    pub(crate) fn new(clients: impl IntoIterator<Item = PtyHostClient>) -> Self {
         let clients = clients.into_iter().filter_map(|c| c.server_pid().map(|p| (p, c))).collect();
         Self { clients }
     }
