@@ -106,6 +106,60 @@ async fn resolution_failure_surfaces_without_fallback() {
     }
 }
 
+impl Inventory for crate::state::permissions::WireInventory {
+    async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject { self.resolve().await }
+    fn app_call(&self) { panic!("app FFI must never be called") }
+}
+
+// Real SystemPort -> inventory resolver -> real WireClient, including follow-up
+// status and request dispatch. The injected app boundary panics before any FFI.
+async fn system_wire_case(case: u8) {
+    use termflow_pty_protocol::{read_frame, write_frame, Control, Frame, Response, PermissionState as P};
+    let (client, mut peer, _) = crate::pty_host_client::conn_tests::wired();
+    client.set_permissions(true);
+    let _keep_connected = client.clone();
+    let task = tokio::spawn(async move {
+        let inventory = crate::state::permissions::WireInventory(vec![client]);
+        let expected = (case == 2).then(|| ExpectedSubject { target: PermissionTarget::Host, subject: SubjectIdentity { pid: Some(999), ..Default::default() } });
+        execute_expected(&SystemPort(&inventory), Some(PermissionKind::Accessibility), 17, expected).await
+    });
+    let mut requests = 0;
+    let mut statuses = 0;
+    loop {
+        tokio::select! {
+            result = async { while !task.is_finished() { tokio::task::yield_now().await; } } => { let _ = result; break; }
+            frame = read_frame(&mut peer) => {
+                let response = match frame.unwrap().unwrap() {
+                    Frame::Ctrl(Control::PermissionStatus { req, .. }) => {
+                        statuses += 1;
+                        let state = if case == 0 || statuses == 2 { P::Unknown } else { P::Granted };
+                        Response::PermissionStatusReply { req, accessibility: state, screen_recording: state, self_responsible: Some(true) }
+                    }
+                    Frame::Ctrl(Control::RequestPermission { req, kind, .. }) => {
+                        requests += 1;
+                        Response::PermissionRequested { req, kind, state: P::Granted, self_responsible: Some(true) }
+                    }
+                    other => panic!("unexpected frame: {other:?}"),
+                };
+                write_frame(&mut peer, &Frame::Resp(response)).await.unwrap();
+            }
+        }
+    }
+    let view = task.await.unwrap();
+    assert_eq!(requests, usize::from(case == 1), "captured RequestPermission frames");
+    assert_eq!(statuses, if case == 1 { 2 } else { 1 });
+    let json = serde_json::to_value(view).unwrap();
+    assert!(json["error"].is_string(), "{json}");
+    assert_eq!(json["accessibility"], "unknown");
+    assert_eq!(json["screenRecording"], "unknown");
+}
+#[tokio::test]
+async fn system_initial_unknown() { system_wire_case(0).await; }
+#[tokio::test]
+async fn system_followup_unknown() { system_wire_case(1).await; }
+#[tokio::test]
+async fn system_expected_mismatch() { system_wire_case(2).await; }
+
 struct WirePort { client: PtyHostClient, target: PermissionTarget }
 impl PermissionPort for WirePort {
     type Host = PtyHostClient;

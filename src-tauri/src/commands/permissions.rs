@@ -134,11 +134,20 @@ async fn execute_expected<P: PermissionPort>(port: &P, kind: Option<PermissionKi
     PermissionView { epoch, target: subject.view.target, subject: subject.view.subject, accessibility: states.0, screen_recording: states.1, other_hosts: subject.view.other_hosts, app_sessions: subject.view.app_sessions, error }
 }
 
-struct SystemPort<'a>(&'a AppState);
-impl PermissionPort for SystemPort<'_> {
+trait Inventory {
+    async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject;
+    fn app_call(&self) {}
+}
+impl Inventory for AppState {
+    async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject {
+        crate::state::permissions::permission_subject(self).await
+    }
+}
+struct SystemPort<'a, S>(&'a S);
+impl<S: Inventory> PermissionPort for SystemPort<'_, S> {
     type Host = PtyHostClient;
     async fn subject(&self) -> Subject<Self::Host> {
-        let resolved = crate::state::permissions::permission_subject(self.0).await;
+        let resolved = self.0.resolve().await;
         Subject { view: resolved.view, host: resolved.host, status: resolved.status.map(host_states), resolution_failed: resolved.resolution_failed }
     }
     async fn host_status(&self, host: &PtyHostClient) -> Result<(PermState, PermState), ()> {
@@ -151,6 +160,7 @@ impl PermissionPort for SystemPort<'_> {
         }
     }
     async fn app_status(&self) -> Result<(PermState, PermState), ()> {
+        self.0.app_call();
         tokio::task::spawn_blocking(|| {
             use termflow_macos_tcc::Tcc;
             let (a, s) = termflow_macos_tcc::SystemTcc.status();
@@ -158,6 +168,7 @@ impl PermissionPort for SystemPort<'_> {
         }).await.map_err(|_| ())?
     }
     async fn app_request(&self, kind: PermissionKind) -> Result<(), ()> {
+        self.0.app_call();
         tokio::task::spawn_blocking(move || {
             use termflow_macos_tcc::{PermissionState, Tcc};
             if termflow_macos_tcc::SystemTcc.request(kind.into()) == PermissionState::Unknown { Err(()) } else { Ok(()) }
@@ -180,14 +191,14 @@ fn in_process_sessions(state: &AppState) -> bool {
 pub async fn macos_permission_status(state: State<'_, AppState>) -> Result<PermissionView, String> {
     let epoch = next_epoch()?;
     if !cfg!(target_os = "macos") { return Ok(unsupported(epoch, in_process_sessions(&state))); }
-    Ok(execute(&SystemPort(&state), None, epoch).await)
+    Ok(execute(&SystemPort(&*state), None, epoch).await)
 }
 
 #[tauri::command]
 pub async fn request_macos_permission(state: State<'_, AppState>, kind: PermissionKind, expected: Option<ExpectedSubject>) -> Result<PermissionView, String> {
     let epoch = next_epoch()?;
     if !cfg!(target_os = "macos") { return Ok(unsupported(epoch, in_process_sessions(&state))); }
-    Ok(execute_expected(&SystemPort(&state), Some(kind), epoch, expected).await)
+    Ok(execute_expected(&SystemPort(&*state), Some(kind), epoch, expected).await)
 }
 
 #[cfg(test)]
