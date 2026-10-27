@@ -69,6 +69,8 @@ pub const CAP_INHERIT_CURSOR: u32 = 1 << 4;
 /// send those frames to a host whose discovery record advertises this bit — a
 /// legacy host fails to decode the unknown variants and drops the connection.
 pub const CAP_MCP_HOLD: u32 = 1 << 5;
+/// Host supports permission controls; never send them without this bit.
+pub const CAP_PERMISSIONS: u32 = 1 << 6;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
