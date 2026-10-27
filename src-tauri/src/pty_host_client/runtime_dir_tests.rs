@@ -14,7 +14,9 @@ fn launch_generation_is_install_directory_identity_and_fallback_has_none() {
     let base = dir.path().join("runtime");
     let installed = super::resolve_launch_from(source.clone(), Some(&base));
     assert!(installed.path.starts_with(&base));
-    assert_eq!(installed.generation.as_deref(), installed.path.parent().unwrap().file_name().unwrap().to_str());
+    // The executable may be nested under TermFlow Host.app/Contents/MacOS;
+    // the generation is the directory immediately below the runtime root.
+    assert_eq!(installed.generation.as_deref(), installed.path.strip_prefix(&base).unwrap().components().next().unwrap().as_os_str().to_str());
     assert_eq!(installed.build_id, Some(super::hex_full(&super::sha256_file(&source).unwrap())));
     for base in [None, Some(source.as_path())] {
         let fallback = super::resolve_launch_from(source.clone(), base);

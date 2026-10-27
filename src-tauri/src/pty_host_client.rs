@@ -1150,16 +1150,18 @@ fn live_host_probe(record_pid: Option<u32>) -> impl FnMut() -> bool {
             last_alive = sys
                 .process(target)
                 .map(|p| {
-                    p.name().to_string_lossy().starts_with("termflow-pty-ho")
-                        || p.exe()
-                            .and_then(|e| e.file_name())
-                            .map(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
-                            .unwrap_or(false)
+                    host_image_matches(p.name(), p.exe())
                 })
                 .unwrap_or(false);
         }
         last_alive
     }
+}
+
+fn host_image_matches(name: &std::ffi::OsStr, exe: Option<&std::path::Path>) -> bool {
+    name.to_string_lossy().starts_with("termflow-pty-ho")
+        || exe.and_then(|p| p.file_name())
+            .is_some_and(|n| n.to_string_lossy().starts_with("termflow-pty-host"))
 }
 
 /// Connect to the sidecar's pipe, spawning it (detached, breaking away from any
@@ -1895,12 +1897,16 @@ pub struct HostLaunch {
 
 pub fn resolve_host_launch() -> Option<HostLaunch> {
     let src = resolve_bundled_host_path()?;
+    #[cfg(target_os = "macos")]
+    let launch = resolve_macos_launch(src, runtime_host_dir().as_deref())?;
+    #[cfg(not(target_os = "macos"))]
     let launch = resolve_launch_from(src, runtime_host_dir().as_deref());
     endpoints::pin_current_paths(launch.generation.as_deref());
     endpoints::pin_current_generation(launch.generation.as_deref());
     Some(launch)
 }
 
+#[cfg(any(not(target_os = "macos"), debug_assertions, test))]
 fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) -> HostLaunch {
     let mut generation = None;
     let path = match base {
@@ -1931,6 +1937,54 @@ fn resolve_launch_from(src: std::path::PathBuf, base: Option<&std::path::Path>) 
         e
     }).ok();
     HostLaunch { path, build_id, generation }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_launch(src: std::path::PathBuf, base: Option<&std::path::Path>) -> Option<HostLaunch> {
+    let bundle = src.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        .filter(|p| p.file_name() == Some(std::ffi::OsStr::new("TermFlow Host.app")));
+    match bundle {
+        Some(bundle) => resolve_bundle_launch(&src, bundle, base, bundle_staging::validate_source, bundle_staging::install_host_bundle_into),
+        None => {
+            #[cfg(debug_assertions)]
+            {
+                log::warn!("[HOTSWAP] debug bare host override: bundle validation skipped");
+                Some(resolve_launch_from(src, base))
+            }
+            #[cfg(not(debug_assertions))]
+            { None }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn resolve_bundle_launch(
+    src: &std::path::Path,
+    bundle: &std::path::Path,
+    base: Option<&std::path::Path>,
+    validate: impl Fn(&std::path::Path) -> std::io::Result<String>,
+    install: impl Fn(&std::path::Path, &std::path::Path) -> std::io::Result<bundle_staging::StagedHost>,
+) -> Option<HostLaunch> {
+    // Never fall back to a source which has not itself passed the full check.
+    let build_id = match validate(bundle) {
+        Ok(id) => id,
+        Err(e) => { log::warn!("[HOTSWAP] helper rejected: {e}"); return None; }
+    };
+    if let Some(base) = base {
+        match install(bundle, base) {
+            Ok(staged) => return Some(HostLaunch { path: staged.exe, build_id: Some(staged.build_id), generation: Some(staged.generation) }),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                log::warn!("[HOTSWAP] helper validation failed: {e}");
+                return None;
+            }
+            Err(e) => log::warn!("[HOTSWAP] staging I/O failed ({e}); validating bundled fallback"),
+        }
+    }
+    // The source may have changed during staging; verify again before using it.
+    let current_id = validate(bundle).ok()?;
+    if current_id != build_id { return None; }
+    log::warn!("[HOTSWAP] running bundled helper; host cannot survive payload replacement");
+    Some(HostLaunch { path: src.to_path_buf(), build_id: Some(current_id), generation: None })
 }
 
 fn hex_full(digest: &[u8; 32]) -> String {
@@ -2223,6 +2277,15 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    let helper = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| {
+        dir.join("..").join("Helpers").join("TermFlow Host.app").join("Contents/MacOS/termflow-pty-host")
+    }));
+    #[cfg(target_os = "macos")]
+    if !cfg!(debug_assertions) {
+        return select_macos_host(helper, false, Vec::new());
+    }
+
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
     // 2. Next to the app exe (release / staged) and 3a. dev, relative to the exe
@@ -2256,7 +2319,19 @@ pub fn resolve_bundled_host_path() -> Option<std::path::PathBuf> {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    {
+        select_macos_host(helper, true, candidates)
+    }
+    #[cfg(not(target_os = "macos"))]
     candidates.into_iter().find(|p| p.exists())
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn select_macos_host(helper: Option<std::path::PathBuf>, debug: bool, candidates: Vec<std::path::PathBuf>) -> Option<std::path::PathBuf> {
+    helper.filter(|p| p.exists()).or_else(|| {
+        if debug { candidates.into_iter().find(|p| p.exists()) } else { None }
+    })
 }
 
 #[cfg(test)]

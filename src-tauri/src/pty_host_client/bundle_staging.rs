@@ -166,6 +166,11 @@ impl Operations for SystemOperations {
     }
 }
 
+pub(super) fn validate_source(src_bundle: &Path) -> io::Result<String> {
+    let snapshot = Snapshot::read(src_bundle, &Codesign)?;
+    Ok(super::hex_full(&snapshot.digest))
+}
+
 pub(super) fn install_host_bundle_into(
     src_bundle: &Path,
     dest_root: &Path,
@@ -360,6 +365,115 @@ mod tests {
         let generation =
             super::super::hex16(&super::super::sha256_file(&f.source.join(EXE)).unwrap());
         assert_eq!(fs::read_dir(f.runtime.join(generation)).unwrap().count(), 0);
+    }
+    #[test]
+    fn resolver_chain_stages_explicit_generation_and_pins_endpoint() {
+        let f = Fixture::new();
+        let source = f.source.join(EXE);
+        let expected = install_with(&f.source, &f.runtime, &Fake, &SystemOperations).unwrap();
+        let launch = super::super::resolve_bundle_launch(
+            &source,
+            &f.source,
+            Some(&f.runtime),
+            |p| Snapshot::read(p, &Fake).map(|s| super::super::hex_full(&s.digest)),
+            |s, d| install_with(s, d, &Fake, &SystemOperations),
+        )
+        .unwrap();
+        assert_eq!(launch.path, expected.exe);
+        assert_eq!(launch.build_id.as_deref(), Some(expected.build_id.as_str()));
+        assert_eq!(
+            launch.generation.as_deref(),
+            Some(expected.generation.as_str())
+        );
+        assert_eq!(expected.generation.len(), 16);
+        assert_ne!(
+            launch.path.parent().unwrap().file_name().unwrap(),
+            expected.generation.as_str()
+        );
+        let paths = super::super::endpoints::test_pinned_paths(launch.generation.as_deref());
+        assert!(paths.endpoint.contains(&expected.generation));
+    }
+    #[test]
+    fn resolver_fallback_policy_rejects_invalid_and_uses_valid_source_on_io() {
+        let f = Fixture::new();
+        let source = f.source.join(EXE);
+        let valid = |p: &Path| Snapshot::read(p, &Fake).map(|s| super::super::hex_full(&s.digest));
+        let launch = super::super::resolve_bundle_launch(
+            &source,
+            &f.source,
+            Some(&f.runtime),
+            valid,
+            |_, _| Err(io::Error::new(io::ErrorKind::PermissionDenied, "injected")),
+        )
+        .unwrap();
+        assert_eq!(launch.path, source);
+        assert_eq!(launch.generation, None);
+        assert!(super::super::exe_origin::spawned_from_bundled_fallback(
+            true,
+            &launch.path,
+            Some(&f.runtime),
+            false
+        ));
+        for error in [io::ErrorKind::InvalidData, io::ErrorKind::NotFound] {
+            assert!(super::super::resolve_bundle_launch(
+                &source,
+                &f.source,
+                Some(&f.runtime),
+                |_| Err(io::Error::new(error, "invalid or missing")),
+                |_, _| panic!("must not stage rejected source")
+            )
+            .is_none());
+        }
+        assert!(super::super::resolve_bundle_launch(
+            &source,
+            &f.source,
+            Some(&f.runtime),
+            valid,
+            |_, _| Err(invalid("signature rejected"))
+        )
+        .is_none());
+    }
+    #[test]
+    fn release_selection_ignores_dev_and_debug_keeps_it() {
+        let f = Fixture::new();
+        let bare = f.root.join("bare");
+        fs::write(&bare, b"bare").unwrap();
+        assert_eq!(
+            super::super::select_macos_host(None, false, vec![bare.clone()]),
+            None
+        );
+        assert_eq!(
+            super::super::select_macos_host(None, true, vec![bare.clone()]),
+            Some(bare)
+        );
+        let helper = f.source.join(EXE);
+        assert_eq!(
+            super::super::select_macos_host(Some(helper.clone()), false, vec![]),
+            Some(helper)
+        );
+    }
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[test]
+    fn debug_bare_override_still_installs() {
+        let f = Fixture::new();
+        let bare = f.root.join("bare");
+        fs::write(&bare, b"bare").unwrap();
+        let launch = super::super::resolve_macos_launch(bare.clone(), Some(&f.runtime)).unwrap();
+        assert_eq!(fs::read(launch.path).unwrap(), b"bare");
+    }
+    #[test]
+    fn live_probe_matches_nested_host_image() {
+        let path = Path::new(
+            "/tmp/runtime/0123456789abcdef/TermFlow Host.app/Contents/MacOS/termflow-pty-host",
+        );
+        assert!(super::super::host_image_matches(
+            std::ffi::OsStr::new("other"),
+            Some(path)
+        ));
+        assert!(!super::super::host_image_matches(
+            std::ffi::OsStr::new("other"),
+            Some(Path::new("/tmp/other"))
+        ));
     }
     struct Counting(AtomicUsize);
     impl Operations for Counting {
