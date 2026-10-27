@@ -20,6 +20,7 @@ import { cleanupTerminalCache } from '../Terminal/TerminalDisplay';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
 import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { closePaneNonBlocking } from '../../services/paneClose';
+import { forgetRemoteHint } from '../Terminal/remoteSuggestHint';
 import './PaneManager.css';
 
 interface PaneManagerProps {
@@ -116,6 +117,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
       clearCwdSnapshot,
       releaseSurface: cleanupTerminalCache,
       clearSessionExit: (id) => dispatch(clearSessionClosed({ terminalId: id })),
+      forgetRemoteHint,
     });
   }, [dispatch, paneTree, tabId]);
 

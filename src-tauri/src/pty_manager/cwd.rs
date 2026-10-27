@@ -190,6 +190,24 @@ mod tests {
         assert_eq!(parse_osc_cwd(two).as_deref(), Some("/b"));
     }
 
+    /// An ssh host's OSC 133 prompt marks must not reach the cwd tracker: the engine
+    /// re-arms its prompt gate on `133;A` (plan 061), and the same bytes passing through
+    /// here would otherwise overwrite the tab's local cwd with a remote path.
+    #[test]
+    fn osc_133_prompt_marks_never_report_a_cwd() {
+        for mark in [
+            &b"\x1b]133;A\x07"[..],
+            &b"\x1b]133;A;aid=42\x1b\\"[..],
+            &b"\x1b]133;B\x07"[..],
+            &b"\x1b]133;D;0\x07"[..],
+        ] {
+            assert_eq!(parse_osc_cwd(mark), None, "{:?}", String::from_utf8_lossy(mark));
+        }
+        // A real cwd report in the same chunk still wins, and 133 does not displace it.
+        let mixed = b"\x1b]9;9;D:\\work\x07\x1b]133;A\x07$ ";
+        assert_eq!(parse_osc_cwd(mixed).as_deref(), Some("D:\\work"));
+    }
+
     /// The batch command (`commands::get_terminal_cwds`) resolves EVERY requested pid
     /// against one shared `System::new_all()` instead of paying that scan per terminal.
     /// That reuse is only safe if it is a faithful projection of the owned-scan

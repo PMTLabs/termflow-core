@@ -24,6 +24,12 @@ export interface Disposable { dispose(): void }
 // cross-window detach handoff — one type, not a repeated inline literal.
 export interface PromptGate { seen: boolean; armed: boolean }
 
+// Who rendered the most recent prompt mark: the local hooked shell (OSC 9;9) or
+// the host on the far side of an ssh (OSC 133;A, OSC 7). Order-based, so a mark
+// that lands before the renderer notices the ssh process is still counted.
+export type PromptMarkKind = 'local' | 'host';
+export interface PromptMarkState { seen: boolean; kind: PromptMarkKind }
+
 // VS Code-style search modifiers. Map 1:1 onto @xterm/addon-search ISearchOptions.
 export interface TerminalSearchOptions {
   caseSensitive?: boolean;

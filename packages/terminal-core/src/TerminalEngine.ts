@@ -24,6 +24,8 @@ import type {
   TerminalSearchResult,
   ContextMenuActions,
   TerminalLinkHit,
+  PromptMarkKind,
+  PromptMarkState,
 } from './types';
 import { terminalCache, HYDRATION_BUFFER_CAP_BYTES } from './cache';
 import { wireScrollbarArrows } from './scrollbarArrows';
@@ -1198,6 +1200,25 @@ export class TerminalEngine {
     const entry = terminalCache.get(this.cacheKey);
     if (entry) entry.promptGate = { seen, armed };
   }
+  // Who rendered the latest prompt mark. 'local' until a host (ssh) mark arrives;
+  // mirrored into the cache entry so a remount keeps knowing the host signalled.
+  private lastPromptMarkKind: PromptMarkKind = 'local';
+  private promptMarkListeners = new Set<(state: PromptMarkState) => void>();
+  private notifyPromptMark(): void {
+    const state: PromptMarkState = { seen: this.promptOscSeen, kind: this.lastPromptMarkKind };
+    for (const listener of [...this.promptMarkListeners]) listener(state);
+  }
+  /**
+   * Subscribe to prompt-gate knowledge a host UI needs (the remote-hook chip).
+   * Fires once immediately with the current state so a subscriber created after
+   * the last mark is not left blind, then on every prompt mark and whenever the
+   * gate is restored or reset. Returns a disposer.
+   */
+  onPromptMark(listener: (state: PromptMarkState) => void): () => void {
+    this.promptMarkListeners.add(listener);
+    listener({ seen: this.promptOscSeen, kind: this.lastPromptMarkKind });
+    return () => { this.promptMarkListeners.delete(listener); };
+  }
   // Keys typed while disarmed may be shell type-ahead that PSReadLine echoes at
   // the NEXT prompt render; a mark planted after that echo would sit mid-line
   // and Enter would capture a tail fragment. Arming skips one command instead
@@ -2322,6 +2343,12 @@ export class TerminalEngine {
       // would otherwise re-persist a stale/null promptGate for the next hop.
       this.setPromptGate(prevGate.seen, prevGate.armed);
     }
+    // The mark kind rides the cache entry beside the gate. A cross-window detach
+    // carries only the gate, so the kind falls back to 'local' there and
+    // corrects itself at the next prompt mark.
+    this.lastPromptMarkKind = terminalCache.get(this.cacheKey)?.lastPromptMarkKind ?? 'local';
+    // A listener subscribed before this mount only holds the pre-restore defaults.
+    this.notifyPromptMark();
 
     const inputSubscription = subscribeUserInput(boundTerm, () => { this.pendingUserInput = true; });
     if (inputSubscription) this.disposables.push(() => inputSubscription.dispose());
@@ -2503,7 +2530,7 @@ export class TerminalEngine {
       // exited without cleaning up (claude/copilot exit paths vary) — reset so
       // enhanced-key encoding and command suggestions return to plain-prompt
       // behavior. Observe-only: cwd parsing stays in the Rust pipeline.
-      const promptOscHeal = (): boolean => {
+      const promptOscHeal = (kind: PromptMarkKind, source: string): boolean => {
         // Every rendered prompt closes one command's span and opens the next —
         // the boundary the ended-region marks are anchored to. Recorded first,
         // so it is independent of whether the heal branches below fire.
@@ -2527,16 +2554,31 @@ export class TerminalEngine {
             this.suppressUntilSubmit = true;
           }
         }
+        this.lastPromptMarkKind = kind;
+        const markEntry = terminalCache.get(this.cacheKey);
+        if (markEntry) markEntry.lastPromptMarkKind = kind;
+        this.opts.onDiag?.(() => `[TERM-DIAG] prompt mark source=${source} kind=${kind} rearmed=${!wasArmed}`);
+        this.notifyPromptMark();
         return false;
       };
       const osc9 = boundTerm.parser.registerOscHandler(9, (data: string) => {
         // OSC 9 is overloaded (9;9=cwd, 9;4=progress, notifications): only the
         // cwd form is a prompt signal — progress can be emitted by a LIVE TUI.
-        if (data.startsWith('9;')) return promptOscHeal();
+        if (data.startsWith('9;')) return promptOscHeal('local', 'osc9;9');
         return false;
       });
-      const osc7 = boundTerm.parser.registerOscHandler(7, () => promptOscHeal());
-      this.disposables.push(() => osc9.dispose(), () => osc7.dispose());
+      const osc7 = boundTerm.parser.registerOscHandler(7, () => promptOscHeal('host', 'osc7'));
+      // OSC 133 (semantic prompt): only the prompt-start mark `A` / `A;…` is a
+      // prompt render. B/C/D mark the command's own start, output and end, and a
+      // TUI may emit those mid-run — they must not re-arm the gate. Unlike OSC 7
+      // and 9;9 the backend never reads 133, so a remote host can send it without
+      // overwriting the tab's cwd with a remote path.
+      const osc133 = boundTerm.parser.registerOscHandler(133, (data: string) => {
+        if (data === 'A' || data.startsWith('A;')) return promptOscHeal('host', `osc133 payload=${JSON.stringify(data.slice(0, 32))}`);
+        this.opts.onDiag?.(() => `[TERM-DIAG] osc133 ignored payload=${JSON.stringify(data.slice(0, 32))} (not a prompt start)`);
+        return false;
+      });
+      this.disposables.push(() => osc9.dispose(), () => osc7.dispose(), () => osc133.dispose());
 
       // Agent color-scheme guard: while a pane has an assigned agent color
       // (cache.agentColorLocked), swallow the program's own color-control OSCs so
@@ -3104,6 +3146,7 @@ export class TerminalEngine {
       // Backlog 011: mark survives the entry swap (live capture owns it now).
       captureMark: existingCache?.captureMark ?? null,
       promptGate: existingCache?.promptGate ?? null,
+      lastPromptMarkKind: existingCache?.lastPromptMarkKind,
       // Enhanced keyboard protocol state — see the adoption comment at the top
       // of mount(). Writing `this.kbState`/`this.win32State` back here (rather
       // than existingCache's) is correct in both cases: if we adopted the cached
@@ -3249,6 +3292,9 @@ export class TerminalEngine {
       // New shell: its own prompt hook re-proves itself (fresh gate state).
       this.setPromptGate(false, false);
       this.sawInputWhileDisarmed = false;
+      this.lastPromptMarkKind = 'local';
+      if (suggestCacheEntry) suggestCacheEntry.lastPromptMarkKind = 'local';
+      this.notifyPromptMark();
       // Review 046/047: a new processId is a new PTY session with its own
       // independent protocol handshake — carrying over the old session's
       // Kitty/Win32-Input-Mode state would be wrong (stale flags, or a

@@ -49,6 +49,7 @@ function rightOf(decl: string): string | null {
 /** Chrome that floats OVER the terminal at its right edge — must clear the scrollbar column. */
 const OVER_THE_TERMINAL = [
   '.agent-chip',
+  '.remote-suggest-chip',
   '.scroll-to-bottom-button',
   '.terminal-search-bar',
   '.terminal-pane.solo .terminal-pane-header',

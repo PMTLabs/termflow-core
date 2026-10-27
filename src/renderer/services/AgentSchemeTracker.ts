@@ -2,6 +2,7 @@ import { store } from '../store';
 import { terminalService } from './TerminalService';
 import { computeEffectiveAgents, ProcSnapshot } from './agentSchemeLogic';
 import { applyEffectiveThemes, applyActivePaneBackground } from '../store/terminalTheme';
+import { isSshProcessName } from './foregroundSsh';
 
 // How often to poll the foreground-agent snapshot. GET /api/processes runs a
 // full sysinfo enumeration (50-200ms) so we keep this modest and pause it while
@@ -26,6 +27,7 @@ class AgentSchemeTrackerClass {
   private effective = new Map<string, string>(); // terminalId → effective agent label
   private detected = new Map<string, string>();  // terminalId → raw detected agent (for menus)
   private detectedExe = new Map<string, string>(); // terminalId → foreground exe path (for icon)
+  private sshForeground = new Set<string>();      // terminalIds whose foreground program is ssh
   private current: Promise<void> | null = null;  // the in-flight poll, if any
   private listeners = new Set<() => void>();      // notified when `detected` changes (agent chip)
 
@@ -43,7 +45,15 @@ class AgentSchemeTrackerClass {
     this.effective.clear();
     this.detected.clear();
     this.detectedExe.clear();
+    this.sshForeground.clear();
     this.current = null;
+  }
+
+  /** Whether the ssh client is a terminal's foreground program (plan 061 remote-hook
+   *  chip). Same poll as the agent detection, so it lags real time by up to one tick —
+   *  callers must not depend on its timing relative to terminal output. */
+  isSshForeground(id: string): boolean {
+    return this.sshForeground.has(id);
   }
 
   /** Effective agent label for a terminal, or null. Read by the THEME appliers
@@ -116,9 +126,11 @@ class AgentSchemeTrackerClass {
       const snapshots: ProcSnapshot[] = [];
       const nextDetected = new Map<string, string>();
       const nextDetectedExe = new Map<string, string>();
+      const nextSsh = new Set<string>();
       for (const p of procs) {
         const terminalId = terminalService.getTerminalIdForProcess(p.id);
         if (!terminalId) continue; // process not owned by this window
+        if (isSshProcessName(p.currentApp?.name)) nextSsh.add(terminalId);
         if (p.agent) nextDetected.set(terminalId, p.agent);
         if (p.agent && p.agentExe) nextDetectedExe.set(terminalId, p.agentExe);
         snapshots.push({
@@ -139,11 +151,16 @@ class AgentSchemeTrackerClass {
       // Raw detection powers the context menus (offer any running agent) and the
       // per-pane agent chip. It is independent of mappings, so an unmapped agent is
       // still surfaced. Notify chip subscribers only when it actually changed.
+      const sshChanged =
+        this.sshForeground.size !== nextSsh.size ||
+        [...nextSsh].some((id) => !this.sshForeground.has(id));
       const detectedChanged =
         !sameStringMap(this.detected, nextDetected) ||
-        !sameStringMap(this.detectedExe, nextDetectedExe);
+        !sameStringMap(this.detectedExe, nextDetectedExe) ||
+        sshChanged;
       this.detected = nextDetected;
       this.detectedExe = nextDetectedExe;
+      this.sshForeground = nextSsh;
       if (detectedChanged) {
         for (const listener of this.listeners) {
           try { listener(); } catch (e) { console.warn('AgentSchemeTracker: listener failed', e); }

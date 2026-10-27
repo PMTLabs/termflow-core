@@ -26,6 +26,7 @@ import { PreviousHostForTerminals } from './HostGenerationMarker';
 import { resolveTabProcessIds } from '../../services/tabProcessIds';
 import { renameTab } from '../../services/renameTab';
 import { clearCwdSnapshot } from '../../services/cwdSnapshot';
+import { forgetRemoteHint } from '../Terminal/remoteSuggestHint';
 import { clearSessionClosed } from '../../store/slices/sessionExitSlice';
 import { runSettingsGuard } from '../../services/settingsNavGuard';
 import { isVirtualTab, SETTINGS_SHELL_TYPE } from '../../services/tabKinds';
@@ -613,6 +614,7 @@ export const TabManager: React.FC<TabManagerProps> = () => {
       // PaneManager.performClose does for a single pane. Without this, closing a
       // whole tab leaked its panes' entries for the rest of the session.
       clearCwdSnapshot(terminalId);
+      forgetRemoteHint(terminalId); // plan 061 chip dismissal, same lifetime
       // The xterm cache is keyed by terminalId (cacheKey === terminalId), so it
       // must be disposed per terminal — doing it once for the tab id both missed
       // the extra panes of a split tab and hit a moved-away pane.
