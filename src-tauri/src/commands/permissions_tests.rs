@@ -111,57 +111,165 @@ impl Inventory for crate::state::permissions::WireInventory {
     fn app_call(&self) { panic!("app FFI must never be called") }
 }
 
-// Real SystemPort -> inventory resolver -> real WireClient, including follow-up
-// status and request dispatch. The injected app boundary panics before any FFI.
-async fn system_wire_case(case: u8) {
-    use termflow_pty_protocol::{read_frame, write_frame, Control, Frame, Response, PermissionState as P};
+// The identity override allows testing both Some->None and None->Some while
+// retaining the real resolver, SystemPort, and wire client for every row.
+struct IdentityInventory {
+    wire: crate::state::permissions::WireInventory,
+    identity: Option<SubjectIdentity>,
+}
+impl Inventory for IdentityInventory {
+    async fn resolve(&self) -> crate::state::permissions::ResolvedPermissionSubject {
+        let mut result = self.wire.resolve().await;
+        if let Some(identity) = &self.identity { result.view.subject = identity.clone(); }
+        result
+    }
+    fn app_call(&self) { panic!("app FFI must never be called") }
+}
+
+struct WireCase {
+    initial: (termflow_pty_protocol::PermissionState, termflow_pty_protocol::PermissionState),
+    followup: (termflow_pty_protocol::PermissionState, termflow_pty_protocol::PermissionState),
+    ack: termflow_pty_protocol::PermissionState,
+    kind: Option<PermissionKind>,
+    expected: Option<ExpectedSubject>,
+    identity: Option<SubjectIdentity>,
+}
+
+async fn system_wire_case(case: WireCase) -> (PermissionView, usize, usize) {
+    use termflow_pty_protocol::{read_frame, write_frame, Control, Frame, Response};
+    use std::time::Duration;
     let (client, mut peer, _) = crate::pty_host_client::conn_tests::wired();
     client.set_permissions(true);
     let _keep_connected = client.clone();
-    let task = tokio::spawn(async move {
-        let inventory = crate::state::permissions::WireInventory(vec![client]);
-        let expected = (case == 2).then(|| ExpectedSubject { target: PermissionTarget::Host, subject: SubjectIdentity { pid: Some(999), ..Default::default() } });
-        let kind = (case != 0).then_some(PermissionKind::Accessibility);
-        execute_expected(&SystemPort(&inventory, false), kind, 17, expected).await
+    let mut task = tokio::spawn(async move {
+        let inventory = IdentityInventory { wire: crate::state::permissions::WireInventory(vec![client]), identity: case.identity };
+        execute_expected(&SystemPort(&inventory, false), case.kind, 17, case.expected).await
     });
     let mut requests = 0;
     let mut statuses = 0;
-    loop {
-        tokio::select! {
-            result = async { while !task.is_finished() { tokio::task::yield_now().await; } } => { let _ = result; break; }
-            frame = read_frame(&mut peer) => {
-                let response = match frame.unwrap().unwrap() {
-                    Frame::Ctrl(Control::PermissionStatus { req, .. }) => {
-                        statuses += 1;
-                        let state = if case == 0 || case == 3 || statuses == 2 { P::Unknown } else { P::Granted };
-                        Response::PermissionStatusReply { req, accessibility: state, screen_recording: state, self_responsible: Some(true) }
-                    }
-                    Frame::Ctrl(Control::RequestPermission { req, kind, .. }) => {
-                        requests += 1;
-                        Response::PermissionRequested { req, kind, state: P::Granted, self_responsible: Some(true) }
-                    }
-                    other => panic!("unexpected frame: {other:?}"),
-                };
-                write_frame(&mut peer, &Frame::Resp(response)).await.unwrap();
+    let view = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            tokio::select! {
+                result = &mut task => break result.unwrap(),
+                frame = read_frame(&mut peer) => {
+                    let response = match frame.unwrap().unwrap() {
+                        Frame::Ctrl(Control::PermissionStatus { req, .. }) => {
+                            statuses += 1;
+                            let (accessibility, screen_recording) = if statuses == 1 { case.initial } else { case.followup };
+                            Response::PermissionStatusReply { req, accessibility, screen_recording, self_responsible: Some(true) }
+                        }
+                        Frame::Ctrl(Control::RequestPermission { req, kind, .. }) => {
+                            assert_eq!(Some(kind), case.kind.map(Into::into));
+                            requests += 1;
+                            Response::PermissionRequested { req, kind, state: case.ack, self_responsible: Some(true) }
+                        }
+                        other => panic!("unexpected frame: {other:?}"),
+                    };
+                    write_frame(&mut peer, &Frame::Resp(response)).await.unwrap();
+                }
             }
         }
-    }
-    let view = task.await.unwrap();
-    assert_eq!(requests, usize::from(case == 1), "captured RequestPermission frames");
-    assert_eq!(statuses, if case == 1 { 2 } else { 1 });
-    let json = serde_json::to_value(view).unwrap();
-    assert!(json["error"].is_string(), "{json}");
-    assert_eq!(json["accessibility"], "unknown");
-    assert_eq!(json["screenRecording"], "unknown");
+    }).await.expect("wire case timed out");
+    assert!(tokio::time::timeout(Duration::from_millis(10), read_frame(&mut peer)).await.is_err(), "unexpected frame after completion");
+    (view, statuses, requests)
 }
+
+fn wire_case(kind: Option<PermissionKind>) -> WireCase {
+    use termflow_pty_protocol::PermissionState as P;
+    WireCase { initial: (P::Granted, P::NotGranted), followup: (P::Granted, P::NotGranted), ack: P::Granted, kind, expected: None, identity: None }
+}
+
 #[tokio::test]
-async fn system_initial_unknown() { system_wire_case(0).await; }
+async fn system_initial_unknown() {
+    use termflow_pty_protocol::PermissionState as P;
+    for states in [(P::Unknown, P::Granted), (P::Granted, P::Unknown), (P::Unknown, P::Unknown)] {
+        let mut case = wire_case(None);
+        case.initial = states;
+        let (view, statuses, requests) = system_wire_case(case).await;
+        assert_eq!((statuses, requests), (1, 0), "{states:?}");
+        assert!(serde_json::to_value(&view).unwrap()["error"].is_string(), "{states:?}");
+        assert_eq!((view.accessibility, view.screen_recording), (states.0.into(), states.1.into()));
+    }
+}
+
 #[tokio::test]
-async fn system_followup_unknown() { system_wire_case(1).await; }
+async fn system_initial_unknown_request_writes_nothing() {
+    use termflow_pty_protocol::PermissionState as P;
+    for kind in [PermissionKind::Accessibility, PermissionKind::ScreenRecording] {
+        for states in [(P::Unknown, P::Granted), (P::Granted, P::Unknown), (P::Unknown, P::Unknown)] {
+            let mut case = wire_case(Some(kind));
+            case.initial = states;
+            let (view, statuses, requests) = system_wire_case(case).await;
+            assert_eq!((statuses, requests), (1, 0), "{kind:?} {states:?}");
+            assert!(serde_json::to_value(&view).unwrap()["error"].is_string(), "{kind:?} {states:?}");
+            assert_eq!((view.accessibility, view.screen_recording), (states.0.into(), states.1.into()));
+        }
+    }
+}
+
 #[tokio::test]
-async fn system_initial_unknown_request_writes_nothing() { system_wire_case(3).await; }
+async fn system_followup_unknown() {
+    use termflow_pty_protocol::PermissionState as P;
+    for kind in [PermissionKind::Accessibility, PermissionKind::ScreenRecording] {
+        for states in [(P::Unknown, P::Granted), (P::Granted, P::Unknown), (P::Unknown, P::Unknown)] {
+            let mut case = wire_case(Some(kind));
+            case.followup = states;
+            let (view, statuses, requests) = system_wire_case(case).await;
+            assert_eq!((statuses, requests), (2, 1), "{kind:?} {states:?}");
+            assert!(serde_json::to_value(&view).unwrap()["error"].is_string(), "{kind:?} {states:?}");
+            assert_eq!((view.accessibility, view.screen_recording), (states.0.into(), states.1.into()));
+        }
+    }
+}
+
 #[tokio::test]
-async fn system_expected_mismatch() { system_wire_case(2).await; }
+async fn system_unknown_ack_and_non_unknown_control() {
+    use termflow_pty_protocol::PermissionState as P;
+    for kind in [PermissionKind::Accessibility, PermissionKind::ScreenRecording] {
+        let mut case = wire_case(Some(kind));
+        case.ack = P::Unknown;
+        let (view, statuses, requests) = system_wire_case(case).await;
+        assert_eq!((statuses, requests), (1, 1), "{kind:?}");
+        assert!(serde_json::to_value(&view).unwrap()["error"].is_string());
+        assert_eq!((view.accessibility, view.screen_recording), (PermState::Unknown, PermState::Unknown));
+        let (view, statuses, requests) = system_wire_case(wire_case(Some(kind))).await;
+        assert_eq!((statuses, requests), (2, 1));
+        assert!(view.error.is_none());
+        assert_eq!((view.accessibility, view.screen_recording), (PermState::Granted, PermState::NotGranted));
+    }
+}
+
+#[tokio::test]
+async fn system_expected_mismatch() {
+    let base = SubjectIdentity { pid: Some(100), generation: Some("g0".into()), bundle_id: Some(crate::state::permissions::HELPER_BUNDLE_ID.into()) };
+    let none = SubjectIdentity { pid: None, generation: None, bundle_id: None };
+    let mut rows = vec![("target", base.clone(), PermissionTarget::App, base.clone())];
+    for (name, actual, expected) in [
+        ("pid different", base.clone(), SubjectIdentity { pid: Some(101), ..base.clone() }),
+        ("pid some to none", base.clone(), SubjectIdentity { pid: None, ..base.clone() }),
+        ("pid none to some", none.clone(), SubjectIdentity { pid: Some(100), ..none.clone() }),
+        ("generation different", base.clone(), SubjectIdentity { generation: Some("g1".into()), ..base.clone() }),
+        ("generation some to none", base.clone(), SubjectIdentity { generation: None, ..base.clone() }),
+        ("generation none to some", none.clone(), SubjectIdentity { generation: Some("g0".into()), ..none.clone() }),
+        ("bundle different", base.clone(), SubjectIdentity { bundle_id: Some("other".into()), ..base.clone() }),
+        ("bundle some to none", base.clone(), SubjectIdentity { bundle_id: None, ..base.clone() }),
+        ("bundle none to some", none.clone(), SubjectIdentity { bundle_id: Some("other".into()), ..none.clone() }),
+    ] { rows.push((name, actual, PermissionTarget::Host, expected)); }
+    for (name, actual, target, expected) in rows {
+        let mut case = wire_case(Some(PermissionKind::Accessibility));
+        case.identity = Some(actual);
+        case.expected = Some(ExpectedSubject { target, subject: expected });
+        let (view, statuses, requests) = system_wire_case(case).await;
+        assert_eq!((statuses, requests), (1, 0), "{name}");
+        assert!(serde_json::to_value(&view).unwrap()["error"].is_string(), "{name}");
+    }
+    let mut case = wire_case(Some(PermissionKind::Accessibility));
+    case.expected = Some(ExpectedSubject { target: PermissionTarget::Host, subject: base });
+    let (view, statuses, requests) = system_wire_case(case).await;
+    assert_eq!((statuses, requests), (2, 1));
+    assert!(view.error.is_none());
+    assert_eq!((view.accessibility, view.screen_recording), (PermState::Granted, PermState::NotGranted));
+}
 
 struct WirePort { client: PtyHostClient, target: PermissionTarget }
 impl PermissionPort for WirePort {
