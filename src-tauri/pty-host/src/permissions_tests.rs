@@ -130,8 +130,19 @@ async fn bad_token_never_calls_backend_or_replies() {
         req: 2,
         token: "bad".into(),
     });
-    assert!(rx.try_recv().is_err());
-    assert_eq!(fake.calls.load(Ordering::SeqCst), 0);
+    // Dispatch is asynchronous, so "nothing yet" proves nothing. A good-token request of the other
+    // kind (no coalescing with the bad Accessibility one) is the barrier: once it is answered, any
+    // work the bad-token controls had started would have reached the backend too.
+    manager.handle_control(request(3, "secret", PermissionKind::ScreenRecording));
+    wait_for_calls(&fake, 1);
+    std::thread::sleep(Duration::from_millis(50));
+    fake.release();
+    match next(&mut rx).await {
+        Response::PermissionRequested { req, .. } => assert_eq!(req, 3),
+        other => panic!("only the good-token request is answered, got {other:?}"),
+    }
+    assert_eq!(fake.calls.load(Ordering::SeqCst), 1, "bad-token controls reached the backend");
+    assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.is_err(), "a bad-token control was answered");
 }
 
 #[tokio::test]
