@@ -16,6 +16,7 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            identity_cache: Arc::default(),
             lifecycle: Arc::new(HostRetention::Unknown),
             alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             lifecycle_token: Arc::new("tok".into()),
@@ -30,6 +31,48 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
         },
         out_rx,
     )
+}
+
+#[tokio::test]
+async fn code_identity_cache_clears_on_pid_change_and_close() {
+    use crate::state::permissions::IdentityVerdict;
+    use std::sync::atomic::AtomicUsize;
+    let (client, _peer, _) = super::conn_tests::wired();
+    let count = AtomicUsize::new(0);
+    let lookup = |_| { count.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches };
+    client.set_peer_pid(41);
+    client.identity_cache.verify(41, lookup);
+    client.identity_cache.verify(41, lookup);
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    client.set_peer_pid(42);
+    client.set_peer_pid(41);
+    client.identity_cache.verify(41, lookup);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert!(client.close_transport().await);
+    client.identity_cache.verify(41, lookup);
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    assert_eq!(client.host_identity_verdict(41), IdentityVerdict::Unverifiable);
+}
+
+#[tokio::test]
+async fn code_identity_cache_clears_on_transport_loss() {
+    use crate::state::permissions::IdentityVerdict;
+    use std::sync::atomic::AtomicUsize;
+    let (client, peer, counters) = super::conn_tests::wired();
+    let count = AtomicUsize::new(0);
+    let lookup = |_| { count.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches };
+    client.set_peer_pid(41);
+    client.identity_cache.verify(41, lookup);
+    drop(peer);
+    // The disconnect callback fires after cache invalidation.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while counters.disconnects.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    client.identity_cache.verify(41, lookup);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    assert_eq!(client.host_identity_verdict(41), IdentityVerdict::Unverifiable);
 }
 
 #[cfg(target_os = "macos")]

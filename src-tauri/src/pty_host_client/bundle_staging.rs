@@ -13,7 +13,7 @@ const NAME: &str = "TermFlow Host.app";
 const EXE: &str = "Contents/MacOS/termflow-pty-host";
 const PLIST: &str = "Contents/Info.plist";
 const SEAL: &str = "Contents/_CodeSignature/CodeResources";
-const ID: &str = "app.termflow.desktop.pty-host";
+const ID: &str = crate::helper_identity::HELPER_IDENTIFIER;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StagedHost {
@@ -32,11 +32,10 @@ impl SignatureVerifier for Codesign {
     fn verify(&self, bundle: &Path) -> io::Result<bool> {
         let mut cmd = Command::new("/usr/bin/codesign");
         cmd.args(["--verify", "--strict"]);
-        // Debug helpers can be ad-hoc signed. Release helpers must satisfy the
-        // expected identifier and Developer ID team, not just have a valid seal.
-        if !cfg!(debug_assertions) {
-            cmd.args(["-R", "=identifier \"app.termflow.desktop.pty-host\" and anchor apple generic and certificate leaf[subject.OU] = \"68M75D67LJ\""]);
-        }
+        // Debug accepts ad-hoc signatures with the helper identifier; release
+        // additionally requires Apple's anchor and the Developer ID team.
+        let requirement = format!("={}", crate::helper_identity::helper_requirement());
+        cmd.args(["-R", &requirement]);
         Ok(cmd.arg(bundle).output()?.status.success())
     }
 }

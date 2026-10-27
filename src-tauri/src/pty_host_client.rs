@@ -272,6 +272,7 @@ pub struct PtyHostClient {
     mcp_hold: Arc<std::sync::atomic::AtomicBool>,
     /// Permission controls are unsafe to send unless this connection advertised them.
     permissions: Arc<std::sync::atomic::AtomicBool>,
+    identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
     /// Lifecycle policy copied from the selected connection plan. This is
     /// deliberately connection-owned so UI consumers never re-read a mutable
     /// discovery record after connecting.
@@ -438,7 +439,15 @@ impl PtyHostClient {
 
     /// Set the peer PID for inbound connections where GUI acts as server.
     pub fn set_peer_pid(&self, pid: u32) {
+        if self.server_pid() != Some(pid) { self.identity_cache.clear(); }
         self.exe_origin.set_server_pid(Some(pid));
+    }
+
+    pub(crate) fn host_identity_verdict(&self, pid: u32) -> crate::state::permissions::IdentityVerdict {
+        use crate::state::permissions::{host_identity::verify_pid, IdentityVerdict};
+        if !self.is_alive() || self.server_pid() != Some(pid) { return IdentityVerdict::Unverifiable; }
+        let verdict = self.identity_cache.verify(pid, verify_pid);
+        if self.is_alive() && self.server_pid() == Some(pid) { verdict } else { IdentityVerdict::Unverifiable }
     }
 
     /// Whether an intentional exit must announce itself to this host.
@@ -463,6 +472,7 @@ impl PtyHostClient {
         const BOUND: std::time::Duration = std::time::Duration::from_secs(2);
         if self.conn.begin_close() {
             self.alive.store(false, Ordering::Release);
+            self.identity_cache.clear();
             self.conn.cancel();
         }
         self.pending.lock().unwrap().clear();
@@ -955,7 +965,9 @@ where
     let stdout_observer: StdoutObserver = Arc::default();
     #[cfg(test)]
     let stdout_observer_r = stdout_observer.clone();
+    let identity_cache = Arc::new(crate::state::permissions::host_identity::IdentityCache::default());
     let end = Arc::new(ConnLoss {
+        identity_cache: identity_cache.clone(),
         conn: conn.clone(),
         alive: alive.clone(),
         pending: pending.clone(),
@@ -1093,6 +1105,7 @@ where
         inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        identity_cache,
         lifecycle: Arc::new(HostRetention::Unknown),
         alive,
         lifecycle_token,
@@ -1116,6 +1129,7 @@ where
 /// compare-exchange acts, so `on_disconnect` fires at most once.
 #[cfg(any(windows, unix))]
 struct ConnLoss {
+    identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
     conn: Arc<ConnState>,
     alive: Arc<std::sync::atomic::AtomicBool>,
     pending: PendingMap,
@@ -1133,6 +1147,7 @@ impl ConnLoss {
         // to publish it), stop the other task, fail waiting requests, and only
         // then surface the loss.
         self.alive.store(false, Ordering::Release);
+        self.identity_cache.clear();
         self.conn.cancel();
         self.pending.lock().unwrap().clear();
         let binding = self.sessions.lock().unwrap().clone();

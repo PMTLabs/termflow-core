@@ -1,6 +1,4 @@
-//! Non-spawning permission-subject selection. Signing verification is injected:
-//! B2 supplies the Security-framework implementation; there is no permissive
-//! production verifier in this module.
+//! Non-spawning permission-subject selection, with PID-based code verification.
 use super::host_adoption::AdoptionPort;
 use super::host_generation::ServingHosts;
 use super::host_routing::spawn_target;
@@ -10,7 +8,8 @@ use crate::pty_host_client::{PermissionOutcome, PtyHostClient};
 use serde::Serialize;
 use tauri::Runtime;
 
-pub(crate) const HELPER_BUNDLE_ID: &str = "app.termflow.desktop.pty-host";
+pub(crate) mod host_identity;
+pub(crate) const HELPER_BUNDLE_ID: &str = crate::helper_identity::HELPER_IDENTIFIER;
 const APP_BUNDLE_ID: &str = "app.termflow.desktop";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,8 +104,12 @@ fn other_reason<H>(host: &Host<H>, verifier: &impl HostIdentityVerifier) -> Opti
     }
 }
 
+#[cfg(test)]
 async fn resolve<S: SubjectSource>(source: &S, verifier: &impl HostIdentityVerifier) -> PermissionSubject {
-    let snapshot = source.snapshot();
+    resolve_snapshot(source, source.snapshot(), verifier).await
+}
+
+async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Handle>, verifier: &impl HostIdentityVerifier) -> PermissionSubject {
     let selected = snapshot.selected.and_then(|c| snapshot.hosts.iter().find(|h| h.channel == c));
     let mut result = PermissionSubject { target: PermissionTarget::Unresolved, subject: SubjectIdentity::default(), other_hosts: Vec::new(), app_sessions: snapshot.app_sessions };
     let mut covered = None;
@@ -220,10 +223,11 @@ impl<R: Runtime> SubjectSource for AppState<R> {
     }
 }
 
-/// Selects only among existing connections and never starts a host. B2 provides
-/// the verifier; no commands or permissive default verifier are installed here.
-pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>, verifier: &impl HostIdentityVerifier) -> PermissionSubject {
-    resolve(state, verifier).await
+/// Selects only among existing connections and never starts a host.
+pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>) -> PermissionSubject {
+    let snapshot = state.snapshot();
+    let verifier = host_identity::ProductionVerifier::new(snapshot.hosts.iter().map(|host| host.handle.clone()));
+    resolve_snapshot(state, snapshot, &verifier).await
 }
 
 #[cfg(test)]
