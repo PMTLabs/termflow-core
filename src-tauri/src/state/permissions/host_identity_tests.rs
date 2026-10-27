@@ -62,11 +62,44 @@ int main(int argc, char **argv) {
     assert_eq!(token.pid(), child.id());
     let first = macos::verify(token, DEBUG_REQUIREMENT);
     assert!(matches!(&first, IdentityVerdict::Matches(_)));
+    let output = Command::new("/usr/bin/codesign").args(["-d", "-r-"]).arg(&exe).output().unwrap();
+    assert!(output.status.success());
+    let details = format!("{}\n{}", String::from_utf8(output.stdout).unwrap(), String::from_utf8(output.stderr).unwrap());
+    let dr = details.lines().find_map(|line| line.strip_prefix("designated => ").or_else(|| line.strip_prefix("# designated => "))).expect("designated requirement");
+    assert_eq!(first, IdentityVerdict::Matches(dr.to_owned()));
     let mut wrong_version = token;
     wrong_version.0[7] ^= 1;
     assert_eq!(macos::verify(wrong_version, DEBUG_REQUIREMENT), IdentityVerdict::Unverifiable);
     assert_eq!(macos::verify(token, DEBUG_REQUIREMENT), first);
     assert_eq!(macos::verify(token, RELEASE_REQUIREMENT), IdentityVerdict::Different);
+    // Different code bytes with the same explicit DR must have the same identity.
+    let same_requirement = "=designated => identifier \"app.termflow.desktop.pty-host\"";
+    let mut same_children = Vec::new();
+    let mut same_verdicts = Vec::new();
+    let mut hashes = Vec::new();
+    for exit_code in [0, 7] {
+        let same_source = dir.path().join(format!("same{exit_code}.c"));
+        let same_exe = dir.path().join(format!("same{exit_code}"));
+        let code = std::fs::read_to_string(&source).unwrap().replace("sleep(2); return 0;", &format!("sleep(10); return {exit_code};"));
+        std::fs::write(&same_source, code).unwrap();
+        assert!(Command::new("/usr/bin/cc").arg(&same_source).arg("-o").arg(&same_exe).status().unwrap().success());
+        assert!(Command::new("/usr/bin/codesign").args(["--force", "-s", "-", "--identifier", "app.termflow.desktop.pty-host", "-r", same_requirement]).arg(&same_exe).status().unwrap().success());
+        let output = Command::new("/usr/bin/codesign").args(["-d", "--verbose=4"]).arg(&same_exe).output().unwrap();
+        assert!(output.status.success());
+        let details = String::from_utf8(output.stderr).unwrap();
+        hashes.push(details.lines().find_map(|line| line.strip_prefix("CDHash=")).unwrap().to_owned());
+        let child = Command::new(&same_exe).arg(&path).spawn().unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        let token = crate::pty_host_client::unix_peer_token(&socket).unwrap();
+        assert_eq!(token.pid(), child.id());
+        same_verdicts.push(macos::verify(token, DEBUG_REQUIREMENT));
+        same_children.push(child);
+    }
+    assert_ne!(hashes[0], hashes[1]);
+    assert!(matches!(&same_verdicts[0], IdentityVerdict::Matches(_)));
+    assert_eq!(same_verdicts[0], same_verdicts[1]);
+    super::super::tests::assert_same_dr(same_verdicts[0].clone(), same_verdicts[1].clone()).await;
+    for mut child in same_children { let _ = child.wait().unwrap(); }
     // A second permitted same-identifier process with a distinct actual DR.
     let second_exe = dir.path().join("sleeper2");
     std::fs::copy(&exe, &second_exe).unwrap();

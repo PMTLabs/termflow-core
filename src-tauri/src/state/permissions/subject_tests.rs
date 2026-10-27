@@ -132,6 +132,16 @@ async fn identity_verdicts_and_failed_or_stale_status_never_become_a_subject() {
     assert_eq!(resolve(&fake, &verifier()).await.target, PermissionTarget::Unresolved);
 }
 
+#[cfg(target_os = "macos")]
+pub(super) async fn assert_same_dr(first: IdentityVerdict, second: IdentityVerdict) {
+    let current = HostChannel::Primary;
+    let frozen = HostChannel::Frozen(FrozenId(1));
+    let fake = fixture(Some(current), vec![host(current, 1, true), host(frozen, 2, true)]);
+    let result = resolve(&fake, &Verifier(HashMap::from([(1, first), (2, second)]))).await;
+    assert_eq!(result.target, PermissionTarget::Host);
+    assert!(result.other_hosts.is_empty(), "unexpected warnings: {:?}", result.other_hosts);
+}
+
 pub(super) async fn assert_different_dr(first: IdentityVerdict, second: IdentityVerdict) {
     let current = HostChannel::Primary;
     let frozen = HostChannel::Frozen(FrozenId(1));
