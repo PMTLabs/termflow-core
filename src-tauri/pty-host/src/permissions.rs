@@ -29,19 +29,35 @@ enum Operation {
 pub(crate) trait Backend: Send + Sync {
     fn status(&self) -> (PermissionState, PermissionState);
     fn request(&self, kind: PermissionKind) -> PermissionState;
+    fn self_responsible(&self) -> Option<bool> {
+        None
+    }
+}
+fn child_status(
+    output: Option<crate::tcc_child::ChildOutput>,
+) -> (PermissionState, PermissionState) {
+    output
+        .map(|output| (output.accessibility, output.screen_recording))
+        .unwrap_or((PermissionState::Unknown, PermissionState::Unknown))
+}
+fn child_request(output: Option<crate::tcc_child::ChildOutput>) -> PermissionState {
+    output
+        .map(|output| output.screen_recording)
+        .unwrap_or(PermissionState::Unknown)
 }
 struct SystemBackend;
 impl Backend for SystemBackend {
     fn status(&self) -> (PermissionState, PermissionState) {
-        let (accessibility, screen_recording) = SystemTcc.status();
-        (convert(accessibility), convert(screen_recording))
+        child_status(crate::tcc_runner::run("status"))
     }
     fn request(&self, kind: PermissionKind) -> PermissionState {
-        let kind = match kind {
-            PermissionKind::Accessibility => NativeKind::Accessibility,
-            PermissionKind::ScreenRecording => NativeKind::ScreenRecording,
-        };
-        convert(SystemTcc.request(kind))
+        match kind {
+            PermissionKind::Accessibility => convert(SystemTcc.request(NativeKind::Accessibility)),
+            PermissionKind::ScreenRecording => child_request(crate::tcc_runner::run("request-sc")),
+        }
+    }
+    fn self_responsible(&self) -> Option<bool> {
+        SystemTcc.self_responsible()
     }
 }
 
@@ -99,6 +115,7 @@ impl Permissions {
                 }
                 Operation::Request(kind) => (backend.request(kind), PermissionState::Unknown),
             };
+            let self_responsible = backend.self_responsible();
             let mut state = state.lock().unwrap();
             let waiters = state.pending.remove(&operation).unwrap_or_default();
             for (generation, req) in waiters {
@@ -110,13 +127,13 @@ impl Permissions {
                         req,
                         accessibility: result.0,
                         screen_recording: result.1,
-                        self_responsible: None,
+                        self_responsible,
                     },
                     Operation::Request(kind) => Response::PermissionRequested {
                         req,
                         kind,
                         state: result.0,
-                        self_responsible: None,
+                        self_responsible,
                     },
                 };
                 let _ = responses.try_send(response);

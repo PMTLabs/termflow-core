@@ -8,6 +8,15 @@ rust-version = "1.88.0"
 name = "termflow-pty-host"
 path = "src/main.rs"
 
+# Separate fixture executable; no test hook is present in the production host.
+[[bin]]
+name = "tcc-test-child"
+path = "tests/fixtures/tcc_test_child.rs"
+required-features = ["tcc-test-fixtures"]
+
+[features]
+tcc-test-fixtures = []
+
 [dependencies]
 termflow-pty-protocol = { path = "../pty-protocol" }
 termflow-macos-tcc = { path = "../macos-tcc" }

@@ -74,6 +74,54 @@ async fn next(rx: &mut tokio::sync::mpsc::Receiver<Response>) -> Response {
         .unwrap()
 }
 
+#[test]
+fn child_failure_maps_to_unknown_for_both_operations() {
+    assert_eq!(
+        child_status(None),
+        (PermissionState::Unknown, PermissionState::Unknown)
+    );
+    assert_eq!(child_request(None), PermissionState::Unknown);
+}
+
+struct Responsible;
+impl Backend for Responsible {
+    fn status(&self) -> (PermissionState, PermissionState) {
+        (PermissionState::Granted, PermissionState::NotGranted)
+    }
+    fn request(&self, _: PermissionKind) -> PermissionState {
+        PermissionState::Granted
+    }
+    fn self_responsible(&self) -> Option<bool> {
+        Some(true)
+    }
+}
+#[tokio::test]
+async fn both_replies_include_host_responsibility() {
+    let (mut manager, mut rx, _) = setup();
+    manager.set_permission_backend(Arc::new(Responsible));
+    manager.handle_control(Control::PermissionStatus {
+        req: 1,
+        token: "secret".into(),
+    });
+    assert!(matches!(
+        next(&mut rx).await,
+        Response::PermissionStatusReply {
+            req: 1,
+            self_responsible: Some(true),
+            ..
+        }
+    ));
+    manager.handle_control(request(2, "secret", PermissionKind::Accessibility));
+    assert!(matches!(
+        next(&mut rx).await,
+        Response::PermissionRequested {
+            req: 2,
+            self_responsible: Some(true),
+            ..
+        }
+    ));
+}
+
 #[tokio::test]
 async fn bad_token_never_calls_backend_or_replies() {
     let (mut manager, mut rx, fake) = setup();
