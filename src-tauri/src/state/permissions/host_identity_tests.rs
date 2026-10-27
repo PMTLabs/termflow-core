@@ -62,6 +62,10 @@ int main(int argc, char **argv) {
     assert_eq!(token.pid(), child.id());
     let first = macos::verify(token, DEBUG_REQUIREMENT);
     assert!(matches!(&first, IdentityVerdict::Matches(_)));
+    let mut wrong_version = token;
+    wrong_version.0[7] ^= 1;
+    assert_eq!(macos::verify(wrong_version, DEBUG_REQUIREMENT), IdentityVerdict::Unverifiable);
+    assert_eq!(macos::verify(token, DEBUG_REQUIREMENT), first);
     assert_eq!(macos::verify(token, RELEASE_REQUIREMENT), IdentityVerdict::Different);
     // A second permitted same-identifier process with a distinct actual DR.
     let second_exe = dir.path().join("sleeper2");
