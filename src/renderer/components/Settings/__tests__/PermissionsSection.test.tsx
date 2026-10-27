@@ -102,19 +102,39 @@ describe('PermissionsSection', () => {
         expect(api.openMacosPermissionPane.mock.calls).toEqual([['screenRecording']]);
         expect(container.textContent).not.toContain('Not granted');
     });
-    it.each(['focus', 'pty-host:state'])('shows a request error after a same-subject %s refresh', async event => {
+    it.each([
+        ['focus', 'fulfilled'], ['focus', 'rejected'],
+        ['pty-host:state', 'fulfilled'], ['pty-host:state', 'rejected'],
+    ] as const)('preserves a same-subject %s refresh after a %s request error', async (event, outcome) => {
         await render(); const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await click(0);
         jest.spyOn(document, 'hasFocus').mockReturnValue(true);
+        api.macosPermissionStatus.mockResolvedValue(base({ accessibility: 'granted', screenRecording: 'notGranted' }));
         await act(async () => window.dispatchEvent(new Event(event)));
-        await act(async () => pending.resolve(base({ error: 'disconnected', accessibility: 'unknown', screenRecording: 'unknown' })));
+        await act(async () => {
+            if (outcome === 'fulfilled') pending.resolve(base({ error: 'disconnected', accessibility: 'unknown', screenRecording: 'unknown' }));
+            else pending.reject(new Error('disconnected'));
+        });
         expect(actions.some(a => a.type === 'ui/addToast' && a.payload.message.includes('disconnected'))).toBe(true);
-        expect(api.openMacosPermissionPane.mock.calls).toEqual([['accessibility']]);
+        expect(api.openMacosPermissionPane.mock.calls).toEqual(outcome === 'fulfilled' ? [['accessibility']] : []);
+        expect(button(0).nextElementSibling?.textContent).toContain('Granted');
+        expect(button(1).nextElementSibling?.textContent).toContain('Not granted');
     });
-    it('does not publish a slow request for an old subject', async () => {
+    it.each([
+        { field: 'target', changes: { target: 'app' } },
+        { field: 'pid', changes: { subject: { pid: 2, generation: 'gen-1', bundleId: 'app.host' } } },
+        { field: 'generation', changes: { subject: { pid: 1, generation: 'gen-2', bundleId: 'app.host' } } },
+        { field: 'bundleId', changes: { subject: { pid: 1, generation: 'gen-1', bundleId: 'app.other' } } },
+        { field: 'equal', changes: {} },
+    ] as const)('handles a slow request after a $field subject refresh', async ({ field, changes }) => {
+        const original = base({ subject: { pid: 1, generation: 'gen-1', bundleId: 'app.host' } });
+        api.macosPermissionStatus.mockResolvedValue(original);
         await render(); const pending = deferred<PermissionView>(); api.requestMacosPermission.mockReturnValue(pending.promise); await click(0);
-        api.macosPermissionStatus.mockResolvedValue(base({ subject: { pid: 2 }, target: 'app' })); await focus();
-        await act(async () => pending.resolve(base({ accessibility: 'granted' })));
-        expect(container.textContent).toContain('Permission target: TermFlow'); expect(api.openMacosPermissionPane).not.toHaveBeenCalled();
+        api.macosPermissionStatus.mockResolvedValue({ ...original, ...changes, accessibility: 'granted', screenRecording: 'notGranted' }); await focus();
+        await act(async () => pending.resolve({ ...original, accessibility: 'unknown', screenRecording: 'unknown' }));
+        expect(button(0).nextElementSibling?.textContent).toContain('Granted');
+        expect(button(1).nextElementSibling?.textContent).toContain('Not granted');
+        expect(api.openMacosPermissionPane.mock.calls).toEqual(field === 'equal' ? [['accessibility']] : []);
+        expect(container.textContent).toContain(`Permission target: ${field === 'target' ? 'TermFlow' : 'TermFlow Host'}`);
     });
     it('rejects a request response for a different subject even without a refresh', async () => {
         api.requestMacosPermission.mockResolvedValue(base({ subject: { pid: 2 }, accessibility: 'granted' })); await render(); await click(0);

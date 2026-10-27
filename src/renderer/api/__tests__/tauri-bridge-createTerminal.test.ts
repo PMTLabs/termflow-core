@@ -36,10 +36,13 @@ beforeEach(() => {
 });
 
 describe('tauriBridge permission requests', () => {
-  it('forwards the displayed subject to the permission command', async () => {
+  it.each(['accessibility', 'screenRecording'] as const)('forwards %s and the displayed subject to the permission command', async kind => {
     const expected = { target: 'host' as const, pid: 42, generation: 'generation-1', bundleId: 'app.termflow.host' };
-    await tauriBridge.requestMacosPermission('accessibility', expected);
-    expect(invokeMock).toHaveBeenCalledWith('request_macos_permission', { kind: 'accessibility', expected });
+    const view = { epoch: 1, target: 'host', subject: expected, accessibility: 'unknown', screenRecording: 'unknown', otherHosts: [], appSessions: false, error: 'disconnected' };
+    invokeMock.mockResolvedValueOnce(view);
+    expect(await tauriBridge.requestMacosPermission(kind, expected)).toBe(view);
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith('request_macos_permission', { kind, expected });
   });
 });
 
