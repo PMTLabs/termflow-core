@@ -4,7 +4,7 @@ use super::host_generation::ServingHosts;
 use super::host_routing::spawn_target;
 use super::types::AppState;
 use crate::elevated_host::HostChannel;
-use crate::pty_host_client::{PermissionOutcome, PtyHostClient};
+use crate::pty_host_client::{PermissionOutcome, PermissionStatus, PtyHostClient};
 use serde::Serialize;
 use tauri::Runtime;
 
@@ -87,7 +87,7 @@ struct Snapshot<H> {
 trait SubjectSource {
     type Handle: Clone;
     fn snapshot(&self) -> Snapshot<Self::Handle>;
-    async fn self_responsible(&self, handle: &Self::Handle) -> Result<Option<bool>, ()>;
+    async fn status(&self, handle: &Self::Handle) -> Result<(Option<bool>, Option<PermissionStatus>), ()>;
     fn still_selected(&self, host: &Host<Self::Handle>) -> bool;
 }
 
@@ -106,13 +106,15 @@ fn other_reason<H>(host: &Host<H>, verifier: &impl HostIdentityVerifier) -> Opti
 
 #[cfg(test)]
 async fn resolve<S: SubjectSource>(source: &S, verifier: &impl HostIdentityVerifier) -> PermissionSubject {
-    resolve_snapshot(source, source.snapshot(), verifier).await
+    resolve_snapshot(source, source.snapshot(), verifier).await.0
 }
 
-async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Handle>, verifier: &impl HostIdentityVerifier) -> PermissionSubject {
+async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Handle>, verifier: &impl HostIdentityVerifier) -> (PermissionSubject, Option<S::Handle>, Option<PermissionStatus>) {
     let selected = snapshot.selected.and_then(|c| snapshot.hosts.iter().find(|h| h.channel == c));
     let mut result = PermissionSubject { target: PermissionTarget::Unresolved, subject: SubjectIdentity::default(), other_hosts: Vec::new(), app_sessions: snapshot.app_sessions };
     let mut covered = None;
+    let mut selected_handle = None;
+    let mut status = None;
     if snapshot.disabled {
         result.target = PermissionTarget::App;
         result.subject.pid = Some(std::process::id());
@@ -124,13 +126,15 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
             covered = Some(host.channel);
         } else if other_reason(host, verifier).is_none() {
             // A failed or disconnected request never falls back to the app.
-            if let Ok(responsible) = source.self_responsible(&host.handle).await {
+            if let Ok((responsible, evidence)) = source.status(&host.handle).await {
                 if source.still_selected(host) {
                     match identity(responsible, host.spawn_identity) {
                         Some(SpawnIdentity::Helper) => {
                             result.target = PermissionTarget::Host;
                             result.subject = SubjectIdentity { pid: host.pid, generation: host.generation.clone(), bundle_id: Some(HELPER_BUNDLE_ID.into()) };
                             covered = Some(host.channel);
+                            selected_handle = Some(host.handle.clone());
+                            status = evidence;
                         }
                         Some(SpawnIdentity::App) => {
                             result.target = PermissionTarget::App;
@@ -157,7 +161,7 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
             result.other_hosts.push(OtherHost { pid, generation: host.generation.clone(), reason });
         }
     }
-    result
+    (result, selected_handle, status)
 }
 
 fn host_snapshot(channel: HostChannel, client: PtyHostClient, generation: Option<String>) -> Host<PtyHostClient> {
@@ -208,9 +212,9 @@ impl<R: Runtime> SubjectSource for AppState<R> {
             app_sessions: self.terminals.iter().any(|t| !self.host_terminals.contains_key(t.key())),
         }
     }
-    async fn self_responsible(&self, client: &PtyHostClient) -> Result<Option<bool>, ()> {
+    async fn status(&self, client: &PtyHostClient) -> Result<(Option<bool>, Option<PermissionStatus>), ()> {
         match client.permission_status().await {
-            Ok(PermissionOutcome::Reply(status)) => Ok(status.self_responsible),
+            Ok(PermissionOutcome::Reply(status)) => Ok((status.self_responsible, Some(status))),
             _ => Err(()),
         }
     }
@@ -224,10 +228,17 @@ impl<R: Runtime> SubjectSource for AppState<R> {
 }
 
 /// Selects only among existing connections and never starts a host.
-pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>) -> PermissionSubject {
+pub(crate) struct ResolvedPermissionSubject {
+    pub view: PermissionSubject,
+    pub host: Option<PtyHostClient>,
+    pub status: Option<PermissionStatus>,
+}
+
+pub(crate) async fn permission_subject<R: Runtime>(state: &AppState<R>) -> ResolvedPermissionSubject {
     let snapshot = state.snapshot();
     let verifier = host_identity::ProductionVerifier::new(snapshot.hosts.iter().map(|host| host.handle.clone()));
-    resolve_snapshot(state, snapshot, &verifier).await
+    let (view, host, status) = resolve_snapshot(state, snapshot, &verifier).await;
+    ResolvedPermissionSubject { view, host, status }
 }
 
 #[cfg(test)]

@@ -1781,7 +1781,7 @@ mod runtime_dir_tests;
 mod discovery_tests;
 
 #[cfg(test)]
-mod conn_tests;
+pub(crate) mod conn_tests;
 #[cfg(test)]
 mod counter_tests;
 #[cfg(test)]

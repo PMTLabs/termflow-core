@@ -8,7 +8,7 @@ use std::time::Duration;
 use termflow_pty_protocol::read_frame;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
-pub(super) struct Counters {
+pub(crate) struct Counters {
     pub disconnects: Arc<AtomicUsize>,
     pub exits: Arc<AtomicUsize>,
 }
@@ -36,7 +36,7 @@ pub(super) fn deps() -> (PtyHostDeps, Counters) {
 }
 
 /// A client wired to one end of a duplex; the other end is the "host".
-pub(super) fn wired() -> (PtyHostClient, DuplexStream, Counters) {
+pub(crate) fn wired() -> (PtyHostClient, DuplexStream, Counters) {
     let (client_side, server) = tokio::io::duplex(64 * 1024);
     let (rd, wr) = tokio::io::split(client_side);
     let (deps, counters) = deps();

@@ -12,8 +12,8 @@ struct Fake {
 impl SubjectSource for Fake {
     type Handle = u32;
     fn snapshot(&self) -> Snapshot<u32> { self.snapshot.clone() }
-    async fn self_responsible(&self, handle: &u32) -> Result<Option<bool>, ()> {
-        *self.replies.get(handle).unwrap_or(&Err(()))
+    async fn status(&self, handle: &u32) -> Result<(Option<bool>, Option<PermissionStatus>), ()> {
+        self.replies.get(handle).copied().unwrap_or(Err(())).map(|responsible| (responsible, None))
     }
     fn still_selected(&self, _: &Host<u32>) -> bool { self.still_selected }
 }
@@ -68,6 +68,16 @@ async fn subject_table_and_no_spawn() {
         }
         assert_eq!(fake.spawn_count.load(Ordering::SeqCst), 0, "{name}");
     }
+}
+
+#[tokio::test]
+async fn cold_settings_then_created_pane_changes_subject_without_settings_spawning() {
+    let mut fake = fixture(None, vec![]);
+    assert_eq!(resolve(&fake, &verifier()).await.target, PermissionTarget::Unresolved);
+    fake.snapshot.selected = Some(HostChannel::Primary);
+    fake.snapshot.hosts.push(host(HostChannel::Primary, 1, true));
+    assert_eq!(resolve(&fake, &verifier()).await.target, PermissionTarget::Host);
+    assert_eq!(fake.spawn_count.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

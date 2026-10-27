@@ -10,6 +10,7 @@ mod snippets;
 mod system;
 mod terminal;
 mod panes;
+pub(crate) mod permissions;
 mod update;
 mod window;
 
@@ -20,5 +21,6 @@ pub use snippets::*;
 pub use system::*;
 pub use terminal::*;
 pub(crate) use panes::*;
+pub use permissions::*;
 pub use update::*;
 pub use window::*;

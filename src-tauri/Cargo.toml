@@ -100,6 +100,7 @@ if-addrs = "0.13"
 # Shared wire protocol with the PTY-host sidecar (SpawnSpec + frames). Path dep
 # (not a workspace member) to avoid disturbing the existing single-package build.
 termflow-pty-protocol = { path = "pty-protocol" }
+termflow-macos-tcc = { path = "macos-tcc" }
 # Advisory INTER-PROCESS file locking for the config read-merge-write window. A
 # process-local mutex cannot help here: two profiles are two processes.
 fs4 = "1.1"
