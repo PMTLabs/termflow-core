@@ -19,7 +19,7 @@ impl SubjectSource for Fake {
 }
 struct Verifier(HashMap<u32, IdentityVerdict>);
 impl HostIdentityVerifier for Verifier {
-    fn verify(&self, pid: u32) -> IdentityVerdict { *self.0.get(&pid).unwrap_or(&IdentityVerdict::Unverifiable) }
+    fn verify(&self, pid: u32) -> IdentityVerdict { self.0.get(&pid).cloned().unwrap_or(IdentityVerdict::Unverifiable) }
 }
 fn host(channel: HostChannel, pid: u32, capable: bool) -> Host<u32> {
     Host { channel, handle: pid, pid: Some(pid), generation: Some(format!("gen{pid}")), capable, spawn_identity: None }
@@ -27,7 +27,8 @@ fn host(channel: HostChannel, pid: u32, capable: bool) -> Host<u32> {
 fn fixture(selected: Option<HostChannel>, hosts: Vec<Host<u32>>) -> Fake {
     Fake { snapshot: Snapshot { selected, hosts, disabled: false, helper_unavailable: false, reconnecting: false, app_sessions: false }, replies: HashMap::from([(1, Ok(Some(true))), (2, Ok(Some(true)))]), spawn_count: AtomicUsize::new(0), still_selected: true }
 }
-fn verifier() -> Verifier { Verifier(HashMap::from([(1, IdentityVerdict::Matches), (2, IdentityVerdict::Matches)])) }
+fn matched() -> IdentityVerdict { IdentityVerdict::Matches("same canonical DR".into()) }
+fn verifier() -> Verifier { Verifier(HashMap::from([(1, matched()), (2, matched())])) }
 
 #[tokio::test]
 async fn subject_table_and_no_spawn() {
@@ -111,11 +112,11 @@ async fn identity_verdicts_and_failed_or_stale_status_never_become_a_subject() {
     for (verdict, reason) in [(IdentityVerdict::Different, OtherHostReason::DifferentIdentity), (IdentityVerdict::Unverifiable, OtherHostReason::Unverified)] {
         // Both hosts can claim the same bundle id; only verified DR matters.
         let fake = fixture(Some(current), vec![host(current, 1, true), host(frozen, 2, true)]);
-        let v = Verifier(HashMap::from([(1, IdentityVerdict::Matches), (2, verdict)]));
+        let v = Verifier(HashMap::from([(1, matched()), (2, verdict.clone())]));
         let result = resolve(&fake, &v).await;
         assert_eq!(result.target, PermissionTarget::Host);
         assert_eq!(result.other_hosts, vec![OtherHost { pid: 2, generation: Some("gen2".into()), reason }]);
-        let v = Verifier(HashMap::from([(1, verdict), (2, IdentityVerdict::Matches)]));
+        let v = Verifier(HashMap::from([(1, verdict), (2, matched())]));
         let result = resolve(&fake, &v).await;
         assert_eq!(result.target, PermissionTarget::Unresolved);
         assert_eq!(result.subject.pid, None);
@@ -129,6 +130,15 @@ async fn identity_verdicts_and_failed_or_stale_status_never_become_a_subject() {
     fake.replies.insert(1, Ok(Some(true)));
     fake.still_selected = false;
     assert_eq!(resolve(&fake, &verifier()).await.target, PermissionTarget::Unresolved);
+}
+
+pub(super) async fn assert_different_dr(first: IdentityVerdict, second: IdentityVerdict) {
+    let current = HostChannel::Primary;
+    let frozen = HostChannel::Frozen(FrozenId(1));
+    let fake = fixture(Some(current), vec![host(current, 1, true), host(frozen, 2, true)]);
+    let result = resolve(&fake, &Verifier(HashMap::from([(1, first), (2, second)]))).await;
+    assert_eq!(result.target, PermissionTarget::Host);
+    assert_eq!(result.other_hosts[0].reason, OtherHostReason::DifferentIdentity);
 }
 
 #[test]

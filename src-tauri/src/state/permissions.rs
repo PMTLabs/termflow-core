@@ -1,4 +1,4 @@
-//! Non-spawning permission-subject selection, with PID-based code verification.
+//! Non-spawning permission-subject selection, with process-instance code verification.
 use super::host_adoption::AdoptionPort;
 use super::host_generation::ServingHosts;
 use super::host_routing::spawn_target;
@@ -12,8 +12,8 @@ pub(crate) mod host_identity;
 pub(crate) const HELPER_BUNDLE_ID: &str = crate::helper_identity::HELPER_IDENTIFIER;
 const APP_BUNDLE_ID: &str = "app.termflow.desktop";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum IdentityVerdict { Matches, Different, Unverifiable }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum IdentityVerdict { Matches(String), Different, Unverifiable }
 
 /// Implementations must compare the host's code identity, not its build hash or capability.
 pub(crate) trait HostIdentityVerifier {
@@ -98,7 +98,7 @@ fn identity(responsible: Option<bool>, fallback: Option<SpawnIdentity>) -> Optio
 fn other_reason<H>(host: &Host<H>, verifier: &impl HostIdentityVerifier) -> Option<OtherHostReason> {
     if !host.capable { return Some(OtherHostReason::Legacy); }
     match host.pid.map(|pid| verifier.verify(pid)).unwrap_or(IdentityVerdict::Unverifiable) {
-        IdentityVerdict::Matches => None,
+        IdentityVerdict::Matches(_) => None,
         IdentityVerdict::Different => Some(OtherHostReason::DifferentIdentity),
         IdentityVerdict::Unverifiable => Some(OtherHostReason::Unverified),
     }
@@ -155,10 +155,17 @@ async fn resolve_snapshot<S: SubjectSource>(source: &S, snapshot: Snapshot<S::Ha
         result.subject.pid = Some(std::process::id());
         result.subject.bundle_id = Some(APP_BUNDLE_ID.into());
     }
+    let selected_dr = selected.and_then(|h| h.pid).and_then(|pid| match verifier.verify(pid) {
+        IdentityVerdict::Matches(dr) => Some(dr), _ => None,
+    });
     for host in &snapshot.hosts {
         if Some(host.channel) == covered { continue; }
         let reason = other_reason(host, verifier).or_else(|| {
-            (result.target == PermissionTarget::App && host.capable).then_some(OtherHostReason::DifferentIdentity)
+            let different_dr = host.pid.is_some_and(|pid| match verifier.verify(pid) {
+                IdentityVerdict::Matches(dr) => selected_dr.as_ref().is_some_and(|selected| *selected != dr),
+                _ => false,
+            });
+            (different_dr || (result.target == PermissionTarget::App && host.capable)).then_some(OtherHostReason::DifferentIdentity)
         });
         if let (Some(pid), Some(reason)) = (host.pid, reason) {
             result.other_hosts.push(OtherHost { pid, generation: host.generation.clone(), reason });

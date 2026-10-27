@@ -18,11 +18,11 @@ impl IdentityCache {
     pub(crate) fn verify(&self, token: Option<AuditToken>, lookup: impl FnOnce(AuditToken) -> IdentityVerdict) -> IdentityVerdict {
         let Some(token) = token else { return IdentityVerdict::Unverifiable; };
         let mut entry = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((cached_pid, verdict)) = *entry {
-            if cached_pid == token { return verdict; }
+        if let Some((cached_pid, verdict)) = entry.as_ref() {
+            if *cached_pid == token { return verdict.clone(); }
         }
         let verdict = lookup(token);
-        *entry = Some((token, verdict));
+        *entry = Some((token, verdict.clone()));
         verdict
     }
     pub(crate) fn clear(&self) {
@@ -69,6 +69,9 @@ mod macos {
     extern "C" {
         fn CFStringCreateWithCString(allocator: CFRef, text: *const c_char, encoding: u32) -> CFRef;
         fn CFDataCreate(allocator: CFRef, bytes: *const u8, length: isize) -> CFRef;
+        fn CFStringGetLength(text: CFRef) -> isize;
+        fn CFStringGetMaximumSizeForEncoding(length: isize, encoding: u32) -> isize;
+        fn CFStringGetCString(text: CFRef, buffer: *mut c_char, size: isize, encoding: u32) -> u8;
         fn CFDictionaryCreate(allocator: CFRef, keys: *const CFRef, values: *const CFRef, count: isize, key_callbacks: *const c_void, value_callbacks: *const c_void) -> CFRef;
         fn CFRelease(object: CFRef);
         static kCFTypeDictionaryKeyCallBacks: c_void;
@@ -80,6 +83,8 @@ mod macos {
         fn SecCodeCopyGuestWithAttributes(host: CFRef, attributes: CFRef, flags: u32, guest: *mut CFRef) -> i32;
         fn SecRequirementCreateWithString(text: CFRef, flags: u32, requirement: *mut CFRef) -> i32;
         fn SecCodeCheckValidity(code: CFRef, flags: u32, requirement: CFRef) -> i32;
+        fn SecCodeCopyDesignatedRequirement(code: CFRef, flags: u32, requirement: *mut CFRef) -> i32;
+        fn SecRequirementCopyString(requirement: CFRef, flags: u32, text: *mut CFRef) -> i32;
     }
     struct Owned(CFRef);
     impl Owned {
@@ -107,7 +112,21 @@ mod macos {
             if status != 0 { return IdentityVerdict::Unverifiable; }
             let Some(req) = req else { return IdentityVerdict::Unverifiable; };
             match SecCodeCheckValidity(code.0, 0, req.0) {
-                0 => IdentityVerdict::Matches,
+                0 => {
+                    let mut dr = ptr::null();
+                    if SecCodeCopyDesignatedRequirement(code.0, 0, &mut dr) != 0 { return IdentityVerdict::Unverifiable; }
+                    let Some(dr) = Owned::new(dr) else { return IdentityVerdict::Unverifiable; };
+                    let mut text = ptr::null();
+                    if SecRequirementCopyString(dr.0, 0, &mut text) != 0 { return IdentityVerdict::Unverifiable; }
+                    let Some(text) = Owned::new(text) else { return IdentityVerdict::Unverifiable; };
+                    let size = CFStringGetMaximumSizeForEncoding(CFStringGetLength(text.0), UTF8) + 1;
+                    let mut buffer = vec![0u8; size as usize];
+                    if CFStringGetCString(text.0, buffer.as_mut_ptr().cast(), size, UTF8) == 0 { return IdentityVerdict::Unverifiable; }
+                    match std::ffi::CStr::from_ptr(buffer.as_ptr().cast()).to_str() {
+                        Ok(dr) => IdentityVerdict::Matches(dr.to_owned()),
+                        Err(_) => IdentityVerdict::Unverifiable,
+                    }
+                },
                 ERR_SEC_CS_REQ_FAILED => IdentityVerdict::Different,
                 _ => IdentityVerdict::Unverifiable,
             }

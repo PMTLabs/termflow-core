@@ -44,7 +44,7 @@ async fn code_identity_cache_clears_on_pid_change_and_close() {
     use std::sync::atomic::AtomicUsize;
     let (client, _peer, _) = super::conn_tests::wired();
     let count = AtomicUsize::new(0);
-    let lookup = |_| { count.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches };
+    let lookup = |_| { count.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches("DR".into()) };
     client.set_peer_pid(41);
     client.identity_cache.verify(token(), lookup);
     client.identity_cache.verify(token(), lookup);
@@ -65,7 +65,7 @@ async fn code_identity_cache_clears_on_transport_loss() {
     use std::sync::atomic::AtomicUsize;
     let (client, peer, counters) = super::conn_tests::wired();
     let count = AtomicUsize::new(0);
-    let lookup = |_| { count.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches };
+    let lookup = |_| { count.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches("DR".into()) };
     client.set_peer_pid(41);
     client.identity_cache.verify(token(), lookup);
     drop(peer);

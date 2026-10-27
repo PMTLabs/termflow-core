@@ -7,13 +7,13 @@ fn cache_is_keyed_by_full_token_and_invalidates() {
     let calls = AtomicUsize::new(0);
     let mut a = AuditToken([0; 8]); a.0[5] = 42; a.0[7] = 1;
     let mut b = a; b.0[7] = 2;
-    let lookup = |_| { calls.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches };
+    let lookup = |_| { calls.fetch_add(1, Ordering::SeqCst); IdentityVerdict::Matches("DR".into()) };
     assert_eq!(cache.verify(None, lookup), IdentityVerdict::Unverifiable);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert_eq!(cache.verify(Some(a), lookup), IdentityVerdict::Matches);
-    assert_eq!(cache.verify(Some(a), lookup), IdentityVerdict::Matches);
+    assert_eq!(cache.verify(Some(a), lookup), IdentityVerdict::Matches("DR".into()));
+    assert_eq!(cache.verify(Some(a), lookup), IdentityVerdict::Matches("DR".into()));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(cache.verify(Some(b), lookup), IdentityVerdict::Matches);
+    assert_eq!(cache.verify(Some(b), lookup), IdentityVerdict::Matches("DR".into()));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     cache.clear();
     cache.verify(Some(b), lookup);
@@ -60,8 +60,26 @@ int main(int argc, char **argv) {
     let (socket, _) = listener.accept().await.unwrap();
     let token = crate::pty_host_client::unix_peer_token(&socket).unwrap();
     assert_eq!(token.pid(), child.id());
-    assert_eq!(macos::verify(token, DEBUG_REQUIREMENT), IdentityVerdict::Matches);
+    let first = macos::verify(token, DEBUG_REQUIREMENT);
+    assert!(matches!(&first, IdentityVerdict::Matches(_)));
     assert_eq!(macos::verify(token, RELEASE_REQUIREMENT), IdentityVerdict::Different);
+    // A second permitted same-identifier process with a distinct actual DR.
+    let second_exe = dir.path().join("sleeper2");
+    std::fs::copy(&exe, &second_exe).unwrap();
+    let output = Command::new("/usr/bin/codesign").args(["-d", "--verbose=4"]).arg(&second_exe).output().unwrap();
+    let details = String::from_utf8_lossy(&output.stderr);
+    let hash = details.lines().find_map(|l| l.strip_prefix("CDHash=")).unwrap();
+    let requirement = format!("=designated => identifier \"app.termflow.desktop.pty-host\" and cdhash H\"{hash}\"");
+    assert!(Command::new("/usr/bin/codesign").args(["--force", "-s", "-", "--identifier", "app.termflow.desktop.pty-host", "-r", &requirement]).arg(&second_exe).status().unwrap().success());
+    let mut second = Command::new(&second_exe).arg(&path).spawn().unwrap();
+    let (second_socket, _) = listener.accept().await.unwrap();
+    let second_token = crate::pty_host_client::unix_peer_token(&second_socket).unwrap();
+    let other = macos::verify(second_token, DEBUG_REQUIREMENT);
+    assert!(matches!(&other, IdentityVerdict::Matches(_)));
+    assert_ne!(first, other);
+    // Feed real verifier evidence into the subject resolver, not a fabricated Different verdict.
+    super::super::tests::assert_different_dr(first, other).await;
+    assert!(second.wait().unwrap().success());
     assert!(child.wait().unwrap().success());
     assert_eq!(macos::verify(token, DEBUG_REQUIREMENT), IdentityVerdict::Unverifiable);
 }
