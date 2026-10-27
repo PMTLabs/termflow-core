@@ -166,6 +166,11 @@ pub(crate) fn route_inbound(
     lookup(session_key)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn unix_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
+    macos_spawn::peer_pid(stream)
+}
+
 /// True when the PTY-host sidecar path is active.
 ///
 /// **Default-on** on every supported OS, in dev and release, so shells are
@@ -1494,11 +1499,16 @@ pub async fn connect_or_spawn(
         }
     };
     #[cfg(target_os = "macos")]
-    let permission_identity = macos_spawn::identity_for_peer(spawned, macos_spawn::peer_pid(&conn));
+    let peer_pid = macos_spawn::peer_pid(&conn);
+    #[cfg(target_os = "macos")]
+    let permission_identity = macos_spawn::identity_for_peer(spawned, peer_pid);
     let (rd, wr) = tokio::io::split(conn);
     let client = wire_client(rd, wr, deps);
     #[cfg(target_os = "macos")]
-    { *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = permission_identity; }
+    {
+        client.exe_origin.set_server_pid(peer_pid);
+        *client.permission_identity.lock().unwrap_or_else(|e| e.into_inner()) = permission_identity;
+    }
     client
         .survives_hotswap
         .store(survives, std::sync::atomic::Ordering::Release);

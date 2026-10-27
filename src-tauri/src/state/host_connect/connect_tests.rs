@@ -54,6 +54,18 @@ fn only_a_missing_or_refused_endpoint_is_gone() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn adopted_socket_preserves_kernel_peer_pid() {
+    let path = missing_endpoint();
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = connect_existing(&path, GRACE_ENDPOINT_ONLY, deps()).await.unwrap();
+    let (_peer, _) = listener.accept().await.unwrap();
+    assert_eq!(client.server_pid(), Some(std::process::id()));
+    client.close_transport().await;
+    std::fs::remove_file(path).unwrap();
+}
+
 #[cfg(windows)]
 mod windows_pipe {
     use super::*;
