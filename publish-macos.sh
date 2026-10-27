@@ -35,6 +35,7 @@ APP_ENTITLEMENTS="$SCRIPT_DIR/src-tauri/macos/app.entitlements"
 HOST_ENTITLEMENTS="$SCRIPT_DIR/src-tauri/pty-host/macos/host.entitlements"
 HOST_ID="app.termflow.desktop.pty-host"
 SIGN_TEAM="68M75D67LJ"
+EXPECTED_HOST_DR="designated => identifier \"$HOST_ID\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = \"$SIGN_TEAM\""
 
 # Keep the outer app's shipped permissions unchanged: app.entitlements is a
 # verbatim copy of vpk 1.2.0 vendor/Velopack.entitlements (NuGet package), used
@@ -69,9 +70,11 @@ verify_app() (
   details="$(codesign -dv --verbose=4 "$helper" 2>&1)" || details=""
   assert_check "Helper team $SIGN_TEAM" grep -Fxq "TeamIdentifier=$SIGN_TEAM" <<< "$details"
   assert_check "Helper hardened runtime" grep -Eq 'flags=.*\(.*runtime.*\)' <<< "$details"
-  requirement="$(codesign -d -r- "$helper" 2>&1)" || requirement=""
-  assert_check "Helper DR identifier" grep -Fq "identifier \"$HOST_ID\"" <<< "$requirement"
-  assert_check "Helper DR team" grep -Eq "certificate leaf\\[subject.OU\\] = \"?$SIGN_TEAM\"?([[:space:]]|$)" <<< "$requirement"
+  # The whole designated requirement, compared exactly: TCC stores it with the grant, so any extra
+  # clause (a cdhash, a path) would make each release a new identity. This is the default DR codesign
+  # gives a Developer ID Application signature (checked against a real signed bundle, plan 060 Task 0).
+  requirement="$(codesign -d -r- "$helper" 2>/dev/null | grep '^designated => ')" || requirement=""
+  assert_check "Helper DR is exactly the update-stable Developer ID requirement" test "$requirement" = "$EXPECTED_HOST_DR"
   assert_check "Read helper entitlements" bash -c 'codesign -d --entitlements :- "$1" > "$2"' _ "$helper" "$tmp/entitlements.plist"
   assert_check "Helper entitlements equal host.entitlements" python3 - "$HOST_ENTITLEMENTS" "$tmp/entitlements.plist" <<'PY'
 import plistlib, sys
