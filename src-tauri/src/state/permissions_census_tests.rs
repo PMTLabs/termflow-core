@@ -92,7 +92,8 @@ const STATE_PERMISSIONS: &str = include_str!("permissions.rs");
 
 /// The single-flight behaviour test drives a test inventory, so this pins the production links it
 /// cannot see: the status command joins the flight, the request command does not, and the
-/// AppState inventory reaches `StatusFlight::resolve`. Each body must be exactly the one expression.
+/// AppState inventory reaches `StatusFlight::resolve`. Each body is compared whole, so a dead branch
+/// or an early return cannot keep the expected call while another one runs.
 fn check_status_flight_wiring(commands: &str, state: &str) -> Result<(), String> {
     fn body_is(src: &Src, signature: &str, expected: &str) -> Result<(), String> {
         let body = src.try_function(signature)?;
@@ -102,10 +103,10 @@ fn check_status_flight_wiring(commands: &str, state: &str) -> Result<(), String>
         Ok(())
     }
     let src = Src::production(commands);
-    let status = src.norm(&{ let b = src.try_function("pub async fn macos_permission_status(")?; b.open..b.close + 1 });
-    if !status.contains("Ok(execute(&SystemPort(&*state,true),None,epoch).await)") { return Err("status command must join the flight".into()); }
-    let request = src.norm(&{ let b = src.try_function("pub async fn request_macos_permission(")?; b.open..b.close + 1 });
-    if !request.contains("execute_expected(&SystemPort(&*state,false),Some(kind),epoch,expected)") { return Err("request command must bypass the flight".into()); }
+    let guard = "let epoch = next_epoch()?; if !cfg!(target_os = \"macos\") { return Ok(unsupported(epoch, in_process_sessions(&state))); }";
+    body_is(&src, "pub async fn macos_permission_status(", &format!("{{ {guard} Ok(execute(&SystemPort(&*state, true), None, epoch).await) }}"))?;
+    body_is(&src, "pub async fn request_macos_permission(",
+        &format!("{{ {guard} Ok(execute_expected(&SystemPort(&*state, false), Some(kind), epoch, expected).await) }}"))?;
     let start = commands.find("impl Inventory for AppState {").ok_or("missing AppState inventory")?;
     let end = commands[start..].find("// Only read-only status commands").ok_or("missing AppState inventory end")? + start;
     let app = Src::production(&commands[start..end]);
@@ -122,6 +123,13 @@ fn status_flight_wiring_census_and_mutations() {
         (mutate(COMMANDS, "SystemPort(&*state, false), Some(kind)", "SystemPort(&*state, true), Some(kind)"), STATE_PERMISSIONS.to_owned()),
         (mutate(COMMANDS, "crate::state::permissions::permission_status_subject(self).await", "crate::state::permissions::permission_subject(self).await"), STATE_PERMISSIONS.to_owned()),
         (COMMANDS.to_owned(), mutate(STATE_PERMISSIONS, "state.permission_status_flight.resolve(move || async move { permission_subject(&owned).await }).await", "permission_subject(&owned).await")),
+        // The expected call kept in a dead branch while a bypass actually runs (review r3, R3-02).
+        (mutate(COMMANDS, "    Ok(execute(&SystemPort(&*state, true), None, epoch).await)\n",
+            "    if false { return Ok(execute(&SystemPort(&*state, true), None, epoch).await); }\n    Ok(execute(&SystemPort(&*state, false), None, epoch).await)\n"), STATE_PERMISSIONS.to_owned()),
+        (mutate(COMMANDS, "    Ok(execute_expected(&SystemPort(&*state, false), Some(kind), epoch, expected).await)\n",
+            "    if false { return Ok(execute_expected(&SystemPort(&*state, false), Some(kind), epoch, expected).await); }\n    Ok(execute_expected(&SystemPort(&*state, true), Some(kind), epoch, expected).await)\n"), STATE_PERMISSIONS.to_owned()),
+        (mutate(COMMANDS, "    let epoch = next_epoch()?;\n    if !cfg!(target_os = \"macos\") { return Ok(unsupported(epoch, in_process_sessions(&state))); }\n    Ok(execute(",
+            "    let epoch = next_epoch()?;\n    return Ok(execute(&SystemPort(&*state, false), None, epoch).await);\n    Ok(execute("), STATE_PERMISSIONS.to_owned()),
     ] { assert!(check_status_flight_wiring(&c, &s).is_err()); }
 }
 
