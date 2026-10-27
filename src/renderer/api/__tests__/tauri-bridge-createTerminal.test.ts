@@ -35,6 +35,14 @@ beforeEach(() => {
   invokeMock.mockImplementation((_cmd: string, _args?: any) => Promise.resolve('mock-pid'));
 });
 
+describe('tauriBridge permission requests', () => {
+  it('forwards the displayed subject to the permission command', async () => {
+    const expected = { target: 'host' as const, pid: 42, generation: 'generation-1', bundleId: 'app.termflow.host' };
+    await tauriBridge.requestMacosPermission('accessibility', expected);
+    expect(invokeMock).toHaveBeenCalledWith('request_macos_permission', { kind: 'accessibility', expected });
+  });
+});
+
 describe('tauriBridge restore intent contract', () => {
   it('round-trips full process ids and exact recovered session overrides', async () => {
     const processId = 'pc-0123456789ab4cde8fab0123456789ab';
