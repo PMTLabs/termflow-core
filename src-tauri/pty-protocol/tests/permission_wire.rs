@@ -57,17 +57,33 @@ fn every_permission_frame_kind_and_state_roundtrips() {
     for kind in kinds {
         frames.push(Frame::Ctrl(Control::RequestPermission { req: 20, token: "tok".into(), kind }));
         for state in states {
-            frames.push(Frame::Resp(Response::PermissionRequested { req: 21, kind, state }));
+            for self_responsible in [None, Some(false), Some(true)] {
+                frames.push(Frame::Resp(Response::PermissionRequested { req: 21, kind, state, self_responsible }));
+            }
         }
     }
     for accessibility in states {
         for screen_recording in states {
-            frames.push(Frame::Resp(Response::PermissionStatusReply { req: 22, accessibility, screen_recording }));
+            for self_responsible in [None, Some(false), Some(true)] {
+                frames.push(Frame::Resp(Response::PermissionStatusReply { req: 22, accessibility, screen_recording, self_responsible }));
+            }
         }
     }
     for frame in frames {
         let bytes = encode(&frame);
         assert_eq!(decode(bytes[0], &bytes[5..]).unwrap(), frame);
+    }
+}
+
+#[test]
+fn permission_reply_responsibility_wire_layout() {
+    let cases = [
+        (Frame::Resp(Response::PermissionStatusReply { req: 1, accessibility: PermissionState::Granted, screen_recording: PermissionState::NotGranted, self_responsible: Some(true) }), "011a000000010000000a000000010000000000000000000000010000000101"),
+        (Frame::Resp(Response::PermissionRequested { req: 2, kind: PermissionKind::ScreenRecording, state: PermissionState::Unsupported, self_responsible: None }), "0119000000010000000b0000000200000000000000010000000200000000"),
+    ];
+    for (frame, expected) in cases {
+        let actual = encode(&frame).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(actual, expected);
     }
 }
 
@@ -98,8 +114,8 @@ fn non_capable_client_can_decode_all_old_host_frames() {
         bincode::deserialize::<OldHostFrame>(&bytes[5..]).unwrap_or_else(|e| panic!("{frame:?}: {e}"));
     }
     for frame in [
-        Frame::Resp(Response::PermissionStatusReply { req: 1, accessibility: PermissionState::Granted, screen_recording: PermissionState::NotGranted }),
-        Frame::Resp(Response::PermissionRequested { req: 2, kind: PermissionKind::Accessibility, state: PermissionState::Granted }),
+        Frame::Resp(Response::PermissionStatusReply { req: 1, accessibility: PermissionState::Granted, screen_recording: PermissionState::NotGranted, self_responsible: None }),
+        Frame::Resp(Response::PermissionRequested { req: 2, kind: PermissionKind::Accessibility, state: PermissionState::Granted, self_responsible: Some(true) }),
     ] {
         assert!(bincode::deserialize::<OldHostFrame>(&encode(&frame)[5..]).is_err());
     }

@@ -159,8 +159,11 @@ pub enum Response {
     McpClaimAck { req: u64, held: Option<McpHeld> },
     /// Reply to [`Control::ReleaseMcp`]: stop has been ORDERED (not completed).
     McpReleaseAck { req: u64, was_holding: bool },
-    PermissionStatusReply { req: u64, accessibility: PermissionState, screen_recording: PermissionState },
-    PermissionRequested { req: u64, kind: PermissionKind, state: PermissionState },
+    /// `self_responsible` is whether the host is its own TCC responsible process;
+    /// `None` means the answer is unavailable (including non-macOS hosts).
+    PermissionStatusReply { req: u64, accessibility: PermissionState, screen_recording: PermissionState, self_responsible: Option<bool> },
+    /// The responsibility result describes the host, not its one-shot child.
+    PermissionRequested { req: u64, kind: PermissionKind, state: PermissionState, self_responsible: Option<bool> },
 }
 
 /// One surviving session as reported by `ListSessions`.
