@@ -130,6 +130,18 @@ export interface DirUsageRow {
   lastUsedAt: number;
 }
 
+export type PermissionKind = 'accessibility' | 'screenRecording';
+export type PermState = 'granted' | 'notGranted' | 'unsupported' | 'unknown';
+export interface PermissionView {
+  epoch: number;
+  target: 'host' | 'hostLegacy' | 'app' | 'unresolved';
+  subject: { pid?: number; generation?: string; bundleId?: string };
+  accessibility: PermState;
+  screenRecording: PermState;
+  otherHosts: { pid: number; generation?: string; reason: 'legacy' | 'differentIdentity' | 'unverified' }[];
+  appSessions: boolean;
+}
+
 export interface ElectronAPI {
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
@@ -328,6 +340,9 @@ export interface ElectronAPI {
   /** Preflight: resolves if an offload would keep all terminals alive, rejects
    *  with the reason if it would currently be refused. */
   hotswapAvailable?: () => Promise<void>;
+  macosPermissionStatus?: () => Promise<PermissionView>;
+  requestMacosPermission?: (kind: PermissionKind) => Promise<PermissionView>;
+  openMacosPermissionPane?: (kind: PermissionKind) => Promise<void>;
   /** Move persisted scrollback between renderer leaves (design 014 migration). */
   renameTerminalHistory?: (from: string, to: string) => Promise<void>;
   /** Preflight for a Velopack update: ours PLUS every sibling, because the
