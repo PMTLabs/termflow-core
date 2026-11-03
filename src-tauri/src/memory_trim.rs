@@ -1,5 +1,7 @@
-//! One visible trim and one subsequent LOW trim per quiet epoch (Windows only).
-//! Shells keep running. This reduces resident working sets, not committed GPU memory.
+//! One working-set trim per off-screen epoch (Windows only): after TermFlow is hidden to the
+//! tray or minimized to the taskbar, or after a start that leaves nothing on screen. A
+//! visible window is never trimmed, even behind another app. Shells keep running. This
+//! reduces resident working sets, not committed GPU memory.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::{
@@ -13,13 +15,11 @@ pub enum Trigger {
     Startup,
     Hidden,
     Minimized,
-    Deactivated,
 }
 impl Trigger {
     fn delay(self) -> Duration {
         Duration::from_secs(match self {
             Self::Startup => 8,
-            Self::Deactivated => 15,
             _ => 3,
         })
     }
@@ -29,7 +29,6 @@ impl Trigger {
             Self::Startup => "startup",
             Self::Hidden => "hidden",
             Self::Minimized => "minimized",
-            Self::Deactivated => "deactivated",
         }
     }
 }
@@ -37,23 +36,34 @@ impl Trigger {
 enum Epoch {
     #[default]
     Untrimmed,
-    Visible,
     Low,
 }
 #[derive(Default)]
 struct Admission {
-    app_focused: bool,
-    foreground: bool,
     low: bool,
     dragging: bool,
     stopping: bool,
-    produced: u64,
 }
 #[derive(Default)]
 struct Windows {
     count: usize,
     on_screen: bool,
     minimized: bool,
+}
+impl Windows {
+    fn add(&mut self, visible: bool, minimized: bool) {
+        self.count += 1;
+        self.on_screen |= visible && !minimized;
+        self.minimized |= minimized;
+    }
+    // Shared with tests: "low" (allowed to trim) means no window is on screen.
+    fn admission(&self, dragging: bool, stopping: bool) -> Admission {
+        Admission {
+            low: !self.on_screen,
+            dragging,
+            stopping,
+        }
+    }
 }
 #[derive(Debug, PartialEq, Eq)]
 enum Edge {
@@ -66,25 +76,20 @@ struct IdleTrimScheduler {
     generation: u64,
     pending: Option<(Trigger, Instant)>,
     epoch: Epoch,
-    focused: HashSet<String>,
     low_applied: HashSet<String>,
     started: bool,
     off_screen: bool,
-    last_mark: u64,
     task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 impl IdleTrimScheduler {
-    fn request(&mut self, trigger: Trigger, now: Instant, produced: u64) -> Option<u64> {
+    fn request(&mut self, trigger: Trigger, now: Instant) -> Option<u64> {
         if trigger == Trigger::Startup {
             if self.started {
                 return None;
             }
             self.started = true;
         }
-        if self.epoch == Epoch::Low
-            || (self.epoch == Epoch::Visible
-                && !matches!(trigger, Trigger::Hidden | Trigger::Minimized))
-        {
+        if self.epoch == Epoch::Low {
             return None;
         }
         if self
@@ -94,7 +99,6 @@ impl IdleTrimScheduler {
             return None;
         }
         self.cancel();
-        self.last_mark = produced;
         self.pending = Some((trigger, now + trigger.delay()));
         Some(self.generation)
     }
@@ -118,14 +122,6 @@ impl IdleTrimScheduler {
         self.epoch = Epoch::Untrimmed;
         self.off_screen = false;
     }
-    fn focus(&mut self, label: &str, focused: bool) {
-        if focused {
-            self.focused.insert(label.into());
-            self.activate();
-        } else {
-            self.focused.remove(label);
-        }
-    }
     fn resize(&mut self, windows: &Windows) -> Option<Edge> {
         let was = self.off_screen;
         self.off_screen = !windows.on_screen;
@@ -136,19 +132,15 @@ impl IdleTrimScheduler {
         }
     }
     fn destroyed(&mut self, label: &str, windows: &Windows, keep: bool) -> Option<Trigger> {
-        self.focused.remove(label);
         self.low_applied.remove(label);
         self.off_screen = !windows.on_screen;
         if windows.count == 0 && !keep {
             self.cancel();
-            return None;
-        }
-        if windows.count == 0 && keep {
+            None
+        } else if windows.count == 0 {
             Some(Trigger::Hidden)
         } else if !windows.on_screen && windows.minimized {
             Some(Trigger::Minimized)
-        } else if self.focused.is_empty() && windows.on_screen {
-            Some(Trigger::Deactivated)
         } else {
             None
         }
@@ -161,26 +153,23 @@ impl IdleTrimScheduler {
         if now < deadline {
             return None;
         }
-        let output_seen = adm.produced != self.last_mark;
-        self.last_mark = adm.produced;
-        // Focus only means "in use" while something is on screen: Windows can leave a
-        // minimized window as the foreground window, and a hidden one keeps its label until
-        // a LostFocus that may never come. Off screen, nobody is working in TermFlow.
-        let in_use = !adm.low && (adm.app_focused || adm.foreground);
-        if adm.stopping || in_use {
+        // Trim only while nothing is on screen. A window still visible behind another app
+        // stays resident, so returning to it never pages back in. Focus and foreground are
+        // not consulted: Windows can leave a minimized window as the foreground window.
+        if adm.stopping || !adm.low {
             self.abandon(generation);
             return None;
         }
-        if adm.dragging || (output_seen && !adm.low) {
+        if adm.dragging {
             self.pending = Some((trigger, now + trigger.delay()));
             return None;
         }
         self.abandon(generation);
-        if self.epoch == Epoch::Low || (self.epoch == Epoch::Visible && !adm.low) {
+        if self.epoch == Epoch::Low {
             return None;
         }
-        self.off_screen = adm.low;
-        self.epoch = if adm.low { Epoch::Low } else { Epoch::Visible };
+        self.off_screen = true;
+        self.epoch = Epoch::Low;
         Some(trigger)
     }
 }
@@ -211,12 +200,11 @@ fn request_with_census<T>(
     state: Option<&T>,
     trigger: Trigger,
     now: Instant,
-    produced: u64,
 ) -> Option<u64> {
     if let Some(windows) = windows {
         sync_off_screen(scheduler, windows);
     }
-    request_if_present(scheduler, state, trigger, now, produced)
+    request_if_present(scheduler, state, trigger, now)
 }
 
 fn insert_nonzero(pids: &mut std::collections::BTreeSet<u32>, pid: u32) {
@@ -231,10 +219,9 @@ fn request_if_present<T>(
     state: Option<&T>,
     trigger: Trigger,
     now: Instant,
-    produced: u64,
 ) -> Option<u64> {
     state?;
-    scheduler.request(trigger, now, produced)
+    scheduler.request(trigger, now)
 }
 
 #[cfg(not(windows))]
@@ -267,7 +254,6 @@ mod platform {
         Win32::{
             Foundation::{CloseHandle, ERROR_NO_MORE_FILES},
             System::{Diagnostics::ToolHelp::*, Memory::*, Threading::*},
-            UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT},
         },
     };
 
@@ -283,11 +269,7 @@ mod platform {
     fn census(app: &AppHandle, exclude: Option<&str>) -> Option<Windows> {
         let mut result = Windows::default();
         for w in real(app).into_iter().filter(|w| Some(w.label()) != exclude) {
-            result.count += 1;
-            let visible = w.is_visible().ok()?;
-            let minimized = w.is_minimized().ok()?;
-            result.on_screen |= visible && !minimized;
-            result.minimized |= minimized;
+            result.add(w.is_visible().ok()?, w.is_minimized().ok()?);
         }
         Some(result)
     }
@@ -301,18 +283,9 @@ mod platform {
         if window.label() == PREVIEW_LABEL {
             return;
         }
-        let app = window.app_handle();
-        let Some(s) = scheduler(app) else {
-            return;
-        };
-        s.lock().unwrap().focus(window.label(), focused);
+        // Losing focus while on screen never trims; gaining it ends an off-screen epoch.
         if focused {
-            memory_target(app, false);
-        } else {
-            let none_focused = s.lock().unwrap().focused.is_empty();
-            if none_focused && census(app, None).is_some_and(|w| w.on_screen) {
-                request(app, Trigger::Deactivated);
-            }
+            activate(window.app_handle());
         }
     }
     pub fn resized(window: &tauri::Window) {
@@ -338,12 +311,8 @@ mod platform {
         let Some(s) = scheduler(app) else {
             return;
         };
-        // Remove stale labels even if querying a remaining window fails.
-        {
-            let mut s = s.lock().unwrap();
-            s.focused.remove(window.label());
-            s.low_applied.remove(window.label());
-        }
+        // Remove the stale label even if querying a remaining window fails.
+        s.lock().unwrap().low_applied.remove(window.label());
         let Some(windows) = census(app, Some(window.label())) else {
             return;
         };
@@ -368,7 +337,7 @@ mod platform {
         // Hide may not emit Resized; sync even if the request is rejected.
         let windows = census(app, None);
         // Clone every Arc before spawning; never keep a managed State across await.
-        let (generation, produced, exiting, recovering, restarting, keys) = {
+        let (generation, exiting, recovering, restarting, keys) = {
             let state = app.try_state::<AppState>();
             let generation = request_with_census(
                 &mut scheduler.lock().unwrap(),
@@ -376,16 +345,12 @@ mod platform {
                 state.as_deref(),
                 trigger,
                 Instant::now(),
-                state
-                    .as_ref()
-                    .map_or(0, |s| s.output_produced.load(Ordering::Relaxed)),
             );
             let (Some(generation), Some(state)) = (generation, state) else {
                 return;
             };
             (
                 generation,
-                state.output_produced.clone(),
                 state.exiting.clone(),
                 state.recovering.clone(),
                 state.restart_in_flight.clone(),
@@ -409,7 +374,6 @@ mod platform {
                 tokio::time::sleep_until(deadline.into()).await;
                 let handle = app.clone();
                 let admission = scheduler.clone();
-                let produced = produced.clone();
                 let exiting = exiting.clone();
                 let recovering = recovering.clone();
                 let restarting = restarting.clone();
@@ -421,15 +385,6 @@ mod platform {
                             admission.lock().unwrap().abandon(generation);
                             return;
                         };
-                        let foreground = unsafe { GetAncestor(GetForegroundWindow(), GA_ROOT) };
-                        let mut is_foreground = false;
-                        for w in real(&handle) {
-                            let Ok(hwnd) = w.hwnd() else {
-                                admission.lock().unwrap().abandon(generation);
-                                return;
-                            };
-                            is_foreground |= hwnd == foreground;
-                        }
                         let stopping = exiting.load(Ordering::Relaxed)
                             || recovering.load(Ordering::Relaxed)
                             || restarting.load(Ordering::Relaxed);
@@ -437,24 +392,13 @@ mod platform {
                             || handle
                                 .get_webview_window(PREVIEW_LABEL)
                                 .is_some_and(|w| w.is_visible().unwrap_or(false));
-                        let trigger = {
-                            let mut s = admission.lock().unwrap();
-                            let app_focused = !s.focused.is_empty();
-                            s.fire(
-                                generation,
-                                Instant::now(),
-                                Admission {
-                                    app_focused,
-                                    foreground: is_foreground,
-                                    low: !windows.on_screen,
-                                    dragging,
-                                    stopping,
-                                    produced: produced.load(Ordering::Relaxed),
-                                },
-                            )
-                        };
+                        let trigger = admission.lock().unwrap().fire(
+                            generation,
+                            Instant::now(),
+                            windows.admission(dragging, stopping),
+                        );
                         if let Some(trigger) = trigger {
-                            trim(&handle, trigger, !windows.on_screen);
+                            trim(&handle, trigger);
                         }
                         let _ = tx.send(());
                     })
@@ -534,10 +478,9 @@ mod platform {
             }
         }
     }
-    fn trim(app: &AppHandle, trigger: Trigger, low: bool) {
-        if low {
-            memory_target(app, true);
-        }
+    // Only an admitted off-screen trim gets here, so the WebViews also go LOW.
+    fn trim(app: &AppHandle, trigger: Trigger) {
+        memory_target(app, true);
         let mcp = app.try_state::<AppState>().and_then(|s| {
             s.mcp_process.lock().ok().and_then(|slot| {
                 slot.current().and_then(|p| match &p.handle {
@@ -549,7 +492,6 @@ mod platform {
         // Host and verified MCP do not depend on WebView dispatch succeeding.
         finish_trim(
             trigger,
-            low,
             Instant::now(),
             0,
             mcp,
@@ -596,7 +538,7 @@ mod platform {
                     if let Err(e) = result {
                         warn("discovery", e);
                     }
-                    finish_trim(trigger, low, start, browser, mcp, pids, "webview");
+                    finish_trim(trigger, start, browser, mcp, pids, "webview");
                 })
                 .is_err()
             {
@@ -606,7 +548,6 @@ mod platform {
     }
     fn finish_trim(
         trigger: Trigger,
-        low: bool,
         start: Instant,
         browser: u32,
         mcp: Option<u32>,
@@ -626,10 +567,9 @@ mod platform {
         }
         let (trimmed, failed) = trim_processes(&pids);
         log::info!(
-            "memory_trim: part={} trigger={} low={} processes={} trimmed={} failed={} elapsed_ms={}",
+            "memory_trim: part={} trigger={} processes={} trimmed={} failed={} elapsed_ms={}",
             part,
             trigger.name(),
-            low,
             pids.len(),
             trimmed,
             failed,
@@ -732,38 +672,42 @@ fn is_mcp_child(recorded: Option<u32>, host: u32, pid: u32, parent: u32, image: 
 #[cfg(test)]
 mod tests {
     use super::*;
-    const TRIGGERS: [Trigger; 4] = [
-        Trigger::Startup,
-        Trigger::Hidden,
-        Trigger::Minimized,
-        Trigger::Deactivated,
-    ];
-    fn quiet(low: bool, produced: u64) -> Admission {
+    const TRIGGERS: [Trigger; 3] = [Trigger::Startup, Trigger::Hidden, Trigger::Minimized];
+    fn off_screen() -> Admission {
         Admission {
-            low,
-            produced,
+            low: true,
             ..Default::default()
+        }
+    }
+    fn visible() -> Windows {
+        Windows {
+            count: 1,
+            on_screen: true,
+            minimized: false,
+        }
+    }
+    fn minimized() -> Windows {
+        Windows {
+            count: 1,
+            on_screen: false,
+            minimized: true,
         }
     }
     #[test]
     fn review_regressions() {
         let now = Instant::now();
         let mut s = IdleTrimScheduler::default();
-        let g = s.request(Trigger::Hidden, now, 1).unwrap();
-        assert_eq!(s.request(Trigger::Hidden, now, 2), None);
-        assert_eq!(s.last_mark, 1);
-        assert_eq!(
-            s.fire(g, now + Duration::from_secs(2), quiet(false, 2)),
-            None
-        );
-        assert_eq!(s.last_mark, 1);
+        let g = s.request(Trigger::Hidden, now).unwrap();
+        assert_eq!(s.request(Trigger::Hidden, now), None);
+        assert_eq!(s.fire(g, now + Duration::from_secs(2), off_screen()), None);
+        assert!(s.pending.is_some());
         assert_eq!(
             s.fire(
                 g,
                 now + Duration::from_secs(3),
                 Admission {
                     dragging: true,
-                    produced: 1,
+                    low: true,
                     ..Default::default()
                 }
             ),
@@ -771,7 +715,7 @@ mod tests {
         );
         assert!(s.pending.is_some());
         assert_eq!(
-            s.fire(g, now + Duration::from_secs(6), quiet(true, 1)),
+            s.fire(g, now + Duration::from_secs(6), off_screen()),
             Some(Trigger::Hidden)
         );
         assert!(s.off_screen);
@@ -780,57 +724,73 @@ mod tests {
         assert!(!s.off_screen);
         assert_eq!(s.epoch, Epoch::Untrimmed);
         assert!(keep_low(&Epoch::Low));
-        assert!(!keep_low(&Epoch::Visible));
         assert!(!keep_low(&Epoch::Untrimmed));
         s.low_applied.extend(["A".into(), "B".into()]);
-        s.focused.insert("B".into());
-        let visible = Windows {
-            count: 1,
-            on_screen: true,
-            minimized: false,
-        };
-        assert_eq!(s.destroyed("A", &visible, true), None);
+        assert_eq!(s.destroyed("A", &visible(), true), None);
         assert!(s.low_applied.contains("B"));
-        let minimized = Windows {
-            count: 1,
-            on_screen: false,
-            minimized: true,
-        };
-        assert_eq!(s.destroyed("A", &minimized, true), Some(Trigger::Minimized));
-        let g = s.request(Trigger::Hidden, now, 0).unwrap();
+        assert_eq!(
+            s.destroyed("A", &minimized(), true),
+            Some(Trigger::Minimized)
+        );
+        let g = s.request(Trigger::Hidden, now).unwrap();
         assert_eq!(s.destroyed("B", &Windows::default(), false), None);
         assert!(s.generation > g);
         assert!(s.pending.is_none());
         s.epoch = Epoch::Low;
         assert_eq!(
-            request_with_census(&mut s, Some(&minimized), Some(&()), Trigger::Hidden, now, 0),
+            request_with_census(&mut s, Some(&minimized()), Some(&()), Trigger::Hidden, now),
             None
         );
         assert!(s.off_screen);
-        sync_off_screen(&mut s, &visible);
+        sync_off_screen(&mut s, &visible());
         assert!(!s.off_screen);
         let mut pids = std::collections::BTreeSet::new();
         insert_nonzero(&mut pids, 0);
         insert_nonzero(&mut pids, 7);
         assert_eq!(pids, std::collections::BTreeSet::from([7]));
+        // A trim already taken this epoch cannot repeat from a pending request.
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Hidden, now).unwrap();
+        s.epoch = Epoch::Low;
+        assert_eq!(s.fire(g, now + Duration::from_secs(3), off_screen()), None);
+        assert!(s.pending.is_none());
         let mut image = wide("msedgewebview2.exe");
         image.extend([65, 66]);
         assert!(image_is(&image, "msedgewebview2.exe"));
     }
     #[test]
+    fn census_fold_and_admission_see_any_window_on_screen() {
+        let mut w = Windows::default();
+        w.add(false, false); // hidden to the tray
+        assert!(!w.on_screen && !w.minimized);
+        assert!(w.admission(false, false).low);
+        w.add(true, true); // minimized to the taskbar
+        assert!(!w.on_screen && w.minimized);
+        assert!(w.admission(false, false).low);
+        w.add(true, false); // on screen, focused or behind another app
+        assert_eq!(w.count, 3);
+        assert!(w.on_screen);
+        let adm = w.admission(true, true);
+        assert!(!adm.low && adm.dragging && adm.stopping);
+        let mut w = Windows::default();
+        w.add(true, false);
+        w.add(true, true);
+        assert!(w.on_screen && w.minimized);
+    }
+    #[test]
     fn exact_delays_and_no_early_fire() {
-        for (t, seconds) in TRIGGERS.into_iter().zip([8, 3, 3, 15]) {
+        for (t, seconds) in TRIGGERS.into_iter().zip([8, 3, 3]) {
             let mut s = IdleTrimScheduler::default();
             let now = Instant::now();
-            let g = s.request(t, now, 9).unwrap();
+            let g = s.request(t, now).unwrap();
             let deadline = now + Duration::from_secs(seconds);
             assert_eq!(s.pending, Some((t, deadline)));
             assert_eq!(
-                s.fire(g, deadline - Duration::from_millis(1), quiet(false, 9)),
+                s.fire(g, deadline - Duration::from_millis(1), off_screen()),
                 None
             );
             assert_eq!(s.pending, Some((t, deadline)));
-            assert_eq!(s.fire(g, deadline, quiet(false, 9)), Some(t));
+            assert_eq!(s.fire(g, deadline, off_screen()), Some(t));
             assert!(s.pending.is_none());
         }
     }
@@ -838,117 +798,79 @@ mod tests {
     fn shorter_replaces_longer_and_stale_generation_cannot_fire() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
-        let old = s.request(Trigger::Deactivated, now, 0).unwrap();
+        let old = s.request(Trigger::Startup, now).unwrap();
         let new = s
-            .request(Trigger::Minimized, now + Duration::from_secs(1), 4)
+            .request(Trigger::Minimized, now + Duration::from_secs(1))
             .unwrap();
         assert!(new > old);
         assert_eq!(
-            s.fire(old, now + Duration::from_secs(20), quiet(true, 4)),
+            s.fire(old, now + Duration::from_secs(20), off_screen()),
             None
         );
         assert_eq!(
-            s.fire(new, now + Duration::from_secs(4), quiet(true, 4)),
+            s.fire(new, now + Duration::from_secs(4), off_screen()),
             Some(Trigger::Minimized)
         );
     }
     #[test]
-    fn rejected_requests_do_not_push_deadline_or_overwrite_output_mark() {
+    fn rejected_requests_do_not_push_deadline() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
-        let g = s.request(Trigger::Startup, now, 1).unwrap();
+        s.request(Trigger::Startup, now).unwrap();
         assert_eq!(
-            s.request(Trigger::Deactivated, now + Duration::from_secs(2), 2),
+            s.request(Trigger::Hidden, now + Duration::from_secs(6)),
             None
         );
-        assert_eq!(
-            s.request(Trigger::Hidden, now + Duration::from_secs(6), 3),
-            None
-        );
-        assert_eq!(s.last_mark, 1);
         assert_eq!(
             s.pending,
             Some((Trigger::Startup, now + Duration::from_secs(8)))
         );
-        assert_eq!(
-            s.fire(g, now + Duration::from_secs(8), quiet(false, 3)),
-            None
-        );
-        assert_eq!(s.last_mark, 3);
-        assert_eq!(s.pending.unwrap().1, now + Duration::from_secs(16));
     }
     #[test]
     fn activation_alone_invalidates_generation_and_reopens_epoch() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
-        let g = s.request(Trigger::Hidden, now, 0).unwrap();
+        let g = s.request(Trigger::Hidden, now).unwrap();
         s.activate();
         assert!(s.generation > g);
         assert!(s.pending.is_none());
-        assert_eq!(
-            s.fire(g, now + Duration::from_secs(3), quiet(true, 0)),
-            None
-        );
+        assert_eq!(s.fire(g, now + Duration::from_secs(3), off_screen()), None);
         assert_eq!(s.epoch, Epoch::Untrimmed);
     }
+    /// User rule 2026-11-03: TermFlow behind another app is still in use; only the tray
+    /// or the taskbar trims it.
     #[test]
-    fn focused_and_foreground_drop_every_trigger_without_consuming_epoch() {
+    fn a_window_on_screen_drops_every_trigger_without_consuming_epoch() {
         for t in TRIGGERS {
-            for foreground in [false, true] {
+            for dragging in [false, true] {
                 let mut s = IdleTrimScheduler::default();
                 let now = Instant::now();
-                let g = s.request(t, now, 0).unwrap();
-                // Output and dragging must NOT override the focus drop.
+                let g = s.request(t, now).unwrap();
                 let adm = Admission {
-                    app_focused: !foreground,
-                    foreground,
-                    dragging: true,
-                    produced: 1,
+                    dragging,
                     ..Default::default()
                 };
                 assert_eq!(s.fire(g, now + t.delay(), adm), None);
                 assert!(s.pending.is_none());
                 assert!(s.generation > g);
                 assert_eq!(s.epoch, Epoch::Untrimmed);
+                assert!(!s.off_screen);
+                // The epoch stays open: a later minimize still trims.
                 let later = now + Duration::from_secs(20);
-                let g = s.request(Trigger::Deactivated, later, 1).unwrap();
+                let g = s.request(Trigger::Minimized, later).unwrap();
                 assert_eq!(
-                    s.fire(g, later + Duration::from_secs(14), quiet(false, 1)),
-                    None
-                );
-                assert_eq!(
-                    s.fire(g, later + Duration::from_secs(15), quiet(false, 1)),
-                    Some(Trigger::Deactivated)
+                    s.fire(g, later + Duration::from_secs(3), off_screen()),
+                    Some(Trigger::Minimized)
                 );
             }
         }
     }
-    /// Live check 2026-11-03: a window minimized while it stays the foreground window
-    /// (iconic + GetForegroundWindow) had its Minimized trim dropped as "in use".
     #[test]
-    fn focus_and_foreground_do_not_block_an_off_screen_trim() {
-        for t in [Trigger::Startup, Trigger::Hidden, Trigger::Minimized] {
-            for (app_focused, foreground) in [(true, false), (false, true), (true, true)] {
-                let mut s = IdleTrimScheduler::default();
-                let now = Instant::now();
-                let g = s.request(t, now, 0).unwrap();
-                let adm = Admission {
-                    app_focused,
-                    foreground,
-                    low: true,
-                    ..Default::default()
-                };
-                assert_eq!(s.fire(g, now + t.delay(), adm), Some(t));
-                assert_eq!(s.epoch, Epoch::Low);
-            }
-        }
-    }
-    #[test]
-    fn stopping_drops_even_with_output_and_drag() {
+    fn stopping_drops_even_while_off_screen_and_dragging() {
         for t in TRIGGERS {
             let mut s = IdleTrimScheduler::default();
             let now = Instant::now();
-            let g = s.request(t, now, 0).unwrap();
+            let g = s.request(t, now).unwrap();
             assert_eq!(
                 s.fire(
                     g,
@@ -956,8 +878,7 @@ mod tests {
                     Admission {
                         stopping: true,
                         dragging: true,
-                        produced: 1,
-                        ..Default::default()
+                        low: true,
                     }
                 ),
                 None
@@ -968,11 +889,11 @@ mod tests {
         }
     }
     #[test]
-    fn dragging_postpones_same_trigger_even_when_low() {
+    fn dragging_postpones_same_trigger_while_off_screen() {
         for t in TRIGGERS {
             let mut s = IdleTrimScheduler::default();
             let now = Instant::now();
-            let g = s.request(t, now, 0).unwrap();
+            let g = s.request(t, now).unwrap();
             assert_eq!(
                 s.fire(
                     g,
@@ -980,159 +901,68 @@ mod tests {
                     Admission {
                         dragging: true,
                         low: true,
-                        produced: 2,
                         ..Default::default()
                     }
                 ),
                 None
             );
             assert_eq!(s.pending, Some((t, now + t.delay() * 2)));
-            assert_eq!(s.last_mark, 2);
-            assert_eq!(s.fire(g, now + t.delay() * 2, quiet(true, 2)), Some(t));
+            assert_eq!(s.fire(g, now + t.delay() * 2, off_screen()), Some(t));
         }
     }
     #[test]
-    fn output_needs_a_full_quiet_window_and_postpone_updates_mark() {
+    fn startup_is_once_even_when_dropped_on_screen() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
-        let t = Trigger::Deactivated;
-        let g = s.request(t, now, 10).unwrap();
-        assert_eq!(s.fire(g, now + t.delay(), quiet(false, 11)), None);
-        assert_eq!(s.last_mark, 11);
-        assert_eq!(s.fire(g, now + t.delay() * 2, quiet(false, 12)), None);
-        assert_eq!(s.last_mark, 12);
+        let g = s.request(Trigger::Startup, now).unwrap();
         assert_eq!(
-            s.fire(
-                g,
-                now + t.delay() * 3 - Duration::from_millis(1),
-                quiet(false, 12)
-            ),
+            s.fire(g, now + Duration::from_secs(8), Admission::default()),
             None
         );
-        assert_eq!(s.fire(g, now + t.delay() * 3, quiet(false, 12)), Some(t));
-    }
-    #[test]
-    fn output_while_low_does_not_block_any_trigger() {
-        for t in TRIGGERS {
-            let mut s = IdleTrimScheduler::default();
-            let now = Instant::now();
-            let g = s.request(t, now, 0).unwrap();
-            assert_eq!(s.fire(g, now + t.delay(), quiet(true, 100)), Some(t));
-            assert_eq!(s.last_mark, 100);
-            assert_eq!(s.epoch, Epoch::Low);
-        }
-    }
-    #[test]
-    fn startup_is_once_even_after_focus_drop() {
-        let mut s = IdleTrimScheduler::default();
-        let now = Instant::now();
-        let g = s.request(Trigger::Startup, now, 0).unwrap();
-        s.fire(
-            g,
-            now + Duration::from_secs(8),
-            Admission {
-                foreground: true,
-                ..Default::default()
-            },
-        );
         assert_eq!(
-            s.request(Trigger::Startup, now + Duration::from_secs(9), 0),
+            s.request(Trigger::Startup, now + Duration::from_secs(9)),
             None
         );
         assert!(s.pending.is_none());
     }
     #[test]
-    fn visible_to_low_escalates_once_and_activation_reopens() {
+    fn low_epoch_trims_once_and_activation_reopens() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
-        let g = s.request(Trigger::Deactivated, now, 0).unwrap();
+        let g = s.request(Trigger::Hidden, now).unwrap();
         assert_eq!(
-            s.fire(g, now + Duration::from_secs(15), quiet(false, 0)),
-            Some(Trigger::Deactivated)
-        );
-        assert_eq!(s.epoch, Epoch::Visible);
-        assert_eq!(s.request(Trigger::Deactivated, now, 0), None);
-        let g = s
-            .request(Trigger::Hidden, now + Duration::from_secs(16), 0)
-            .unwrap();
-        assert_eq!(
-            s.fire(g, now + Duration::from_secs(19), quiet(true, 0)),
+            s.fire(g, now + Duration::from_secs(3), off_screen()),
             Some(Trigger::Hidden)
         );
         assert_eq!(s.epoch, Epoch::Low);
         for t in TRIGGERS {
-            assert_eq!(s.request(t, now, 0), None);
+            assert_eq!(s.request(t, now), None);
         }
         s.activate();
-        let g = s.request(Trigger::Deactivated, now, 0).unwrap();
+        let g = s.request(Trigger::Minimized, now).unwrap();
         assert_eq!(
-            s.fire(g, now + Duration::from_secs(15), quiet(false, 0)),
-            Some(Trigger::Deactivated)
+            s.fire(g, now + Duration::from_secs(3), off_screen()),
+            Some(Trigger::Minimized)
         );
-    }
-    #[test]
-    fn pending_low_trigger_cannot_repeat_visible_trim() {
-        let mut s = IdleTrimScheduler::default();
-        let now = Instant::now();
-        let g = s.request(Trigger::Deactivated, now, 0).unwrap();
-        s.fire(g, now + Duration::from_secs(15), quiet(false, 0));
-        let g = s.request(Trigger::Minimized, now, 0).unwrap();
-        assert_eq!(
-            s.fire(g, now + Duration::from_secs(3), quiet(false, 0)),
-            None
-        );
-        assert!(s.pending.is_none());
-        assert!(s.generation > g);
-        assert_eq!(s.epoch, Epoch::Visible);
-    }
-    #[test]
-    fn focus_switch_cancels_and_destroy_removes_focused_label_and_cache() {
-        let mut s = IdleTrimScheduler::default();
-        let now = Instant::now();
-        s.focus("A", true);
-        s.focus("B", true);
-        s.focus("A", false);
-        assert_eq!(s.focused, HashSet::from(["B".into()]));
-        s.focus("B", false);
-        let g = s.request(Trigger::Deactivated, now, 0).unwrap();
-        s.focus("A", true);
-        assert_eq!(
-            s.fire(g, now + Duration::from_secs(15), quiet(false, 0)),
-            None
-        );
-        s.low_applied.insert("A".into());
-        s.destroyed("A", &Windows::default(), true);
-        assert!(s.focused.is_empty());
-        assert!(s.low_applied.is_empty());
     }
     #[test]
     fn resize_only_acts_on_edges() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
-        let g = s.request(Trigger::Deactivated, now, 0).unwrap();
-        let visible = Windows {
-            count: 1,
-            on_screen: true,
-            minimized: false,
-        };
-        assert_eq!(s.resize(&visible), None);
+        let g = s.request(Trigger::Startup, now).unwrap();
+        assert_eq!(s.resize(&visible()), None);
         assert_eq!(s.generation, g);
         assert!(s.pending.is_some());
-        let minimized = Windows {
-            count: 1,
-            on_screen: false,
-            minimized: true,
-        };
         assert_eq!(
-            s.resize(&minimized),
+            s.resize(&minimized()),
             Some(Edge::Request(Trigger::Minimized))
         );
-        assert_eq!(s.resize(&minimized), None);
-        assert_eq!(s.resize(&visible), Some(Edge::Activate));
-        assert_eq!(s.resize(&visible), None);
+        assert_eq!(s.resize(&minimized()), None);
+        assert_eq!(s.resize(&visible()), Some(Edge::Activate));
+        assert_eq!(s.resize(&visible()), None);
     }
     #[test]
-    fn destroyed_reevaluates_all_three_branches_and_non_tray_exit() {
+    fn destroyed_reevaluates_branches_and_non_tray_exit() {
         let mut s = IdleTrimScheduler::default();
         assert_eq!(
             s.destroyed("A", &Windows::default(), true),
@@ -1140,43 +970,29 @@ mod tests {
         );
         assert_eq!(s.destroyed("A", &Windows::default(), false), None);
         assert_eq!(
-            s.destroyed(
-                "A",
-                &Windows {
-                    count: 1,
-                    minimized: true,
-                    on_screen: false
-                },
-                false
-            ),
+            s.destroyed("A", &minimized(), false),
             Some(Trigger::Minimized)
         );
-        let visible = Windows {
-            count: 1,
-            on_screen: true,
-            minimized: false,
-        };
-        s.focus("A", true);
-        assert_eq!(
-            s.destroyed("A", &visible, false),
-            Some(Trigger::Deactivated)
-        );
-        s.focus("B", true);
-        assert_eq!(s.destroyed("A", &visible, false), None);
+        // A window still on screen means no trim, focused or not.
+        assert_eq!(s.destroyed("A", &visible(), false), None);
+        assert_eq!(s.destroyed("A", &visible(), true), None);
+        s.low_applied.insert("A".into());
+        s.destroyed("A", &Windows::default(), true);
+        assert!(s.low_applied.is_empty());
     }
     #[test]
     fn absent_app_state_does_not_accept_or_start_timer() {
         let mut s = IdleTrimScheduler::default();
         let now = Instant::now();
         assert_eq!(
-            request_if_present::<()>(&mut s, None, Trigger::Startup, now, 0),
+            request_if_present::<()>(&mut s, None, Trigger::Startup, now),
             None
         );
         assert!(s.task.is_none());
         assert!(s.pending.is_none());
         assert!(!s.started);
         assert_eq!(s.generation, 0);
-        assert!(request_if_present(&mut s, Some(&()), Trigger::Startup, now, 0).is_some());
+        assert!(request_if_present(&mut s, Some(&()), Trigger::Startup, now).is_some());
     }
     #[tokio::test]
     async fn memory_trim_drop_cancels_task_despite_task_owned_arc() {
@@ -1185,7 +1001,7 @@ mod tests {
         let g = owner
             .lock()
             .unwrap()
-            .request(Trigger::Hidden, Instant::now(), 0)
+            .request(Trigger::Hidden, Instant::now())
             .unwrap();
         let held = owner.clone();
         let (started, ready) = tokio::sync::oneshot::channel();
@@ -1212,7 +1028,7 @@ mod tests {
         for replace in [false, true] {
             let mut s = IdleTrimScheduler::default();
             let now = Instant::now();
-            s.request(Trigger::Deactivated, now, 0);
+            s.request(Trigger::Startup, now);
             let (tx, rx) = tokio::sync::oneshot::channel::<()>();
             let (tx_ready, rx_ready) = tokio::sync::oneshot::channel();
             s.task = Some(tauri::async_runtime::spawn(async move {
@@ -1222,7 +1038,7 @@ mod tests {
             }));
             rx_ready.await.unwrap();
             if replace {
-                s.request(Trigger::Hidden, now, 0).unwrap();
+                s.request(Trigger::Hidden, now).unwrap();
             } else {
                 drop(s);
             }
