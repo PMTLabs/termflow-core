@@ -163,7 +163,11 @@ impl IdleTrimScheduler {
         }
         let output_seen = adm.produced != self.last_mark;
         self.last_mark = adm.produced;
-        if adm.stopping || adm.app_focused || adm.foreground {
+        // Focus only means "in use" while something is on screen: Windows can leave a
+        // minimized window as the foreground window, and a hidden one keeps its label until
+        // a LostFocus that may never come. Off screen, nobody is working in TermFlow.
+        let in_use = !adm.low && (adm.app_focused || adm.foreground);
+        if adm.stopping || in_use {
             self.abandon(generation);
             return None;
         }
@@ -916,6 +920,26 @@ mod tests {
                     s.fire(g, later + Duration::from_secs(15), quiet(false, 1)),
                     Some(Trigger::Deactivated)
                 );
+            }
+        }
+    }
+    /// Live check 2026-11-03: a window minimized while it stays the foreground window
+    /// (iconic + GetForegroundWindow) had its Minimized trim dropped as "in use".
+    #[test]
+    fn focus_and_foreground_do_not_block_an_off_screen_trim() {
+        for t in [Trigger::Startup, Trigger::Hidden, Trigger::Minimized] {
+            for (app_focused, foreground) in [(true, false), (false, true), (true, true)] {
+                let mut s = IdleTrimScheduler::default();
+                let now = Instant::now();
+                let g = s.request(t, now, 0).unwrap();
+                let adm = Admission {
+                    app_focused,
+                    foreground,
+                    low: true,
+                    ..Default::default()
+                };
+                assert_eq!(s.fire(g, now + t.delay(), adm), Some(t));
+                assert_eq!(s.epoch, Epoch::Low);
             }
         }
     }
