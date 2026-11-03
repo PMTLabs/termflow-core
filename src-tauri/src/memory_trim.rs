@@ -1,7 +1,8 @@
-//! One working-set trim per off-screen epoch (Windows only): after TermFlow is hidden to the
-//! tray or minimized to the taskbar, or after a start that leaves nothing on screen. A
-//! visible window is never trimmed, even behind another app. Shells keep running. This
-//! reduces resident working sets, not committed GPU memory.
+//! Working-set trims while TermFlow is not in use (Windows only): 3 s after it is hidden to
+//! the tray or minimized to the taskbar (also LOW memory target), after a start that leaves
+//! nothing on screen, and once after it sits visible behind another app for an hour.
+//! Bringing it back to the front cancels a pending trim. Shells keep running. This reduces
+//! resident working sets, not committed GPU memory.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use std::{
@@ -15,11 +16,14 @@ pub enum Trigger {
     Startup,
     Hidden,
     Minimized,
+    /// Visible but behind another app: no TermFlow window has focus.
+    Behind,
 }
 impl Trigger {
     fn delay(self) -> Duration {
         Duration::from_secs(match self {
             Self::Startup => 8,
+            Self::Behind => 60 * 60,
             _ => 3,
         })
     }
@@ -29,6 +33,7 @@ impl Trigger {
             Self::Startup => "startup",
             Self::Hidden => "hidden",
             Self::Minimized => "minimized",
+            Self::Behind => "behind",
         }
     }
 }
@@ -36,11 +41,15 @@ impl Trigger {
 enum Epoch {
     #[default]
     Untrimmed,
+    /// Trimmed while visible behind another app; a later hide or minimize still trims LOW.
+    Visible,
     Low,
 }
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Admission {
     low: bool,
+    /// A TermFlow window is the foreground window (only consulted while on screen).
+    foreground: bool,
     dragging: bool,
     stopping: bool,
 }
@@ -56,10 +65,11 @@ impl Windows {
         self.on_screen |= visible && !minimized;
         self.minimized |= minimized;
     }
-    // Shared with tests: "low" (allowed to trim) means no window is on screen.
-    fn admission(&self, dragging: bool, stopping: bool) -> Admission {
+    // Shared with tests: "low" means no window is on screen.
+    fn admission(&self, foreground: bool, dragging: bool, stopping: bool) -> Admission {
         Admission {
             low: !self.on_screen,
+            foreground,
             dragging,
             stopping,
         }
@@ -89,7 +99,8 @@ impl IdleTrimScheduler {
             }
             self.started = true;
         }
-        if self.epoch == Epoch::Low {
+        if self.epoch == Epoch::Low || (self.epoch == Epoch::Visible && trigger == Trigger::Behind)
+        {
             return None;
         }
         if self
@@ -141,6 +152,10 @@ impl IdleTrimScheduler {
             Some(Trigger::Hidden)
         } else if !windows.on_screen && windows.minimized {
             Some(Trigger::Minimized)
+        } else if windows.on_screen {
+            // Focus may have gone to another app; if it went to a TermFlow window, its
+            // Focused event activates and cancels this.
+            Some(Trigger::Behind)
         } else {
             None
         }
@@ -153,10 +168,11 @@ impl IdleTrimScheduler {
         if now < deadline {
             return None;
         }
-        // Trim only while nothing is on screen. A window still visible behind another app
-        // stays resident, so returning to it never pages back in. Focus and foreground are
-        // not consulted: Windows can leave a minimized window as the foreground window.
-        if adm.stopping || !adm.low {
+        // On screen, only the hour-behind trigger may trim, and only if TermFlow is still not
+        // the foreground window. Off screen, foreground is not consulted: Windows can leave a
+        // minimized window as the foreground window.
+        let on_screen_blocked = !adm.low && (trigger != Trigger::Behind || adm.foreground);
+        if adm.stopping || on_screen_blocked {
             self.abandon(generation);
             return None;
         }
@@ -165,11 +181,11 @@ impl IdleTrimScheduler {
             return None;
         }
         self.abandon(generation);
-        if self.epoch == Epoch::Low {
+        if self.epoch == Epoch::Low || (self.epoch == Epoch::Visible && !adm.low) {
             return None;
         }
-        self.off_screen = true;
-        self.epoch = Epoch::Low;
+        self.off_screen = adm.low;
+        self.epoch = if adm.low { Epoch::Low } else { Epoch::Visible };
         Some(trigger)
     }
 }
@@ -254,6 +270,7 @@ mod platform {
         Win32::{
             Foundation::{CloseHandle, ERROR_NO_MORE_FILES},
             System::{Diagnostics::ToolHelp::*, Memory::*, Threading::*},
+            UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOTOWNER},
         },
     };
 
@@ -283,9 +300,14 @@ mod platform {
         if window.label() == PREVIEW_LABEL {
             return;
         }
-        // Losing focus while on screen never trims; gaining it ends an off-screen epoch.
+        // Gaining focus cancels any pending trim and ends the epoch. Losing it while a window
+        // is on screen starts the hour-behind timer; a switch to another TermFlow window
+        // cancels it again through that window's Focused(true).
+        let app = window.app_handle();
         if focused {
-            activate(window.app_handle());
+            activate(app);
+        } else if census(app, None).is_some_and(|w| w.on_screen) {
+            request(app, Trigger::Behind);
         }
     }
     pub fn resized(window: &tauri::Window) {
@@ -388,6 +410,13 @@ mod platform {
                         let stopping = exiting.load(Ordering::Relaxed)
                             || recovering.load(Ordering::Relaxed)
                             || restarting.load(Ordering::Relaxed);
+                        // An unreadable handle counts as foreground: never trim on a guess. ROOTOWNER maps an
+                        // owned dialog (file picker) to its TermFlow window.
+                        let foreground =
+                            unsafe { GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) };
+                        let is_foreground = real(&handle)
+                            .iter()
+                            .any(|w| w.hwnd().map_or(true, |h| h == foreground));
                         let dragging = keys.pane_drag_active()
                             || handle
                                 .get_webview_window(PREVIEW_LABEL)
@@ -395,10 +424,10 @@ mod platform {
                         let trigger = admission.lock().unwrap().fire(
                             generation,
                             Instant::now(),
-                            windows.admission(dragging, stopping),
+                            windows.admission(is_foreground, dragging, stopping),
                         );
                         if let Some(trigger) = trigger {
-                            trim(&handle, trigger);
+                            trim(&handle, trigger, !windows.on_screen);
                         }
                         let _ = tx.send(());
                     })
@@ -478,9 +507,11 @@ mod platform {
             }
         }
     }
-    // Only an admitted off-screen trim gets here, so the WebViews also go LOW.
-    fn trim(app: &AppHandle, trigger: Trigger) {
-        memory_target(app, true);
+    // LOW memory target only while nothing is on screen.
+    fn trim(app: &AppHandle, trigger: Trigger, low: bool) {
+        if low {
+            memory_target(app, true);
+        }
         let mcp = app.try_state::<AppState>().and_then(|s| {
             s.mcp_process.lock().ok().and_then(|slot| {
                 slot.current().and_then(|p| match &p.handle {
@@ -492,6 +523,7 @@ mod platform {
         // Host and verified MCP do not depend on WebView dispatch succeeding.
         finish_trim(
             trigger,
+            low,
             Instant::now(),
             0,
             mcp,
@@ -538,7 +570,7 @@ mod platform {
                     if let Err(e) = result {
                         warn("discovery", e);
                     }
-                    finish_trim(trigger, start, browser, mcp, pids, "webview");
+                    finish_trim(trigger, low, start, browser, mcp, pids, "webview");
                 })
                 .is_err()
             {
@@ -548,6 +580,7 @@ mod platform {
     }
     fn finish_trim(
         trigger: Trigger,
+        low: bool,
         start: Instant,
         browser: u32,
         mcp: Option<u32>,
@@ -567,9 +600,10 @@ mod platform {
         }
         let (trimmed, failed) = trim_processes(&pids);
         log::info!(
-            "memory_trim: part={} trigger={} processes={} trimmed={} failed={} elapsed_ms={}",
+            "memory_trim: part={} trigger={} low={} processes={} trimmed={} failed={} elapsed_ms={}",
             part,
             trigger.name(),
+            low,
             pids.len(),
             trimmed,
             failed,
@@ -725,8 +759,9 @@ mod tests {
         assert_eq!(s.epoch, Epoch::Untrimmed);
         assert!(keep_low(&Epoch::Low));
         assert!(!keep_low(&Epoch::Untrimmed));
+        assert!(!keep_low(&Epoch::Visible));
         s.low_applied.extend(["A".into(), "B".into()]);
-        assert_eq!(s.destroyed("A", &visible(), true), None);
+        assert_eq!(s.destroyed("A", &visible(), true), Some(Trigger::Behind));
         assert!(s.low_applied.contains("B"));
         assert_eq!(
             s.destroyed("A", &minimized(), true),
@@ -763,19 +798,112 @@ mod tests {
         let mut w = Windows::default();
         w.add(false, false); // hidden to the tray
         assert!(!w.on_screen && !w.minimized);
-        assert!(w.admission(false, false).low);
+        assert!(w.admission(false, false, false).low);
         w.add(true, true); // minimized to the taskbar
         assert!(!w.on_screen && w.minimized);
-        assert!(w.admission(false, false).low);
+        assert!(w.admission(false, false, false).low);
         w.add(true, false); // on screen, focused or behind another app
         assert_eq!(w.count, 3);
         assert!(w.on_screen);
-        let adm = w.admission(true, true);
-        assert!(!adm.low && adm.dragging && adm.stopping);
+        let adm = w.admission(true, true, true);
+        assert!(!adm.low && adm.foreground && adm.dragging && adm.stopping);
         let mut w = Windows::default();
         w.add(true, false);
         w.add(true, true);
         assert!(w.on_screen && w.minimized);
+    }
+    /// User rule 2026-11-03: visible behind another app for an hour trims once; coming back
+    /// to the front before that cancels it.
+    #[test]
+    fn behind_trims_after_an_hour_unless_brought_back() {
+        let hour = Duration::from_secs(3600);
+        let behind = Admission::default();
+        let now = Instant::now();
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Behind, now).unwrap();
+        assert_eq!(s.pending, Some((Trigger::Behind, now + hour)));
+        assert_eq!(
+            s.fire(
+                g,
+                now + hour - Duration::from_millis(1),
+                Admission::default()
+            ),
+            None
+        );
+        assert_eq!(s.fire(g, now + hour, behind), Some(Trigger::Behind));
+        assert_eq!(s.epoch, Epoch::Visible);
+        assert!(!s.off_screen);
+        // Once per epoch: a second hour behind does not trim again.
+        assert_eq!(s.request(Trigger::Behind, now + hour), None);
+        // A later minimize still takes the LOW trim.
+        let g = s.request(Trigger::Minimized, now + hour).unwrap();
+        assert_eq!(
+            s.fire(g, now + hour + Duration::from_secs(3), off_screen()),
+            Some(Trigger::Minimized)
+        );
+        assert_eq!(s.epoch, Epoch::Low);
+
+        // Brought back to the front before the hour: the timer is cancelled.
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Behind, now).unwrap();
+        s.activate();
+        assert!(s.generation > g && s.pending.is_none());
+        assert_eq!(s.fire(g, now + hour, behind), None);
+        assert_eq!(s.epoch, Epoch::Untrimmed);
+
+        // Still the foreground window at the hour (a missed focus event): drop, epoch open.
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Behind, now).unwrap();
+        let front = Admission {
+            foreground: true,
+            ..Default::default()
+        };
+        assert_eq!(s.fire(g, now + hour, front), None);
+        assert!(s.pending.is_none());
+        assert_eq!(s.epoch, Epoch::Untrimmed);
+        assert!(s.request(Trigger::Behind, now + hour).is_some());
+
+        // Hidden or minimized meanwhile: the 3 s trigger replaces the hour.
+        let mut s = IdleTrimScheduler::default();
+        s.request(Trigger::Behind, now).unwrap();
+        let g = s
+            .request(Trigger::Hidden, now + Duration::from_secs(60))
+            .unwrap();
+        assert_eq!(
+            s.pending,
+            Some((Trigger::Hidden, now + Duration::from_secs(63)))
+        );
+        assert_eq!(
+            s.fire(g, now + Duration::from_secs(63), off_screen()),
+            Some(Trigger::Hidden)
+        );
+        assert_eq!(s.epoch, Epoch::Low);
+
+        // A visible trim cannot repeat from a pending request either.
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Behind, now).unwrap();
+        s.epoch = Epoch::Visible;
+        assert_eq!(s.fire(g, now + hour, behind), None);
+    }
+    #[test]
+    fn behind_drag_postpones_and_stopping_drops() {
+        let hour = Duration::from_secs(3600);
+        let now = Instant::now();
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Behind, now).unwrap();
+        let drag = Admission {
+            dragging: true,
+            ..Default::default()
+        };
+        assert_eq!(s.fire(g, now + hour, drag), None);
+        assert_eq!(s.pending, Some((Trigger::Behind, now + hour * 2)));
+        let stop = Admission {
+            stopping: true,
+            ..Default::default()
+        };
+        assert_eq!(s.fire(g, now + hour * 2, stop), None);
+        assert!(s.pending.is_none());
+        assert_eq!(s.epoch, Epoch::Untrimmed);
     }
     #[test]
     fn exact_delays_and_no_early_fire() {
@@ -837,10 +965,10 @@ mod tests {
         assert_eq!(s.fire(g, now + Duration::from_secs(3), off_screen()), None);
         assert_eq!(s.epoch, Epoch::Untrimmed);
     }
-    /// User rule 2026-11-03: TermFlow behind another app is still in use; only the tray
-    /// or the taskbar trims it.
+    /// User rule 2026-11-03: on screen, only the hour-behind trigger trims; the others need
+    /// the tray or the taskbar.
     #[test]
-    fn a_window_on_screen_drops_every_trigger_without_consuming_epoch() {
+    fn a_window_on_screen_drops_every_off_screen_trigger_without_consuming_epoch() {
         for t in TRIGGERS {
             for dragging in [false, true] {
                 let mut s = IdleTrimScheduler::default();
@@ -879,6 +1007,7 @@ mod tests {
                         stopping: true,
                         dragging: true,
                         low: true,
+                        foreground: false,
                     }
                 ),
                 None
@@ -935,7 +1064,7 @@ mod tests {
             Some(Trigger::Hidden)
         );
         assert_eq!(s.epoch, Epoch::Low);
-        for t in TRIGGERS {
+        for t in TRIGGERS.into_iter().chain([Trigger::Behind]) {
             assert_eq!(s.request(t, now), None);
         }
         s.activate();
@@ -973,9 +1102,9 @@ mod tests {
             s.destroyed("A", &minimized(), false),
             Some(Trigger::Minimized)
         );
-        // A window still on screen means no trim, focused or not.
-        assert_eq!(s.destroyed("A", &visible(), false), None);
-        assert_eq!(s.destroyed("A", &visible(), true), None);
+        // A window still on screen starts the hour-behind timer (focus may be elsewhere).
+        assert_eq!(s.destroyed("A", &visible(), false), Some(Trigger::Behind));
+        assert_eq!(s.destroyed("A", &visible(), true), Some(Trigger::Behind));
         s.low_applied.insert("A".into());
         s.destroyed("A", &Windows::default(), true);
         assert!(s.low_applied.is_empty());
