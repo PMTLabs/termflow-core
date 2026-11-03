@@ -139,6 +139,10 @@ impl IdleTrimScheduler {
         self.focused.remove(label);
         self.low_applied.remove(label);
         self.off_screen = !windows.on_screen;
+        if windows.count == 0 && !keep {
+            self.cancel();
+            return None;
+        }
         if windows.count == 0 && keep {
             Some(Trigger::Hidden)
         } else if !windows.on_screen && windows.minimized {
@@ -171,6 +175,7 @@ impl IdleTrimScheduler {
         if self.epoch == Epoch::Low || (self.epoch == Epoch::Visible && !adm.low) {
             return None;
         }
+        self.off_screen = adm.low;
         self.epoch = if adm.low { Epoch::Low } else { Epoch::Visible };
         Some(trigger)
     }
@@ -185,6 +190,34 @@ pub struct MemoryTrim(Arc<Mutex<IdleTrimScheduler>>);
 impl Drop for MemoryTrim {
     fn drop(&mut self) {
         self.0.lock().unwrap().cancel();
+    }
+}
+
+fn keep_low(epoch: &Epoch) -> bool {
+    *epoch == Epoch::Low
+}
+
+fn sync_off_screen(s: &mut IdleTrimScheduler, windows: &Windows) {
+    s.off_screen = !windows.on_screen;
+}
+
+fn request_with_census<T>(
+    scheduler: &mut IdleTrimScheduler,
+    windows: Option<&Windows>,
+    state: Option<&T>,
+    trigger: Trigger,
+    now: Instant,
+    produced: u64,
+) -> Option<u64> {
+    if let Some(windows) = windows {
+        sync_off_screen(scheduler, windows);
+    }
+    request_if_present(scheduler, state, trigger, now, produced)
+}
+
+fn insert_nonzero(pids: &mut std::collections::BTreeSet<u32>, pid: u32) {
+    if pid != 0 {
+        pids.insert(pid);
     }
 }
 
@@ -271,10 +304,11 @@ mod platform {
         s.lock().unwrap().focus(window.label(), focused);
         if focused {
             memory_target(app, false);
-        } else if s.lock().unwrap().focused.is_empty()
-            && census(app, None).is_some_and(|w| w.on_screen)
-        {
-            request(app, Trigger::Deactivated);
+        } else {
+            let none_focused = s.lock().unwrap().focused.is_empty();
+            if none_focused && census(app, None).is_some_and(|w| w.on_screen) {
+                request(app, Trigger::Deactivated);
+            }
         }
     }
     pub fn resized(window: &tauri::Window) {
@@ -327,11 +361,14 @@ mod platform {
         let Some(scheduler) = scheduler(app) else {
             return;
         };
+        // Hide may not emit Resized; sync even if the request is rejected.
+        let windows = census(app, None);
         // Clone every Arc before spawning; never keep a managed State across await.
         let (generation, produced, exiting, recovering, restarting, keys) = {
             let state = app.try_state::<AppState>();
-            let generation = request_if_present(
+            let generation = request_with_census(
                 &mut scheduler.lock().unwrap(),
+                windows.as_ref(),
                 state.as_deref(),
                 trigger,
                 Instant::now(),
@@ -351,14 +388,6 @@ mod platform {
                 state.host_table.keys().clone(),
             )
         };
-        // Hide does not necessarily emit Resized. Remember the actual off-screen
-        // state now so a restore before this timer fires is still an activation edge.
-        if let Some(windows) = census(app, None) {
-            let mut s = scheduler.lock().unwrap();
-            if s.generation == generation {
-                s.off_screen = !windows.on_screen;
-            }
-        }
         let owner = scheduler.clone();
         let app = app.clone();
         let task = tauri::async_runtime::spawn(async move {
@@ -403,7 +432,7 @@ mod platform {
                         let dragging = keys.pane_drag_active()
                             || handle
                                 .get_webview_window(PREVIEW_LABEL)
-                                .is_some_and(|w| w.is_visible().unwrap_or(true));
+                                .is_some_and(|w| w.is_visible().unwrap_or(false));
                         let trigger = {
                             let mut s = admission.lock().unwrap();
                             let app_focused = !s.focused.is_empty();
@@ -466,7 +495,7 @@ mod platform {
             if window
                 .with_webview(move |webview| unsafe {
                     // A queued LOW must not undo an activation that overtook it.
-                    if low && s.lock().unwrap().epoch != Epoch::Low {
+                    if keep_low(&s.lock().unwrap().epoch) != low {
                         return;
                     }
                     let result = (|| {
@@ -478,18 +507,21 @@ mod platform {
                             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
                         } else {
                             COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
-                        })
-                    })();
-                    match result {
-                        Ok(()) => {
-                            let mut s = s.lock().unwrap();
-                            if low {
-                                s.low_applied.insert(label);
-                            } else {
-                                s.low_applied.remove(&label);
-                            }
+                        })?;
+                        let mut s = s.lock().unwrap();
+                        if low && !keep_low(&s.epoch) {
+                            core.SetMemoryUsageTargetLevel(
+                                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+                            )?;
+                        } else if low {
+                            s.low_applied.insert(label);
+                        } else {
+                            s.low_applied.remove(&label);
                         }
-                        Err(e) => warn("memory_target", e),
+                        Ok(())
+                    })();
+                    if let Err(e) = result {
+                        warn("memory_target", e);
                     }
                 })
                 .is_err()
@@ -510,21 +542,30 @@ mod platform {
                 })
             })
         });
-        // Host and verified MCP must still be trimmed with no real windows left.
-        let window = real(app)
-            .into_iter()
-            .next()
-            .or_else(|| app.get_webview_window(PREVIEW_LABEL));
+        // Host and verified MCP do not depend on WebView dispatch succeeding.
+        finish_trim(
+            trigger,
+            low,
+            Instant::now(),
+            0,
+            mcp,
+            BTreeSet::from([std::process::id()]),
+            "host",
+        );
+        let window = real(app).into_iter().next().or_else(|| {
+            app.get_webview_window(PREVIEW_LABEL)
+                .filter(|w| w.is_visible().is_ok())
+        });
         if let Some(window) = window {
             if window
                 .with_webview(move |webview| unsafe {
                     let start = Instant::now();
-                    let mut pids = BTreeSet::from([std::process::id()]);
+                    let mut pids = BTreeSet::new();
                     let mut browser = 0;
                     let result: windows::core::Result<()> = (|| {
                         let core = webview.controller().CoreWebView2()?;
                         core.BrowserProcessId(&mut browser)?;
-                        pids.insert(browser);
+                        insert_nonzero(&mut pids, browser);
                         let infos = core
                             .cast::<ICoreWebView2_2>()?
                             .Environment()?
@@ -551,29 +592,12 @@ mod platform {
                     if let Err(e) = result {
                         warn("discovery", e);
                     }
-                    finish_trim(trigger, low, start, browser, mcp, pids);
+                    finish_trim(trigger, low, start, browser, mcp, pids, "webview");
                 })
                 .is_err()
             {
                 dispatch_failed();
-                finish_trim(
-                    trigger,
-                    low,
-                    Instant::now(),
-                    0,
-                    mcp,
-                    BTreeSet::from([std::process::id()]),
-                );
             }
-        } else {
-            finish_trim(
-                trigger,
-                low,
-                Instant::now(),
-                0,
-                mcp,
-                BTreeSet::from([std::process::id()]),
-            );
         }
     }
     fn finish_trim(
@@ -583,13 +607,23 @@ mod platform {
         browser: u32,
         mcp: Option<u32>,
         mut pids: BTreeSet<u32>,
+        part: &str,
     ) {
-        if let Err(e) = supplemental_processes(browser, mcp, &mut pids) {
+        if let Err(e) =
+            supplemental_processes(browser, if part == "host" { mcp } else { None }, &mut pids)
+        {
             warn("snapshot", e);
+        }
+        if part == "webview" {
+            pids.remove(&std::process::id());
+            if let Some(pid) = mcp {
+                pids.remove(&pid);
+            }
         }
         let (trimmed, failed) = trim_processes(&pids);
         log::info!(
-            "memory_trim: trigger={} low={} processes={} trimmed={} failed={} elapsed_ms={}",
+            "memory_trim: part={} trigger={} low={} processes={} trimmed={} failed={} elapsed_ms={}",
+            part,
             trigger.name(),
             low,
             pids.len(),
@@ -706,6 +740,78 @@ mod tests {
             produced,
             ..Default::default()
         }
+    }
+    #[test]
+    fn review_regressions() {
+        let now = Instant::now();
+        let mut s = IdleTrimScheduler::default();
+        let g = s.request(Trigger::Hidden, now, 1).unwrap();
+        assert_eq!(s.request(Trigger::Hidden, now, 2), None);
+        assert_eq!(s.last_mark, 1);
+        assert_eq!(
+            s.fire(g, now + Duration::from_secs(2), quiet(false, 2)),
+            None
+        );
+        assert_eq!(s.last_mark, 1);
+        assert_eq!(
+            s.fire(
+                g,
+                now + Duration::from_secs(3),
+                Admission {
+                    dragging: true,
+                    produced: 1,
+                    ..Default::default()
+                }
+            ),
+            None
+        );
+        assert!(s.pending.is_some());
+        assert_eq!(
+            s.fire(g, now + Duration::from_secs(6), quiet(true, 1)),
+            Some(Trigger::Hidden)
+        );
+        assert!(s.off_screen);
+        assert_eq!(s.epoch, Epoch::Low);
+        s.activate();
+        assert!(!s.off_screen);
+        assert_eq!(s.epoch, Epoch::Untrimmed);
+        assert!(keep_low(&Epoch::Low));
+        assert!(!keep_low(&Epoch::Visible));
+        assert!(!keep_low(&Epoch::Untrimmed));
+        s.low_applied.extend(["A".into(), "B".into()]);
+        s.focused.insert("B".into());
+        let visible = Windows {
+            count: 1,
+            on_screen: true,
+            minimized: false,
+        };
+        assert_eq!(s.destroyed("A", &visible, true), None);
+        assert!(s.low_applied.contains("B"));
+        let minimized = Windows {
+            count: 1,
+            on_screen: false,
+            minimized: true,
+        };
+        assert_eq!(s.destroyed("A", &minimized, true), Some(Trigger::Minimized));
+        let g = s.request(Trigger::Hidden, now, 0).unwrap();
+        assert_eq!(s.destroyed("B", &Windows::default(), false), None);
+        assert!(s.generation > g);
+        assert!(s.pending.is_none());
+        s.epoch = Epoch::Low;
+        assert_eq!(
+            request_with_census(&mut s, Some(&minimized), Some(&()), Trigger::Hidden, now, 0),
+            None
+        );
+        assert!(s.off_screen);
+        sync_off_screen(&mut s, &visible);
+        assert!(!s.off_screen);
+        let mut pids = std::collections::BTreeSet::new();
+        insert_nonzero(&mut pids, 0);
+        insert_nonzero(&mut pids, 7);
+        assert_eq!(pids, std::collections::BTreeSet::from([7]));
+        let mut image = wide("msedgewebview2.exe");
+        image.extend([65, 66]);
+        assert!(image_is(&image, "msedgewebview2.exe"));
     }
     #[test]
     fn exact_delays_and_no_early_fire() {
