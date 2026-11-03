@@ -4,6 +4,7 @@ pub mod state;
 pub mod console_window;
 pub mod context_menu;
 pub mod webview_power;
+mod memory_trim;
 mod webview_recovery;
 mod checked_counter;
 pub mod session_notify;
@@ -574,6 +575,8 @@ pub fn run() {
         tauri_plugin_autostart::MacosLauncher::LaunchAgent,
         None,
     ))
+    .manage(memory_trim::MemoryTrim::default())
+    .on_page_load(|webview, payload| memory_trim::on_page_load(webview, payload.event()))
     .setup(move |app| {
         // Resolved before the builder ran, so it could not be logged then.
         gpu_preference::log_resolution();
@@ -1046,6 +1049,12 @@ pub fn run() {
         }
     })
     .on_window_event(|window, event| {
+        match event {
+            WindowEvent::Focused(focused) => memory_trim::focused(window, *focused),
+            WindowEvent::Resized(_) => memory_trim::resized(window),
+            WindowEvent::Destroyed => memory_trim::destroyed(window),
+            _ => {}
+        }
         // Intercept the native window close so the frontend can show an in-app
         // confirmation dialog. The actual exit happens via confirm_close_app.
         if let WindowEvent::CloseRequested { api, .. } = event {
@@ -1072,8 +1081,9 @@ pub fn run() {
                         .count();
                     if real_windows <= 1 {
                         api.prevent_close();
-                        if let Err(e) = window.hide() {
-                            log::warn!("Failed to hide window to tray: {}", e);
+                        match window.hide() {
+                            Ok(()) => memory_trim::request(app, memory_trim::Trigger::Hidden),
+                            Err(e) => log::warn!("Failed to hide window to tray: {}", e),
                         }
                         return;
                     }

@@ -23,6 +23,7 @@
 //! succeeded, so a failed hide cannot leave us believing the webview is hidden when it is
 //! not — the next event simply tries again.
 
+use tauri::Manager;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -80,6 +81,7 @@ pub fn restore_and_focus(window: &tauri::WebviewWindow) {
     let _ = window.show();
     let _ = window.set_focus();
     sync(window);
+    crate::memory_trim::activate(window.app_handle());
 }
 
 #[cfg(windows)]

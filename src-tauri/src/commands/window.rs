@@ -579,6 +579,7 @@ pub async fn create_detached_window(
     if let Some(id) = reserved {
         record_new_window(&app_handle, &window, id, (900, 600));
     }
+    crate::memory_trim::activate(&app_handle);
     refresh_menu(&app_handle);
     if !super::panes::transfer_taken(taken).await { return Err("destination never took transfer".into()); }
     Ok(label)
@@ -641,6 +642,7 @@ pub fn open_new_window(app: &tauri::AppHandle, path: Option<String>) -> Result<S
     if let Some(id) = reserved {
         record_new_window(app, &window, id, (1280, 800));
     }
+    crate::memory_trim::activate(app);
     Ok(label)
 }
 
