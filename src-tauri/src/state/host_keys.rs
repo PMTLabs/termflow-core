@@ -88,6 +88,10 @@ impl Default for HostKeys {
 }
 
 impl HostKeys {
+    /// Cross-window pane drags do not use the tab drag-preview window.
+    #[cfg(windows)]
+    pub(crate) fn pane_drag_active(&self) -> bool { self.lock().panes.active_drag.is_some() }
+
     pub fn new(routes: HostRoutes) -> Self {
         Self { inner: Arc::new(Mutex::new(Inner {
             keys: HashMap::new(), channels: HashMap::new(), sequence: 0, owners: HashMap::new(),
