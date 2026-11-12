@@ -569,6 +569,41 @@ mod app_exec_alias_tests {
         assert_eq!(parse_app_exec_link(&missing_target), None);
     }
 
+    #[test]
+    fn a_data_length_shorter_than_the_version_field_is_rejected_not_a_panic() {
+        for data_len in [0u16, 2] {
+            let mut buf = reparse_buffer(0x8000_001B, &["a", "b", r"C:\x.exe", "0"]);
+            buf[4..6].copy_from_slice(&data_len.to_le_bytes());
+            assert_eq!(parse_app_exec_link(&buf), None);
+        }
+    }
+
+    #[test]
+    fn an_unknown_layout_version_is_rejected() {
+        let mut buf = reparse_buffer(0x8000_001B, &["a", "b", r"C:\x.exe", "0"]);
+        buf[8..12].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(parse_app_exec_link(&buf), None);
+    }
+
+    #[test]
+    fn executable_present_rejects_directories() {
+        let dir = std::env::temp_dir().join(format!("tf-exe-present-{}", std::process::id()));
+        let fake = dir.join("pwsh.exe");
+        std::fs::create_dir_all(&fake).unwrap();
+        assert!(!super::executable_present(&fake));
+        std::fs::write(dir.join("real.exe"), b"").unwrap();
+        assert!(super::executable_present(&dir.join("real.exe")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Live: a bare `pwsh` (no extension) resolves through PATHEXT, as spawn does.
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_name_resolves_through_pathext() {
+        let resolved = super::resolve_executable("cmd").expect("cmd resolves via PATHEXT");
+        assert_eq!(resolved.file_name().unwrap().to_ascii_lowercase(), "cmd.exe");
+    }
+
     /// Live: on a machine with Store PowerShell, the alias must resolve to the
     /// packaged exe and extract that exe's icon, not the generic stub icon.
     #[cfg(windows)]
@@ -596,18 +631,39 @@ mod app_exec_alias_tests {
 #[cfg(windows)]
 fn resolve_executable(path: &str) -> Option<std::path::PathBuf> {
     let p = std::path::Path::new(path);
-    if p.is_absolute() && p.exists() {
+    if p.is_absolute() && executable_present(p) {
         return Some(p.to_path_buf());
     }
-    if let Ok(path_var) = std::env::var("PATH") {
+    // A bare name without an extension (`pwsh`, `nu`) spawns through PATHEXT,
+    // so try the same extensions here.
+    let mut names = vec![std::ffi::OsString::from(path)];
+    if cfg!(windows) && p.extension().is_none() {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        names.extend(
+            pathext
+                .split(';')
+                .filter(|e| !e.is_empty())
+                .map(|ext| std::ffi::OsString::from(format!("{path}{}", ext.to_ascii_lowercase()))),
+        );
+    }
+    if let Some(path_var) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path_var) {
-            let candidate = dir.join(path);
-            if candidate.exists() {
-                return Some(candidate);
+            for name in &names {
+                let candidate = dir.join(name);
+                if executable_present(&candidate) {
+                    return Some(candidate);
+                }
             }
         }
     }
-    if p.exists() { Some(p.to_path_buf()) } else { None }
+    if executable_present(p) { Some(p.to_path_buf()) } else { None }
+}
+
+/// A regular file, or a Store app execution alias. An alias is a reparse point
+/// that cannot be opened as a file, so `Path::exists()` may report it missing;
+/// its link metadata is still readable. Directories never count.
+fn executable_present(path: &std::path::Path) -> bool {
+    path.is_file() || std::fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir())
 }
 
 /// Pick the best binary to read an icon from. Most shells carry their own icon,
@@ -711,6 +767,15 @@ fn parse_app_exec_link(buf: &[u8]) -> Option<String> {
     }
     let data_len = u16::from_le_bytes(buf[4..6].try_into().ok()?) as usize;
     let end = (8 + data_len).min(buf.len());
+    if end < 12 {
+        return None;
+    }
+    // Version 3 is the only documented layout; a different one may order the
+    // strings differently, so refuse it rather than read the wrong string.
+    let version = u32::from_le_bytes(buf[8..12].try_into().ok()?);
+    if version != 3 {
+        return None;
+    }
     let units: Vec<u16> = buf[12..end]
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))

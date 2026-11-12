@@ -9,15 +9,22 @@ export interface NewShellProfileInput {
 
 /**
  * Split a command-line argument string into argv entries. Whitespace separates
- * arguments; double quotes group text containing spaces (`-NoLogo -Command "Get-Date -Format o"`).
+ * arguments; double quotes group text containing spaces (`-NoLogo -Command "Get-Date -Format o"`);
+ * `\"` is a literal quote. Throws on an unclosed quote rather than guessing.
  */
 export function parseArgs(input: string): string[] {
   const args: string[] = [];
   let current = '';
   let inQuotes = false;
   let hasToken = false;
-  for (const ch of input) {
-    if (ch === '"') {
+  const chars = [...input];
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (ch === '\\' && chars[i + 1] === '"') {
+      current += '"';
+      hasToken = true;
+      i++;
+    } else if (ch === '"') {
       inQuotes = !inQuotes;
       hasToken = true;
     } else if (!inQuotes && /\s/.test(ch)) {
@@ -29,6 +36,7 @@ export function parseArgs(input: string): string[] {
       hasToken = true;
     }
   }
+  if (inQuotes) throw new Error('Arguments have an unclosed double quote.');
   if (hasToken) args.push(current);
   return args;
 }
@@ -69,13 +77,20 @@ export const AddShellProfileForm: React.FC<AddShellProfileFormProps> = ({ onSubm
       setError('Enter the shell executable path.');
       return;
     }
+    let parsedArgs: string[];
+    try {
+      parsedArgs = parseArgs(args);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      return;
+    }
     setError(null);
     setSaving(true);
     try {
       await onSubmit({
         name: name.trim(),
         path: path.trim(),
-        args: parseArgs(args),
+        args: parsedArgs,
         cwd: cwd.trim() || undefined,
       });
     } catch (err) {

@@ -331,7 +331,7 @@ class BrowserBridge implements ElectronAPI {
 
     async getShellProfiles(): Promise<any[]> {
         try {
-            const response = await fetch(`${API_BASE_URL}/profiles`);
+            const response = await fetch(`${API_BASE_URL}/profiles`, { headers: this.buildAuthHeaders() });
             if (response.ok) {
                 const data = await response.json();
                 return data.profiles || [];
@@ -345,7 +345,7 @@ class BrowserBridge implements ElectronAPI {
     async addShellProfile(profile: { name: string; path: string; args: string[]; cwd?: string }): Promise<any> {
         const response = await fetch(`${API_BASE_URL}/profiles`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...this.buildAuthHeaders() },
             body: JSON.stringify(profile),
         });
         const data = await response.json().catch(() => ({}));
@@ -355,7 +355,10 @@ class BrowserBridge implements ElectronAPI {
     }
 
     async deleteShellProfile(id: string): Promise<void> {
-        const response = await fetch(`${API_BASE_URL}/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        const response = await fetch(`${API_BASE_URL}/profiles/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+            headers: this.buildAuthHeaders(),
+        });
         if (!response.ok) {
             const data = await response.json().catch(() => ({}));
             throw new Error(data.error || `Deleting the profile failed (${response.status})`);

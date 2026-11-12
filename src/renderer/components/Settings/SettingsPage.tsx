@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useSelector, useDispatch } from 'react-redux';
+import { useSelector, useDispatch, useStore } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
 import { setFontSize, setFontWeight, setFontWeightBold, TERMINAL_FONT_WEIGHTS, updateShellProfile, setDefaultProfile, setCloseTabOnProcessExit, setSmartCtrlC, setEnhancedKeyboard, setCommandSuggestions, setCanvasWheelMode, setCanvasBusyCue, setDefaultEditor, setTabSizingMode, setFixedTabWidth, setTabRunningCue, setActivateTabOnApiCreate, setColorSchema, setNonFocusedPaneOpacity, setAgentColorScheme, removeAgentColorScheme, setAgentColorSchemes, setCustomKeybindings, setCustomKeybinding, resetCustomKeybinding, setLaunchAtLogin, setNotifySoundEnabled, setNotifyToastEnabled, setNotifyOsEnabled, setFileManagerIntegration, setExemptLoopbackFromProxy } from '../../store/slices/settingsSlice';
@@ -112,6 +112,9 @@ interface SettingsPageProps {
 export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) => {
     const dispatch = useDispatch<AppDispatch>();
     const settings = useSelector((state: RootState) => state.settings);
+    // Fresh reads after an await: a handler's render closure can predate edits
+    // or removals that landed while its IPC call was in flight.
+    const store = useStore<RootState>();
     const isMac = typeof navigator !== 'undefined' && !!navigator.platform?.includes('Mac');
 
     // Local state for font size input to allow typing
@@ -912,39 +915,54 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const [addingProfile, setAddingProfile] = useState(false);
 
-    // Adding/removing a profile is saved by the backend at once, so it must move
-    // the unsaved-changes baseline too, or the new card would read as an edit.
+    const [removingIds, setRemovingIds] = useState<string[]>([]);
+
+    // Adding or removing a profile saves the Shell Profiles page at once: the
+    // backend writes profiles.json, and the list goes to config through
+    // merge_config, whose `config:changed` broadcast updates every window (a
+    // window left with the old list would write it back on its next Save).
+    // The baseline then moves to the saved state so nothing reads as unsaved.
+    const commitProfiles = async (next: ShellProfile[], nextDefault: string) => {
+        dispatch(setShellProfiles(next));
+        if (nextDefault && nextDefault !== store.getState().settings.defaultProfile) {
+            dispatch(setDefaultProfile(nextDefault));
+        }
+        await window.electronAPI?.setConfigValue('shellProfiles', next);
+        setBaseline((prev) => prev?.kind === 'profiles'
+            ? snapshotCategory('profiles', store.getState().settings)
+            : prev);
+    };
+
     const handleAddProfile = async (input: NewShellProfileInput) => {
         if (!window.electronAPI?.addShellProfile) {
             throw new Error('Adding profiles requires the desktop app.');
         }
         const created: ShellProfile = await window.electronAPI.addShellProfile(input);
-        dispatch(setShellProfiles([...settings.shellProfiles, created]));
-        setBaseline((prev) => prev?.kind === 'profiles'
-            ? { ...prev, cwds: [...prev.cwds, { id: created.id, cwd: created.cwd ?? '' }] }
-            : prev);
+        const fresh = store.getState().settings;
+        await commitProfiles(
+            [...fresh.shellProfiles.filter((p) => p.id !== created.id), created],
+            fresh.defaultProfile,
+        );
         setAddingProfile(false);
         dispatch(addToast({ message: `Added shell profile "${created.name}"`, type: 'success' }));
     };
 
     const handleRemoveProfile = async (profile: ShellProfile) => {
+        if (removingIds.includes(profile.id)) return;
+        setRemovingIds((ids) => [...ids, profile.id]);
         try {
             await window.electronAPI?.deleteShellProfile?.(profile.id);
+            const fresh = store.getState().settings;
+            const remaining = fresh.shellProfiles.filter((p) => p.id !== profile.id);
+            const nextDefault = fresh.defaultProfile === profile.id
+                ? remaining[0]?.id ?? ''
+                : fresh.defaultProfile;
+            await commitProfiles(remaining, nextDefault);
         } catch (err) {
             dispatch(addToast({ message: `Could not remove "${profile.name}": ${err instanceof Error ? err.message : String(err)}`, type: 'error' }));
-            return;
+        } finally {
+            setRemovingIds((ids) => ids.filter((id) => id !== profile.id));
         }
-        const remaining = settings.shellProfiles.filter((p) => p.id !== profile.id);
-        dispatch(setShellProfiles(remaining));
-        const nextDefault = settings.defaultProfile === profile.id ? remaining[0]?.id : undefined;
-        if (nextDefault) dispatch(setDefaultProfile(nextDefault));
-        setBaseline((prev) => prev?.kind === 'profiles'
-            ? {
-                ...prev,
-                defaultProfile: nextDefault ?? prev.defaultProfile,
-                cwds: prev.cwds.filter((c) => c.id !== profile.id),
-            }
-            : prev);
     };
 
     const handleBrowseEditor = async () => {
@@ -1746,6 +1764,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                             type="button"
                                             className="set-default-btn remove-profile-btn"
                                             onClick={() => handleRemoveProfile(profile)}
+                                            disabled={removingIds.includes(profile.id)}
                                             aria-label={`Remove profile ${profile.name}`}
                                         >
                                             Remove

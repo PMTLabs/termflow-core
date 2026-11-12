@@ -131,10 +131,10 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
 /// True when `path` names a file, including a Microsoft Store app execution
 /// alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`). An alias is a
 /// reparse point that cannot be opened as a file, so `Path::exists()` may say
-/// false for it; reading the link itself still succeeds.
+/// false for it; reading the link itself still succeeds. Directories never count.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn file_present(path: &Path) -> bool {
-    path.is_file() || fs::symlink_metadata(path).is_ok()
+    path.is_file() || fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir())
 }
 
 /// Where PowerShell 7 can live, most specific first: the MSI install under
@@ -221,10 +221,10 @@ fn invalidate_shell_cache() {
 
 pub fn get_available_shells() -> Vec<ShellProfile> {
     // get_available_shells() never holds the cache lock across
-    // compute_available_shells() (which blocks on a subprocess spawn) — every
-    // caller here is an async Tauri/Axum handler calling this sync function
-    // directly, so holding a lock across the spawn would let one slow wsl.exe
-    // serialize every concurrent caller behind it instead of each only
+    // compute_available_shells() (which does blocking disk and registry I/O) —
+    // every caller here is an async Tauri/Axum handler calling this sync
+    // function directly, so holding a lock across that I/O would let one slow
+    // read serialize every concurrent caller behind it instead of each only
     // blocking its own worker, as happens today. Instead, snapshot the
     // generation while checking for a cache hit, release the lock, compute,
     // then only write back if the generation hasn't moved — an invalidation
@@ -467,11 +467,18 @@ pub fn add_custom_profile(mut profile: ShellProfile) -> Result<String, String> {
     }
     profile.is_custom = true;
     profile.is_wsl = false;
-    if profile.id.is_empty() {
-        profile.id = format!("custom-{}", chrono::Utc::now().timestamp_millis());
-    }
-    
     let mut custom = load_custom_profiles();
+    if profile.id.is_empty() {
+        // Millisecond ids collide when two adds land together; suffix until unique.
+        let base = format!("custom-{}", chrono::Utc::now().timestamp_millis());
+        let mut id = base.clone();
+        let mut n = 1;
+        while custom.iter().any(|p| p.id == id) {
+            n += 1;
+            id = format!("{base}-{n}");
+        }
+        profile.id = id;
+    }
     custom.push(profile.clone());
     save_custom_profiles(&custom)?;
     invalidate_shell_cache();
@@ -544,7 +551,7 @@ mod tests {
         .unwrap();
         let local = std::path::PathBuf::from(r"C:\Users\dev\AppData\Local");
 
-        let got = pwsh_candidates(&[pf.clone()], Some(path_var.as_os_str()), Some(&local));
+        let got = pwsh_candidates(std::slice::from_ref(&pf), Some(path_var.as_os_str()), Some(&local));
 
         assert_eq!(
             got,
@@ -601,8 +608,47 @@ mod tests {
             .map(|o| o.status.success())
             .unwrap_or(false);
         if where_found {
-            assert!(find_pwsh().is_some(), "`where pwsh` found pwsh but find_pwsh() did not");
+            let found = find_pwsh().expect("`where pwsh` found pwsh but find_pwsh() did not");
+            let found = std::path::PathBuf::from(found);
+            assert_eq!(
+                found.file_name().and_then(|f| f.to_str()).map(|f| f.to_ascii_lowercase()).as_deref(),
+                Some("pwsh.exe")
+            );
+            assert!(file_present(&found), "{} is not a file or alias", found.display());
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn powershell_profiles_follow_pwsh_detection() {
+        let shells = compute_available_shells();
+        let ps = shells.iter().find(|p| p.id == "powershell").expect("powershell profile");
+        let win_ps = shells.iter().find(|p| p.id == "windows-powershell");
+        assert!(ps.is_default);
+        match find_pwsh() {
+            Some(pwsh) => {
+                assert_eq!(ps.name, "PowerShell 7");
+                assert_eq!(ps.path, pwsh);
+                let win_ps = win_ps.expect("Windows PowerShell kept beside PowerShell 7");
+                assert_eq!(win_ps.path, "powershell.exe");
+                assert!(!win_ps.is_default);
+            }
+            None => {
+                assert_eq!(ps.path, "powershell.exe");
+                assert!(win_ps.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn file_present_rejects_a_directory_named_like_the_exe() {
+        let dir = std::env::temp_dir().join(format!("tf-pwsh-dir-{}", std::process::id()));
+        let fake = dir.join("pwsh.exe");
+        fs::create_dir_all(&fake).unwrap();
+        assert!(!file_present(&fake));
+        let found = pwsh_candidates(&[], Some(dir.as_os_str()), None).into_iter().find(|p| file_present(p));
+        assert_eq!(found, None);
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[cfg(target_os = "windows")]
