@@ -678,7 +678,7 @@ fn app_exec_alias_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
     // output pointer/length describe `buf`, which outlives the call.
     let ok = unsafe {
         DeviceIoControl(
-            file.as_raw_handle() as *mut std::ffi::c_void,
+            file.as_raw_handle(),
             FSCTL_GET_REPARSE_POINT,
             std::ptr::null(),
             0,
