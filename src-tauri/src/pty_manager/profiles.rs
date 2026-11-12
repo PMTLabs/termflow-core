@@ -543,13 +543,14 @@ mod tests {
 
     #[test]
     fn pwsh_candidates_cover_program_files_path_and_store_alias() {
-        let pf = std::path::PathBuf::from(r"C:\Program Files");
-        let path_var = std::env::join_paths([
-            std::path::PathBuf::from(r"C:\tools\scoop\shims"),
-            std::path::PathBuf::from(r"C:\Users\dev\.dotnet\tools"),
-        ])
-        .unwrap();
-        let local = std::path::PathBuf::from(r"C:\Users\dev\AppData\Local");
+        // Built from temp_dir so the paths are absolute on every OS and hold no
+        // PATH separator (a `C:\...` literal splits at its colon on Unix).
+        let root = std::env::temp_dir().join("tf-pwsh-candidates");
+        let pf = root.join("Program Files");
+        let shims = root.join("scoop").join("shims");
+        let dotnet = root.join("dev").join(".dotnet").join("tools");
+        let path_var = std::env::join_paths([&shims, &dotnet]).unwrap();
+        let local = root.join("dev").join("AppData").join("Local");
 
         let got = pwsh_candidates(std::slice::from_ref(&pf), Some(path_var.as_os_str()), Some(&local));
 
@@ -557,8 +558,8 @@ mod tests {
             got,
             vec![
                 pf.join("PowerShell").join("7").join("pwsh.exe"),
-                std::path::PathBuf::from(r"C:\tools\scoop\shims").join("pwsh.exe"),
-                std::path::PathBuf::from(r"C:\Users\dev\.dotnet\tools").join("pwsh.exe"),
+                shims.join("pwsh.exe"),
+                dotnet.join("pwsh.exe"),
                 local.join("Microsoft").join("WindowsApps").join("pwsh.exe"),
             ]
         );
