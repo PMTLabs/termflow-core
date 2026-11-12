@@ -532,6 +532,65 @@ mod health_tests {
     }
 }
 
+#[cfg(test)]
+mod app_exec_alias_tests {
+    use super::parse_app_exec_link;
+
+    fn reparse_buffer(tag: u32, strings: &[&str]) -> Vec<u8> {
+        let mut data = 3u32.to_le_bytes().to_vec(); // version
+        for s in strings {
+            for u in s.encode_utf16().chain(std::iter::once(0)) {
+                data.extend_from_slice(&u.to_le_bytes());
+            }
+        }
+        let mut buf = tag.to_le_bytes().to_vec();
+        buf.extend_from_slice(&(data.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&data);
+        buf
+    }
+
+    #[test]
+    fn parses_the_target_exe_out_of_an_appexeclink() {
+        let target = r"C:\Program Files\WindowsApps\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\pwsh.exe";
+        let buf = reparse_buffer(
+            0x8000_001B,
+            &["Microsoft.PowerShell_8wekyb3d8bbwe", "Microsoft.PowerShell_8wekyb3d8bbwe!App", target, "0"],
+        );
+        assert_eq!(parse_app_exec_link(&buf).as_deref(), Some(target));
+    }
+
+    #[test]
+    fn rejects_other_reparse_tags_and_short_buffers() {
+        let symlink = reparse_buffer(0xA000_000C, &["a", "b", r"C:\x.exe", "0"]);
+        assert_eq!(parse_app_exec_link(&symlink), None);
+        assert_eq!(parse_app_exec_link(&[0u8; 6]), None);
+        let missing_target = reparse_buffer(0x8000_001B, &["family", "app"]);
+        assert_eq!(parse_app_exec_link(&missing_target), None);
+    }
+
+    /// Live: on a machine with Store PowerShell, the alias must resolve to the
+    /// packaged exe and extract that exe's icon, not the generic stub icon.
+    #[cfg(windows)]
+    #[test]
+    fn store_pwsh_alias_extracts_the_packaged_exe_icon() {
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
+        let alias = std::path::Path::new(&local).join(r"Microsoft\WindowsApps\pwsh.exe");
+        if std::fs::symlink_metadata(&alias).is_err() {
+            return; // no Store PowerShell here
+        }
+        let target = super::app_exec_alias_target(&alias).expect("alias has an APPEXECLINK target");
+        assert!(target.exists(), "target {} missing", target.display());
+        assert_eq!(super::icon_source_for(&alias), target);
+
+        let via_alias = super::extract_executable_icon(&alias.to_string_lossy()).unwrap();
+        let direct = super::extract_executable_icon(&target.to_string_lossy()).unwrap();
+        assert_eq!(via_alias, direct);
+        let generic = super::extract_executable_icon(r"C:\Windows\System32\where.exe").unwrap_or_default();
+        assert_ne!(via_alias, generic, "alias still extracts the generic exe icon");
+    }
+}
+
 /// Resolve a possibly-bare executable name (e.g. "cmd.exe", "wsl.exe") to a full
 /// path by searching PATH, so the icon can be read from the real binary.
 #[cfg(windows)]
@@ -570,7 +629,97 @@ fn icon_source_for(exe: &std::path::Path) -> std::path::PathBuf {
             }
         }
     }
+    // A Microsoft Store app execution alias (`…\WindowsApps\pwsh.exe`) is an
+    // empty reparse stub with no icon resources, so it would extract as the
+    // generic exe icon. Read the icon from the packaged exe it points at.
+    if let Some(target) = app_exec_alias_target(exe) {
+        if target.exists() {
+            return target;
+        }
+    }
     exe.to_path_buf()
+}
+
+/// The packaged exe a Store app execution alias launches, read from the
+/// alias's `IO_REPARSE_TAG_APPEXECLINK` reparse data. `None` for an ordinary file.
+#[cfg(windows)]
+fn app_exec_alias_target(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
+    const MAXIMUM_REPARSE_DATA_BUFFER_SIZE: usize = 16 * 1024;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn DeviceIoControl(
+            device: *mut std::ffi::c_void,
+            code: u32,
+            in_buf: *const std::ffi::c_void,
+            in_len: u32,
+            out_buf: *mut std::ffi::c_void,
+            out_len: u32,
+            returned: *mut u32,
+            overlapped: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    let mut buf = vec![0u8; MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    let mut returned = 0u32;
+    // SAFETY: `file` owns a valid handle for the duration of the call, and the
+    // output pointer/length describe `buf`, which outlives the call.
+    let ok = unsafe {
+        DeviceIoControl(
+            file.as_raw_handle() as *mut std::ffi::c_void,
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.len() as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    buf.truncate(returned as usize);
+    parse_app_exec_link(&buf).map(std::path::PathBuf::from)
+}
+
+/// Parse a `REPARSE_DATA_BUFFER` holding an `IO_REPARSE_TAG_APPEXECLINK`:
+/// tag (u32), data length (u16), reserved (u16), version (u32), then
+/// NUL-terminated UTF-16 strings — package family, app user model id,
+/// target exe path, app type. Returns the target exe path.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_app_exec_link(buf: &[u8]) -> Option<String> {
+    const IO_REPARSE_TAG_APPEXECLINK: u32 = 0x8000_001B;
+    if buf.len() < 12 {
+        return None;
+    }
+    let tag = u32::from_le_bytes(buf[0..4].try_into().ok()?);
+    if tag != IO_REPARSE_TAG_APPEXECLINK {
+        return None;
+    }
+    let data_len = u16::from_le_bytes(buf[4..6].try_into().ok()?) as usize;
+    let end = (8 + data_len).min(buf.len());
+    let units: Vec<u16> = buf[12..end]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let target = units.split(|&u| u == 0).nth(2)?;
+    if target.is_empty() {
+        return None;
+    }
+    String::from_utf16(target).ok()
 }
 
 /// Session cache of resolved icon data URLs, keyed by the raw `path` argument.
