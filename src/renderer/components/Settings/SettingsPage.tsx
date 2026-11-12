@@ -14,7 +14,8 @@ import {
 } from '../../services/shortcutActions';
 import { COLOR_SCHEMAS } from '../../store/colorSchemas';
 import { addToast } from '../../store/slices/uiSlice';
-import { ShellProfile } from '../../store/slices/settingsSlice';
+import { ShellProfile, setShellProfiles } from '../../store/slices/settingsSlice';
+import { AddShellProfileForm, NewShellProfileInput } from './AddShellProfileForm';
 import { NetworkConfig, NetworkInterfaceInfo, EffectiveEndpoints } from '../../types/electron';
 import { setStoredApiToken } from '../../services/profileScope';
 import { McpConnectModal } from './McpConnectModal';
@@ -909,6 +910,43 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         dispatch(setDefaultProfile(profileId));
     };
 
+    const [addingProfile, setAddingProfile] = useState(false);
+
+    // Adding/removing a profile is saved by the backend at once, so it must move
+    // the unsaved-changes baseline too, or the new card would read as an edit.
+    const handleAddProfile = async (input: NewShellProfileInput) => {
+        if (!window.electronAPI?.addShellProfile) {
+            throw new Error('Adding profiles requires the desktop app.');
+        }
+        const created: ShellProfile = await window.electronAPI.addShellProfile(input);
+        dispatch(setShellProfiles([...settings.shellProfiles, created]));
+        setBaseline((prev) => prev?.kind === 'profiles'
+            ? { ...prev, cwds: [...prev.cwds, { id: created.id, cwd: created.cwd ?? '' }] }
+            : prev);
+        setAddingProfile(false);
+        dispatch(addToast({ message: `Added shell profile "${created.name}"`, type: 'success' }));
+    };
+
+    const handleRemoveProfile = async (profile: ShellProfile) => {
+        try {
+            await window.electronAPI?.deleteShellProfile?.(profile.id);
+        } catch (err) {
+            dispatch(addToast({ message: `Could not remove "${profile.name}": ${err instanceof Error ? err.message : String(err)}`, type: 'error' }));
+            return;
+        }
+        const remaining = settings.shellProfiles.filter((p) => p.id !== profile.id);
+        dispatch(setShellProfiles(remaining));
+        const nextDefault = settings.defaultProfile === profile.id ? remaining[0]?.id : undefined;
+        if (nextDefault) dispatch(setDefaultProfile(nextDefault));
+        setBaseline((prev) => prev?.kind === 'profiles'
+            ? {
+                ...prev,
+                defaultProfile: nextDefault ?? prev.defaultProfile,
+                cwds: prev.cwds.filter((c) => c.id !== profile.id),
+            }
+            : prev);
+    };
+
     const handleBrowseEditor = async () => {
         const picked = await window.electronAPI?.pickExecutablePath?.();
         if (picked) {
@@ -1671,7 +1709,27 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const renderProfiles = () => (
         <div className="settings-section">
-            <h2>Shell Profiles</h2>
+            <div className="profiles-heading">
+                <h2>Shell Profiles</h2>
+                {!addingProfile && (
+                    <button
+                        type="button"
+                        className="set-default-btn"
+                        onClick={() => setAddingProfile(true)}
+                    >
+                        + Add profile
+                    </button>
+                )}
+            </div>
+            {addingProfile && (
+                <AddShellProfileForm
+                    onSubmit={handleAddProfile}
+                    onCancel={() => setAddingProfile(false)}
+                    onBrowse={window.electronAPI?.pickExecutablePath
+                        ? () => window.electronAPI!.pickExecutablePath!('Select shell executable')
+                        : undefined}
+                />
+            )}
             {settings.shellProfiles.map((profile: ShellProfile) => (
                         <div key={profile.id} className={`profile-card ${settings.defaultProfile === profile.id ? 'active-profile' : ''}`}>
                             <div className="profile-header">
@@ -1682,17 +1740,31 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                                     )}
                                 </div>
 
-                                {settings.defaultProfile !== profile.id && (
-                                    <button
-                                        className="set-default-btn"
-                                        onClick={() => handleSetDefault(profile.id)}
-                                    >
-                                        Set as Default
-                                    </button>
-                                )}
+                                <div className="profile-actions">
+                                    {profile.is_custom && (
+                                        <button
+                                            type="button"
+                                            className="set-default-btn remove-profile-btn"
+                                            onClick={() => handleRemoveProfile(profile)}
+                                            aria-label={`Remove profile ${profile.name}`}
+                                        >
+                                            Remove
+                                        </button>
+                                    )}
+                                    {settings.defaultProfile !== profile.id && (
+                                        <button
+                                            className="set-default-btn"
+                                            onClick={() => handleSetDefault(profile.id)}
+                                        >
+                                            Set as Default
+                                        </button>
+                                    )}
+                                </div>
                             </div>
 
-                            <div className="profile-path">{profile.path}</div>
+                            <div className="profile-path">
+                                {profile.path}{profile.args?.length ? ` ${profile.args.join(' ')}` : ''}
+                            </div>
 
                             <div className="cwd-input-group" style={{ marginTop: '1rem' }}>
                                 <label className="setting-label">Start In Directory</label>

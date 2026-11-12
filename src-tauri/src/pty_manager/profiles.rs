@@ -128,6 +128,65 @@ fn detect_wsl_distributions() -> Vec<ShellProfile> {
     Vec::new()
 }
 
+/// True when `path` names a file, including a Microsoft Store app execution
+/// alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`). An alias is a
+/// reparse point that cannot be opened as a file, so `Path::exists()` may say
+/// false for it; reading the link itself still succeeds.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn file_present(path: &Path) -> bool {
+    path.is_file() || fs::symlink_metadata(path).is_ok()
+}
+
+/// Where PowerShell 7 can live, most specific first: the MSI install under
+/// Program Files, then every PATH entry (winget/scoop/portable installs, the
+/// Store alias, `dotnet tool install -g PowerShell`), then the Store alias
+/// directory itself in case PATH was trimmed.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn pwsh_candidates(
+    program_files: &[std::path::PathBuf],
+    path_var: Option<&std::ffi::OsStr>,
+    local_app_data: Option<&Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = program_files
+        .iter()
+        .map(|pf| pf.join("PowerShell").join("7").join("pwsh.exe"))
+        .collect();
+    if let Some(path_var) = path_var {
+        candidates.extend(
+            std::env::split_paths(path_var)
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .map(|dir| dir.join("pwsh.exe")),
+        );
+    }
+    if let Some(local) = local_app_data {
+        candidates.push(local.join("Microsoft").join("WindowsApps").join("pwsh.exe"));
+    }
+    candidates
+}
+
+/// Locate PowerShell 7 (`pwsh.exe`). Only checks file presence — no process
+/// is spawned, so detection stays instant.
+#[cfg(target_os = "windows")]
+fn find_pwsh() -> Option<String> {
+    let mut program_files: Vec<std::path::PathBuf> = ["ProgramW6432", "ProgramFiles"]
+        .iter()
+        .filter_map(|var| std::env::var_os(var).map(std::path::PathBuf::from))
+        .collect();
+    program_files.push(std::path::PathBuf::from(r"C:\Program Files"));
+    let path_var = std::env::var_os("PATH");
+    let local_app_data = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
+
+    pwsh_candidates(&program_files, path_var.as_deref(), local_app_data.as_deref())
+        .into_iter()
+        .find(|p| file_present(p))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_pwsh() -> Option<String> {
+    None
+}
+
 /// TTL for the get_available_shells() cache. Long enough to absorb rapid
 /// shell queries; custom profile edits immediately call invalidate_shell_cache().
 const SHELL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -204,18 +263,31 @@ fn compute_available_shells() -> Vec<ShellProfile> {
     let mut profiles = Vec::new();
 
     if cfg!(target_os = "windows") {
-        // 1. PowerShell (Prefer v7 if available)
-        let pwsh_7_path = r"C:\Program Files\PowerShell\7\pwsh.exe";
-        if Path::new(pwsh_7_path).exists() {
+        // 1. PowerShell (Prefer v7 if available). PowerShell 7 keeps the
+        // `powershell` id (saved defaults and tabs reference it); Windows
+        // PowerShell 5.1 is then still offered under its own id.
+        if let Some(pwsh_7_path) = find_pwsh() {
             profiles.push(ShellProfile {
                 id: "powershell".to_string(),
                 name: "PowerShell 7".to_string(),
-                path: pwsh_7_path.to_string(),
+                path: pwsh_7_path,
                 args: vec![],
                 env: HashMap::new(),
                 cwd: None,
                 icon: Some("terminal-powershell".to_string()),
                 is_default: true,
+                is_custom: false,
+                is_wsl: false,
+            });
+            profiles.push(ShellProfile {
+                id: "windows-powershell".to_string(),
+                name: "Windows PowerShell".to_string(),
+                path: "powershell.exe".to_string(),
+                args: vec![],
+                env: HashMap::new(),
+                cwd: None,
+                icon: Some("terminal-powershell".to_string()),
+                is_default: false,
                 is_custom: false,
                 is_wsl: false,
             });
@@ -385,7 +457,16 @@ pub fn get_profile(profile_id: &str) -> Option<ShellProfile> {
 
 /// Add a custom profile
 pub fn add_custom_profile(mut profile: ShellProfile) -> Result<String, String> {
+    profile.name = profile.name.trim().to_string();
+    profile.path = profile.path.trim().to_string();
+    if profile.name.is_empty() {
+        return Err("Profile name is required".to_string());
+    }
+    if profile.path.is_empty() {
+        return Err("Profile executable path is required".to_string());
+    }
     profile.is_custom = true;
+    profile.is_wsl = false;
     if profile.id.is_empty() {
         profile.id = format!("custom-{}", chrono::Utc::now().timestamp_millis());
     }
@@ -451,6 +532,77 @@ mod tests {
             elapsed
         );
         assert!(!shells.is_empty(), "expected at least one default shell profile");
+    }
+
+    #[test]
+    fn pwsh_candidates_cover_program_files_path_and_store_alias() {
+        let pf = std::path::PathBuf::from(r"C:\Program Files");
+        let path_var = std::env::join_paths([
+            std::path::PathBuf::from(r"C:\tools\scoop\shims"),
+            std::path::PathBuf::from(r"C:\Users\dev\.dotnet\tools"),
+        ])
+        .unwrap();
+        let local = std::path::PathBuf::from(r"C:\Users\dev\AppData\Local");
+
+        let got = pwsh_candidates(&[pf.clone()], Some(path_var.as_os_str()), Some(&local));
+
+        assert_eq!(
+            got,
+            vec![
+                pf.join("PowerShell").join("7").join("pwsh.exe"),
+                std::path::PathBuf::from(r"C:\tools\scoop\shims").join("pwsh.exe"),
+                std::path::PathBuf::from(r"C:\Users\dev\.dotnet\tools").join("pwsh.exe"),
+                local.join("Microsoft").join("WindowsApps").join("pwsh.exe"),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_present_sees_files_and_rejects_missing_paths() {
+        let dir = std::env::temp_dir().join(format!("tf-pwsh-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("pwsh.exe");
+        fs::write(&exe, b"").unwrap();
+
+        let found = pwsh_candidates(&[], Some(dir.as_os_str()), None)
+            .into_iter()
+            .find(|p| file_present(p));
+        assert_eq!(found, Some(exe.clone()));
+        assert!(!file_present(&dir.join("missing.exe")));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn add_custom_profile_rejects_blank_name_or_path() {
+        let blank = |name: &str, path: &str| ShellProfile {
+            id: String::new(),
+            name: name.to_string(),
+            path: path.to_string(),
+            args: vec![],
+            env: HashMap::new(),
+            cwd: None,
+            icon: None,
+            is_default: false,
+            is_custom: true,
+            is_wsl: false,
+        };
+        assert!(add_custom_profile(blank("  ", "pwsh.exe")).is_err());
+        assert!(add_custom_profile(blank("Nu", "   ")).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn find_pwsh_matches_a_where_lookup() {
+        // Live check on the build machine: if `where pwsh` finds one, so must we.
+        let where_found = std::process::Command::new("where")
+            .arg("pwsh")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if where_found {
+            assert!(find_pwsh().is_some(), "`where pwsh` found pwsh but find_pwsh() did not");
+        }
     }
 
     #[cfg(target_os = "windows")]

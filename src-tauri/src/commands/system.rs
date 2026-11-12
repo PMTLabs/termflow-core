@@ -15,6 +15,42 @@ pub async fn get_shell_profiles() -> Result<Vec<pty_manager::ShellProfile>, Stri
     Ok(pty_manager::get_available_shells())
 }
 
+/// A user-defined shell profile from Settings → Shell Profiles → Add profile.
+#[derive(Debug, Deserialize)]
+pub struct NewShellProfile {
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// Save a custom shell profile and return it with its generated id.
+#[tauri::command]
+pub async fn add_shell_profile(profile: NewShellProfile) -> Result<pty_manager::ShellProfile, String> {
+    let cwd = profile.cwd.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
+    let id = pty_manager::add_custom_profile(pty_manager::ShellProfile {
+        id: String::new(),
+        name: profile.name,
+        path: profile.path,
+        args: profile.args.into_iter().filter(|a| !a.is_empty()).collect(),
+        env: Default::default(),
+        cwd,
+        icon: None,
+        is_default: false,
+        is_custom: true,
+        is_wsl: false,
+    })?;
+    pty_manager::get_profile(&id).ok_or_else(|| "Saved profile could not be read back".to_string())
+}
+
+/// Delete a custom shell profile. Detected profiles cannot be deleted.
+#[tauri::command]
+pub async fn delete_shell_profile(id: String) -> Result<(), String> {
+    pty_manager::delete_custom_profile(&id)
+}
+
 /// Filenames the [`read_legal_document`] command may resolve, bundled under `legal/` as
 /// Tauri resources (see `bundle.resources` in `tauri.conf.json` / `tauri.pro.conf.json`).
 /// A fixed whitelist so a caller can never resolve an arbitrary path.

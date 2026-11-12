@@ -342,6 +342,26 @@ class BrowserBridge implements ElectronAPI {
         return [];
     }
 
+    async addShellProfile(profile: { name: string; path: string; args: string[]; cwd?: string }): Promise<any> {
+        const response = await fetch(`${API_BASE_URL}/profiles`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(profile),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `Adding the profile failed (${response.status})`);
+        const listed = await this.getShellProfiles();
+        return listed.find((p) => p.id === data.id) ?? { ...profile, id: data.id, env: {}, is_custom: true };
+    }
+
+    async deleteShellProfile(id: string): Promise<void> {
+        const response = await fetch(`${API_BASE_URL}/profiles/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        if (!response.ok) {
+            const data = await response.json().catch(() => ({}));
+            throw new Error(data.error || `Deleting the profile failed (${response.status})`);
+        }
+    }
+
     async getSystemInfo(): Promise<any> {
         try {
             const response = await fetch(`${API_BASE_URL}/system/info`);

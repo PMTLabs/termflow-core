@@ -249,7 +249,7 @@ export interface ElectronAPI {
 
   // Settings: native "Browse…" picker for the Default editor executable.
   // Resolves to the chosen path, or null if the user cancelled the dialog.
-  pickExecutablePath?: () => Promise<string | null>;
+  pickExecutablePath?: (title?: string) => Promise<string | null>;
 
   // Snippets import/export (plan/029 §8). Two narrow, purpose-built commands rather
   // than a general read/write pair — see the note on the Rust side (commands.rs).
@@ -272,6 +272,8 @@ export interface ElectronAPI {
 
   // System info
   getShellProfiles: () => Promise<any[]>;
+  addShellProfile?: (profile: { name: string; path: string; args: string[]; cwd?: string }) => Promise<any>;
+  deleteShellProfile?: (id: string) => Promise<void>;
   getExecutableIcon?: (path: string) => Promise<string>;
   getSystemInfo: () => Promise<any>;
 
