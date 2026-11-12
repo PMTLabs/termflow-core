@@ -151,7 +151,7 @@ interface ElectronAPI {
   openDevtools: () => Promise<void>;
   openPath: (path: string) => Promise<void>;
   openInEditor: (editor: string, path: string, line?: number, col?: number) => Promise<void>;
-  pickExecutablePath: () => Promise<string | null>;
+  pickExecutablePath: (title?: string) => Promise<string | null>;
   pickSnippetsExportPath: () => Promise<string | null>;
   pickSnippetsImportPath: () => Promise<string | null>;
   exportSnippetsFile: (path: string, json: string) => Promise<void>;
@@ -161,6 +161,8 @@ interface ElectronAPI {
   onTerminalData: (callback: (id: string, data: string) => void) => void;
   onTerminalExit: (callback: (id: string, code: number, cwd?: string | null) => void) => void;
   getShellProfiles: () => Promise<any[]>;
+  addShellProfile: (profile: { name: string; path: string; args: string[]; cwd?: string }) => Promise<any>;
+  deleteShellProfile: (id: string) => Promise<void>;
   getExecutableIcon: (path: string) => Promise<string>;
   getSystemInfo: () => Promise<any>;
   getConfig: () => Promise<any>;
@@ -549,11 +551,11 @@ const tauriBridge: ElectronAPI = {
   // Settings "Default editor" Browse… button. Opens a native single-file picker.
   // Filters surface common executables per-OS while still letting the user pick
   // any file (e.g. a Unix binary with no extension) via "All files".
-  pickExecutablePath: async () => {
+  pickExecutablePath: async (title?: string) => {
     const selection = await openFileDialog({
       multiple: false,
       directory: false,
-      title: 'Select editor executable',
+      title: title ?? 'Select editor executable',
       filters: [
         { name: 'Executables', extensions: ['exe', 'bat', 'cmd', 'com', 'app'] },
         { name: 'All files', extensions: ['*'] },
@@ -630,6 +632,15 @@ const tauriBridge: ElectronAPI = {
       console.error('Failed to get shell profiles', error);
       return [];
     }
+  },
+
+  // Settings → Shell Profiles: user-defined profiles, persisted by the backend.
+  addShellProfile: async (profile) => {
+    return invoke('add_shell_profile', { profile });
+  },
+
+  deleteShellProfile: async (id: string) => {
+    await invoke('delete_shell_profile', { id });
   },
 
   getExecutableIcon: async (path: string) => {

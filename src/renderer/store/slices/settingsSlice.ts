@@ -18,6 +18,8 @@ export interface ShellProfile {
   icon?: string;
   cwd?: string;
   is_wsl?: boolean;
+  /** User-defined in Settings (stored in profiles.json), so it can be removed. */
+  is_custom?: boolean;
 }
 
 export interface Theme {

@@ -963,6 +963,8 @@ pub fn run() {
         commands::get_terminal_size,
         commands::get_terminal_generations,
         commands::get_shell_profiles,
+        commands::add_shell_profile,
+        commands::delete_shell_profile,
         commands::read_legal_document,
         // Snippets import/export (plan/029 §8.3). Tauri IPC only by design (D10) —
         // see the note above the two functions in commands.rs before adding a route.
