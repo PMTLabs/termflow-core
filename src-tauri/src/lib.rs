@@ -917,7 +917,8 @@ pub fn run() {
 
         Ok(())
     })
-    .invoke_handler(tauri::generate_handler![
+    .manage(crate::ssh::store::Store::new(crate::ssh::store::store_path()))
+    .invoke_handler(crate::ssh_handlers![
         commands::create_terminal,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,
