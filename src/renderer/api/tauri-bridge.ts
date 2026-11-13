@@ -92,6 +92,7 @@ export interface NetworkInterfaceInfo {
 
 // Define the interface to match existing usage
 interface ElectronAPI {
+  pickFile?: (title?: string) => Promise<string | null>;
   ssh?: import('../types/ssh').SshStoreApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
@@ -554,6 +555,10 @@ const tauriBridge: ElectronAPI = {
   // Settings "Default editor" Browse… button. Opens a native single-file picker.
   // Filters surface common executables per-OS while still letting the user pick
   // any file (e.g. a Unix binary with no extension) via "All files".
+  pickFile: async (title?: string) => {
+    const selection = await openFileDialog({ multiple:false, directory:false, title:title ?? 'Select file' });
+    return typeof selection === 'string' ? selection : null;
+  },
   pickExecutablePath: async (title?: string) => {
     const selection = await openFileDialog({
       multiple: false,

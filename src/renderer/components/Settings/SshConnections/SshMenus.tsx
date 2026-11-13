@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ContextMenu, ContextMenuItem } from '../../Terminal/ContextMenu';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
 import { FolderIconPicker } from './FolderIconPicker';
 import type { SshFolder, SshConnection, SshStoreApi, SshView, SshReply } from '../../../types/ssh';
-export interface SshMenuTarget { x:number; y:number; row?: SshFolder | SshConnection; kind?: 'folder' | 'connection' }
+export interface SshMenuTarget { deleteRequested?:boolean; x:number; y:number; row?: SshFolder | SshConnection; kind?: 'folder' | 'connection' }
 export function SshMenus({ target, view, api, commit, onClose, onFolder, onConnection, onRename }: {
   target:SshMenuTarget; view:SshView; api:SshStoreApi; commit(operation: () => Promise<SshReply>): Promise<unknown>;
   onClose():void; onFolder(parentId:string | null):void; onConnection(folderId:string | null):void; onRename(row:SshFolder | SshConnection, kind:'folder' | 'connection'):void;
@@ -16,6 +16,7 @@ export function SshMenus({ target, view, api, commit, onClose, onFolder, onConne
   const nonempty = ids.size > 1 || connections > 0;
   const remove = () => { if (!row) return; void commit(() => folder ? api.deleteFolder({ id:folder.id, recursive:nonempty }) : api.deleteConnection({ id:row.id })); onClose(); };
   const requestDelete = () => { if (folder && !nonempty) remove(); else { setConfirm(true); setMenuOpen(false); } };
+  useEffect(() => { if (target.deleteRequested) requestDelete(); }, []);
   const items: ContextMenuItem[] = folder ? [
     { label:'Add subfolder', click:() => onFolder(folder.id) },
     { label:'New SSH connection here', click:() => onConnection(folder.id) },

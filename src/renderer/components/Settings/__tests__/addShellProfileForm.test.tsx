@@ -1,7 +1,8 @@
 /** @jest-environment jsdom */
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
-import { AddShellProfileForm, parseArgs } from '../AddShellProfileForm';
+import { AddShellProfileForm } from '../AddShellProfileForm';
+import { parseArgs } from '../../../services/argParse';
 
 describe('parseArgs', () => {
     it('splits on whitespace and keeps quoted text together', () => {

@@ -146,6 +146,7 @@ export interface PermissionView {
 export type ExpectedPermissionSubject = PermissionView['subject'] & { target: PermissionView['target'] };
 
 export interface ElectronAPI {
+  pickFile?: (title?: string) => Promise<string | null>;
   ssh?: import('./ssh').SshStoreApi;
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{

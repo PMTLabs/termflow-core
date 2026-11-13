@@ -14,6 +14,7 @@ console.log('Initializing Browser Bridge...');
 
 class BrowserBridge implements ElectronAPI {
     ssh = browserSshBridge;
+    pickFile = async (): Promise<null> => null;
     private ws: WebSocket | null = null;
     private dataListeners: ((id: string, data: string) => void)[] = [];
     private exitListeners: ((id: string, code: number, cwd?: string | null) => void)[] = [];
