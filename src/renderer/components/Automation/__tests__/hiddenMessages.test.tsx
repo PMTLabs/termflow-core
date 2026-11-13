@@ -2,7 +2,7 @@
 import React, { act, useReducer } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { ActionPanel } from '../panels/ActionPanel';
-import { draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
+import { canonicalJson, draftFromRule, draftReducer, isDirty, ruleFromDraft } from '../automationDraft';
 import { describeRule, faceFor, MASKED_MESSAGE, panelFor, ruleSummary } from '../automationDerive';
 import { problems } from '../automationValidation';
 import { AUTOMATION_TEMPLATES, draftFromTemplate } from '../../Settings/Automations/automationTemplates';
@@ -154,5 +154,15 @@ describe('hidden terminal message', () => {
         const written = ruleFromDraft(unrelated);
         expect(written.graph.action!.messageCipher).toBe('v1:unreadable');
         expect(isDirty(draftFromRule(written))).toBe(false);
+    });
+});
+
+describe('canonicalJson (Test-report identity)', () => {
+    it('ignores key insertion order at every depth but not values or array order', () => {
+        const a = { graph: { cond: { value: 1, op: 'eq' }, action: { message: 'x', masked: true } }, ids: ['a', 'b'] };
+        const b = { ids: ['a', 'b'], graph: { action: { masked: true, message: 'x' }, cond: { op: 'eq', value: 1 } } };
+        expect(canonicalJson(a)).toBe(canonicalJson(b));
+        expect(canonicalJson(a)).not.toBe(canonicalJson({ ...b, graph: { ...b.graph, action: { masked: false, message: 'x' } } }));
+        expect(canonicalJson(a)).not.toBe(canonicalJson({ ...b, ids: ['b', 'a'] }));
     });
 });

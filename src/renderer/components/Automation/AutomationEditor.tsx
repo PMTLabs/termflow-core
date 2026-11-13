@@ -59,7 +59,7 @@ import type { OutPortKey, StepKind } from './automationSteps';
 import { STEP_ORDER, canAddStep, removalGroup } from './automationSteps';
 import { listSteps } from './AuNodeMenu';
 import type { CanvasOpening, NodePos } from './automationDraft';
-import { draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
+import { canonicalJson, draftFromRule, draftReducer, isDirty, ruleFromDraft, timerShapeOf } from './automationDraft';
 import { AuCanvas } from './AuCanvas';
 import {
     AU_INSPECT_DEFAULT,
@@ -231,7 +231,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
      */
     const writing = useMemo(() => ruleFromDraft(draft), [draft]);
     const testGeneration = useRef(0);
-    const testInput = JSON.stringify(writing);
+    const testInput = canonicalJson(writing);
     const report = testResult?.input === testInput ? testResult.report : null;
     const testError = testResult?.input === testInput ? testResult.error : null;
     useLayoutEffect(() => {
