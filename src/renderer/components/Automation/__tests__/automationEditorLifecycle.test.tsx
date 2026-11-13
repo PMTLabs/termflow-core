@@ -194,8 +194,7 @@ describe('the editor, mounted', () => {
     it.each(['report', 'error'])('redacts stale Test %s in the first masked commit', async (kind) => {
         const maskedCommits: string[] = [];
         const api = await openEditorOn(rule(), () => {
-            const hide = [...document.querySelectorAll('label')]
-                .find((l) => l.textContent?.includes('Hide message'))?.querySelector('input');
+            const hide = [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((i) => [...(i.labels ?? [])].some((l) => l.textContent?.includes('Hide message')));
             if (hide?.checked) maskedCommits.push(document.body.textContent ?? '');
         });
         const secret = 'stale-test-secret-935';
@@ -211,7 +210,7 @@ describe('the editor, mounted', () => {
         await selectStep('action');
         expect(document.body.textContent).toContain(secret);
         await act(async () => {
-            [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Hide message'))!.querySelector('input')!.click();
+            [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((i) => [...(i.labels ?? [])].some((l) => l.textContent?.includes('Hide message')))!.click();
         });
         expect(maskedCommits.length).toBeGreaterThan(0);
         expect(maskedCommits[0]).not.toContain(secret);
@@ -232,7 +231,7 @@ describe('the editor, mounted', () => {
         await selectStep('action');
         if (!delayed) expect(document.body.textContent).toContain('stale-password-846');
         await act(async () => {
-            [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Hide message'))!.querySelector('input')!.click();
+            [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((i) => [...(i.labels ?? [])].some((l) => l.textContent?.includes('Hide message')))!.click();
         });
         if (delayed) await act(async () => { finish(report); });
         expect(document.body.textContent).not.toContain('stale-password-846');
