@@ -192,6 +192,8 @@ export const READ_PHRASES = {
     onScreen: "What's on screen right now",
 } as const;
 
+export const MASKED_MESSAGE = '••••••••';
+
 export const SEND_PHRASES = {
     submit: 'Type it and press Enter',
     hold: "Type it, don't press Enter",
@@ -357,7 +359,7 @@ export function stepValues(rule: AutomationRule, step: StepKind): Record<string,
             }
             return {
                 message:
-                    action.message.trim().length === 0
+                    action.masked ? value(MASKED_MESSAGE) : action.message.trim().length === 0
                         ? absent('nothing to send')
                         : value(action.message),
                 send: value(action.submit ? SEND_PHRASES.submit : SEND_PHRASES.hold),
@@ -649,7 +651,7 @@ export function ruleSummary(rule: AutomationRule): string {
     const destination = rule.graph.action
         ? {
             verb: rule.graph.action.submit ? 'send' : 'type',
-            message: rule.graph.action.message,
+            message: rule.graph.action.masked ? MASKED_MESSAGE : rule.graph.action.message,
         }
         : {
             verb: 'post',
@@ -788,7 +790,7 @@ export function describeRule(rule: AutomationRule): RuleSentence {
     const send = action
         ? {
         verbSend: action.submit ? 'send' : 'type',
-        message: action.message,
+        message: action.masked ? MASKED_MESSAGE : action.message,
         sendNote: action.submit ? null : ' — no Enter',
         }
         : {

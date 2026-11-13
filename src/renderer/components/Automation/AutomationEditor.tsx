@@ -229,6 +229,15 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
      * alone.
      */
     const writing = useMemo(() => ruleFromDraft(draft), [draft]);
+    const testGeneration = useRef(0);
+    const testInput = JSON.stringify(writing);
+    useEffect(() => {
+        testGeneration.current++;
+        setReport(null);
+        setTestError(null);
+        setRunning(false);
+        return () => { testGeneration.current++; };
+    }, [testInput]);
     const problems = useMemo(() => validate(writing), [writing]);
     const blocking = blockingProblems(problems);
 
@@ -484,6 +493,7 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
 
     // --- actions -------------------------------------------------------------------------------------
     const runDryRun = useCallback(async () => {
+        const generation = ++testGeneration.current;
         const target = testTarget ?? terminals.find((t) => t.alive)?.terminalId ?? null;
         if (!target) {
             setDrawer('test');
@@ -498,12 +508,14 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
             if (!api?.dryRunAutomation) throw new Error('the desktop bridge is not available');
             // `writing`, not `draft.rule`: a dry run reports what the rule WOULD do, and the rule
             // that would run is the one a save writes.
-            setReport(await api.dryRunAutomation(writing, target));
+            const result = await api.dryRunAutomation(writing, target);
+            if (generation === testGeneration.current) setReport(result);
         } catch (e) {
+            if (generation !== testGeneration.current) return;
             setReport(null);
             setTestError(redactWebhookError(e));
         } finally {
-            setRunning(false);
+            if (generation === testGeneration.current) setRunning(false);
         }
     }, [api, writing, terminals, testTarget]);
 

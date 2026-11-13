@@ -607,7 +607,18 @@ function comparable(rule: AutomationRule): string {
         : rule.graph;
     return JSON.stringify({
         ...rule,
-        graph,
+        graph: {
+            ...graph,
+            action: graph.action ? {
+                message: graph.action.message,
+                sendTo: graph.action.sendTo,
+                submit: graph.action.submit,
+                cliType: graph.action.cliType,
+                substitute: graph.action.substitute ?? false,
+                masked: graph.action.masked ?? false,
+                messageCipher: graph.action.messageCipher ?? undefined,
+            } : undefined,
+        },
         targetIds: [...rule.targetIds].sort(),
         excludedIds: [...(rule.excludedIds ?? [])].sort(),
     });
@@ -912,7 +923,8 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
         }
         case 'action':
             return rule.graph.action
-                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch } })
+                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch,
+                    ...('message' in action.patch ? { messageCipher: undefined } : {}) } })
                 : draft;
         case 'webhook':
             // A panel patch cannot materialise a destination. In particular, it must never make
