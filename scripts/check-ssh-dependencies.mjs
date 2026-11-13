@@ -6,7 +6,7 @@ const packages = new Map(metadata.packages.map(p => [p.id, p]));
 const nodes = new Map(metadata.resolve.nodes.map(n => [n.id, n]));
 const visited = new Set();
 function visit(id) { if (visited.has(id)) return; visited.add(id); for (const dependency of nodes.get(id)?.dependencies || []) visit(dependency); }
-for (const p of packages.values()) if (['russh', 'russh-sftp', 'ssh-key'].includes(p.name)) visit(p.id);
+for (const p of packages.values()) if (['russh', 'russh-sftp', 'ssh-key', 'hmac', 'sha1', 'zeroize', 'aes-gcm'].includes(p.name)) visit(p.id);
 const subtree = [...visited].map(id => packages.get(id)).sort((a, b) => a.name.localeCompare(b.name));
 const above = (version, major, minor) => { const [a, b] = (version || '0.0').split('.').map(Number); return a > major || (a === major && b > minor); };
 let failed = false;
