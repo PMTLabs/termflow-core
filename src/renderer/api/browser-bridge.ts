@@ -1,4 +1,5 @@
 import { ElectronAPI, HostGeneration, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
+import { browserSshBridge } from './sshBridge';
 import { emitPtyInput } from '../utils/ptyInputSignal';
 import { emitPtyResize } from '../utils/ptyResizeSignal';
 import { getStoredApiToken } from '../services/profileScope';
@@ -12,6 +13,7 @@ const WS_URL = `ws://localhost:${API_PORT}/api/ws`;
 console.log('Initializing Browser Bridge...');
 
 class BrowserBridge implements ElectronAPI {
+    ssh = browserSshBridge;
     private ws: WebSocket | null = null;
     private dataListeners: ((id: string, data: string) => void)[] = [];
     private exitListeners: ((id: string, code: number, cwd?: string | null) => void)[] = [];

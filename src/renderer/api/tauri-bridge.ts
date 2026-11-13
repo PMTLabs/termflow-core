@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -91,6 +92,7 @@ export interface NetworkInterfaceInfo {
 
 // Define the interface to match existing usage
 interface ElectronAPI {
+  ssh?: import('../types/ssh').SshStoreApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
     offset: number;
@@ -361,6 +363,7 @@ const buildAuthHeaders = (): Record<string, string> => {
 };
 
 const tauriBridge: ElectronAPI = {
+  ssh: createSshBridge(invoke, listen),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
     const response = await fetch(`${await apiBase()}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
       headers: {

@@ -1,6 +1,7 @@
 import { paneIncarnations, acceptsTransferNotice, describePanes, type PaneCapture } from './services/paneIncarnations';
 import { captureWorkspace, isCurrentWorkspace } from './services/workspaceReplacement';
 import React, { useEffect, useRef, useState } from 'react';
+import { hydrateSsh } from './services/sshHydration';
 import { installInputBroadcast } from './services/inputBroadcast';
 import { BroadcastOverlay } from './components/Broadcast/BroadcastOverlay';
 import { listen } from '@tauri-apps/api/event';
@@ -133,6 +134,7 @@ const App: React.FC = () => {
   // When the last cwd refresh STARTED, to throttle the visibilitychange trigger
   // (see handleVisibilityChange). A ref, not state: it must not re-render.
   const lastCwdRefreshAt = useRef(0);
+  const sshHydration = useRef<ReturnType<typeof hydrateSsh> | null>(null);
 
   // The native window close is intercepted in Rust (prevent_close) and forwarded
   // as `app:close-requested`; show an in-app confirm before actually closing. The
@@ -430,6 +432,7 @@ const App: React.FC = () => {
       StateManager.saveState();
 
       // Cleanup IPC listeners
+      sshHydration.current?.stop();
       cleanupIPCListeners();
       inputHandler.destroy();
 
@@ -477,6 +480,7 @@ const App: React.FC = () => {
     await Promise.all([
       loadConfigSettings(config),
       initializeShellProfiles(config),
+      (sshHydration.current ??= hydrateSsh(window.electronAPI?.ssh, store.dispatch)).ready,
     ]);
 
     // Detached windows reconstruct a handed-off tab/pane (reattaching to the
