@@ -568,6 +568,74 @@ fn resolve_returns_target_and_jump_hops_in_order_with_their_own_auth() {
     );
 }
 #[test]
+fn repaired_equal_or_lower_revision_reload_advances_served_revision_and_next_write_persists_it() {
+    for repaired_revision in [18, 4] {
+        let temp = Temp::new();
+        let store = temp.store();
+        temp.put(&serde_json::to_vec(&fixture()).unwrap());
+        assert_eq!(store.get().unwrap().revision, 17);
+        temp.put(b"corrupt");
+        let mut events = vec![];
+        let read_only = store.reload(|reply| events.push(reply.clone())).unwrap();
+        assert_eq!(read_only.revision, 18);
+        assert!(read_only.view.load_error.is_some());
+        assert_eq!(events, vec![read_only]);
+        assert_eq!(std::fs::read(temp.path()).unwrap(), b"corrupt");
+        let mut repaired = fixture();
+        repaired.revision = repaired_revision;
+        let bytes = serde_json::to_vec(&repaired).unwrap();
+        temp.put(&bytes);
+        events.clear();
+        let recovered = store.reload(|reply| events.push(reply.clone())).unwrap();
+        assert_eq!(recovered.revision, 19);
+        assert_eq!(recovered.view.revision, 19);
+        assert!(recovered.view.load_error.is_none());
+        assert_eq!(events, vec![recovered.clone()]);
+        assert_eq!(
+            std::fs::read(temp.path()).unwrap(),
+            bytes,
+            "Reload must never rewrite the file"
+        );
+        events.clear();
+        assert_eq!(
+            store.reload(|reply| events.push(reply.clone())).unwrap(),
+            recovered
+        );
+        assert!(
+            events.is_empty(),
+            "unchanged reload must not emit or advance"
+        );
+        assert_eq!(store.get().unwrap(), recovered);
+        let committed = store
+            .transact(|s| add_folder(s, "After recovery"), |_| {})
+            .unwrap();
+        assert_eq!(committed.revision, 20);
+        assert_eq!(store.load().unwrap().revision, 20);
+    }
+}
+#[test]
+fn initial_corrupt_zero_revision_recovers_at_one_and_unchanged_reload_emits_nothing() {
+    let temp = Temp::new();
+    temp.put(b"corrupt");
+    let store = temp.store();
+    let read_only = store.get().unwrap();
+    assert_eq!(read_only.revision, 0);
+    assert!(read_only.view.load_error.is_some());
+    temp.put(&serde_json::to_vec(&Persisted::default()).unwrap());
+    let mut events = vec![];
+    let recovered = store.reload(|reply| events.push(reply.clone())).unwrap();
+    assert_eq!(recovered.revision, 1);
+    assert!(recovered.view.load_error.is_none());
+    assert_eq!(events, vec![recovered.clone()]);
+    events.clear();
+    assert_eq!(
+        store.reload(|reply| events.push(reply.clone())).unwrap(),
+        recovered
+    );
+    assert!(events.is_empty());
+}
+
+#[test]
 fn path_is_dev_file_scoped_once() {
     assert_eq!(
         store_path().file_name().unwrap().to_str().unwrap(),

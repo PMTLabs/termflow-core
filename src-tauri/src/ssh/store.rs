@@ -583,6 +583,8 @@ type Writer = dyn Fn(&Path, &str) -> std::result::Result<(), String> + Send + Sy
 pub struct Store {
     path: PathBuf,
     cache: Mutex<Option<(std::time::SystemTime, u64, Persisted)>>,
+    // Reload recovery revisions are served immediately but only persisted on a write.
+    served: Mutex<Option<Reply>>,
     writer: Box<Writer>,
 }
 impl Store {
@@ -590,6 +592,7 @@ impl Store {
         Self {
             path,
             cache: Mutex::new(None),
+            served: Mutex::new(None),
             writer: Box::new(write_atomic),
         }
     }
@@ -628,12 +631,12 @@ impl Store {
         *self.cache.lock().unwrap() = self.stamp().map(|(mtime, len)| (mtime, len, data));
     }
     pub fn get(&self) -> Result<Reply> {
-        self.read(false)
+        self.read(false, |_| {})
     }
-    pub fn reload(&self) -> Result<Reply> {
-        self.read(true)
+    pub fn reload(&self, emit: impl FnOnce(&Reply)) -> Result<Reply> {
+        self.read(true, emit)
     }
-    fn read(&self, force: bool) -> Result<Reply> {
+    fn read(&self, force: bool, emit: impl FnOnce(&Reply)) -> Result<Reply> {
         let _lock = self.lock()?;
         if !force {
             if let (Some((mtime, len)), Some((cached_mtime, cached_len, data))) =
@@ -644,7 +647,7 @@ impl Store {
                 }
             }
         }
-        match self.load() {
+        let (mut reply, data) = match self.load() {
             Ok(data) => {
                 log::info!(
                     "SSH store loaded: revision={}, folders={}, connections={}",
@@ -652,16 +655,47 @@ impl Store {
                     data.folders.len(),
                     data.connections.len()
                 );
-                let reply = data.view(None);
-                self.remember(data);
-                Ok(reply)
+                (data.view(None), Some(data))
             }
-            Err(e) => {
+            Err(mut error) => {
                 *self.cache.lock().unwrap() = None;
-                log::warn!("SSH store load failed: {}", e.code);
-                Ok(Persisted::default().view(Some(e)))
+                log::warn!("SSH store load failed: {}", error.code);
+                error.message = format!("{}: {}", self.path.display(), error.message);
+                (Persisted::default().view(Some(error)), None)
             }
+        };
+        let mut served = self.served.lock().unwrap();
+        if let Some(previous) = served.as_ref() {
+            let mut previous_content = previous.view.clone();
+            let mut next_content = reply.view.clone();
+            previous_content.revision = 0;
+            next_content.revision = 0;
+            let revision = if previous_content != next_content {
+                reply.revision.max(
+                    previous
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| StoreError::new("revision-overflow", "Revision overflow"))?,
+                )
+            } else {
+                // Disk may still have the pre-recovery revision. An unchanged Reload
+                // must not keep manufacturing revisions while awaiting the next write.
+                reply.revision.max(previous.revision)
+            };
+            reply.revision = revision;
+            reply.view.revision = revision;
         }
+        let changed = served.as_ref() != Some(&reply);
+        if let Some(mut data) = data {
+            data.revision = reply.revision;
+            self.remember(data);
+        }
+        *served = Some(reply.clone());
+        drop(served);
+        if force && changed {
+            emit(&reply);
+        }
+        Ok(reply)
     }
     pub fn transact(
         &self,
@@ -675,8 +709,15 @@ impl Store {
         mutation(&mut candidate)?;
         candidate.validate()?;
         candidate.normalize();
+        let served_revision = self
+            .served
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |reply| reply.revision);
         candidate.revision = candidate
             .revision
+            .max(served_revision)
             .checked_add(1)
             .ok_or_else(|| StoreError::new("revision-overflow", "Revision overflow"))?;
         let contents = serde_json::to_string_pretty(&candidate)
@@ -685,6 +726,7 @@ impl Store {
             .map_err(|e| StoreError::new("io", format!("{}: {e}", self.path.display())))?;
         let reply = candidate.view(None);
         self.remember(candidate);
+        *self.served.lock().unwrap() = Some(reply.clone());
         emit(&reply);
         Ok(reply)
     }
@@ -698,13 +740,23 @@ mod enum_census {
     use super::*;
     #[test]
     fn icons_and_colors_match_renderer() {
-        let ts = include_str!("../../../src/renderer/components/Settings/SshConnections/sshFolderIcons.ts").replace("\r\n", "\n");
+        let ts = include_str!(
+            "../../../src/renderer/components/Settings/SshConnections/sshFolderIcons.ts"
+        )
+        .replace("\r\n", "\n");
         for (name, expected) in [("SSH_FOLDER_ICONS", ICONS), ("SSH_FOLDER_COLORS", COLORS)] {
             let tail = ts.split_once(name).unwrap().1;
             let array = tail.split_once('[').unwrap().1.split_once(']').unwrap().0;
-            let mut actual: Vec<_> = array.split(',').map(|s| s.trim().trim_matches('\'')).filter(|s| !s.is_empty()).collect();
+            let mut actual: Vec<_> = array
+                .split(',')
+                .map(|s| s.trim().trim_matches('\''))
+                .filter(|s| !s.is_empty())
+                .collect();
             let mut expected = expected.to_vec();
-            assert!(!actual.is_empty()); actual.sort(); expected.sort(); assert_eq!(actual, expected);
+            assert!(!actual.is_empty());
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
         }
     }
 }

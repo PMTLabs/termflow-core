@@ -20,6 +20,8 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("automation_store/sql.rs", &["ensure_column", "schema", "set_verbose_until", "sweep_expired_verbose"], "DB mutex; out of scope durable rule config/logs"),
     ("automation_store/sql/methods.rs", &["append", "bump_and_trim", "clear_completed", "delete_rule", "duplicate_automation", "mark_completed", "set_enabled_checked", "touch_target", "write_rule"], "DB mutex/transaction; out of scope durable rules and historical logs"),
     ("canvas_store.rs", &["delete_edge", "delete_edges_for", "insert_edge", "schema", "update_label"], "DB mutex; shell writers retain leaf stripes/current owner; user edits are durable intent"),
+    ("commands/ssh_store.rs", &["changed"], "out of scope saved SSH-definition event, no terminal lifetime subject; ConfigLock commit order and revision-filtered mirror; commands::ssh_store exact-payload behavioral tests"),
+    ("ssh/store.rs", &["validate"], "out of scope pure saved-definition validation (no session/socket/PTY effects); ssh::store field-rule and graph tests"),
     ("commands/config_history.rs", &["merge_config"], "out of scope user command/directory history merge"),
     ("commands/drag.rs", &["begin_global_pane_drag", "claim_global_pane_drag", "resolve_tab_drop", "show_drag_preview"], "native notifications queued by ownership-qualified pg/wi/tx sinks with immutable page receipts; preview geometry is UI intent"),
     ("commands/panes.rs", &["pane_op"], "qualified Settle post-effect schedules shared sweep outside ownership/FIFO"),

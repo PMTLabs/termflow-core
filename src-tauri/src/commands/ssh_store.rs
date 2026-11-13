@@ -7,10 +7,10 @@ pub const CHANGED: &str = "ssh-store:changed";
 macro_rules! ssh_handlers {
     ($($extra:path),* $(,)?) => {
         tauri::generate_handler![
-            crate::commands::ssh_store_get, crate::commands::ssh_store_reload,
-            crate::commands::ssh_folder_upsert, crate::commands::ssh_folder_delete,
-            crate::commands::ssh_connection_upsert, crate::commands::ssh_connection_delete,
-            crate::commands::ssh_move, crate::commands::ssh_set_bookmark,
+            $crate::commands::ssh_store_get, $crate::commands::ssh_store_reload,
+            $crate::commands::ssh_folder_upsert, $crate::commands::ssh_folder_delete,
+            $crate::commands::ssh_connection_upsert, $crate::commands::ssh_connection_delete,
+            $crate::commands::ssh_move, $crate::commands::ssh_set_bookmark,
             $($extra),*
         ]
     };
@@ -37,8 +37,11 @@ pub fn ssh_store_get(store: State<'_, Store>) -> Result<Reply, StoreError> {
     store.get()
 }
 #[tauri::command]
-pub fn ssh_store_reload(store: State<'_, Store>) -> Result<Reply, StoreError> {
-    store.reload()
+pub fn ssh_store_reload<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, Store>,
+) -> Result<Reply, StoreError> {
+    store.reload(|reply| app.changed(CHANGED, reply))
 }
 #[tauri::command]
 pub fn ssh_folder_upsert<R: tauri::Runtime>(
@@ -185,7 +188,7 @@ mod tests {
             })
             .unwrap();
             assert_eq!(reply.revision, setup.revision + 1, "{kind}");
-            assert_eq!(reply, store.reload().unwrap(), "{kind}");
+            assert_eq!(reply, store.reload(|_| {}).unwrap(), "{kind}");
             assert_eq!(
                 *capture.0.lock().unwrap(),
                 vec![("ssh-store:changed".into(), reply.clone())],
@@ -258,5 +261,28 @@ mod tests {
         assert_eq!(reply.view.folders.len(), 1);
         assert_eq!(reply.view.folders[0].name, "IPC folder");
         assert_eq!(invoke("ssh_store_get", serde_json::json!({})), reply);
+        // Exercise the actual Reload adapter/emitter, not just the Store seam.
+        use tauri::Listener;
+        let events = std::sync::Arc::new(Mutex::new(Vec::<Reply>::new()));
+        let captured = events.clone();
+        app.listen(CHANGED, move |event| {
+            captured
+                .lock()
+                .unwrap()
+                .push(serde_json::from_str(event.payload()).unwrap());
+        });
+        let file = temp.0.join("ssh.json");
+        let repaired_bytes = std::fs::read(&file).unwrap();
+        std::fs::write(&file, b"corrupt").unwrap();
+        let read_only = invoke("ssh_store_reload", serde_json::json!({}));
+        assert_eq!(read_only.revision, 2);
+        assert!(read_only.view.load_error.is_some());
+        std::fs::write(&file, repaired_bytes).unwrap(); // old disk revision 1
+        let recovered = invoke("ssh_store_reload", serde_json::json!({}));
+        assert_eq!(recovered.revision, 3);
+        assert!(recovered.view.load_error.is_none());
+        assert_eq!(*events.lock().unwrap(), vec![read_only, recovered.clone()]);
+        assert_eq!(invoke("ssh_store_reload", serde_json::json!({})), recovered);
+        assert_eq!(events.lock().unwrap().len(), 2);
     }
 }
