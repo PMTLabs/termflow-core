@@ -57,6 +57,8 @@ fn graph_unfolded(
             submit: true,
             cli_type: "default".to_string(),
             substitute: false,
+            masked: false,
+            message_cipher: None,
         }),
         webhook: None,
     }

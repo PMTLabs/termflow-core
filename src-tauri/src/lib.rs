@@ -22,6 +22,7 @@ pub mod automation;
 pub mod automation_commands;
 pub mod automation_engine;
 pub mod automation_store;
+mod automation_secret;
 pub mod automation_validation;
 pub mod automation_webhook;
 pub mod canvas_endpoints;

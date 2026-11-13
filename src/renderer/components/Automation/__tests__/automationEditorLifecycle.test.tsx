@@ -118,10 +118,12 @@ describe('the editor, mounted', () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    async function openEditorOn(subject: AutomationRule): Promise<Api> {
+    async function openEditorOn(subject: AutomationRule, onCommit?: React.ProfilerOnRenderCallback): Promise<Api> {
         const api = installApi([subject]);
         await act(async () => {
-            root.render(<AutomationsPanel />);
+            root.render(onCommit
+                ? <React.Profiler id="mask-commit" onRender={onCommit}><AutomationsPanel /></React.Profiler>
+                : <AutomationsPanel />);
         });
         await settle();
         const edit = [...container.querySelectorAll<HTMLButtonElement>('.au-btn.sm')].find(
@@ -177,6 +179,65 @@ describe('the editor, mounted', () => {
      * CAPTURE phase, so without the borrow a Ctrl+W typed into the editor closes a tab behind it.
      * The counter is what makes overlapping owners safe; the cleanup is what gives it back.
      */
+    it('hides the secret across the Settings row and editor surfaces', async () => {
+        const subject = rule();
+        subject.graph.action!.masked = true;
+        subject.graph.action!.message = 'fresh-password-846 ${secretPassword}';
+        subject.graph.action!.substitute = true;
+        await openEditorOn(subject);
+        await selectStep('action');
+        expect(document.body.textContent).not.toContain('fresh-password-846');
+        expect(document.body.textContent).not.toContain('secretPassword');
+        expect([...document.querySelectorAll('[title]')].map((e) => e.getAttribute('title')).join('')).not.toContain('secretPassword');
+    });
+
+    it.each(['report', 'error'])('redacts stale Test %s in the first masked commit', async (kind) => {
+        const maskedCommits: string[] = [];
+        const api = await openEditorOn(rule(), () => {
+            const hide = [...document.querySelectorAll('label')]
+                .find((l) => l.textContent?.includes('Hide message'))?.querySelector('input');
+            if (hide?.checked) maskedCommits.push(document.body.textContent ?? '');
+        });
+        const secret = 'stale-test-secret-935';
+        api.dryRunAutomation.mockImplementation(() => kind === 'error'
+            ? Promise.reject(new Error(secret))
+            : Promise.resolve({
+                verdict: 'would-fire',
+                steps: [{ kind: 'action', status: 'ok', detail: secret }],
+                terminalId: 'tm-a', at: 0,
+            }));
+        await act(async () => [...editor()!.querySelectorAll<HTMLButtonElement>('button')]
+            .find((b) => b.textContent?.trim() === '▶ Test')!.click());
+        await selectStep('action');
+        expect(document.body.textContent).toContain(secret);
+        await act(async () => {
+            [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Hide message'))!.querySelector('input')!.click();
+        });
+        expect(maskedCommits.length).toBeGreaterThan(0);
+        expect(maskedCommits[0]).not.toContain(secret);
+        expect(maskedCommits.every((text) => !text.includes(secret))).toBe(true);
+    });
+
+    it.each([false, true])('drops visible or delayed Test results after Hide (delayed=%s)', async (delayed) => {
+        const api = await openEditorOn(rule());
+        const report = {
+            verdict: 'would-fire', steps: [{ kind: 'action', status: 'ok', detail: 'would type stale-password-846' }],
+            terminalId: 'tm-a', at: 0,
+        };
+        let finish!: (value: unknown) => void;
+        api.dryRunAutomation.mockImplementation(() => delayed
+            ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve(report));
+        await act(async () => [...editor()!.querySelectorAll<HTMLButtonElement>('button')]
+            .find((b) => b.textContent?.trim() === '▶ Test')!.click());
+        await selectStep('action');
+        if (!delayed) expect(document.body.textContent).toContain('stale-password-846');
+        await act(async () => {
+            [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Hide message'))!.querySelector('input')!.click();
+        });
+        if (delayed) await act(async () => { finish(report); });
+        expect(document.body.textContent).not.toContain('stale-password-846');
+    });
+
     it('borrows the keyboard while it is open, and gives it back on unmount', async () => {
         const before = inputHandler.suspensionCount();
         await openEditorOn(rule());

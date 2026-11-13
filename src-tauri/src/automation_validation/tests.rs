@@ -26,6 +26,8 @@ fn graph(find: &str, keep: Keep) -> AutomationGraph {
             submit: true,
             cli_type: "default".into(),
             substitute: false,
+            masked: false,
+            message_cipher: None,
         }),
         webhook: None,
     }
@@ -33,6 +35,24 @@ fn graph(find: &str, keep: Keep) -> AutomationGraph {
 
 fn blocks(g: &AutomationGraph) -> bool {
     pattern_problems(g).iter().any(Problem::blocks)
+}
+
+#[test]
+fn hidden_message_problem_words_are_generic_and_blocking() {
+    let mut r = valid_rule();
+    r.graph.action_mut().masked = true;
+    r.graph.action_mut().substitute = true;
+    r.graph.action_mut().message = "${secretPassword}".into();
+    let list = problems(&r);
+    let token = list.iter().find(|p| p.code == "action.unknownToken").unwrap();
+    assert_eq!(token.message, "A hidden message token has nothing to stand for. Check the pattern in Read a value.");
+    assert!(token.blocks());
+    r.graph.action_mut().message.clear();
+    r.graph.action_mut().message_cipher = Some("v1:unreadable".into());
+    let list = problems(&r);
+    let unreadable = list.iter().find(|p| p.code == "action.hiddenUnreadable").unwrap();
+    assert_eq!(unreadable.message, "The hidden message can't be read on this machine — type it again.");
+    assert!(unreadable.blocks());
 }
 
 #[test]
@@ -383,6 +403,7 @@ fn the_shared_fixture_agrees_case_for_case() {
         "timer.scheduleWithMonitor",
         "timer.neverRuns",
         "action.empty",
+        "action.hiddenUnreadable",
         "action.echo",
         "action.tokenWithoutParse",
         "action.unknownToken",

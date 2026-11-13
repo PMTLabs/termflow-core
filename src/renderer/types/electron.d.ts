@@ -651,6 +651,8 @@ export interface AutomationCondStep {
 }
 
 export interface AutomationActionStep {
+  masked?: boolean;
+  messageCipher?: string;
   message: string;
   sendTo: AutomationSendTo;
   /**

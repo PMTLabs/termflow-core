@@ -137,7 +137,7 @@ export const AuInspector: React.FC<AuInspectorProps> = (props) => {
                     <TimerPanel draft={draft} model={model} dispatch={props.dispatch} />
                 )}
                 {step === 'action' && draft.rule.graph.action && (
-                    <ActionPanel draft={draft} model={model} dispatch={props.dispatch} />
+                    <ActionPanel key={draft.rule.id} draft={draft} model={model} dispatch={props.dispatch} />
                 )}
                 {step === 'webhook' && draft.rule.graph.webhook && (
                     <WebhookPanel key={draft.rule.id} draft={draft} dispatch={props.dispatch} />

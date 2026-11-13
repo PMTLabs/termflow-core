@@ -553,6 +553,19 @@ function layoutOf(rule: AutomationRule): Record<StepKind, NodePos> {
  * and `isDirty` compares this against the rule as it came off the wire, so every clause rule would
  * have opened reading dirty. The same both-sides rule `comparable` and `draftFromRule` follow.
  */
+/**
+ * `JSON.stringify` with every object's keys sorted, so two values with the same fields in a
+ * different insertion order serialise identically. The Test pane keys its report on this: a plain
+ * stringify would throw away a valid report because a reducer rebuilt an object in another order.
+ */
+export function canonicalJson(value: unknown): string {
+    return JSON.stringify(value, (_key, v: unknown) =>
+        v && typeof v === 'object' && !Array.isArray(v)
+            ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, (v as Record<string, unknown>)[k]]))
+            : v,
+    );
+}
+
 export function ruleFromDraft(draft: AutomationDraft): AutomationRule {
     const graph = { ...draft.rule.graph, layout: draft.layout };
     const cond = graph.cond;
@@ -607,7 +620,18 @@ function comparable(rule: AutomationRule): string {
         : rule.graph;
     return JSON.stringify({
         ...rule,
-        graph,
+        graph: {
+            ...graph,
+            action: graph.action ? {
+                message: graph.action.message,
+                sendTo: graph.action.sendTo,
+                submit: graph.action.submit,
+                cliType: graph.action.cliType,
+                substitute: graph.action.substitute ?? false,
+                masked: graph.action.masked ?? false,
+                messageCipher: graph.action.messageCipher ?? undefined,
+            } : undefined,
+        },
         targetIds: [...rule.targetIds].sort(),
         excludedIds: [...(rule.excludedIds ?? [])].sort(),
     });
@@ -912,7 +936,8 @@ export function draftReducer(draft: AutomationDraft, action: DraftAction): Autom
         }
         case 'action':
             return rule.graph.action
-                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch } })
+                ? withGraph(draft, { action: { ...rule.graph.action, ...action.patch,
+                    ...('message' in action.patch ? { messageCipher: undefined } : {}) } })
                 : draft;
         case 'webhook':
             // A panel patch cannot materialise a destination. In particular, it must never make

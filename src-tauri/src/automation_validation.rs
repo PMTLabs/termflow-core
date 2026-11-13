@@ -702,6 +702,11 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
             "rule.noDestination",
             "Add a terminal message or a webhook destination.",
         ));
+    } else if rule.graph.action.as_ref().is_some_and(|a| a.masked && a.message.is_empty() && a.message_cipher.is_some()) {
+        out.push(Problem::new(
+            Severity::Blocks, "action", "action.hiddenUnreadable",
+            "The hidden message can't be read on this machine — type it again.",
+        ));
     } else if rule
         .graph
         .action
@@ -809,11 +814,13 @@ pub fn problems(rule: &AutomationRule) -> Vec<Problem> {
                             Severity::Blocks,
                             field,
                             "action.unknownToken",
-                            format!(
+                            if field == "action" && rule.graph.action.as_ref().is_some_and(|a| a.masked) {
+                                "A hidden message token has nothing to stand for. Check the pattern in Read a value.".to_string()
+                            } else { format!(
                                 "{token} has nothing to stand for. The pattern in Read a value has \
                                  {count} bracketed group{}, so the highest you can use is ${count}.",
                                 if count == 1 { "" } else { "s" }
-                            ),
+                            ) },
                         ));
                     }
                 }

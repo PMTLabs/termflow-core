@@ -1202,6 +1202,10 @@
     border-color: #6e2b28;
 }
 
+.au-editor .au-finput-masked {
+    -webkit-text-security: disc;
+}
+
 .au-editor .au-finput-message {
     resize: vertical;
     min-height: 62px;

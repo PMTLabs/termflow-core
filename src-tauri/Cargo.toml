@@ -105,6 +105,8 @@ termflow-macos-tcc = { path = "macos-tcc" }
 # process-local mutex cannot help here: two profiles are two processes.
 fs4 = "1.1"
 
+aes-gcm = "0.10"
+
 [dev-dependencies]
 # `test-util` is NOT part of tokio's `full`, and it is what lets a test drive a
 # timeout in virtual time (`#[tokio::test(start_paused = true)]`). Without it the
@@ -128,11 +130,14 @@ tauri-plugin-single-instance = "2"
 # exposes no click callback.
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6"
+keyring = { version = "3", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 notify-rust = "4.11"
+keyring = { version = "3", default-features = false, features = ["async-secret-service", "tokio", "crypto-rust"] }
 
 [target.'cfg(windows)'.dependencies]
+keyring = { version = "3", default-features = false, features = ["windows-native"] }
 webview2-com = "0.38"
 windows-core = "0.61"
 # Single-instance guard (src/instance_lock.rs): named mutex + hidden event window
