@@ -15,7 +15,7 @@ afterEach(() => { act(() => root.unmount()); container.remove(); });
 function render(filter = '', data = view) { act(() => root.render(<SshTree tree={selectTree({ ssh:reducer(undefined, applyView({ revision:data.revision, view:data })) })} view={data} filter={filter} onSelect={() => {}} onMove={move} onBookmark={bookmark} />)); }
 function row(id: string) { return container.querySelector<HTMLElement>(`[data-row-id="${id}"] > .ssh-tree-row`)!; }
 function drop(id: string, drag: object) { const event = new Event('drop', { bubbles:true, cancelable:true }); Object.defineProperty(event, 'dataTransfer', { value:{ getData:() => JSON.stringify(drag) } }); act(() => row(id).dispatchEvent(event)); }
-test('renders each folder icon and colour', () => { render(); expect(row('f-root').querySelector('[data-icon="flask"]')?.className).toContain('ssh-color-violet'); expect(row('f-child').querySelector('[data-icon="server"]')?.className).toContain('ssh-color-sky'); });
+test('renders each folder icon and colour', () => { render(); expect(row('f-root').querySelector('[data-icon="flask"] svg')).not.toBeNull(); expect(row('f-root').querySelector('[data-icon="flask"]')?.className).toContain('ssh-color-violet'); expect(row('f-child').querySelector('[data-icon="server"]')?.className).toContain('ssh-color-sky'); });
 test.each([['Needle','c-name','one','alpha'],['Second','c-host','needle','beta'],['Third','c-user','three','needle']])('filter independently matches %s by name, host or user', (_name, id, _host, _user) => {
   const target = view.connections.find(c => c.id === id)!;
   const field = id === 'c-name' ? 'name' : id === 'c-host' ? 'host' : 'user';

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { SshConnection, SshFolder, SshMove, SshView } from '../../../types/ssh';
 import type { SshTreeNode } from '../../../store/slices/sshSlice';
-import { folderGlyph } from './sshFolderIcons';
+import { SshFolderIcon } from './SshFolderIcon';
 export interface SshTreeProps {
   tree: SshTreeNode[]; view: SshView; filter: string; selectedId?: string;
   onSelect(row: SshConnection | SshFolder, kind: 'folder' | 'connection'): void;
@@ -42,7 +42,7 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
           else if (event.key === 'F2') { event.preventDefault(); onRename?.(row, kind); }
           else if (event.key === 'Delete') { event.preventDefault(); onDelete?.(row, kind); }
         }}>
-        {kind === 'folder' ? <><button aria-label={`Toggle ${row.name}`} aria-expanded={!closed} onClick={event => { event.stopPropagation(); toggle(row.id); }}>{closed ? '▸' : '▾'}</button><span className={`ssh-folder-icon ssh-color-${(row as SshFolder).color}`} data-icon={(row as SshFolder).icon}>{folderGlyph[(row as SshFolder).icon]}</span></> : <span aria-hidden>⌁</span>}
+        {kind === 'folder' ? <><button aria-label={`Toggle ${row.name}`} aria-expanded={!closed} onClick={event => { event.stopPropagation(); toggle(row.id); }}>{closed ? '▸' : '▾'}</button><span className={`ssh-folder-icon ssh-color-${(row as SshFolder).color}`} data-icon={(row as SshFolder).icon}><SshFolderIcon icon={(row as SshFolder).icon} /></span></> : <span aria-hidden>⌁</span>}
         <span className="ssh-row-label">{row.name}</span>
         {kind === 'connection' && <button aria-label={`Bookmark ${row.name}`} aria-pressed={(row as SshConnection).bookmarked} onClick={event => { event.stopPropagation(); onBookmark(row.id, !(row as SshConnection).bookmarked); }}>{(row as SshConnection).bookmarked ? '★' : '☆'}</button>}
       </div>
