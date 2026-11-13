@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { isSshEditorDirty, saveSshEditorDraft, discardSshEditorDraft } from '../../services/sshEditorGuard';
+import { SshConnectionsPanel } from './SshConnections/SshConnectionsPanel';
 import { useSelector, useDispatch, useStore } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
@@ -2313,7 +2314,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'notifications': return renderNotifications();
             case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
-            case 'ssh': return <section aria-label="SSH Connections"><h2>SSH Connections</h2></section>;
+            case 'ssh': return <SshConnectionsPanel />;
             case 'automations': return <AutomationsPanel />;
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();

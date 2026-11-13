@@ -692,3 +692,19 @@ impl Store {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod enum_census {
+    use super::*;
+    #[test]
+    fn icons_and_colors_match_renderer() {
+        let ts = include_str!("../../../src/renderer/components/Settings/SshConnections/sshFolderIcons.ts").replace("\r\n", "\n");
+        for (name, expected) in [("SSH_FOLDER_ICONS", ICONS), ("SSH_FOLDER_COLORS", COLORS)] {
+            let tail = ts.split_once(name).unwrap().1;
+            let array = tail.split_once('[').unwrap().1.split_once(']').unwrap().0;
+            let mut actual: Vec<_> = array.split(',').map(|s| s.trim().trim_matches('\'')).filter(|s| !s.is_empty()).collect();
+            let mut expected = expected.to_vec();
+            assert!(!actual.is_empty()); actual.sort(); expected.sort(); assert_eq!(actual, expected);
+        }
+    }
+}
