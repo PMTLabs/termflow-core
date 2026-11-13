@@ -932,6 +932,9 @@ async fn run_send(
     let Some(action) = rule.graph.action.as_ref() else {
         return DestinationOutcome::Failed("the rule has no terminal destination".into());
     };
+    if action.masked && action.message.is_empty() {
+        return DestinationOutcome::Failed("the hidden message can't be read on this machine".into());
+    }
     let lock = engine.runtime.send_lock(&tm);
 
     let _guard =
@@ -997,9 +1000,9 @@ async fn run_send(
             // the "unintended content" this whole feature exists to prevent, and a refusal that is
             // logged is the safe fallback it asks for instead.
             Err(e) => {
-                return DestinationOutcome::Failed(format!(
-                    "nothing sent — {e} had no value at the moment it fired"
-                ));
+                return DestinationOutcome::Failed(if action.masked {
+                    "nothing sent — a hidden message token had no value at the moment it fired".into()
+                } else { format!("nothing sent — {e} had no value at the moment it fired") });
             }
         }
     } else {
@@ -1021,7 +1024,9 @@ async fn run_send(
     .await;
 
     if let Err(e) = outcome {
-        return DestinationOutcome::Failed(format!("the message could not be sent: {}", e));
+        return DestinationOutcome::Failed(if action.masked {
+            "the hidden message could not be sent".into()
+        } else { format!("the message could not be sent: {}", e) });
     }
 
     let at = send.at_ms;

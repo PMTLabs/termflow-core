@@ -5,7 +5,7 @@
 ///
 /// `3` as of the webhook milestone: a rule is stamped only for the newest feature it actually uses,
 /// never merely because this build can write one.
-pub const SUPPORTED_SCHEMA_VERSION: i64 = 3;
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 4;
 
 // ---------------------------------------------------------------------------------------------
 // The DTO. These serde names are THE AUTHORITY for the whole feature (plan §7.7): the renderer's
@@ -330,10 +330,14 @@ impl Default for CondStep {
 }
 
 /// Step 4 — "Send to terminal". Plan §2.5, Q1.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionStep {
     pub message: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub masked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_cipher: Option<String>,
     #[serde(default = "default_send_to")]
     pub send_to: SendTo,
     /// Whether to press Enter after the text. `false` leaves the message sitting in the composer,
@@ -377,6 +381,18 @@ impl std::fmt::Debug for WebhookStep {
             .field("body", &self.body).field("substitute", &self.substitute).finish()
     }
 }
+
+impl std::fmt::Debug for ActionStep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionStep")
+            .field("message", &if self.masked { "<redacted>" } else { &self.message })
+            .field("masked", &self.masked)
+            .field("send_to", &self.send_to).field("submit", &self.submit)
+            .field("cli_type", &self.cli_type).field("substitute", &self.substitute).finish()
+    }
+}
+
+fn is_false(value: &bool) -> bool { !*value }
 
 fn default_send_to() -> SendTo {
     SendTo::Matched
@@ -541,7 +557,8 @@ pub fn schema_version_for(rule: &AutomationRule) -> i64 {
         // which is the case the stamp exists to signal: it would read the line the user is still
         // typing and fire on it — the exact behaviour the box was ticked to stop.
         || graph.monitor.as_ref().is_some_and(|monitor| monitor.skip_typed_line);
-    if uses_a_v3_feature { 3 } else if uses_a_v2_feature {
+    if graph.action.as_ref().is_some_and(|action| action.masked) { 4 }
+    else if uses_a_v3_feature { 3 } else if uses_a_v2_feature {
         2
     } else {
         1

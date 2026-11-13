@@ -244,6 +244,8 @@ fn a_schedule_rule_writes_no_monitor_parse_or_cond_key() {
             submit: true,
             cli_type: "default".to_string(),
             substitute: false,
+            masked: false,
+            message_cipher: None,
         }),
         webhook: None,
         layout: None,

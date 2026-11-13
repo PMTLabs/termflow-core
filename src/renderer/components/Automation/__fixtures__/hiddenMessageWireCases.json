@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "legacy defaults",
+      "input": { "message": "legacy text", "sendTo": "matched", "submit": true, "cliType": "default" },
+      "hydrated": { "message": "legacy text", "sendTo": "matched", "submit": true, "cliType": "default", "substitute": false }
+    },
+    {
+      "name": "readable hidden message",
+      "input": { "sendTo": "matched", "submit": true, "cliType": "default", "message": "fresh hidden wire secret", "substitute": false, "masked": true },
+      "hydrated": { "message": "fresh hidden wire secret", "masked": true, "sendTo": "matched", "submit": true, "cliType": "default", "substitute": false }
+    },
+    {
+      "name": "unreadable hidden message",
+      "input": { "sendTo": "matched", "submit": true, "cliType": "default", "message": "", "messageCipher": "v1:unreadable", "masked": true, "substitute": false },
+      "hydrated": { "message": "", "masked": true, "messageCipher": "v1:unreadable", "sendTo": "matched", "submit": true, "cliType": "default", "substitute": false }
+    }
+  ]
+}

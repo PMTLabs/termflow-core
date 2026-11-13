@@ -7,3 +7,4 @@ mod verbose_and_targets;
 mod enable_disable_gating;
 mod target_mutations_and_decode;
 mod wire_format;
+mod hidden_messages;

@@ -135,13 +135,23 @@ fn read_rule_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawRule> {
     })
 }
 
-fn hydrate_rule(raw: RawRule) -> Result<AutomationRule, AutomationStoreError> {
+fn hydrate_rule(raw: RawRule, cipher: &crate::automation_secret::MessageCipher) -> Result<AutomationRule, AutomationStoreError> {
+    let mut graph: AutomationGraph = serde_json::from_str(&raw.graph)
+        .map_err(|_| AutomationStoreError::Invalid(format!("rule {}: bad graph blob", raw.id)))?;
+    if let Some(action) = graph.action.as_mut().filter(|a| a.masked) {
+        if let Some(encrypted) = action.message_cipher.as_ref() {
+            action.message.clear();
+            if let Ok(plain) = cipher.decrypt(encrypted) {
+                action.message = plain;
+                action.message_cipher = None;
+            }
+        }
+    }
     Ok(AutomationRule {
         // Serde can quote the malformed value in its error, and a graph contains the webhook URL.
         // Keep the decode boundary opaque: list_rules turns this into a skipped-row reason and
         // reload persists that reason to the activity log.
-        graph: serde_json::from_str(&raw.graph)
-            .map_err(|_| AutomationStoreError::Invalid(format!("rule {}: bad graph blob", raw.id)))?,
+        graph,
         target_mode: enum_from_db(&raw.target_mode)?,
         criterion: enum_from_db(&raw.criterion)?,
         exclude_criterion: raw.exclude_criterion.as_deref().map(enum_from_db).transpose()?,
@@ -176,6 +186,7 @@ struct EmitState {
 
 /// Rules, their pinned terminals and the activity log, stored beside scrollback in `history.db`.
 pub struct AutomationStore {
+    cipher: crate::automation_secret::MessageCipher,
     conn: Mutex<Option<Connection>>,
     /// Rows per rule, for the cap. Lazily seeded once per rule per process by one indexed
     /// `SELECT COUNT(*)`. Its accuracy decides only WHEN the trim runs, never whether it is correct.
@@ -219,6 +230,7 @@ impl AutomationStore {
     /// A disabled store. `init` upgrades it in place, exactly as `CanvasStore::new` does.
     pub fn new() -> Self {
         Self {
+            cipher: crate::automation_secret::MessageCipher::default(),
             conn: Mutex::new(None),
             log_counts: DashMap::new(),
             last_verbose: DashMap::new(),
@@ -464,7 +476,7 @@ impl AutomationStore {
         for raw in raws {
             let raw = raw?; // a SQLite error is still fatal — the DB is gone
             let id = raw.id.clone();
-            match hydrate_rule(raw) {
+            match hydrate_rule(raw, &self.cipher) {
                 Ok(mut rule) => {
                     rule.target_ids = targets.remove(&rule.id).unwrap_or_default();
                     rule.excluded_ids = exclusions.remove(&rule.id).unwrap_or_default();
@@ -549,7 +561,7 @@ impl AutomationStore {
         }
         owned.updated_at = at;
 
-        let previous = Self::write_rule(&tx, &owned)?;
+        let previous = self.write_rule(&tx, &owned)?;
         tx.commit()?;
         drop(guard);
         // Write through rather than invalidate, for the reason `save_rule` gives.
@@ -608,7 +620,7 @@ impl AutomationStore {
         // The existence check and the write, on ONE transaction. Every early return below drops `tx`
         // uncommitted, which rolls back — so "the rule is gone" and "the gate refused" both leave the
         // file exactly as they found it.
-        let Some(mut rule) = Self::read_rule_on(&tx, rule_id)? else {
+        let Some(mut rule) = self.read_rule_on(&tx, rule_id)? else {
             return Ok(false);
         };
         if rule.target_ids.iter().any(|id| id.as_str() == terminal_id) {
@@ -634,7 +646,7 @@ impl AutomationStore {
             Self::refuse_if_it_would_run_wrong(&rule)?;
         }
 
-        Self::write_rule(&tx, &rule)?;
+        self.write_rule(&tx, &rule)?;
         tx.commit()?;
         // No `verbose_cache` write-through: `verbose_until` is written back exactly as it was read, so
         // the cached value is still the row's value. Only a path that CHANGES it owes the cache a write.
@@ -694,7 +706,7 @@ impl AutomationStore {
         // The existence check and the write, on ONE transaction. Every early return below drops `tx`
         // uncommitted, which rolls back — so "the rule is gone", "it never watched that id" and "the
         // gate refused" all leave the file exactly as they found it.
-        let Some(mut rule) = Self::read_rule_on(&tx, rule_id)? else {
+        let Some(mut rule) = self.read_rule_on(&tx, rule_id)? else {
             return Ok(false);
         };
         let kept: Vec<String> = rule
@@ -719,7 +731,7 @@ impl AutomationStore {
         // documents is reachable from here — a DISABLED pinned rule may legally end up watching
         // nothing — and it is the arm that had the `'' NOT IN ('')` bug, so this path wants the fixed
         // one rather than a second copy.
-        Self::write_rule(&tx, &rule)?;
+        self.write_rule(&tx, &rule)?;
         tx.commit()?;
         // No `verbose_cache` write-through, for the reason the append gives: `verbose_until` is
         // written back exactly as it was read, so the cached value is still the row's value.
@@ -786,7 +798,7 @@ impl AutomationStore {
         // switch; what it buys is that this method reads a rule the same way every other conditional
         // writer in this file does, which is the property `every_read_that_decides_a_write_…` checks
         // in source. A hand-rolled existence query here would pass no test and fail that one.
-        if Self::read_rule_on(&tx, rule_id)?.is_none() {
+        if self.read_rule_on(&tx, rule_id)?.is_none() {
             return Ok(false);
         }
 
@@ -803,7 +815,7 @@ impl AutomationStore {
     pub fn get_rule(&self, id: &str) -> Result<Option<AutomationRule>, AutomationStoreError> {
         let guard = self.conn.lock().unwrap();
         let conn = guard.as_ref().ok_or(AutomationStoreError::Disabled)?;
-        Self::read_rule_on(conn, id)
+        self.read_rule_on(conn, id)
     }
 
     /// `get_rule`'s body with the locking taken out, so a caller that must **decide** something from
@@ -815,6 +827,7 @@ impl AutomationStore {
     /// the rest of the file, where `set_enabled_checked` and `duplicate_automation` had the identical
     /// shape. A fix applied at one site of a class is not a fix.
     pub(super) fn read_rule_on(
+        &self,
         conn: &rusqlite::Connection,
         id: &str,
     ) -> Result<Option<AutomationRule>, AutomationStoreError> {
@@ -829,7 +842,7 @@ impl AutomationStore {
                 // Deliberately NOT the skip path §3.3 gives `list_rules`: a caller naming one rule
                 // wants that rule, and `Ok(None)` would read as "deleted" for a row that is merely
                 // undecodable by this build.
-                let mut rule = hydrate_rule(raw)?;
+                let mut rule = hydrate_rule(raw, &self.cipher)?;
                 // The SAME predicate and order `list_rules` uses, in SQL, rather than reading every
                 // source and filtering in Rust. The two shapes differ deliberately — `list_rules`
                 // does one bulk query to avoid N+1 — but the definition of "this rule's pinned

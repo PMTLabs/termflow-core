@@ -6,6 +6,7 @@ use crate::automation_engine::test_host::*;
 
 mod tick_substitution_and_schedule;
 mod wait_and_cancellation;
+mod hidden_messages;
 mod send_serialisation_and_guards;
 mod runs_once_and_targeting;
 mod review_findings_send_and_log;
