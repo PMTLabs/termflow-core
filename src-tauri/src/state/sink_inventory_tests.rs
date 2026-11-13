@@ -9,6 +9,8 @@ use regex::Regex;
 
 // File, explicitly named functions, qualification mechanism or scope rationale.
 const INVENTORY: &[(&str, &[&str], &str)] = &[
+    ("commands/ssh_session.rs", &["emit"], "redacted immutable session/probe view queued from entry-locked generation publication; no credentials"),
+    ("ssh/session.rs", &["publish_locked"], "entry mutex; generation token and lease revoked before nonconnected publication; snapshots and events monotonically revisioned; stale attempts cannot update"),
     ("api_server/capture.rs", &["resize_with_reflow"], "Registered pc rechecked at host enqueue; retained pc-indexed local master"),
     ("api_server/fleet.rs", &["fleet_local_run"], "new unique process event; deferred input retains exact pc"),
     ("api_server/mod.rs", &["start_api_server"], "owned listener; out of scope network status"),

@@ -36,6 +36,10 @@ fn check_connection_sites(host_port: &str) -> Result<(), String> {
 }
 
 fn check_unix_evidence(client: &str, host: &str) -> Result<(), String> {
+    // Source checkouts on Windows may use CRLF; spelling is not evidence.
+    let client_text = client.replace("\r\n", "\n");
+    let host_text = host.replace("\r\n", "\n");
+    let client = client_text.as_str(); let host = host_text.as_str();
     let unix_start = client.find("#[cfg(unix)]\npub async fn connect_or_spawn(").ok_or("missing Unix connect")?;
     let unix_end = client[unix_start..].find("/// Spawn the sidecar detached").ok_or("missing Unix connect end")? + unix_start;
     let unix = Src::production(&client[unix_start..unix_end]);

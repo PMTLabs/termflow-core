@@ -1,3 +1,4 @@
+import type { SshAPI, SshSessionView, SshPromptReceipt } from '../types/ssh';
 import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
@@ -91,7 +92,7 @@ export interface NetworkInterfaceInfo {
 }
 
 // Define the interface to match existing usage
-interface ElectronAPI {
+interface ElectronAPI extends SshAPI {
   pickFile?: (title?: string) => Promise<string | null>;
   ssh?: import('../types/ssh').SshStoreApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
@@ -363,8 +364,28 @@ const buildAuthHeaders = (): Record<string, string> => {
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
+async function listenSsh(event: string, listener: (view: SshSessionView) => void): Promise<UnlistenFn> {
+  let active = true;
+  const unlisten = await listen<SshSessionView>(event, e => { if (active) listener(e.payload); });
+  const dispose = () => { if (!active) return; active = false; unlisten(); };
+  trackUnlisten(Promise.resolve(dispose));
+  return dispose;
+}
 const tauriBridge: ElectronAPI = {
   ssh: createSshBridge(invoke, listen),
+  sshSessionOpen: async (terminalId: string, connectionId: string) => invoke<SshSessionView>('ssh_session_open', { terminalId, connectionId }),
+  sshSessionState: async (terminalId: string) => invoke<SshSessionView>('ssh_session_state', { terminalId }),
+  sshSessionClose: async (terminalId: string, generation?: number) => invoke<void>('ssh_session_close', { terminalId, generation }),
+  sshSessionReconnect: async (terminalId: string) => invoke<SshSessionView>('ssh_session_reconnect', { terminalId }),
+  sshSessionSubmitSecret: async (terminalId: string, secret: string, remember: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_session_submit_secret', { terminalId, secret, remember, ...receipt }),
+  sshSessionTrustHost: async (terminalId: string, accept: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_session_trust_host', { terminalId, accept, ...receipt }),
+  sshTestConnection: async (connectionId: string) => invoke<{ probeId: string }>('ssh_test_connection', { connectionId }),
+  sshTestState: async (probeId: string) => invoke<SshSessionView>('ssh_test_state', { probeId }),
+  sshTestClose: async (probeId: string) => invoke<void>('ssh_test_close', { probeId }),
+  sshTestSubmitSecret: async (probeId: string, secret: string, remember: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_submit_secret', { probeId, secret, remember, ...receipt }),
+  sshTestTrustHost: async (probeId: string, accept: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_trust_host', { probeId, accept, ...receipt }),
+  onSshSessionState: (listener) => listenSsh('ssh-session:state', listener),
+  onSshTestState: (listener) => listenSsh('ssh-test:state', listener),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
     const response = await fetch(`${await apiBase()}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
       headers: {

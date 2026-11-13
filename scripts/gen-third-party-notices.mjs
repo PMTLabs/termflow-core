@@ -65,7 +65,24 @@ function rustDeps(manifestPath, label) {
   return deps;
 }
 
+// Rust-only dependency updates can retain the already generated JS attributions
+// when bun.lock/package.json are unchanged. This avoids fetching a notice tool.
+// Explicit opt-in only; ordinary release regeneration still scans the JS tree.
+function cachedJsNotices() {
+  const previous = readFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), 'utf8');
+  const entries = [];
+  for (const block of previous.split(/\r?\n={80}\r?\n/)) {
+    const match = block.trim().match(/^(.+) ([^ ]+)  —  (.+)  \[javascript\]\r?\n-+\r?\n([\s\S]*)$/);
+    if (!match) continue;
+    const [, name, version, license, text] = match;
+    entries.push({ name, version, license, text: text.startsWith('(No bundled license') ? null : text.trim(), kind: 'javascript' });
+  }
+  if (!entries.length) throw new Error('No cached JavaScript notices; run a full regeneration');
+  console.log(`[notices] reusing ${entries.length} unchanged JavaScript attributions`);
+  return entries;
+}
 function jsDeps() {
+  if (process.argv.includes('--reuse-js-notices')) return cachedJsNotices();
   let json;
   try {
     json = run('bunx', ['license-checker', '--production', '--json', '--excludePrivatePackages', '--start', ROOT]);
@@ -148,5 +165,5 @@ const body = all
   })
   .join('\n================================================================================\n\n');
 
-writeFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), header + '\n' + body + '\n');
+writeFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), (header + '\n' + body + '\n').replace(/\r\n/g, '\n').replace(/[ \t]+$/gm, ''));
 console.log(`[notices] wrote legal/THIRD-PARTY-NOTICES.txt — ${all.length} components (${withText} with text)`);

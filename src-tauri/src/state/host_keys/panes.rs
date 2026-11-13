@@ -113,7 +113,7 @@ pub(super) struct Transfer {
 pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Default, Debug)]
-pub(crate) struct PaneEffects { pub closes: Vec<String>, pub wake_transfers: bool, pub release_restore_sweep: bool }
+pub(crate) struct PaneEffects { pub closes: Vec<String>, pub ssh_retired: Vec<(String, u64)>, pub wake_transfers: bool, pub release_restore_sweep: bool }
 
 fn rejected(message: &str) -> PaneResult { PaneResult::Rejected { message: message.into() } }
 impl HostKeys {
@@ -163,6 +163,7 @@ impl HostKeys {
                 Self::forget_pane_holder(inner, pi, leaf.is_some(), now);
                 inner.panes.present.remove(&pi);
                 let Some(leaf) = leaf else { return PaneResult::Contended; };
+                if let Some(row) = inner.owners.get(&leaf) { effects.ssh_retired.push((leaf.clone(), row.cg)); }
                 Self::close_leaf_locked(inner, &leaf, CloseStorage::Delete, &mut effects.closes);
                 PaneResult::Ok
             }
@@ -296,6 +297,12 @@ impl HostKeys {
         let mut effects = Vec::new();
         Self::close_leaf_locked(&mut inner, &leaf, CloseStorage::Delete, &mut effects);
         (PaneResult::Ok, effects)
+    }
+    /// Stable placement generation survives transfers/reload, but not final close.
+    pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
+        let inner = self.lock();
+        let row = inner.owners.get(leaf)?;
+        if matches!(row.owner, Owner::Orphaned | Owner::Headless) || matches!(row.state, OwnerState::Closing(_)) { None } else { Some(row.cg) }
     }
     #[cfg(test)]
     pub(crate) fn pane_owner(&self, leaf: &str) -> Option<Owner> { self.lock().owners.get(leaf).map(|r| r.owner.clone()) }

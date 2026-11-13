@@ -15,22 +15,25 @@ fn dispatch_closes(state: &AppState, processes: Vec<String>) {
     }
 }
 
-fn schedule_transfer_expiry(keys: crate::state::HostKeys) {
+fn schedule_transfer_expiry(state: AppState) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(crate::state::TRANSFER_DEADLINE).await;
-        keys.expire_transfers(std::time::Instant::now());
+        state.host_table.keys().expire_transfers(std::time::Instant::now());
+        state.reconcile_ssh_owners();
     });
 }
 
 #[tauri::command]
 pub(crate) fn pane_op(window: WebviewWindow, state: State<'_, AppState>, request: PaneRequest) -> Result<PaneReply, String> {
     let (reply, effects) = state.host_table.keys().pane_op(window.label(), request)?;
+    for (leaf, receipt) in effects.ssh_retired { state.ssh_sessions.retire_owner(&leaf, receipt); }
+    state.reconcile_ssh_owners();
     dispatch_closes(state.inner(), effects.closes);
     if effects.release_restore_sweep { state.schedule_host_restore_release(); }
     // A timer releases only abandoned ownership; it never closes a shell. Take
     // resets the stamp, so an earlier timer cannot expire a newer Taken state.
     if effects.wake_transfers {
-        schedule_transfer_expiry(state.host_table.keys().clone());
+        schedule_transfer_expiry(state.inner().clone());
     }
     Ok(reply)
 }
@@ -85,6 +88,7 @@ pub(crate) async fn create_admitted_terminal(window: WebviewWindow, state: State
 #[tauri::command]
 pub(crate) fn close_process(state: State<'_, AppState>, pc: String, reap: bool) -> Result<PaneResult, String> {
     let (result, effects) = state.host_table.keys().close_process_reap(&pc, reap);
+    state.reconcile_ssh_owners();
     dispatch_closes(state.inner(), effects);
     Ok(result)
 }

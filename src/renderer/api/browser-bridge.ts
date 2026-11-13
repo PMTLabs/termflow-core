@@ -1,3 +1,4 @@
+import type { SshSessionView, SshPromptReceipt } from '../types/ssh';
 import { ElectronAPI, HostGeneration, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { browserSshBridge } from './sshBridge';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -15,6 +16,31 @@ console.log('Initializing Browser Bridge...');
 class BrowserBridge implements ElectronAPI {
     ssh = browserSshBridge;
     pickFile = async (): Promise<null> => null;
+  // ssh_session_open: desktop-only, never return a fabricated session.
+  async sshSessionOpen(_terminalId: string, _connectionId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_state: desktop-only, never return a fabricated session.
+  async sshSessionState(_terminalId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_close: desktop-only, never return a fabricated session.
+  async sshSessionClose(_terminalId: string, _generation?: number): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_reconnect: desktop-only, never return a fabricated session.
+  async sshSessionReconnect(_terminalId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_submit_secret: desktop-only, never return a fabricated session.
+  async sshSessionSubmitSecret(_terminalId: string, _secret: string, _remember: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_session_trust_host: desktop-only, never return a fabricated session.
+  async sshSessionTrustHost(_terminalId: string, _accept: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_connection: desktop-only, never return a fabricated session.
+  async sshTestConnection(_connectionId: string): Promise<{ probeId: string }> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_state: desktop-only, never return a fabricated session.
+  async sshTestState(_probeId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_close: desktop-only, never return a fabricated session.
+  async sshTestClose(_probeId: string): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_submit_secret: desktop-only, never return a fabricated session.
+  async sshTestSubmitSecret(_probeId: string, _secret: string, _remember: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  // ssh_test_trust_host: desktop-only, never return a fabricated session.
+  async sshTestTrustHost(_probeId: string, _accept: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
+  async onSshSessionState(_listener: (view: SshSessionView) => void): Promise<() => void> { throw new Error('SSH is desktop-only'); }
+  async onSshTestState(_listener: (view: SshSessionView) => void): Promise<() => void> { throw new Error('SSH is desktop-only'); }
+
     private ws: WebSocket | null = null;
     private dataListeners: ((id: string, data: string) => void)[] = [];
     private exitListeners: ((id: string, code: number, cwd?: string | null) => void)[] = [];
