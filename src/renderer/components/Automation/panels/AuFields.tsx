@@ -52,21 +52,54 @@ export const AuCheck: React.FC<{
     sub?: React.ReactNode;
     onToggle: () => void;
     disabled?: boolean;
-    /** Drawn after the label text, e.g. an `AuInfo`. */
+    /**
+     * Drawn after the label text, e.g. an `AuInfo`. A button may not sit inside a `<label>`, so a
+     * row with `extra` is a `div` whose checkbox is named by `htmlFor` labels instead.
+     */
     extra?: React.ReactNode;
-}> = ({ on, label, sub, onToggle, disabled, extra }) => (
-    <label className={`au-checkrow${on ? ' on' : ''}${disabled ? ' disabled' : ''}`}>
-        <input type="checkbox" checked={on} onChange={onToggle} disabled={disabled} />
-        <span className="au-cmark" aria-hidden="true">
-            ✓
-        </span>
-        <span>
-            {label}
-            {extra}
-            {sub && <span className="au-rsub">{sub}</span>}
-        </span>
-    </label>
-);
+}> = ({ on, label, sub, onToggle, disabled, extra }) => {
+    const id = React.useId();
+    const className = `au-checkrow${on ? ' on' : ''}${disabled ? ' disabled' : ''}`;
+    if (!extra) {
+        return (
+            <label className={className}>
+                <input type="checkbox" checked={on} onChange={onToggle} disabled={disabled} />
+                <span className="au-cmark" aria-hidden="true">
+                    ✓
+                </span>
+                <span>
+                    {label}
+                    {sub && <span className="au-rsub">{sub}</span>}
+                </span>
+            </label>
+        );
+    }
+    return (
+        <div className={className}>
+            <input
+                id={id}
+                type="checkbox"
+                checked={on}
+                onChange={onToggle}
+                disabled={disabled}
+                aria-describedby={sub ? `${id}-sub` : undefined}
+            />
+            <label htmlFor={id} className="au-cmark" aria-hidden="true">
+                ✓
+            </label>
+            <span>
+                <label htmlFor={id}>{label}</label>
+                {extra}
+                {/* A description, not a label: a label here would also join the accessible name. */}
+                {sub && (
+                    <span id={`${id}-sub`} className="au-rsub">
+                        {sub}
+                    </span>
+                )}
+            </span>
+        </div>
+    );
+};
 
 export const AuHelp: React.FC<{ children: React.ReactNode; warn?: boolean }> = ({
     children,

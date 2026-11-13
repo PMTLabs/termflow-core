@@ -42,7 +42,7 @@ describe('hidden terminal message', () => {
     }
     async function show(r = rule()) { await act(async () => root.render(<Host key={r.id} initial={r} />)); }
     const box = () => container.querySelector('textarea')!;
-    const hide = () => [...container.querySelectorAll('label')].find((l) => l.textContent?.includes('Hide message'))!.querySelector('input')!;
+    const hide = () => [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((i) => [...(i.labels ?? [])].some((l) => l.textContent?.includes('Hide message')))!;
     const button = (text: string) => [...container.querySelectorAll('button')].find((b) => b.textContent === text)!;
     async function click(el: HTMLElement) { await act(async () => el.click()); }
     function clipboard(type: string): Event {
@@ -54,12 +54,23 @@ describe('hidden terminal message', () => {
         expect(row).not.toBeNull();
         expect(row.textContent).toContain('Hide message (password or secret)');
         expect(row.querySelector('.au-rsub')!.textContent).toContain('The terminal still receives exactly what you typed');
+        // Named by its label text only; the explanation is its description, not part of its name.
+        const names = [...hide().labels!].filter((l) => l.getAttribute('aria-hidden') !== 'true').map((l) => l.textContent);
+        expect(names).toEqual(['Hide message (password or secret)']);
+        expect(document.getElementById(hide().getAttribute('aria-describedby')!)!.textContent)
+            .toContain('The terminal still receives exactly what you typed');
         const info = row.querySelector<HTMLButtonElement>('button.au-info')!;
+        expect(info.closest('label')).toBeNull(); // a button is not valid label content
         expect(info.getAttribute('aria-label')).toBe('About hiding the message');
         expect(info.getAttribute('title')).toMatch(/dots everywhere.*encrypted.*exactly what you typed/);
         const wasMasked = hide().checked;
         await click(info);
-        expect(hide().checked).toBe(wasMasked); // the icon sits inside the label but must not toggle it
+        expect(hide().checked).toBe(wasMasked);
+        // The text label and the tick mark both still toggle the box.
+        await click([...hide().labels!].find((l) => l.textContent === 'Hide message (password or secret)')!);
+        expect(hide().checked).toBe(!wasMasked);
+        await click(row.querySelector<HTMLElement>('label.au-cmark')!);
+        expect(hide().checked).toBe(wasMasked);
         expect(document.body.querySelector('.au-infopop')!.textContent).toContain('system keystore');
         const reveal = button('Reveal');
         expect(reveal.classList.contains('au-mini')).toBe(true);
