@@ -120,6 +120,18 @@ describe('SettingsPage category enumeration sites (plan/029 §7.1)', () => {
         expect(SETTINGS).toContain("cat.id !== 'permissions' || isMac");
     });
 
+    it('SSH is self-saving, immediately follows profiles, and relabels both API/MCP labels', () => {
+        const tracked = /const isTracked = \(c: SettingsCategory\): c is TrackedCategory =>([\s\S]+?);/.exec(SETTINGS);
+        expect(tracked?.[1]).toContain("c !== 'ssh'");
+        const ids = siteCategoriesArray();
+        expect(ids[ids.indexOf('profiles') + 1]).toBe('ssh');
+        expect(SETTINGS).toContain("connections: 'Connections (API & MCP)'");
+        expect(SETTINGS).toMatch(/id: 'connections',\s*label: 'Connections \(API & MCP\)'/);
+        expect(SETTINGS).toContain("activeCategory !== 'ssh'");
+        expect(SETTINGS).toContain("saveSshEditorDraft()");
+        expect(SETTINGS).toContain("discardSshEditorDraft()");
+    });
+
     it('renderActiveCategory() (site 6) has a case for snippets', () => {
         expect(SETTINGS).toMatch(/case 'snippets': return <SnippetsPanel/);
     });

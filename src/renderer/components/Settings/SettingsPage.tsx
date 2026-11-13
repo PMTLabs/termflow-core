@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { isSshEditorDirty, saveSshEditorDraft, discardSshEditorDraft } from '../../services/sshEditorGuard';
 import { useSelector, useDispatch, useStore } from 'react-redux';
 import { RootState, AppDispatch } from '../../store';
 import { useSurfaceZoom, useZoomGestures } from '../../hooks/useSurfaceZoom';
@@ -153,7 +154,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // duplicate union, renderActiveCategory's switch, and (for Automations) the editor's
     // dirty-guard hook-up in requestCategoryChange. Plan 028 §5.1 and plan 029 §7.1 both
     // list them — the two features landed independently and each hit all seven.
-    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'permissions' | 'updates' | 'about';
+    type SettingsCategory = 'appearance' | 'terminal' | 'notifications' | 'startup' | 'profiles' | 'ssh' | 'automations' | 'shortcuts' | 'connections' | 'peers' | 'snippets' | 'permissions' | 'updates' | 'about';
     const [activeCategory, setActiveCategory] = useState<SettingsCategory>('appearance');
     const [snippetsEntry, setSnippetsEntry] = useState(0);
 
@@ -216,8 +217,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     const CATEGORY_LABELS: Record<SettingsCategory, string> = {
         appearance: 'Appearance', terminal: 'Terminal Behavior',
         notifications: 'Notifications', startup: 'Startup & Integration',
-        profiles: 'Shell Profiles', automations: 'Automations',
-        shortcuts: 'Shortcuts', connections: 'Connections',
+        profiles: 'Shell Profiles', ssh: 'SSH Connections', automations: 'Automations',
+        shortcuts: 'Shortcuts', connections: 'Connections (API & MCP)',
         peers: 'Peers', snippets: 'Snippets', permissions: 'Permissions', updates: 'Updates', about: 'About & Legal',
     };
     // Peers/Connections own their own live flow; About & Legal, Updates and
@@ -234,7 +235,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // Snippets is excluded for the neighbouring reason: it applies live, persisting per mutation
     // with no Save button (plan/029 §7.1), so it too has nothing to snapshot and nothing to revert.
     const isTracked = (c: SettingsCategory): c is TrackedCategory =>
-        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations' && c !== 'snippets' && c !== 'permissions';
+        c !== 'connections' && c !== 'peers' && c !== 'about' && c !== 'updates' && c !== 'startup' && c !== 'notifications' && c !== 'automations' && c !== 'snippets' && c !== 'permissions' && c !== 'ssh';
 
     // Baseline snapshot of the ACTIVE category's tracked fields. Only one category
     // can be dirty at a time (every leave is resolved before switching).
@@ -426,7 +427,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     // baseline, while for an automation draft nothing has been written at all and only the editor
     // knows how to persist or drop it. Routing both through one handler would have made "Save" on a
     // dirty automation draft save the *settings* and then throw the draft away.
-    const [unsavedOwner, setUnsavedOwner] = useState<'settings' | 'automations'>('settings');
+    const [unsavedOwner, setUnsavedOwner] = useState<'settings' | 'automations' | 'ssh'>('settings');
 
     // Guard the internal category switch.
     const requestCategoryChange = useCallback((target: SettingsCategory) => {
@@ -437,8 +438,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         // category silently discarded an unsaved rule. The deep-link handler above and the tab-close
         // guard below reach the same code, which is why the check lives here rather than in the
         // sidebar's onClick.
-        if (activeCategory === 'automations' && isAutomationEditorDirty()) {
-            setUnsavedOwner('automations');
+        if ((activeCategory === 'automations' && isAutomationEditorDirty()) || (activeCategory === 'ssh' && isSshEditorDirty())) {
+            setUnsavedOwner(activeCategory as 'automations' | 'ssh');
             setPendingAction(() => go);
             setShowUnsaved(true);
             return;
@@ -469,7 +470,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     useEffect(() => {
         const isCategory = (c: string): c is SettingsCategory =>
             c === 'appearance' || c === 'terminal' || c === 'notifications' || c === 'startup' ||
-            c === 'profiles' || c === 'automations' || c === 'shortcuts' || c === 'connections' ||
+            c === 'profiles' || c === 'ssh' || c === 'automations' || c === 'shortcuts' || c === 'connections' ||
             c === 'peers' || c === 'snippets' || c === 'permissions' || c === 'updates' || c === 'about';
         // A known but unavailable category falls back even for an explicit deep link,
         // rather than restoring some unrelated saved category or leaving a blank page.
@@ -528,12 +529,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const handleUnsavedSave = useCallback(() => {
         setShowUnsaved(false);
-        if (unsavedOwner === 'automations') {
+        if (unsavedOwner === 'automations' || unsavedOwner === 'ssh') {
             // The navigation is CONDITIONAL on the save succeeding. A refused save that still
             // navigated would unmount the editor and take the draft with it — the loss this whole
             // guard exists to prevent, arrived at by way of its own Save button. The prompt is
             // re-raised so the user is not left believing the work was stored.
-            void saveAutomationEditorDraft().then((saved) => {
+            void (unsavedOwner === 'ssh' ? saveSshEditorDraft() : saveAutomationEditorDraft()).then((saved) => {
                 if (!saved) {
                     setShowUnsaved(true);
                     return;
@@ -549,8 +550,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
 
     const handleUnsavedDiscard = useCallback(() => {
         setShowUnsaved(false);
-        if (unsavedOwner === 'automations') {
-            discardAutomationEditorDraft();
+        if (unsavedOwner === 'automations' || unsavedOwner === 'ssh') {
+            if (unsavedOwner === 'ssh') discardSshEditorDraft();
+            else discardAutomationEditorDraft();
         } else {
             revertToBaseline();
         }
@@ -569,8 +571,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
     guardImplRef.current = (proceed: () => void) => {
         // Closing the Settings TAB discards an unsaved automation draft exactly as switching
         // category did (§5.2 names all three routes), so the same question is asked here.
-        if (activeCategory === 'automations' && isAutomationEditorDirty()) {
-            setUnsavedOwner('automations');
+        if ((activeCategory === 'automations' && isAutomationEditorDirty()) || (activeCategory === 'ssh' && isSshEditorDirty())) {
+            setUnsavedOwner(activeCategory as 'automations' | 'ssh');
             setPendingAction(() => proceed);
             setShowUnsaved(true);
             return true;
@@ -1120,6 +1122,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             ),
         },
         {
+            id: 'ssh',
+            label: 'SSH Connections',
+            icon: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h.01M7 17h.01"/></svg>,
+        },
+        {
             id: 'automations',
             label: 'Automations',
             icon: (
@@ -1139,7 +1146,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         },
         {
             id: 'connections',
-            label: 'Connections',
+            label: 'Connections (API & MCP)',
             icon: (
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M9 17H7A5 5 0 0 1 7 7h2" /><path d="M15 7h2a5 5 0 0 1 0 10h-2" /><line x1="8" y1="12" x2="16" y2="12" />
@@ -2306,6 +2313,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
             case 'notifications': return renderNotifications();
             case 'startup': return renderStartup();
             case 'profiles': return renderProfiles();
+            case 'ssh': return <section aria-label="SSH Connections"><h2>SSH Connections</h2></section>;
             case 'automations': return <AutomationsPanel />;
             case 'shortcuts': return renderShortcuts();
             case 'connections': return renderConnections();
@@ -2361,7 +2369,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
                             {Math.round(zoom * 100)}%
                         </button>
                     )}
-                    <button className="save-btn" onClick={handleSaveSettings}>Save Settings</button>
+                    {activeCategory !== 'ssh' && <button className="save-btn" onClick={handleSaveSettings}>Save Settings</button>}
                 </div>
             </div>
 

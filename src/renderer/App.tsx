@@ -433,6 +433,7 @@ const App: React.FC = () => {
 
       // Cleanup IPC listeners
       sshHydration.current?.stop();
+      sshHydration.current = null;
       cleanupIPCListeners();
       inputHandler.destroy();
 
