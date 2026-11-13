@@ -51,14 +51,18 @@ export const AuCheck: React.FC<{
     /** A second line under the label, `au-radio`'s `sub` carried over to the checkbox row. */
     sub?: React.ReactNode;
     onToggle: () => void;
-}> = ({ on, label, sub, onToggle }) => (
-    <label className={`au-checkrow${on ? ' on' : ''}`}>
-        <input type="checkbox" checked={on} onChange={onToggle} />
+    disabled?: boolean;
+    /** Drawn after the label text, e.g. an `AuInfo`. */
+    extra?: React.ReactNode;
+}> = ({ on, label, sub, onToggle, disabled, extra }) => (
+    <label className={`au-checkrow${on ? ' on' : ''}${disabled ? ' disabled' : ''}`}>
+        <input type="checkbox" checked={on} onChange={onToggle} disabled={disabled} />
         <span className="au-cmark" aria-hidden="true">
             ✓
         </span>
         <span>
             {label}
+            {extra}
             {sub && <span className="au-rsub">{sub}</span>}
         </span>
     </label>

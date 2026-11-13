@@ -23,6 +23,7 @@ import { compilePattern, groupsOf, resolvableTokens } from '../automationValidat
 import { isReservedToken, previewSubstitute, tokensUsed } from '../automationTokens';
 import type { PreviewPart } from '../automationTokens';
 import { sayPattern } from '../automationPresets';
+import { AuInfo } from '../AuInfo';
 import { AuCheck, AuField, AuHelp, AuRadio } from './AuFields';
 import { SnippetPickerButton } from './SnippetPickerButton';
 import { restoreCaret, spliceAtCaret } from './caretInsert';
@@ -78,6 +79,31 @@ export function sampleFromPattern(find: string, keep: AutomationKeep): Record<st
     }
     return out;
 }
+
+/** What *Hide message* does, behind the ⓘ next to its checkbox. */
+const HideMessageInfo: React.FC = () => (
+    <>
+        <p className="au-infolead">
+            For a message that contains a password, token or other secret.
+        </p>
+        <h4>What changes</h4>
+        <ul>
+            <li>The message shows as dots here, and as <code>••••••••</code> on the canvas, in the rule list and in Test results.</li>
+            <li>Copy and cut are blocked while it is hidden. <b>Reveal</b> shows it until you switch rules or hide it again.</li>
+            <li>It is stored encrypted, with a key kept in your system keystore (Windows Credential Manager, macOS Keychain or Linux Secret Service).</li>
+        </ul>
+        <h4>What does not change</h4>
+        <p>
+            The terminal receives exactly what you typed, with captured values and Enter handled the same way.
+            The terminal itself may still show the text if the program echoes it.
+        </p>
+        <h4>If it can&apos;t be read</h4>
+        <p>
+            On another computer, or if the keystore entry is removed, the rule stays but will not run until
+            you type the message again.
+        </p>
+    </>
+);
 
 export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch, sample }) => {
     const { parse, action } = draft.rule.graph;
@@ -176,16 +202,8 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
 
     return (
         <>
-            <label>
-                <input type="checkbox" checked={action.masked ?? false} disabled={!!unreadable}
-                    onChange={() => { setRevealed(false); dispatch({ type: 'action', patch: { masked: !action.masked } }); }} />
-                Hide message
-            </label>
-            {unreadable && <AuHelp>Type the message again before un-hiding it</AuHelp>}
-            {action.masked && <button type="button" onClick={() => setRevealed(!revealed)}>
-                {revealed ? 'Hide' : 'Reveal'}
-            </button>}
             <AuField label="Message">
+                <div className="au-frow au-frow-message">
                 <textarea
                     ref={messageRef}
                     className={`au-finput au-finput-message${hidden ? ' au-finput-masked' : ''}${model.values.message.missing ? ' err' : ''}`}
@@ -197,6 +215,19 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                     onCut={(e) => { if (hidden) e.preventDefault(); }}
                     onChange={(e) => dispatch({ type: 'action', patch: { message: e.target.value } })}
                 />
+                {action.masked && (
+                    <button
+                        className="au-mini"
+                        type="button"
+                        aria-label={revealed ? 'Hide message text' : 'Reveal message'}
+                        title={revealed ? 'Show dots again' : 'Show the message until you switch rules or hide it again'}
+                        aria-pressed={revealed}
+                        onClick={() => setRevealed(!revealed)}
+                    >
+                        {revealed ? 'Hide' : 'Reveal'}
+                    </button>
+                )}
+                </div>
                 <div className="au-tokens" aria-label="Available tokens">
                     {chips.map((chip) => (
                         <button
@@ -242,6 +273,30 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                     </AuHelp>
                 )}
             </AuField>
+
+            <AuCheck
+                on={action.masked ?? false}
+                disabled={!!unreadable}
+                label="Hide message (password or secret)"
+                extra={
+                    <AuInfo
+                        label="About hiding the message"
+                        hint="Shows the message as dots everywhere and stores it encrypted. The terminal still receives exactly what you typed. Click for details."
+                    >
+                        <HideMessageInfo />
+                    </AuInfo>
+                }
+                sub="Shown as dots on every screen and stored encrypted. The terminal still receives exactly what you typed."
+                onToggle={() => {
+                    setRevealed(false);
+                    dispatch({ type: 'action', patch: { masked: !action.masked } });
+                }}
+            />
+            {unreadable && (
+                <AuHelp warn>
+                    This hidden message can&apos;t be read on this computer. Type the message again before un-hiding it.
+                </AuHelp>
+            )}
 
             <AuCheck
                 on={substitute}
