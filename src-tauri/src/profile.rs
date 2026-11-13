@@ -594,7 +594,8 @@ mod tests {
         // new file through the resolver, add it here FIRST.
         let id = ProfileIdentity { channel: "rel", name: DEFAULT.into(), integrity: Integrity::Medium };
         for name in ["config.json", "config.dev.json", "history.db", "history.dev.db",
-                     "layout.json", "recordings", "search_index.json", "profiles.json"] {
+                     "layout.json", "recordings", "search_index.json", "profiles.json",
+                     "ssh_connections.json", "ssh_connections.dev.json"] {
             assert_eq!(id.scoped_file(name), name, "default profile must not move {name}");
         }
         assert_eq!(id.scoped_stem("TermFlow"), "TermFlow");

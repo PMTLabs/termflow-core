@@ -34,6 +34,7 @@ mod helper_identity;
 // pipe + UAC launch — see the module doc for why the direction is inverted.
 pub mod elevated_host;
 pub mod commands;
+pub mod ssh;
 #[cfg(feature = "velopack-updates")]
 pub mod updater;
 pub mod update_policy;
