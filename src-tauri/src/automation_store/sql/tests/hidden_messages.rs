@@ -41,7 +41,13 @@ fn hidden_graph_round_trip_transactions_and_schema() {
     store.save_rule(&r).unwrap();
     let encrypted = raw(&store, &r.id);
     assert!(!encrypted.contains("fresh-password"));
-    assert!(encrypted.contains("v1:"));
+    let graph: serde_json::Value = serde_json::from_str(&encrypted).unwrap();
+    assert_eq!(graph["action"]["message"], "");
+    assert_eq!(graph["action"]["masked"], true);
+    assert!(graph["action"]["messageCipher"]
+        .as_str()
+        .unwrap()
+        .starts_with("v1:"));
     let loaded = store.get_rule(&r.id).unwrap().unwrap();
     assert_eq!(
         loaded.graph.action.as_ref().unwrap().message,
@@ -84,7 +90,76 @@ fn hidden_graph_round_trip_transactions_and_schema() {
     let mut unhidden = loaded;
     unhidden.graph.action_mut().masked = false;
     store.save_rule(&unhidden).unwrap();
-    assert!(store.get_rule(&r.id).unwrap().unwrap().schema_version < 4);
+    assert_eq!(
+        store.get_rule(&r.id).unwrap().unwrap().schema_version,
+        schema_version_for(&unhidden)
+    );
+}
+
+#[test]
+fn changed_hidden_message_never_reuses_stale_cipher() {
+    for supply_stale_cipher in [false, true] {
+        let store = AutomationStore::new_in_memory();
+        let mut r = rule("changed-hidden");
+        r.graph.action_mut().masked = true;
+        r.graph.action_mut().message = "hidden-message-A".into();
+        store.save_rule(&r).unwrap();
+        let graph_a = raw(&store, &r.id);
+        let cipher_a = serde_json::from_str::<serde_json::Value>(&graph_a).unwrap()["action"]
+            ["messageCipher"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut edited = store.get_rule(&r.id).unwrap().unwrap();
+        edited.graph.action_mut().message = "hidden-message-B".into();
+        if supply_stale_cipher {
+            edited.graph.action_mut().message_cipher = Some(cipher_a.clone());
+        }
+        store.save_rule(&edited).unwrap();
+        let graph_b = raw(&store, &r.id);
+        let cipher_b = serde_json::from_str::<serde_json::Value>(&graph_b).unwrap()["action"]
+            ["messageCipher"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(cipher_b, cipher_a);
+        let mut loaded = store.get_rule(&r.id).unwrap().unwrap();
+        assert_eq!(
+            loaded.graph.action.as_ref().unwrap().message,
+            "hidden-message-B"
+        );
+        assert!(loaded
+            .graph
+            .action
+            .as_ref()
+            .unwrap()
+            .message_cipher
+            .is_none());
+        loaded.name = "unrelated edit".into();
+        store.save_rule(&loaded).unwrap();
+        store.add_target_to_rule(&r.id, "tm-2", 3000).unwrap();
+        store
+            .remove_target_from_rule(&r.id, &["tm-2".into()], 4000)
+            .unwrap();
+        store.set_verbose_until(&r.id, Some(5000)).unwrap();
+        store.sweep_expired_verbose(6000).unwrap();
+        store.mark_completed(&r.id, 7000).unwrap();
+        store.clear_completed(&r.id).unwrap();
+        store.set_enabled_checked(&r.id, false).unwrap();
+        assert_eq!(raw(&store, &r.id), graph_b);
+        assert_eq!(
+            store
+                .get_rule(&r.id)
+                .unwrap()
+                .unwrap()
+                .graph
+                .action
+                .as_ref()
+                .unwrap()
+                .message,
+            "hidden-message-B"
+        );
+    }
 }
 
 #[test]
@@ -115,11 +190,8 @@ fn unreadable_preserves_cipher_and_refuses_enable_and_duplicate_keeps_it() {
     loaded.name = "unrelated edit".into();
     store.save_rule(&loaded).unwrap();
     assert_eq!(raw(&store, &r.id), original);
-    assert!(store
-        .set_enabled_checked(&r.id, true)
-        .unwrap_err()
-        .to_string()
-        .contains("type it again"));
+    assert_eq!(store.set_enabled_checked(&r.id, true).unwrap_err().to_string(),
+        "automation store rejected the value: The hidden message can't be read on this machine — type it again.");
     let copy = store.duplicate_automation(&r.id, 2000).unwrap();
     assert_eq!(
         copy.graph.action.as_ref().unwrap().message_cipher,
@@ -144,7 +216,7 @@ fn unmasked_never_fetches_and_unavailable_hidden_saves_retry() {
     assert_eq!(source.0.load(Ordering::SeqCst), 0);
     r.graph.action_mut().masked = true;
     for _ in 0..2 {
-        assert!(store.save_rule(&r).unwrap_err().to_string().contains("Can't hide this message: no system keystore is available. Turn off Hide message to save it."));
+        assert_eq!(store.save_rule(&r).unwrap_err().to_string(), "automation store rejected the value: Can't hide this message: no system keystore is available. Turn off Hide message to save it.");
     }
     assert_eq!(source.0.load(Ordering::SeqCst), 2);
     assert!(!raw(&store, &r.id).contains("v1:"));

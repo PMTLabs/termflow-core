@@ -85,9 +85,8 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
     const [revealed, setRevealed] = React.useState(false);
     React.useEffect(() => { setRevealed(false); }, [action?.masked, draft.rule.id]);
     React.useLayoutEffect(() => {
-        // Keep the editable value, not a plaintext child node in the hidden field.
         const el = messageRef.current;
-        if (el && action?.masked && !revealed) el.defaultValue = '';
+        if (el && action && el.value !== action.message) el.value = action.message;
     });
     if (!action) return null;
     const hidden = action.masked === true && !revealed;
@@ -193,7 +192,7 @@ export const ActionPanel: React.FC<ActionPanelProps> = ({ draft, model, dispatch
                     aria-label="Message to send"
                     placeholder="e.g. prepare to do context-hand-off"
                     rows={3}
-                    value={action.message}
+                    defaultValue=""
                     onCopy={(e) => { if (hidden) e.preventDefault(); }}
                     onCut={(e) => { if (hidden) e.preventDefault(); }}
                     onChange={(e) => dispatch({ type: 'action', patch: { message: e.target.value } })}

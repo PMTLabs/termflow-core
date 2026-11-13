@@ -51,13 +51,14 @@ describe('hidden terminal message', () => {
     it.each([false, true])('masks derive, preview, warnings and tooltips (substitute=%s)', async (substitute) => {
         const r = rule(substitute);
         expect(JSON.stringify(faceFor(r, 'action', ctx))).not.toContain('password-876');
-        expect(ruleSummary(r)).toContain(MASKED_MESSAGE);
+        expect(ruleSummary(r)).toBe(ruleSummary({ ...r, graph: { ...r.graph,
+            action: { ...r.graph.action!, masked: false, message: MASKED_MESSAGE } } }));
         expect(describeRule(r).message).toBe(MASKED_MESSAGE);
         expect(JSON.stringify(problems(r))).not.toContain('secretPassword');
         await show(r);
         expect(box().value).toBe(secret);
         expect(box().classList.contains('au-finput-masked')).toBe(true);
-        expect(container.querySelector('[data-testid="action-preview"]')!.textContent).toContain(MASKED_MESSAGE);
+        expect(container.querySelector('[data-testid="action-preview"]')!.textContent).toBe(`> ${MASKED_MESSAGE}⏎`);
         expect([...container.querySelectorAll('[title]')].map((e) => e.getAttribute('title')).join('')).not.toContain('secretPassword');
         expect(clipboard('copy').defaultPrevented).toBe(true);
         expect(clipboard('cut').defaultPrevented).toBe(true);
@@ -65,8 +66,23 @@ describe('hidden terminal message', () => {
         expect(box().classList.contains('au-finput-masked')).toBe(false);
         expect(clipboard('copy').defaultPrevented).toBe(false);
         expect(clipboard('cut').defaultPrevented).toBe(false);
-        expect(container.querySelector('[data-testid="action-preview"]')!.textContent).toContain(substitute ? '${secretPassword}' : secret);
+        expect(container.querySelector('[data-testid="action-preview"]')!.textContent).toBe(substitute
+            ? 'Nothing would be sent — ${secretPassword} has nothing to stand for.' : `> ${secret}⏎`);
     });
+    it('keeps edited hidden text out of body text after input event completion', async () => {
+        await show();
+        const edited = 'edited-password-935 ${secretPassword}';
+        await act(async () => {
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(box(), edited);
+            box().dispatchEvent(new Event('input', { bubbles: true }));
+        });
+        expect(box().value).toBe(edited);
+        expect(current.rule.graph.action!.message).toBe(edited);
+        expect(box().classList.contains('au-finput-masked')).toBe(true);
+        expect(document.body.textContent).not.toContain('edited-password-935');
+        expect(document.body.textContent).not.toContain('secretPassword');
+    });
+
     it('uses the same generic blocking diagnostic words as Rust', () => {
         const r = rule(true);
         expect(problems(r).find((p) => p.code === 'action.unknownToken')).toMatchObject({
@@ -94,14 +110,19 @@ describe('hidden terminal message', () => {
         const r = rule(); r.graph.action!.message = ''; r.graph.action!.messageCipher = 'v1:unreadable';
         await show(r);
         expect(hide().disabled).toBe(true);
-        expect(container.textContent).toContain('Type the message again before un-hiding it');
+        expect([...container.querySelectorAll('.au-fhelp')].map((el) => el.textContent))
+            .toContain('Type the message again before un-hiding it');
         if (method === 'textarea') {
             await act(async () => {
                 Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(box(), 'retyped');
                 box().dispatchEvent(new Event('input', { bubbles: true }));
             });
         } else await click(method === 'token' ? container.querySelector('.au-token')! : button('Insert test snippet'));
-        expect(current.rule.graph.action!.message.length).toBeGreaterThan(0);
+        const expected = method === 'textarea' ? 'retyped' : method === 'token' ? '$0' : 'replacement snippet';
+        expect(current.rule.graph.action!.message).toBe(expected);
+        expect(box().value).toBe(expected);
+        expect(box().textContent).toBe('');
+        if (method !== 'token') expect(document.body.textContent).not.toContain(expected);
         expect(current.rule.graph.action!.messageCipher).toBeUndefined();
         expect(hide().disabled).toBe(false);
     });

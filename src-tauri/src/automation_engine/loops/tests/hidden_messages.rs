@@ -4,53 +4,90 @@ use crate::automation_engine::subst;
 #[tokio::test(start_paused = true)]
 async fn masked_messages_send_original_and_substituted_bytes() {
     for substitute in [false, true] {
-        let (engine, fake, host) = rig_with_rule(|g| {
-            g.action_mut().masked = true;
-            g.action_mut().message = "secret ${terminal.id}".into();
-            g.action_mut().substitute = substitute;
-        });
-        let send = pending(&engine, &host, "au-1", ArmState::armed(), 1000);
-        let reserved = subst::Reserved::sample();
-        let outcome = run_send(
-            &engine,
-            &host,
-            &send,
-            &reserved,
-            tokio::time::Instant::now(),
-        )
-        .await;
-        assert!(matches!(outcome, DestinationOutcome::Sent));
-        let expected = if substitute {
-            format!("secret {}", reserved.terminal_id)
-        } else {
-            "secret ${terminal.id}".into()
-        };
-        assert!(fake.written().join("").contains(&expected));
+        for submit in [false, true] {
+            let mut runs = Vec::new();
+            for masked in [false, true] {
+                let (engine, fake, host) = rig_with_rule(|g| {
+                    g.action_mut().masked = masked;
+                    g.action_mut().message = "secret ${terminal.id}".into();
+                    g.action_mut().substitute = substitute;
+                    g.action_mut().submit = submit;
+                });
+                let send = pending(&engine, &host, "au-1", ArmState::armed(), 1000);
+                let reserved = subst::Reserved::sample();
+                assert!(matches!(
+                    run_send(
+                        &engine,
+                        &host,
+                        &send,
+                        &reserved,
+                        tokio::time::Instant::now()
+                    )
+                    .await,
+                    DestinationOutcome::Sent
+                ));
+                let body = if substitute {
+                    format!("secret {}", reserved.terminal_id)
+                } else {
+                    "secret ${terminal.id}".into()
+                };
+                let mut expected = vec![
+                    (
+                        "pc-1".to_string(),
+                        format!("\x1b[200~{body}\x1b[201~").into_bytes(),
+                    ),
+                    ("pc-1".to_string(), b"\x1b[I".to_vec()),
+                ];
+                if submit {
+                    expected.push(("pc-1".to_string(), b"\r".to_vec()));
+                }
+                let writes = fake.writes.lock().unwrap().clone();
+                assert_eq!(
+                    writes, expected,
+                    "masked={masked}, substitute={substitute}, submit={submit}"
+                );
+                runs.push(writes);
+            }
+            assert_eq!(runs[0], runs[1]);
+        }
     }
 }
 
 #[tokio::test(start_paused = true)]
 async fn readable_hidden_empty_substitution_keeps_submit_behaviour() {
-    let (engine, fake, host) = rig_with_rule(|g| {
-        g.action_mut().masked = true;
-        g.action_mut().substitute = true;
-        g.action_mut().message = "${terminal.title}".into();
-    });
-    let send = pending(&engine, &host, "au-1", ArmState::armed(), 1000);
-    let mut reserved = subst::Reserved::sample();
-    reserved.terminal_title = Some(String::new());
-    assert!(matches!(
-        run_send(
-            &engine,
-            &host,
-            &send,
-            &reserved,
-            tokio::time::Instant::now()
-        )
-        .await,
-        DestinationOutcome::Sent
-    ));
-    assert!(!fake.writes.lock().unwrap().is_empty());
+    for submit in [false, true] {
+        let mut runs = Vec::new();
+        for masked in [false, true] {
+            let (engine, fake, host) = rig_with_rule(|g| {
+                g.action_mut().masked = masked;
+                g.action_mut().substitute = true;
+                g.action_mut().message = "${terminal.title}".into();
+                g.action_mut().submit = submit;
+            });
+            let send = pending(&engine, &host, "au-1", ArmState::armed(), 1000);
+            let mut reserved = subst::Reserved::sample();
+            reserved.terminal_title = Some(String::new());
+            assert!(matches!(
+                run_send(
+                    &engine,
+                    &host,
+                    &send,
+                    &reserved,
+                    tokio::time::Instant::now()
+                )
+                .await,
+                DestinationOutcome::Sent
+            ));
+            let mut expected = vec![("pc-1".to_string(), b"\x1b[I".to_vec())];
+            if submit {
+                expected.push(("pc-1".to_string(), b"\r".to_vec()));
+            }
+            let writes = fake.writes.lock().unwrap().clone();
+            assert_eq!(writes, expected, "masked={masked}, submit={submit}");
+            runs.push(writes);
+        }
+        assert_eq!(runs[0], runs[1]);
+    }
 }
 
 #[tokio::test(start_paused = true)]
@@ -117,7 +154,10 @@ async fn masked_token_refusal_does_not_name_the_token() {
     )
     .await;
     match result {
-        DestinationOutcome::Failed(reason) => assert!(!reason.contains("secretPassword")),
+        DestinationOutcome::Failed(reason) => assert_eq!(
+            reason,
+            "nothing sent — a hidden message token had no value at the moment it fired"
+        ),
         _ => panic!("must refuse"),
     }
     assert!(fake.writes.lock().unwrap().is_empty());

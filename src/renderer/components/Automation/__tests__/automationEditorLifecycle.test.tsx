@@ -118,10 +118,12 @@ describe('the editor, mounted', () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
-    async function openEditorOn(subject: AutomationRule): Promise<Api> {
+    async function openEditorOn(subject: AutomationRule, onCommit?: React.ProfilerOnRenderCallback): Promise<Api> {
         const api = installApi([subject]);
         await act(async () => {
-            root.render(<AutomationsPanel />);
+            root.render(onCommit
+                ? <React.Profiler id="mask-commit" onRender={onCommit}><AutomationsPanel /></React.Profiler>
+                : <AutomationsPanel />);
         });
         await settle();
         const edit = [...container.querySelectorAll<HTMLButtonElement>('.au-btn.sm')].find(
@@ -187,6 +189,33 @@ describe('the editor, mounted', () => {
         expect(document.body.textContent).not.toContain('fresh-password-846');
         expect(document.body.textContent).not.toContain('secretPassword');
         expect([...document.querySelectorAll('[title]')].map((e) => e.getAttribute('title')).join('')).not.toContain('secretPassword');
+    });
+
+    it.each(['report', 'error'])('redacts stale Test %s in the first masked commit', async (kind) => {
+        const maskedCommits: string[] = [];
+        const api = await openEditorOn(rule(), () => {
+            const hide = [...document.querySelectorAll('label')]
+                .find((l) => l.textContent?.includes('Hide message'))?.querySelector('input');
+            if (hide?.checked) maskedCommits.push(document.body.textContent ?? '');
+        });
+        const secret = 'stale-test-secret-935';
+        api.dryRunAutomation.mockImplementation(() => kind === 'error'
+            ? Promise.reject(new Error(secret))
+            : Promise.resolve({
+                verdict: 'would-fire',
+                steps: [{ kind: 'action', status: 'ok', detail: secret }],
+                terminalId: 'tm-a', at: 0,
+            }));
+        await act(async () => [...editor()!.querySelectorAll<HTMLButtonElement>('button')]
+            .find((b) => b.textContent?.trim() === '▶ Test')!.click());
+        await selectStep('action');
+        expect(document.body.textContent).toContain(secret);
+        await act(async () => {
+            [...document.querySelectorAll('label')].find((l) => l.textContent?.includes('Hide message'))!.querySelector('input')!.click();
+        });
+        expect(maskedCommits.length).toBeGreaterThan(0);
+        expect(maskedCommits[0]).not.toContain(secret);
+        expect(maskedCommits.every((text) => !text.includes(secret))).toBe(true);
     });
 
     it.each([false, true])('drops visible or delayed Test results after Hide (delayed=%s)', async (delayed) => {

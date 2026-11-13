@@ -33,7 +33,7 @@
  * says which problem cost it, and leaves it one click from running again. §07: *"losing work to a
  * validation rule is its own bug."*
  */
-import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type {
     AutomationLogEntry,
@@ -187,9 +187,10 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const [terminalsLoading, setTerminalsLoading] = useState(true);
 
     const [drawer, setDrawer] = useState<DrawerTab | null>(null);
-    const [report, setReport] = useState<DryRunReport | null>(null);
+    const [testResult, setTestResult] = useState<{
+        input: string; report: DryRunReport | null; error: string | null;
+    } | null>(null);
     const [running, setRunning] = useState(false);
-    const [testError, setTestError] = useState<string | null>(null);
     const [testTarget, setTestTarget] = useState<string | null>(null);
 
     const [entries, setEntries] = useState<AutomationLogEntry[]>([]);
@@ -231,10 +232,11 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
     const writing = useMemo(() => ruleFromDraft(draft), [draft]);
     const testGeneration = useRef(0);
     const testInput = JSON.stringify(writing);
-    useEffect(() => {
+    const report = testResult?.input === testInput ? testResult.report : null;
+    const testError = testResult?.input === testInput ? testResult.error : null;
+    useLayoutEffect(() => {
         testGeneration.current++;
-        setReport(null);
-        setTestError(null);
+        setTestResult(null);
         setRunning(false);
         return () => { testGeneration.current++; };
     }, [testInput]);
@@ -497,27 +499,26 @@ export const AutomationEditor: React.FC<AutomationEditorProps> = ({
         const target = testTarget ?? terminals.find((t) => t.alive)?.terminalId ?? null;
         if (!target) {
             setDrawer('test');
-            setTestError('no terminal is open to test against');
+            setTestResult({ input: testInput, report: null, error: 'no terminal is open to test against' });
             return;
         }
         setTestTarget(target);
         setDrawer('test');
         setRunning(true);
-        setTestError(null);
+        setTestResult(null);
         try {
             if (!api?.dryRunAutomation) throw new Error('the desktop bridge is not available');
             // `writing`, not `draft.rule`: a dry run reports what the rule WOULD do, and the rule
             // that would run is the one a save writes.
             const result = await api.dryRunAutomation(writing, target);
-            if (generation === testGeneration.current) setReport(result);
+            if (generation === testGeneration.current) setTestResult({ input: testInput, report: result, error: null });
         } catch (e) {
             if (generation !== testGeneration.current) return;
-            setReport(null);
-            setTestError(redactWebhookError(e));
+            setTestResult({ input: testInput, report: null, error: redactWebhookError(e) });
         } finally {
             if (generation === testGeneration.current) setRunning(false);
         }
-    }, [api, writing, terminals, testTarget]);
+    }, [api, writing, testInput, terminals, testTarget]);
 
     const setEnabled = async (enabled: boolean) => {
         if (draft.rule.id.length === 0) {
