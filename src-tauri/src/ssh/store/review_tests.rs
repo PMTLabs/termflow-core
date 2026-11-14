@@ -157,6 +157,15 @@ fn host_allowlist_and_canonical_ipv6_cover_load_write_view_and_resolver() {
     );
     let mut data = fixture();
     data.connections[0].host = "[::1]".into();
+    let disk = Temp::new();
+    let bytes = serde_json::to_vec(&data).unwrap();
+    disk.put(&bytes);
+    assert_eq!(disk.store().get().unwrap().view.connections[0].host, "::1");
+    assert_eq!(
+        std::fs::read(disk.path()).unwrap(),
+        bytes,
+        "read normalization must not rewrite disk"
+    );
     assert_eq!(
         crate::ssh::target::resolve(&data, "c-target").unwrap().hops[0].host,
         "::1"

@@ -20,7 +20,7 @@ test.each([['Needle','c-name','one','alpha'],['Second','c-host','needle','beta']
   const target = view.connections.find(c => c.id === id)!;
   const field = id === 'c-name' ? 'name' : id === 'c-host' ? 'host' : 'user';
   const data = { ...view, connections:view.connections.map(c => ({ ...c, name:'no-name', host:'no-host', user:'no-user', ...(c.id === id ? { [field]:target[field] } : {}) })) };
-  render('needle', data); expect([...container.querySelectorAll('[data-row-id^="c-"]')].map(n => n.getAttribute('data-row-id'))).toEqual([id]);
+  render('needle', data); expect([...container.querySelectorAll('[data-row-id]')].map(n => n.getAttribute('data-row-id'))).toEqual(id === 'c-name' ? [id] : id === 'c-host' ? ['f-root',id] : ['f-root','f-child',id]);
 });
 test('filter expansion drives children, aria-expanded and glyph together', () => {
   localStorage.setItem('ssh-collapsed',JSON.stringify(['f-root','f-child'])); render('needle');

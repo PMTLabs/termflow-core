@@ -236,6 +236,10 @@ impl Persisted {
         }
     }
     fn normalize(&mut self) {
+        // Hand-edited valid bracketed IPv6 is served in the same bare form as IPC input.
+        for connection in &mut self.connections {
+            connection.host = bare_host(&connection.host).into();
+        }
         self.folders.sort_by_key(|f| f.order);
         self.connections.sort_by_key(|c| c.order);
         let parents: HashSet<_> = self

@@ -1,5 +1,19 @@
+/** @jest-environment jsdom */
+jest.mock('@tauri-apps/api/core', () => ({ invoke:jest.fn().mockResolvedValue({}) }));
+jest.mock('@tauri-apps/api/event', () => ({ listen:jest.fn().mockResolvedValue(() => {}) }));
+jest.mock('@tauri-apps/api/window', () => ({ getCurrentWindow:jest.fn(() => ({label:'main'})) }));
+import tauriBridge from '../tauri-bridge';
+import browserBridge from '../browser-bridge';
+import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge, browserSshBridge } from '../sshBridge';
 import type { SshStoreApi } from '../../types/ssh';
+test('both actual bridges wire the SSH surface',async()=>{
+  expect(browserBridge.ssh).toBe(browserSshBridge);
+  await expect(browserBridge.ssh!.get()).rejects.toMatchObject({code:'desktop-only'});
+  expect(tauriBridge.ssh).toBeDefined();
+  await tauriBridge.ssh!.setBookmark('c-real',true);
+  expect(invoke).toHaveBeenCalledWith('ssh_set_bookmark',{id:'c-real',bookmarked:true});
+});
 describe('SSH bridge contract', () => {
   const folder = { parentId: null, name: 'F', icon: 'server', color: 'sky' };
   const connection = { folderId: null, name: 'C', host: 'h', port: 22, user: 'u', auth: 'agent' as const, identityFile: null, jumpConnectionId: null, extraOptions: [], bookmarked: true };
