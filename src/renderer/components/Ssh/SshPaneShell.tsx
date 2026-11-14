@@ -17,8 +17,9 @@ export function SshPaneShell(props: SshPaneShellProps) {
     <div className="ssh-pane-chrome">
       {view.state === 'needs-secret' && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
       {(view.state === 'needs-hostkey' || (view.state === 'error' && view.hostKey?.changed)) && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
-      {(view.state === 'disconnected' || view.state === 'error') && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
+      {(view.state === 'disconnected' || (view.state === 'error' && !view.hostKey?.changed)) && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
       {view.state === 'connecting' && <span role="status">Connecting…</span>}
+      {connected && view.reason && <span role="status">{view.reason}</span>}
     </div>
     <div className="ssh-pane-body">
       <aside className={props.browserCollapsed ? 'ssh-browser collapsed' : 'ssh-browser'} aria-label="Remote browser" aria-disabled={!connected}>
