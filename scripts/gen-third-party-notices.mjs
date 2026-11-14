@@ -12,7 +12,8 @@
 //        sibling default). Fabric deps are included when the crate is present (Pro).
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
-import { join, dirname, isAbsolute } from 'node:path';
+import { join, dirname, isAbsolute, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const ROOT = process.cwd();
 const LICENSE_FILE_RE = /^(LICENSE|LICENCE|COPYING|NOTICE|UNLICENSE)(\.|$|-)/i;
@@ -45,8 +46,7 @@ function rustDeps(manifestPath, label) {
   try {
     meta = JSON.parse(run('cargo', ['metadata', '--format-version', '1', '--manifest-path', manifestPath]));
   } catch (e) {
-    console.warn(`[notices] cargo metadata failed for ${label}: ${e.message}`);
-    return [];
+    throw new Error(`[notices] cargo metadata failed for ${label}: ${e.message}`);
   }
   const members = new Set(meta.workspace_members || []);
   const deps = [];
@@ -68,10 +68,29 @@ function rustDeps(manifestPath, label) {
 // Rust-only dependency updates can retain the already generated JS attributions
 // when bun.lock/package.json are unchanged. This avoids fetching a notice tool.
 // Explicit opt-in only; ordinary release regeneration still scans the JS tree.
+function jsFingerprint() {
+  const rootPackage = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const files = ['package.json', 'bun.lock'];
+  for (const workspace of rootPackage.workspaces || []) {
+    if (workspace.endsWith('/*')) {
+      const dir = workspace.slice(0, -2);
+      for (const name of readdirSync(join(ROOT, dir))) {
+        const manifest = `${dir}/${name}/package.json`;
+        if (existsSync(join(ROOT, manifest))) files.push(manifest);
+      }
+    } else files.push(`${workspace}/package.json`);
+  }
+  const hash = createHash('sha256');
+  for (const file of files.sort()) hash.update(file + '\0').update(readFileSync(join(ROOT, file))).update('\0');
+  return hash.digest('hex');
+}
 function cachedJsNotices() {
   const previous = readFileSync(join(ROOT, 'legal', 'THIRD-PARTY-NOTICES.txt'), 'utf8');
+  if (previous.match(/^JavaScript inputs SHA-256: ([a-f0-9]{64})$/m)?.[1] !== jsFingerprint()) {
+    throw new Error('JavaScript notice inputs changed or fingerprint missing; run a full regeneration');
+  }
   const entries = [];
-  for (const block of previous.split(/\r?\n={80}\r?\n/)) {
+  for (const block of previous.split(/\r?\n={80}\r?\n(?=\r?\n?[^\r\n]+ [^ ]+  —  [^\r\n]+  \[(?:javascript|rust \([^\r\n]+\))\]\r?\n-+\r?\n)/)) {
     const match = block.trim().match(/^(.+) ([^ ]+)  —  (.+)  \[javascript\]\r?\n-+\r?\n([\s\S]*)$/);
     if (!match) continue;
     const [, name, version, license, text] = match;
@@ -113,11 +132,17 @@ function jsDeps() {
 
 function resolveFabricDir() {
   const o = process.env.TERMFLOW_FABRIC_DIR;
-  if (o && o.trim()) return isAbsolute(o) ? o : join(ROOT, o);
-  return join(ROOT, '..', 'termflow-fabric');
+  const candidates = o?.trim() ? [isAbsolute(o) ? o : join(ROOT, o)] : [
+    join(ROOT, '..', 'termflow-fabric'),
+    join(dirname(resolve(ROOT, run('git', ['rev-parse', '--git-common-dir']).trim())), '..', 'termflow-fabric'),
+  ];
+  const found = candidates.find(dir => existsSync(join(dir, 'Cargo.toml')));
+  if (!found) throw new Error(`Fabric source not found (set TERMFLOW_FABRIC_DIR): ${candidates.join(', ')}`);
+  return found;
 }
 
 // --- collect ---------------------------------------------------------------
+const js = jsDeps();
 const rust = [
   ...rustDeps(join(ROOT, 'src-tauri', 'Cargo.toml'), 'core'),
 ];
@@ -129,8 +154,6 @@ if (existsSync(join(fabricDir, 'Cargo.toml'))) {
   console.log(`[notices] fabric not found at ${fabricDir}; Rust notices cover the core only`);
 }
 for (const d of rust) d.text = readLicenseTexts(d.dir);
-
-const js = jsDeps();
 
 // dedup by name@version, prefer an entry that has license text
 const byKey = new Map();
@@ -152,6 +175,7 @@ hand-edit — regenerate with: node scripts/gen-third-party-notices.mjs
 
 Components: ${all.length} (${withText} with reproduced license text)
 Rust: ${rust.length}  ·  JavaScript: ${js.length}
+JavaScript inputs SHA-256: ${jsFingerprint()}
 A human-readable summary is also published at https://termflow.app/licenses.
 
 ================================================================================
