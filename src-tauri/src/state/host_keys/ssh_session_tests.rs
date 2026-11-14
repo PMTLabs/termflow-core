@@ -17,7 +17,7 @@ fn open(f: &Fixture, keys: &HostKeys, leaf: &str, connection: &str) {
 fn reconcile(f: &Fixture, keys: &HostKeys) { f.registry.reconcile_owners(|leaf, expected| keys.ssh_owner_receipt(leaf).is_some_and(|current| expected == Some(current))); }
 #[tokio::test]
 async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
-    for transition in ["depart", "cancel", "self-take", "abort", "staged-exit"] {
+    for transition in ["depart", "cancel", "self-take", "abort", "staged-exit", "reload-settle", "unstarted-depart"] {
         let keys = HostKeys::default();
         let mut page = Page::new(&keys, "held-round2");
         let a = page.enter(&keys, "tm-a");
@@ -25,12 +25,21 @@ async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
         let f = fixture(); open(&f, &keys, "tm-a", "c-a");
         wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
         match transition {
-            "depart" => {
+            "depart" | "unstarted-depart" => {
+                if transition == "unstarted-depart" { assert_eq!(page.admit(&keys, a.pi), receipt); }
                 page.op(&keys, PaneOp::Depart { pi: a.pi });
                 reconcile(&f, &keys);
                 assert!(f.registry.state("tm-a", false).is_ok(), "depart parked receipt");
                 let next = page.enter(&keys, "tm-a");
                 assert_eq!(page.admit(&keys, next.pi), receipt);
+            }
+            "reload-settle" => {
+                let mut reload = Page::register(&keys, page.label, page.wi);
+                assert_eq!(reload.op(&keys, PaneOp::Settle), PaneResult::Ok);
+                reconcile(&f, &keys);
+                assert!(f.registry.state("tm-a", false).is_ok(), "reload parked receipt");
+                let next = reload.enter(&keys, "tm-a");
+                assert_eq!(reload.admit(&keys, next.pi), receipt);
             }
             "cancel" | "self-take" => {
                 page.op(&keys, PaneOp::Stash { tx: "round2".into(), pairs: vec![a], ui: None });

@@ -145,6 +145,18 @@ impl HostKeys {
             _ => false,
         }).map(|(leaf, _)| leaf.clone()).collect();
         for leaf in leaves {
+            // Settling a replacement renderer page is not destroying its OS
+            // window. Park SSH receipts at that surviving page until admission.
+            let row = inner.owners.get(&leaf).unwrap();
+            let old_pg = match row.owner { Owner::Pane(pi) => pi.pg, Owner::Parked { pg, .. } => pg, _ => unreachable!() };
+            let successor = ended.iter().find(|p| p.pg == old_pg).and_then(|p| inner.window_pages.live_page(p.wi));
+            if row.ssh_reserved && !matches!(row.state, OwnerState::Closing(_)) {
+                if let Some(pg) = successor {
+                    let by = match row.owner { Owner::Pane(pi) | Owner::Parked { by: pi, .. } => pi, _ => unreachable!() };
+                    inner.owners.get_mut(&leaf).unwrap().owner = Owner::Parked { pg, by };
+                    continue;
+                }
+            }
             if !(Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf)) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned; }
         }
         // A dead source cannot advertise a drag, but its carried members must
