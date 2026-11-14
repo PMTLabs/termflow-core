@@ -1174,6 +1174,15 @@ const App: React.FC = () => {
       // "not my window", so a not-yet-cleared payload can still win. Inheritance
       // is a one-time copy either way: the new tab keeps whatever it is given.
       const titleColorForTerminal = (id?: string) => terminalTitleColor(store.getState(), id);
+      // Colour a SPLIT pane must wear to match the agent that asked for it. Omitted when the
+      // tab already wears that colour (the pane falls back to it) so no redundant pane-level
+      // colour is pinned; omitted when there is no caller colour so the split target's applies.
+      const splitTitleColor = (splitTabId?: string): string | undefined => {
+        const c = titleColorForTerminal(options.parentTerminalId) || options.parentTitleColor || undefined;
+        if (!c) return undefined;
+        const tabColor = store.getState().tabs.tabs.find((t: any) => t.id === splitTabId)?.titleColor;
+        return c === tabColor ? undefined : c;
+      };
 
       if (terminalId && !paneId && (!tabId || !tabExists(tabId))) {
         // Mode 0: Create a NEW tab for a backend-spawned terminal that has no
@@ -1267,6 +1276,7 @@ const App: React.FC = () => {
           name: name,
           terminalId: leafId, // the tm- leaf the backend minted
           apiCreated: true, // plan 048 — Canvas Mode's Main only filter
+          titleColor: splitTitleColor(tabId),
         }));
 
         captureInstalled(tabId, leafId);
@@ -1391,6 +1401,7 @@ const App: React.FC = () => {
             name: name || tab.title,
             terminalId: newTerminalId,
             apiCreated: true, // plan 048
+            titleColor: splitTitleColor(tabId),
           }));
 
           captureInstalled(tabId, newTerminalId);
@@ -1590,6 +1601,7 @@ const App: React.FC = () => {
           name: name,
           terminalId: leafId, // the leaf the backend minted for this pane
           apiCreated: true, // plan 048
+          titleColor: splitTitleColor(tabId),
         }));
 
         captureInstalled(tabId, leafId);
