@@ -1,0 +1,53 @@
+/** @jest-environment jsdom */
+import React, { act } from 'react';
+import { createRoot, Root } from 'react-dom/client';
+import { Provider } from 'react-redux';
+import { configureStore } from '@reduxjs/toolkit';
+import sshReducer, { applyView } from '../../../store/slices/sshSlice';
+import uiReducer from '../../../store/slices/uiSlice';
+import { SshConnectionEditor } from '../SshConnections/SshConnectionEditor';
+import { SshConnectionsPanel } from '../SshConnections/SshConnectionsPanel';
+import { isSshEditorDirty, saveSshEditorDraft } from '../../../services/sshEditorGuard';
+import type { SshConnection, SshStoreApi, SshView } from '../../../types/ssh';
+const row:SshConnection = { id:'c-one',name:'One',host:'one',port:22,user:'',auth:'agent',identityFile:null,jumpConnectionId:null,folderId:null,extraOptions:[],bookmarked:false,order:0,lastUsedAt:null,hasSavedSecret:false };
+const good=(revision=1):SshView=>({revision,folders:[{id:'f-one',parentId:null,name:'Folder',icon:'folder',color:'grey',order:1}],connections:[row,{...row,id:'c-two',name:'Two',order:2}],loadError:null});
+let host:HTMLDivElement; let root:Root; let api:SshStoreApi; let close:jest.Mock;
+beforeEach(()=>{(globalThis as any).IS_REACT_ACT_ENVIRONMENT=true; host=document.createElement('div');document.body.appendChild(host);root=createRoot(host); close=jest.fn();api={get:jest.fn(),reload:jest.fn(),upsertConnection:jest.fn().mockResolvedValue({revision:2,view:good(2)}),deleteConnection:jest.fn(),upsertFolder:jest.fn(),deleteFolder:jest.fn(),move:jest.fn(),setBookmark:jest.fn()} as unknown as SshStoreApi;window.electronAPI={ssh:api} as any;});
+afterEach(()=>{act(()=>root.unmount());host.remove();});
+const button=(label:string)=>[...document.querySelectorAll<HTMLButtonElement>('button')].find(b=>b.textContent?.trim()===label)!;
+const click=async(label:string)=>{await act(async()=>button(label).click());};
+async function change(name:string,value:string){const input=host.querySelector<HTMLInputElement>(`input[name="${name}"]`)!;await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value')!.set!.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});}
+const editor=(view=good(),focusName=0)=>act(()=>root.render(<SshConnectionEditor connectionId="c-one" initialFolder={null} view={view} api={api} onSaved={()=>{}} onClose={close} focusName={focusName}/>));
+function panel(){const store=configureStore({reducer:{ssh:sshReducer,ui:uiReducer}});store.dispatch(applyView({revision:1,view:good()}));act(()=>root.render(<Provider store={store}><SshConnectionsPanel/></Provider>));return store;}
+async function select(id:string){await act(async()=>host.querySelector<HTMLElement>(`[data-row-id="${id}"] > .ssh-tree-row`)!.click());}
+test.each(['22.5','-1','70000'])('invalid port %s is a field error before IPC',async value=>{editor();await change('port',value);await click('Save connection');expect(api.upsertConnection).not.toHaveBeenCalled();expect(host.querySelector('input[name="port"]')!.closest('label')!.textContent).toContain('integer');});
+test('unclosed quote is shown under extraOptions, not as a generic save error',async()=>{editor();await change('extraOptions','SetEnv="unfinished');await click('Save connection');expect(api.upsertConnection).not.toHaveBeenCalled();expect(host.querySelector('input[name="extraOptions"]')!.closest('label')!.querySelector('[role="alert"]')!.textContent).toContain('unclosed');});
+test('Keep mine synchronizes options baseline with the external record',async()=>{editor();await change('extraOptions','SetEnv=A');const next=good(2);next.connections[0]={...row,extraOptions:[['SetEnv','B']]};editor(next);await click('Keep mine');await change('extraOptions','SetEnv=B');expect(isSshEditorDirty()).toBe(false);});
+test.each(['removed','read-only'])('Discard remains enabled and refused save is visible for %s',async mode=>{editor();await change('name','dirty');const next=good(2);next.connections=[];if(mode==='read-only')next.loadError={code:'invalid-json',message:'corrupt'};editor(next);expect(button('Discard changes').disabled).toBe(false);let result=true;await act(async()=>{result=await saveSshEditorDraft();});expect(result).toBe(false);expect(host.textContent).toContain('Cannot save:');expect(api.upsertConnection).not.toHaveBeenCalled();if(mode==='removed')expect(button('Close')).toBeTruthy();await click('Discard changes');expect(close).toHaveBeenCalledTimes(1);});
+test('removed dirty row navigation: Save refuses visibly, Discard leaves without a loop',async()=>{const store=panel();await select('c-one');await change('name','dirty');act(()=>store.dispatch(applyView({revision:2,view:{...good(2),connections:[good().connections[1]]}})));await select('c-two');await click('Save');expect(host.textContent).toContain('Cannot save: connection was deleted');await click('Discard');expect(host.querySelector<HTMLInputElement>('input[name="name"]')!.value).toBe('Two');expect(api.upsertConnection).not.toHaveBeenCalled();});
+test('rename focuses name even on an already selected connection',async()=>{panel();await select('c-one');const field=host.querySelector<HTMLInputElement>('input[name="host"]')!;field.focus();await act(async()=>host.querySelector<HTMLElement>('[data-row-id="c-one"] > .ssh-tree-row')!.dispatchEvent(new KeyboardEvent('keydown',{key:'F2',bubbles:true})));expect(document.activeElement).toBe(host.querySelector('input[name="name"]'));});
+test('selected folder label follows the live view',async()=>{const store=panel();await select('f-one');const next=good(2);next.folders[0].name='Live rename';act(()=>store.dispatch(applyView({revision:2,view:next})));expect(host.querySelector('.ssh-editor-pane')!.textContent).toBe('Live rename');});
+test('a connection used as a jump cannot itself acquire a jump',()=>{const next=good();next.connections[1]={...next.connections[1],jumpConnectionId:'c-one'};next.connections.push({...row,id:'c-three'});editor(next);expect([...host.querySelectorAll('select[name="jumpConnectionId"] option')].map(o=>o.getAttribute('value'))).toEqual(['']);});
+test('mutation store-read-only refreshes the view to expose the banner',async()=>{const store=panel();(api.setBookmark as jest.Mock).mockRejectedValue({code:'store-read-only',message:'path: corrupt'});(api.get as jest.Mock).mockResolvedValue({revision:2,view:{...good(2),connections:[],loadError:{code:'invalid-json',message:'path: corrupt'}}});await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="Bookmark One"]')!.click());expect(api.get).toHaveBeenCalledTimes(1);expect(store.getState().ssh.view.loadError?.message).toBe('path: corrupt');expect(host.querySelector('.ssh-read-only')!.textContent).toContain('path: corrupt');});
+test('deleting a selected ancestor locally closes the editor',async()=>{const store=panel();const next=good(2);next.connections[0]={...row,folderId:'f-one'};act(()=>store.dispatch(applyView({revision:2,view:next})));await select('c-one');(api.deleteFolder as jest.Mock).mockResolvedValue({revision:3,view:{...good(3),folders:[],connections:[good().connections[1]]}});await act(async()=>host.querySelector<HTMLElement>('[data-row-id="f-one"] > .ssh-tree-row')!.dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true})));await click('Delete');expect(api.deleteFolder).toHaveBeenCalledWith({id:'f-one',recursive:true});expect(host.querySelector('input[name="name"]')).toBeNull();});
+test.each(['folder','menu','delete'])('read-only recovery never resurrects the %s overlay',async overlay=>{
+  const store=panel();
+  if(overlay==='folder')await click('New folder');
+  else if(overlay==='delete'){await select('c-one');await click('Delete connection…');}
+  else await act(async()=>host.querySelector<HTMLElement>('[data-row-id="f-one"] > .ssh-tree-row')!.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  expect(document.querySelector(overlay==='menu'?'.context-menu':'[role="dialog"]')).not.toBeNull();
+  act(()=>store.dispatch(applyView({revision:2,view:{...good(2),folders:[],connections:[],loadError:{code:'bad',message:'corrupt'}}})));
+  act(()=>store.dispatch(applyView({revision:3,view:good(3)})));
+  expect(document.querySelector('.context-menu')).toBeNull();expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+test('removed editor recovery never resurrects delete confirmation',async()=>{editor();await click('Delete connection…');expect(document.querySelector('[role="dialog"]')).not.toBeNull();editor({...good(2),connections:[]});editor(good(3));expect(document.querySelector('[role="dialog"]')).toBeNull();});
+test('unavailable jump and folder ids remain visible during read-only instead of falling back',()=>{
+  const next=good();next.connections[0]={...row,jumpConnectionId:'c-two',folderId:'f-one'};editor(next);
+  const jump=host.querySelector<HTMLSelectElement>('select[name="jumpConnectionId"]')!;const folder=host.querySelector<HTMLSelectElement>('select[name="folderId"]')!;
+  expect(jump.selectedOptions[0].textContent).toBe('Two');expect(folder.selectedOptions[0].textContent).toBe('Folder');expect(host.textContent).not.toContain('(unavailable:');
+  editor({...good(2),connections:[],folders:[],loadError:{code:'bad',message:'corrupt'}});
+  expect(jump.value).toBe('c-two');expect(jump.selectedOptions[0].textContent).toBe('(unavailable: c-two)');expect(jump.selectedOptions[0].disabled).toBe(true);
+  expect(folder.value).toBe('f-one');expect(folder.selectedOptions[0].textContent).toBe('(unavailable: f-one)');expect(folder.selectedOptions[0].disabled).toBe(true);
+  editor(next);expect(jump.selectedOptions[0].textContent).toBe('Two');expect(folder.selectedOptions[0].textContent).toBe('Folder');expect(host.textContent).not.toContain('(unavailable:');
+});
+test('picker and both reload catches show object messages',async()=>{window.electronAPI={ssh:api,pickFile:jest.fn().mockRejectedValue({message:'picker explains'})} as any;const next=good();next.connections[0]={...row,auth:'keyFile',identityFile:'key'};editor(next);await click('Browse…');expect(host.textContent).toContain('picker explains');const store=panel();(api.reload as jest.Mock).mockRejectedValue({message:'reload explains'});act(()=>store.dispatch(applyView({revision:2,view:{...good(2),loadError:{code:'bad',message:'bad'}}})));await click('Reload');expect(store.getState().ui.toasts.some(t=>t.message==='reload explains')).toBe(true);});

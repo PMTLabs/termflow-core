@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -91,6 +92,8 @@ export interface NetworkInterfaceInfo {
 
 // Define the interface to match existing usage
 interface ElectronAPI {
+  pickFile?: (title?: string) => Promise<string | null>;
+  ssh?: import('../types/ssh').SshStoreApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
     offset: number;
@@ -361,6 +364,7 @@ const buildAuthHeaders = (): Record<string, string> => {
 };
 
 const tauriBridge: ElectronAPI = {
+  ssh: createSshBridge(invoke, listen),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
     const response = await fetch(`${await apiBase()}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
       headers: {
@@ -551,6 +555,10 @@ const tauriBridge: ElectronAPI = {
   // Settings "Default editor" Browse… button. Opens a native single-file picker.
   // Filters surface common executables per-OS while still letting the user pick
   // any file (e.g. a Unix binary with no extension) via "All files".
+  pickFile: async (title?: string) => {
+    const selection = await openFileDialog({ multiple:false, directory:false, title:title ?? 'Select file' });
+    return typeof selection === 'string' ? selection : null;
+  },
   pickExecutablePath: async (title?: string) => {
     const selection = await openFileDialog({
       multiple: false,

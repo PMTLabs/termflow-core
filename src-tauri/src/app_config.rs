@@ -198,10 +198,10 @@ pub fn write_atomic(path: &std::path::Path, contents: &str) -> Result<(), String
 
 /// Exclusive inter-process lock over one config file, held for a whole
 /// read-merge-write. Released when dropped (and by the OS if we die).
-struct ConfigLock(std::fs::File);
+pub(crate) struct ConfigLock(std::fs::File);
 
 impl ConfigLock {
-    fn acquire(path: &std::path::Path) -> Result<Self, String> {
+    pub(crate) fn acquire(path: &std::path::Path) -> Result<Self, String> {
         use fs4::FileExt;
         let lock_path = path.with_extension("lock");
         let f = std::fs::OpenOptions::new()

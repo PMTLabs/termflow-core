@@ -1,3 +1,4 @@
+import sshReducer from './slices/sshSlice';
 import broadcastReducer, { shouldStopBroadcast, stopBroadcast } from './slices/broadcastSlice';
 import { combineReducers, configureStore } from '@reduxjs/toolkit';
 import tabsReducer from './slices/tabsSlice';
@@ -38,6 +39,7 @@ const combinedReducer = combineReducers({
   peers: peersReducer,
   canvas: canvasReducer,
   sessionExit: sessionExitReducer,
+  ssh: sshReducer,
 });
 export const store = configureStore({
   reducer: (state: ReturnType<typeof combinedReducer> | undefined, action: Parameters<typeof combinedReducer>[1]) => {
