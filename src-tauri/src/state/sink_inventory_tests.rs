@@ -58,6 +58,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("pty_host_client.rs", &["list_sessions_numbered_within"], "source-client epoch under ownership mutex through numbered FIFO enqueue"),
     ("pty_host_client.rs", &["bind_sessions", "lost", "close_transport"], "exact retained ConnState; authority connect/disconnect compares binding epoch"),
     ("pty_host_client.rs", &["wire_client"], "original reader channel/key/epoch/pc under ownership mutex at offset/output publication"),
+    ("pty_manager/ssh_helpers.rs", &["retire"], "out of scope private helper-file retirement, not terminal/owner retirement; retained immutable entry identity, cross-process root lock and per-entry execution leases; cancel_reconnect_retains_hooks_retires_only_quiescent_payloads and helper_exclusive_publish_and_safe_sweep behavioral gates"),
     ("pty_manager/spawn.rs", &["spawn_terminal"], "Placing original pc under ownership mutex through projection/index inserts; retained unpublished child"),
     ("session_notify.rs", &["subclass_proc"], "out of scope OS resume notification"),
     ("state/engine_host.rs", &["emit_activity", "emit_changed", "emit_state"], "out of scope rule UI state notifications"),
