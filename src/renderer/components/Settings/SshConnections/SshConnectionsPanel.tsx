@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../../store';
 import { applyView, selectTree } from '../../../store/slices/sshSlice';
@@ -23,6 +23,7 @@ export function SshConnectionsPanel() {
   const readOnly = !!state.view.loadError;
   const [menu, setMenu] = useState<(SshMenuTarget & { key:number }) | null>(null);
   const [folderDraft, setFolderDraft] = useState<SshFolderInput | null>(null);
+  useEffect(() => { if (readOnly) { setMenu(null); setFolderDraft(null); } }, [readOnly]);
   const [draftFolder, setDraftFolder] = useState<string | null | undefined>(undefined);
   const [pending, setPending] = useState<(() => void) | null>(null);
   const api = window.electronAPI?.ssh;

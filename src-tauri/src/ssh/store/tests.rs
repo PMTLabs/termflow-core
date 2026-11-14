@@ -1,6 +1,8 @@
 use super::*;
 #[path = "review_tests.rs"]
 mod review_tests;
+#[path = "round2_tests.rs"]
+mod round2_tests;
 use std::sync::atomic::{AtomicUsize, Ordering};
 struct Temp(PathBuf);
 impl Temp {

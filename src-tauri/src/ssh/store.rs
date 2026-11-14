@@ -705,10 +705,7 @@ impl Store {
                 Ok(data)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Persisted::default()),
-            Err(e) => Err(StoreError::new(
-                "read-error",
-                format!("{}: {e}", self.path.display()),
-            )),
+            Err(e) => Err(StoreError::new("read-error", e.to_string())),
         }
     }
     fn lock(&self) -> Result<ConfigLock> {

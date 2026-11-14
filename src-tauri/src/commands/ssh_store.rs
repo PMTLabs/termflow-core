@@ -56,7 +56,14 @@ fn ssh_folder_upsert_inner(
     store: &Store,
     input: FolderInput,
 ) -> Result<Reply, StoreError> {
-    mutate(store, app, |s| s.upsert_folder(input))
+    let mut id = None;
+    let reply = mutate(store, app, |s| {
+        s.upsert_folder(input)?;
+        id = s.folders.last().map(|row| row.id.clone());
+        Ok(())
+    })?;
+    log::info!("SSH folder upsert: id={id:?}");
+    Ok(reply)
 }
 #[tauri::command]
 pub fn ssh_folder_delete<R: tauri::Runtime>(
@@ -73,7 +80,9 @@ fn ssh_folder_delete_inner(
     id: String,
     recursive: bool,
 ) -> Result<Reply, StoreError> {
-    mutate(store, app, |s| s.delete_folder(&id, recursive))
+    let reply = mutate(store, app, |s| s.delete_folder(&id, recursive))?;
+    log::info!("SSH folder delete: id={id}");
+    Ok(reply)
 }
 #[tauri::command]
 pub fn ssh_connection_upsert<R: tauri::Runtime>(
@@ -88,7 +97,14 @@ fn ssh_connection_upsert_inner(
     store: &Store,
     input: ConnectionInput,
 ) -> Result<Reply, StoreError> {
-    mutate(store, app, |s| s.upsert_connection(input))
+    let mut id = None;
+    let reply = mutate(store, app, |s| {
+        s.upsert_connection(input)?;
+        id = s.connections.last().map(|row| row.id.clone());
+        Ok(())
+    })?;
+    log::info!("SSH connection upsert: id={id:?}");
+    Ok(reply)
 }
 #[tauri::command]
 pub fn ssh_connection_delete<R: tauri::Runtime>(
@@ -103,7 +119,9 @@ fn ssh_connection_delete_inner(
     store: &Store,
     id: String,
 ) -> Result<Reply, StoreError> {
-    mutate(store, app, |s| s.delete_connection(&id))
+    let reply = mutate(store, app, |s| s.delete_connection(&id))?;
+    log::info!("SSH connection delete: id={id}");
+    Ok(reply)
 }
 #[tauri::command]
 pub fn ssh_move<R: tauri::Runtime>(
@@ -124,7 +142,9 @@ fn ssh_move_inner(
     parent_id: Option<String>,
     index: usize,
 ) -> Result<Reply, StoreError> {
-    mutate(store, app, |s| s.move_row(&kind, &id, parent_id, index))
+    let reply = mutate(store, app, |s| s.move_row(&kind, &id, parent_id, index))?;
+    log::info!("SSH move: kind={kind}, id={id}");
+    Ok(reply)
 }
 #[tauri::command]
 pub fn ssh_set_bookmark<R: tauri::Runtime>(
@@ -141,9 +161,14 @@ fn ssh_set_bookmark_inner(
     id: String,
     bookmarked: bool,
 ) -> Result<Reply, StoreError> {
-    mutate(store, app, |s| s.set_bookmark(&id, bookmarked))
+    let reply = mutate(store, app, |s| s.set_bookmark(&id, bookmarked))?;
+    log::info!("SSH bookmark: id={id}");
+    Ok(reply)
 }
 
+#[cfg(test)]
+#[path = "ssh_store_log_tests.rs"]
+mod log_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

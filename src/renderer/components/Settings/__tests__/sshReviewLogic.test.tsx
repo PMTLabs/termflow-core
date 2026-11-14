@@ -30,4 +30,24 @@ test('selected folder label follows the live view',async()=>{const store=panel()
 test('a connection used as a jump cannot itself acquire a jump',()=>{const next=good();next.connections[1]={...next.connections[1],jumpConnectionId:'c-one'};next.connections.push({...row,id:'c-three'});editor(next);expect([...host.querySelectorAll('select[name="jumpConnectionId"] option')].map(o=>o.getAttribute('value'))).toEqual(['']);});
 test('mutation store-read-only refreshes the view to expose the banner',async()=>{const store=panel();(api.setBookmark as jest.Mock).mockRejectedValue({code:'store-read-only',message:'path: corrupt'});(api.get as jest.Mock).mockResolvedValue({revision:2,view:{...good(2),connections:[],loadError:{code:'invalid-json',message:'path: corrupt'}}});await act(async()=>host.querySelector<HTMLButtonElement>('[aria-label="Bookmark One"]')!.click());expect(api.get).toHaveBeenCalledTimes(1);expect(store.getState().ssh.view.loadError?.message).toBe('path: corrupt');expect(host.querySelector('.ssh-read-only')!.textContent).toContain('path: corrupt');});
 test('deleting a selected ancestor locally closes the editor',async()=>{const store=panel();const next=good(2);next.connections[0]={...row,folderId:'f-one'};act(()=>store.dispatch(applyView({revision:2,view:next})));await select('c-one');(api.deleteFolder as jest.Mock).mockResolvedValue({revision:3,view:{...good(3),folders:[],connections:[good().connections[1]]}});await act(async()=>host.querySelector<HTMLElement>('[data-row-id="f-one"] > .ssh-tree-row')!.dispatchEvent(new KeyboardEvent('keydown',{key:'Delete',bubbles:true})));await click('Delete');expect(api.deleteFolder).toHaveBeenCalledWith({id:'f-one',recursive:true});expect(host.querySelector('input[name="name"]')).toBeNull();});
+test.each(['folder','menu','delete'])('read-only recovery never resurrects the %s overlay',async overlay=>{
+  const store=panel();
+  if(overlay==='folder')await click('New folder');
+  else if(overlay==='delete'){await select('c-one');await click('Delete connection…');}
+  else await act(async()=>host.querySelector<HTMLElement>('[data-row-id="f-one"] > .ssh-tree-row')!.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true})));
+  expect(document.querySelector(overlay==='menu'?'.context-menu':'[role="dialog"]')).not.toBeNull();
+  act(()=>store.dispatch(applyView({revision:2,view:{...good(2),folders:[],connections:[],loadError:{code:'bad',message:'corrupt'}}})));
+  act(()=>store.dispatch(applyView({revision:3,view:good(3)})));
+  expect(document.querySelector('.context-menu')).toBeNull();expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
+test('removed editor recovery never resurrects delete confirmation',async()=>{editor();await click('Delete connection…');expect(document.querySelector('[role="dialog"]')).not.toBeNull();editor({...good(2),connections:[]});editor(good(3));expect(document.querySelector('[role="dialog"]')).toBeNull();});
+test('unavailable jump and folder ids remain visible during read-only instead of falling back',()=>{
+  const next=good();next.connections[0]={...row,jumpConnectionId:'c-two',folderId:'f-one'};editor(next);
+  const jump=host.querySelector<HTMLSelectElement>('select[name="jumpConnectionId"]')!;const folder=host.querySelector<HTMLSelectElement>('select[name="folderId"]')!;
+  expect(jump.selectedOptions[0].textContent).toBe('Two');expect(folder.selectedOptions[0].textContent).toBe('Folder');expect(host.textContent).not.toContain('(unavailable:');
+  editor({...good(2),connections:[],folders:[],loadError:{code:'bad',message:'corrupt'}});
+  expect(jump.value).toBe('c-two');expect(jump.selectedOptions[0].textContent).toBe('(unavailable: c-two)');expect(jump.selectedOptions[0].disabled).toBe(true);
+  expect(folder.value).toBe('f-one');expect(folder.selectedOptions[0].textContent).toBe('(unavailable: f-one)');expect(folder.selectedOptions[0].disabled).toBe(true);
+  editor(next);expect(jump.selectedOptions[0].textContent).toBe('Two');expect(folder.selectedOptions[0].textContent).toBe('Folder');expect(host.textContent).not.toContain('(unavailable:');
+});
 test('picker and both reload catches show object messages',async()=>{window.electronAPI={ssh:api,pickFile:jest.fn().mockRejectedValue({message:'picker explains'})} as any;const next=good();next.connections[0]={...row,auth:'keyFile',identityFile:'key'};editor(next);await click('Browse…');expect(host.textContent).toContain('picker explains');const store=panel();(api.reload as jest.Mock).mockRejectedValue({message:'reload explains'});act(()=>store.dispatch(applyView({revision:2,view:{...good(2),loadError:{code:'bad',message:'bad'}}})));await click('Reload');expect(store.getState().ui.toasts.some(t=>t.message==='reload explains')).toBe(true);});

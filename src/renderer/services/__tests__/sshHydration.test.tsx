@@ -19,6 +19,13 @@ test('rejected get is error, not successful empty store', async () => {
   const api = { onChanged: async () => () => {}, get: async () => { throw Error('Disk unavailable'); } } as unknown as SshStoreApi;
   await hydrateSsh(api, store.dispatch).ready; expect(store.getState().ssh.status).toBe('error'); expect(store.getState().ssh.revision).toBe(-1);
 });
+test.each(['onChanged','get'].flatMap(method => [{method,error:{code:'io'}},{method,error:{code:'io',message:42}}]))('structured $method rejection uses the shared SSH formatter: $error',async ({method,error})=>{
+  const store=configureStore({reducer:{ssh:reducer}});
+  const api={onChanged:jest.fn().mockResolvedValue(()=>{}),get:jest.fn().mockResolvedValue(reply(0))};
+  api[method as keyof typeof api].mockRejectedValue(error);
+  await hydrateSsh(api as unknown as SshStoreApi,store.dispatch).ready;
+  expect(store.getState().ssh.error).toBe('io');
+});
 test('browser bridge reports desktop-only', async () => {
   const store = configureStore({ reducer: { ssh: reducer } }); await hydrateSsh(browserSshBridge, store.dispatch).ready;
   expect(store.getState().ssh.status).toBe('desktop-only');

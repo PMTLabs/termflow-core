@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { SshConnection, SshFolder, SshMove, SshView } from '../../../types/ssh';
 import type { SshTreeNode } from '../../../store/slices/sshSlice';
 import { SshFolderIcon } from './SshFolderIcon';
+import { sshMoveIndex, SshDropTarget } from '../../../services/sshMoveIndex';
 export interface SshTreeProps {
   tree: SshTreeNode[]; view: SshView; filter: string; selectedId?: string;
   onSelect(row: SshConnection | SshFolder, kind: 'folder' | 'connection'): void;
@@ -35,26 +36,30 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
     }
     return true;
   };
-  const destination = (event: React.DragEvent, node: SshTreeNode) => {
+  const readDrag = (event: React.DragEvent): Drag | null => {
+    if (dragged.current) return dragged.current;
+    try { return JSON.parse(event.dataTransfer.getData(MIME)); } catch { return null; }
+  };
+  const destination = (event: React.DragEvent, node: SshTreeNode):SshDropTarget => {
     const { row, kind } = node;
-    const parentId = kind === 'folder' ? (row as SshFolder).parentId : (row as SshConnection).folderId;
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = rect.height ? (event.clientY - rect.top) / rect.height : 0.5;
     const zone = kind === 'folder' && ratio >= 0.25 && ratio <= 0.75 ? 'inside' : ratio > 0.75 ? 'after' : 'before';
-    return { parentId:zone === 'inside' ? row.id : parentId, index:zone === 'inside' && node.kind === 'folder' ? node.children.length : row.order + (zone === 'after' ? 1 : 0), zone };
+    return { zone,id:row.id };
   };
-  const over = (event: React.DragEvent, parentId:string | null, targetId?:string, zone = 'inside') => {
+  const over = (event: React.DragEvent, target:SshDropTarget) => {
     event.stopPropagation(); clearDrop();
-    if (!allowed(dragged.current,parentId,targetId)) return;
-    event.preventDefault(); event.currentTarget.classList.add('ssh-drop'); event.currentTarget.setAttribute('data-drop-zone',zone);
+    const move = dragged.current && sshMoveIndex(view,dragged.current,target);
+    if (!move || !allowed(dragged.current,move.parentId,target.zone === 'root' ? undefined : target.id)) return;
+    event.preventDefault(); event.currentTarget.classList.add('ssh-drop'); event.currentTarget.setAttribute('data-drop-zone',target.zone);
   };
-  const drop = (event: React.DragEvent, parentId: string | null, index: number, targetId?:string) => {
+  const drop = (event: React.DragEvent, target:SshDropTarget) => {
     event.stopPropagation(); clearDrop();
-    let drag = dragged.current;
-    if (!drag) { try { drag = JSON.parse(event.dataTransfer.getData(MIME)); } catch { return; } }
-    if (!allowed(drag,parentId,targetId)) return;
+    const drag = readDrag(event);
+    const move = drag && sshMoveIndex(view,drag,target);
+    if (!move || !allowed(drag,move.parentId,target.zone === 'root' ? undefined : target.id)) return;
     event.preventDefault(); dragged.current = null;
-    onMove({ kind:drag.kind, id:drag.id, parentId, index });
+    onMove(move);
   };
   const render = (nodes: SshTreeNode[], inherited = false): React.ReactNode => nodes.filter(n => !query || inherited || matches(n)).map(node => {
     const { row, kind } = node; const closed = collapsed.includes(row.id); const expanded = !closed || !!query;
@@ -62,9 +67,9 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
       <div className={`ssh-tree-row ${selectedId === row.id ? 'selected' : ''}`} tabIndex={0} draggable={!readOnly}
         onDragStart={event => { if (readOnly) { event.preventDefault(); return; } dragged.current = { kind,id:row.id }; event.dataTransfer.setData(MIME,JSON.stringify(dragged.current)); }}
         onDragEnd={() => { dragged.current = null; clearDrop(); }}
-        onDragOver={event => { const dest = destination(event,node); over(event,dest.parentId,row.id,dest.zone); }}
+        onDragOver={event => over(event,destination(event,node))}
         onDragLeave={clearDrop}
-        onDrop={event => { const dest = destination(event,node); drop(event,dest.parentId,dest.index,row.id); }}
+        onDrop={event => drop(event,destination(event,node))}
         onClick={() => onSelect(row, kind)} onDoubleClick={() => kind === 'folder' && toggle(row.id)}
         onContextMenu={event => { event.preventDefault(); event.stopPropagation(); if (!readOnly) onMenu?.(event, row, kind); }}
         onKeyDown={event => {
@@ -82,5 +87,5 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
       {kind === 'folder' && expanded && <div role="group" className="ssh-tree-children">{render(node.children, inherited || (!!query && row.name.toLocaleLowerCase().includes(query)))}</div>}
     </div>;
   });
-  return <div ref={treeRef} role="tree" aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); if (!readOnly) onMenu?.(event); }} onDragOver={event => over(event,null)} onDrop={event => drop(event, null, tree.length)}>{render(tree)}</div>;
+  return <div ref={treeRef} role="tree" aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); if (!readOnly) onMenu?.(event); }} onDragOver={event => over(event,{zone:'root'})} onDrop={event => drop(event,{zone:'root'})}>{render(tree)}</div>;
 }
