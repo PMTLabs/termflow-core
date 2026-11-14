@@ -1,4 +1,6 @@
 use super::*;
+#[path = "review_tests.rs"]
+mod review_tests;
 use std::sync::atomic::{AtomicUsize, Ordering};
 struct Temp(PathBuf);
 impl Temp {
@@ -111,11 +113,13 @@ fn round_trips_every_field() {
     );
 }
 #[test]
-fn missing_file_is_empty_and_parent_is_created_on_first_write() {
+fn missing_file_is_empty_read_creates_lock_and_first_write_creates_store() {
     let temp = Temp::new();
     let store = temp.store();
     assert_eq!(store.get().unwrap(), Persisted::default().view(None));
     assert!(!temp.path().exists());
+    assert!(temp.path().parent().unwrap().is_dir());
+    assert!(temp.path().with_extension("lock").is_file());
     store.transact(|s| add_folder(s, "First"), |_| {}).unwrap();
     assert!(temp.path().is_file());
     let data = store.load().unwrap();
@@ -323,13 +327,15 @@ fn move_checks_deepest_descendant_depth_and_cycles() {
 #[test]
 fn nonempty_folder_delete_needs_recursive() {
     let mut s = fixture();
+    s.folders.push(folder("f-outside", None));
+    s.connections.push(connection("c-outside"));
     assert_eq!(
         s.delete_folder("f-parent", false).unwrap_err().code,
         "not-empty"
     );
     s.delete_folder("f-parent", true).unwrap();
-    assert!(s.folders.is_empty());
-    assert!(s.connections.is_empty());
+    assert_eq!(s.folders, vec![folder("f-outside", None)]);
+    assert_eq!(s.connections, vec![connection("c-outside")]);
 }
 #[test]
 fn delete_of_jump_target_is_refused_naming_referrers() {
@@ -343,7 +349,10 @@ fn delete_of_jump_target_is_refused_naming_referrers() {
         s.delete_folder("f-parent", true).unwrap_err(),
     ] {
         assert_eq!(error.code, "in-use-as-jump");
-        assert_eq!(error.message, "Referrer (c-outside)");
+        assert_eq!(
+            error.message,
+            "Cannot delete: used as jump host by Referrer (c-outside)"
+        );
     }
 }
 #[test]
@@ -637,6 +646,35 @@ fn initial_corrupt_zero_revision_recovers_at_one_and_unchanged_reload_emits_noth
 
 #[test]
 fn path_is_dev_file_scoped_once() {
+    // A subprocess owns its OnceLock identity; do not race other unit tests.
+    const CHILD: &str = "TF_SSH_PATH_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        crate::profile::set_current(crate::profile::ProfileIdentity {
+            channel: "rel",
+            name: "work".into(),
+            integrity: crate::profile::Integrity::High,
+        });
+        let expected = if crate::app_config::is_dev() {
+            "ssh_connections.dev.work.high.json"
+        } else {
+            "ssh_connections.work.high.json"
+        };
+        assert_eq!(
+            store_path().file_name().unwrap().to_str().unwrap(),
+            expected
+        );
+        return;
+    }
+    assert!(std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ssh::store::tests::path_is_dev_file_scoped_once",
+            "--nocapture"
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap()
+        .success());
     assert_eq!(
         store_path().file_name().unwrap().to_str().unwrap(),
         crate::app_config::dev_file("ssh_connections.json")

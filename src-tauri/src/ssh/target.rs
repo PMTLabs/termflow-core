@@ -38,7 +38,7 @@ pub fn resolve(store: &Persisted, connection_id: &str) -> Result<ResolvedTarget,
     {
         hops.push(Hop {
             connection_id: c.id.clone(),
-            host: c.host.clone(),
+            host: super::store::bare_host(&c.host).into(),
             port: c.port,
             user: c.user.clone(),
             auth: c.auth.clone(),

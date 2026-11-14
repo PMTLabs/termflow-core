@@ -49,8 +49,14 @@ pub fn ssh_folder_upsert<R: tauri::Runtime>(
     store: State<'_, Store>,
     input: FolderInput,
 ) -> Result<Reply, StoreError> {
-    log::info!("SSH folder upsert: id={:?}", input.id);
-    mutate(&store, &app, |s| s.upsert_folder(input))
+    ssh_folder_upsert_inner(&app, &store, input)
+}
+fn ssh_folder_upsert_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    input: FolderInput,
+) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.upsert_folder(input))
 }
 #[tauri::command]
 pub fn ssh_folder_delete<R: tauri::Runtime>(
@@ -59,8 +65,15 @@ pub fn ssh_folder_delete<R: tauri::Runtime>(
     id: String,
     recursive: bool,
 ) -> Result<Reply, StoreError> {
-    log::info!("SSH folder delete: id={id}");
-    mutate(&store, &app, |s| s.delete_folder(&id, recursive))
+    ssh_folder_delete_inner(&app, &store, id, recursive)
+}
+fn ssh_folder_delete_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    id: String,
+    recursive: bool,
+) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.delete_folder(&id, recursive))
 }
 #[tauri::command]
 pub fn ssh_connection_upsert<R: tauri::Runtime>(
@@ -68,8 +81,14 @@ pub fn ssh_connection_upsert<R: tauri::Runtime>(
     store: State<'_, Store>,
     input: ConnectionInput,
 ) -> Result<Reply, StoreError> {
-    log::info!("SSH connection upsert: id={:?}", input.id);
-    mutate(&store, &app, |s| s.upsert_connection(input))
+    ssh_connection_upsert_inner(&app, &store, input)
+}
+fn ssh_connection_upsert_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    input: ConnectionInput,
+) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.upsert_connection(input))
 }
 #[tauri::command]
 pub fn ssh_connection_delete<R: tauri::Runtime>(
@@ -77,8 +96,14 @@ pub fn ssh_connection_delete<R: tauri::Runtime>(
     store: State<'_, Store>,
     id: String,
 ) -> Result<Reply, StoreError> {
-    log::info!("SSH connection delete: id={id}");
-    mutate(&store, &app, |s| s.delete_connection(&id))
+    ssh_connection_delete_inner(&app, &store, id)
+}
+fn ssh_connection_delete_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    id: String,
+) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.delete_connection(&id))
 }
 #[tauri::command]
 pub fn ssh_move<R: tauri::Runtime>(
@@ -89,8 +114,17 @@ pub fn ssh_move<R: tauri::Runtime>(
     parent_id: Option<String>,
     index: usize,
 ) -> Result<Reply, StoreError> {
-    log::info!("SSH move: kind={kind}, id={id}, parent={parent_id:?}");
-    mutate(&store, &app, |s| s.move_row(&kind, &id, parent_id, index))
+    ssh_move_inner(&app, &store, kind, id, parent_id, index)
+}
+fn ssh_move_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    kind: String,
+    id: String,
+    parent_id: Option<String>,
+    index: usize,
+) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.move_row(&kind, &id, parent_id, index))
 }
 #[tauri::command]
 pub fn ssh_set_bookmark<R: tauri::Runtime>(
@@ -99,8 +133,15 @@ pub fn ssh_set_bookmark<R: tauri::Runtime>(
     id: String,
     bookmarked: bool,
 ) -> Result<Reply, StoreError> {
-    log::info!("SSH bookmark: id={id}");
-    mutate(&store, &app, |s| s.set_bookmark(&id, bookmarked))
+    ssh_set_bookmark_inner(&app, &store, id, bookmarked)
+}
+fn ssh_set_bookmark_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    id: String,
+    bookmarked: bool,
+) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.set_bookmark(&id, bookmarked))
 }
 
 #[cfg(test)]
@@ -177,17 +218,51 @@ mod tests {
                 .unwrap();
             let folder_id = setup.view.folders[0].id.clone();
             let connection_id = setup.view.connections[0].id.clone();
-            let reply = mutate(&store, &capture, |s| match kind {
-                "folder_upsert" => s.upsert_folder(folder()),
-                "folder_delete" => s.delete_folder(&folder_id, false),
-                "connection_upsert" => s.upsert_connection(connection()),
-                "connection_delete" => s.delete_connection(&connection_id),
-                "move" => s.move_row("connection", &connection_id, Some(folder_id), 0),
-                "bookmark" => s.set_bookmark(&connection_id, true),
+            let reply = match kind {
+                "folder_upsert" => ssh_folder_upsert_inner(&capture, &store, folder()),
+                "folder_delete" => {
+                    ssh_folder_delete_inner(&capture, &store, folder_id.clone(), false)
+                }
+                "connection_upsert" => ssh_connection_upsert_inner(&capture, &store, connection()),
+                "connection_delete" => {
+                    ssh_connection_delete_inner(&capture, &store, connection_id.clone())
+                }
+                "move" => ssh_move_inner(
+                    &capture,
+                    &store,
+                    "connection".into(),
+                    connection_id.clone(),
+                    Some(folder_id.clone()),
+                    0,
+                ),
+                "bookmark" => ssh_set_bookmark_inner(&capture, &store, connection_id.clone(), true),
                 _ => unreachable!(),
-            })
+            }
             .unwrap();
             assert_eq!(reply.revision, setup.revision + 1, "{kind}");
+            if kind == "bookmark" {
+                assert!(
+                    reply
+                        .view
+                        .connections
+                        .iter()
+                        .find(|c| c.id == connection_id)
+                        .unwrap()
+                        .bookmarked
+                );
+            }
+            if kind == "move" {
+                assert_eq!(
+                    reply
+                        .view
+                        .connections
+                        .iter()
+                        .find(|c| c.id == connection_id)
+                        .unwrap()
+                        .folder_id,
+                    Some(folder_id)
+                );
+            }
             assert_eq!(reply, store.reload(|_| {}).unwrap(), "{kind}");
             assert_eq!(
                 *capture.0.lock().unwrap(),
@@ -261,6 +336,33 @@ mod tests {
         assert_eq!(reply.view.folders.len(), 1);
         assert_eq!(reply.view.folders[0].name, "IPC folder");
         assert_eq!(invoke("ssh_store_get", serde_json::json!({})), reply);
+        let folder_id = reply.view.folders[0].id.clone();
+        let created = invoke(
+            "ssh_connection_upsert",
+            serde_json::json!({"input": connection()}),
+        );
+        let id = created.view.connections[0].id.clone();
+        let moved = invoke(
+            "ssh_move",
+            serde_json::json!({"kind":"connection","id":id,"parentId":folder_id,"index":0}),
+        );
+        assert_eq!(
+            moved.view.connections[0].folder_id.as_deref(),
+            Some(folder_id.as_str())
+        );
+        let bookmarked = invoke(
+            "ssh_set_bookmark",
+            serde_json::json!({"id":id,"bookmarked":true}),
+        );
+        assert!(bookmarked.view.connections[0].bookmarked);
+        let deleted = invoke("ssh_connection_delete", serde_json::json!({"id":id}));
+        assert!(deleted.view.connections.is_empty());
+        let deleted = invoke(
+            "ssh_folder_delete",
+            serde_json::json!({"id":folder_id,"recursive":false}),
+        );
+        assert!(deleted.view.folders.is_empty());
+        let revision = deleted.revision;
         // Exercise the actual Reload adapter/emitter, not just the Store seam.
         use tauri::Listener;
         let events = std::sync::Arc::new(Mutex::new(Vec::<Reply>::new()));
@@ -275,11 +377,11 @@ mod tests {
         let repaired_bytes = std::fs::read(&file).unwrap();
         std::fs::write(&file, b"corrupt").unwrap();
         let read_only = invoke("ssh_store_reload", serde_json::json!({}));
-        assert_eq!(read_only.revision, 2);
+        assert_eq!(read_only.revision, revision + 1);
         assert!(read_only.view.load_error.is_some());
         std::fs::write(&file, repaired_bytes).unwrap(); // old disk revision 1
         let recovered = invoke("ssh_store_reload", serde_json::json!({}));
-        assert_eq!(recovered.revision, 3);
+        assert_eq!(recovered.revision, revision + 2);
         assert!(recovered.view.load_error.is_none());
         assert_eq!(*events.lock().unwrap(), vec![read_only, recovered.clone()]);
         assert_eq!(invoke("ssh_store_reload", serde_json::json!({})), recovered);

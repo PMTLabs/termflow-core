@@ -7,6 +7,19 @@ use std::{
     sync::Mutex,
 };
 
+const STRING_BOUNDS: &[(&str, usize)] = &[
+    ("name", 80),
+    ("host", 255),
+    ("user", 128),
+    ("identityFile", 4096),
+    ("extraOptions", 1024),
+    ("id", 64),
+    ("parentId", 64),
+    ("folderId", 64),
+    ("jumpConnectionId", 64),
+    ("lastUsedAt", 64),
+    ("secret", 16384),
+];
 pub const ICONS: &[&str] = &[
     "folder",
     "server",
@@ -133,7 +146,7 @@ pub struct ConnectionInput {
     pub folder_id: Option<String>,
     pub name: String,
     pub host: String,
-    pub port: u32,
+    pub port: i64,
     pub user: String,
     pub auth: Auth,
     pub identity_file: Option<String>,
@@ -295,6 +308,10 @@ impl Persisted {
             }
         }
         for f in &self.folders {
+            identifier(&f.id, "id")?;
+            if let Some(id) = &f.parent_id {
+                identifier(id, "parentId")?;
+            }
             name(&f.name)?;
             if !ICONS.contains(&f.icon.as_str()) {
                 return Err(StoreError::field("icon", "invalid"));
@@ -305,6 +322,20 @@ impl Persisted {
             self.depth(&f.id)?;
         }
         for c in &self.connections {
+            identifier(&c.id, "id")?;
+            for (field, value) in [
+                ("folderId", &c.folder_id),
+                ("jumpConnectionId", &c.jump_connection_id),
+            ] {
+                if let Some(id) = value {
+                    identifier(id, field)?;
+                }
+            }
+            for (field, value) in [("lastUsedAt", &c.last_used_at), ("secret", &c.secret)] {
+                if let Some(value) = value {
+                    text(value, field)?;
+                }
+            }
             name(&c.name)?;
             if c.host.is_empty() {
                 return Err(StoreError::field("host", "required"));
@@ -312,9 +343,11 @@ impl Persisted {
             if c.host.starts_with('-') {
                 return Err(StoreError::field("host", "leading-dash"));
             }
-            if c.host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            if !valid_host(&c.host) {
                 return Err(StoreError::field("host", "invalid"));
             }
+            text(&c.host, "host")?;
+            text(&c.user, "user")?;
             if c.port == 0 {
                 return Err(StoreError::field("port", "range"));
             }
@@ -331,6 +364,9 @@ impl Persisted {
                 && c.identity_file.as_ref().is_none_or(|s| s.trim().is_empty())
             {
                 return Err(StoreError::field("identityFile", "required"));
+            }
+            if let Some(path) = &c.identity_file {
+                text(path, "identityFile")?;
             }
             if c.auth != Auth::KeyFile && c.identity_file.is_some() {
                 return Err(StoreError::field("identityFile", "not-applicable"));
@@ -358,7 +394,8 @@ impl Persisted {
             }
             for (key, value) in &c.extra_options {
                 option_key_allowed(key)?;
-                if value.contains(['\n', '\r', '\0']) {
+                bounded(value, "extraOptions")?;
+                if value.chars().any(char::is_control) {
                     return Err(StoreError::field("extraOptions", "invalid-value"));
                 }
             }
@@ -378,7 +415,7 @@ impl Persisted {
         let order = self
             .folders
             .iter()
-            .find(|f| f.id == id)
+            .find(|f| f.id == id && f.parent_id == input.parent_id)
             .map_or(self.next_order(&input.parent_id), |f| f.order);
         let folder = Folder {
             id: id.clone(),
@@ -412,7 +449,7 @@ impl Persisted {
                 .map_or_else(|| new_id("c"), |c| c.id.clone()),
             folder_id: input.folder_id.clone(),
             name: input.name.trim().into(),
-            host: input.host,
+            host: bare_host(&input.host).into(),
             port: input.port as u16,
             user: input.user,
             auth: input.auth,
@@ -422,6 +459,7 @@ impl Persisted {
             bookmarked: input.bookmarked,
             order: existing
                 .as_ref()
+                .filter(|c| c.folder_id == input.folder_id)
                 .map_or(self.next_order(&input.folder_id), |c| c.order),
             last_used_at: existing.as_ref().and_then(|c| c.last_used_at.clone()),
             secret: existing.and_then(|c| c.secret),
@@ -456,7 +494,10 @@ impl Persisted {
         if refs.is_empty() {
             Ok(())
         } else {
-            Err(StoreError::new("in-use-as-jump", refs.join(", ")))
+            Err(StoreError::new(
+                "in-use-as-jump",
+                format!("Cannot delete: used as jump host by {}", refs.join(", ")),
+            ))
         }
     }
     pub fn delete_connection(&mut self, id: &str) -> Result<()> {
@@ -554,8 +595,61 @@ impl Persisted {
         Ok(())
     }
 }
+fn bracketed_host(host: &str) -> bool {
+    host.strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .is_some_and(|s| s.parse::<std::net::Ipv6Addr>().is_ok())
+}
+fn valid_host(host: &str) -> bool {
+    bracketed_host(host)
+        || host.parse::<std::net::Ipv6Addr>().is_ok()
+        || (!host.starts_with(['-', '.'])
+            && host
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b)))
+}
+pub(super) fn bare_host(host: &str) -> &str {
+    if bracketed_host(host) {
+        &host[1..host.len() - 1]
+    } else {
+        host
+    }
+}
+fn bounded(value: &str, field: &str) -> Result<()> {
+    let max = STRING_BOUNDS
+        .iter()
+        .find(|(name, _)| *name == field)
+        .expect("string bound")
+        .1;
+    if value.chars().count() > max {
+        Err(StoreError::field(field, "length"))
+    } else {
+        Ok(())
+    }
+}
+fn text(value: &str, field: &str) -> Result<()> {
+    bounded(value, field)?;
+    if value.chars().any(char::is_control) {
+        Err(StoreError::field(field, "invalid"))
+    } else {
+        Ok(())
+    }
+}
+fn identifier(value: &str, field: &str) -> Result<()> {
+    text(value, field)?;
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        Err(StoreError::field(field, "invalid"))
+    } else {
+        Ok(())
+    }
+}
 fn name(value: &str) -> Result<()> {
-    if value.trim().is_empty() || value.trim().chars().count() > 80 {
+    text(value, "name")?;
+    if value.trim().is_empty() {
         Err(StoreError::field("name", "length"))
     } else {
         Ok(())
@@ -703,9 +797,12 @@ impl Store {
         emit: impl FnOnce(&Reply),
     ) -> Result<Reply> {
         let _lock = self.lock()?;
-        let mut candidate = self
-            .load()
-            .map_err(|e| StoreError::new("store-read-only", e.message))?;
+        let mut candidate = self.load().map_err(|e| {
+            StoreError::new(
+                "store-read-only",
+                format!("{}: {}", self.path.display(), e.message),
+            )
+        })?;
         mutation(&mut candidate)?;
         candidate.validate()?;
         candidate.normalize();
