@@ -286,8 +286,10 @@ const App: React.FC = () => {
   };
 
   useEffect(() => {
-    // Initialize app
-    initializeApp();
+    // Own the SSH listener synchronously, including teardown while getConfig is pending.
+    const ssh = hydrateSsh(window.electronAPI?.ssh, store.dispatch);
+    sshHydration.current = ssh;
+    initializeApp(ssh.ready);
 
     // Save state when window is about to close
     const handleBeforeUnload = () => {
@@ -453,7 +455,7 @@ const App: React.FC = () => {
     };
   }, []);
 
-  const initializeApp = async () => {
+  const initializeApp = async (sshReady: Promise<void>) => {
     console.log('Initializing app...');
 
     // Fetch config exactly once; every consumer below reads this same snapshot
@@ -481,7 +483,7 @@ const App: React.FC = () => {
     await Promise.all([
       loadConfigSettings(config),
       initializeShellProfiles(config),
-      (sshHydration.current ??= hydrateSsh(window.electronAPI?.ssh, store.dispatch)).ready,
+      sshReady,
     ]);
 
     // Detached windows reconstruct a handed-off tab/pane (reattaching to the

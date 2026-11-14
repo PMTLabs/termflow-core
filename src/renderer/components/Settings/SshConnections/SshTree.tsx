@@ -26,8 +26,8 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
     } catch {}
   };
   const render = (nodes: SshTreeNode[], inherited = false): React.ReactNode => nodes.filter(n => !query || inherited || matches(n)).map(node => {
-    const { row, kind } = node; const closed = collapsed.includes(row.id); const parent = kind === 'folder' ? (row as SshFolder).parentId : (row as SshConnection).folderId;
-    return <div key={row.id} role="treeitem" aria-expanded={kind === 'folder' ? !closed : undefined} aria-selected={selectedId === row.id} data-row-id={row.id}>
+    const { row, kind } = node; const closed = collapsed.includes(row.id); const expanded = !closed || !!query; const parent = kind === 'folder' ? (row as SshFolder).parentId : (row as SshConnection).folderId;
+    return <div key={row.id} role="treeitem" aria-expanded={kind === 'folder' ? expanded : undefined} aria-selected={selectedId === row.id} data-row-id={row.id}>
       <div className={`ssh-tree-row ${selectedId === row.id ? 'selected' : ''}`} tabIndex={0} draggable
         onDragStart={event => event.dataTransfer.setData('application/x-termflow-ssh', JSON.stringify({ kind, id: row.id }))}
         onDragOver={event => { event.preventDefault(); event.currentTarget.classList.add('ssh-drop'); }} onDragLeave={event => event.currentTarget.classList.remove('ssh-drop')}
@@ -42,11 +42,11 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
           else if (event.key === 'F2') { event.preventDefault(); onRename?.(row, kind); }
           else if (event.key === 'Delete') { event.preventDefault(); onDelete?.(row, kind); }
         }}>
-        {kind === 'folder' ? <><button aria-label={`Toggle ${row.name}`} aria-expanded={!closed} onClick={event => { event.stopPropagation(); toggle(row.id); }}>{closed ? '▸' : '▾'}</button><span className={`ssh-folder-icon ssh-color-${(row as SshFolder).color}`} data-icon={(row as SshFolder).icon}><SshFolderIcon icon={(row as SshFolder).icon} /></span></> : <span aria-hidden>⌁</span>}
+        {kind === 'folder' ? <><button aria-label={`Toggle ${row.name}`} aria-expanded={expanded} onClick={event => { event.stopPropagation(); toggle(row.id); }}>{expanded ? '▾' : '▸'}</button><span className={`ssh-folder-icon ssh-color-${(row as SshFolder).color}`} data-icon={(row as SshFolder).icon}><SshFolderIcon icon={(row as SshFolder).icon} /></span></> : <span aria-hidden>⌁</span>}
         <span className="ssh-row-label">{row.name}</span>
         {kind === 'connection' && <button aria-label={`Bookmark ${row.name}`} aria-pressed={(row as SshConnection).bookmarked} onClick={event => { event.stopPropagation(); onBookmark(row.id, !(row as SshConnection).bookmarked); }}>{(row as SshConnection).bookmarked ? '★' : '☆'}</button>}
       </div>
-      {kind === 'folder' && (!closed || !!query) && <div role="group" className="ssh-tree-children">{render(node.children, inherited || (!!query && row.name.toLocaleLowerCase().includes(query)))}</div>}
+      {kind === 'folder' && expanded && <div role="group" className="ssh-tree-children">{render(node.children, inherited || (!!query && row.name.toLocaleLowerCase().includes(query)))}</div>}
     </div>;
   });
   return <div role="tree" aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); onMenu?.(event); }} onDragOver={event => event.preventDefault()} onDrop={event => drop(event, null, tree.length)}>{render(tree)}</div>;

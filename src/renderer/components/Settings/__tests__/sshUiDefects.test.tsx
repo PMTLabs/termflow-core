@@ -36,6 +36,11 @@ describe('extra options text', () => {
     [[['SendEnv','LANG LC_*'],['ConnectTimeout','5']]],
     [[['SetEnv','A="b c"']]],
     [[['SetEnv','TAB=\there']]],
+    [[['SetEnv','DIR=C:\\foo\\']]],
+    [[['SetEnv','DIR=C:\\a b\\']]],
+    [[['SetEnv','A=\\"embedded\\"']]],
+    [[['SetEnv','']]],
+    [[['SetEnv','""']]],
     [[['LocalForward','8080 localhost:80'],['Compression','yes']]],
   ] as [string,string][][][])('round-trips through parseArgs without loss: %j', pairs => {
     expect(parseArgs(optionsText({ extraOptions:pairs })).map(token => { const at = token.indexOf('='); return [token.slice(0,at), token.slice(at+1)]; })).toEqual(pairs);
@@ -93,6 +98,14 @@ describe('conflict banner', () => {
     editor(good(3));
     expect(text()).not.toContain('elsewhere');
     expect(host.querySelector('fieldset')!.disabled).toBe(false);
+  });
+  test('render guard alone hides a pre-existing dirty conflict during corruption and recovers correctly', async () => {
+    editor(good(1)); await type('name','local');
+    editor(good(2,[{...row,host:'external'},other])); expect(text()).toContain('Changed elsewhere');
+    editor(corrupt(3)); expect(text()).not.toContain('elsewhere');
+    editor(good(4,[{...row,host:'external'},other])); expect(text()).toContain('Changed elsewhere');
+    editor(corrupt(5)); editor(good(6)); expect(text()).not.toContain('elsewhere');
+    expect(host.querySelector<HTMLInputElement>('input[name="name"]')!.value).toBe('local');
   });
   test('positive control: a genuinely deleted row still says Deleted elsewhere', () => {
     editor(good(1));

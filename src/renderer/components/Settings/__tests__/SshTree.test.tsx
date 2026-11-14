@@ -22,6 +22,13 @@ test.each([['Needle','c-name','one','alpha'],['Second','c-host','needle','beta']
   const data = { ...view, connections:view.connections.map(c => ({ ...c, name:'no-name', host:'no-host', user:'no-user', ...(c.id === id ? { [field]:target[field] } : {}) })) };
   render('needle', data); expect([...container.querySelectorAll('[data-row-id^="c-"]')].map(n => n.getAttribute('data-row-id'))).toEqual([id]);
 });
+test('filter expansion drives children, aria-expanded and glyph together', () => {
+  localStorage.setItem('ssh-collapsed',JSON.stringify(['f-root','f-child'])); render('needle');
+  expect(container.querySelector('[data-row-id="f-root"]')!.getAttribute('aria-expanded')).toBe('true');
+  expect(row('f-root').querySelector('button')!.getAttribute('aria-expanded')).toBe('true');
+  expect(row('f-root').querySelector('button')!.textContent).toBe('▾');
+  expect(row('c-user')).not.toBeNull();
+});
 test('star uses that exact connection id', () => { render(); act(() => row('c-name').querySelector('button')!.click()); expect(bookmark.mock.calls).toEqual([['c-name',true]]); });
 test('drop uses exact kind, dragged id, target and index', () => { render(); drop('f-child', { kind:'connection', id:'c-name' }); expect(move.mock.calls).toEqual([[{ kind:'connection', id:'c-name', parentId:'f-child', index:1 }]]); });
 test('same-parent reorder sends destination index and refusal leaves order intact', () => { render('', { ...view, connections:[...view.connections, { ...view.connections[1], id:'c-sibling', order:2 }] }); const before = [...container.querySelectorAll('[data-row-id]')].map(n => n.getAttribute('data-row-id')); move.mockImplementation(() => {}); drop('c-host', { kind:'connection', id:'c-sibling' }); expect(move.mock.calls).toEqual([[{ kind:'connection', id:'c-sibling', parentId:'f-root', index:1 }]]); expect([...container.querySelectorAll('[data-row-id]')].map(n => n.getAttribute('data-row-id'))).toEqual(before); });

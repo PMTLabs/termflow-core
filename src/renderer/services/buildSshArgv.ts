@@ -12,6 +12,7 @@ export function buildSshArgv(resolved: SshResolvedView): string[] {
     else argv.push('-J', `${jump.user ? `${jump.user}@` : ''}${host}${jump.port !== 22 ? `:${jump.port}` : ''}`);
   }
   for (const [key,value] of resolved.extraOptions) argv.push('-o', `${key}=${value}`);
-  argv.push(`${target.user ? `${target.user}@` : ''}${target.host}`);
+  const host = target.host.startsWith('[') && target.host.endsWith(']') ? target.host.slice(1,-1) : target.host;
+  argv.push(`${target.user ? `${target.user}@` : ''}${host}`);
   return argv;
 }
