@@ -284,23 +284,40 @@ fn cancellation_at_final_commit_fence_keeps_candidate_unpublished() {
 async fn remember_merge_preserves_concurrent_bookmark_and_mark_used() {
     let s = Setup::new();
     let old = s.store.get().unwrap();
-    // Independent process/instance edits after the session snapshot.
+    // Hold an independent instance's transaction open while Remember starts.
+    // The sink must acquire ConfigLock and reload after this candidate commits.
     let other = Store::new(s.path.join("connections.json"));
-    let changed = other
-        .transact(
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let held = barrier.clone();
+    let (ready, entered) = tokio::sync::oneshot::channel();
+    let edit = tokio::task::spawn_blocking(move || {
+        other.transact(
             |d| {
                 d.set_bookmark("c-a", true)?;
                 d.connections[0].last_used_at = Some("2026-11-13T12:00:00Z".into());
                 d.connections[1].name = "unrelated edit".into();
+                ready.send(()).unwrap();
+                held.wait();
                 Ok(())
             },
             |_| {},
         )
-        .unwrap();
-    s.adapter
-        .set_secret_if_binding_matches(&binding(), "v1:ciphertext".into(), CancellationToken::new())
-        .await
-        .unwrap();
+    });
+    entered.await.unwrap();
+    let adapter = s.adapter.clone();
+    let save = tokio::spawn(async move {
+        adapter
+            .set_secret_if_binding_matches(
+                &binding(),
+                "v1:ciphertext".into(),
+                CancellationToken::new(),
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    barrier.wait();
+    let changed = edit.await.unwrap().unwrap();
+    save.await.unwrap().unwrap();
     let fresh = Store::new(s.path.join("connections.json"));
     let data = fresh.snapshot().unwrap();
     assert!(data.revision > changed.revision);

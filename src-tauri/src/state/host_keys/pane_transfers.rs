@@ -78,6 +78,11 @@ impl HostKeys {
                     let row = inner.owners.get_mut(leaf).unwrap();
                     row.owner = Owner::Pane(entry.pi);
                     if !row.started { row.admitted_pg = Some(pg); }
+                } else if inner.owners.get(leaf).is_some_and(|r| r.ssh_reserved)
+                    && inner.window_pages.window_of(transfer.source).is_some() {
+                    // Partial adoption must not silently close an omitted SSH
+                    // pane. Return its receipt to the live source for re-entry.
+                    inner.owners.get_mut(leaf).unwrap().owner = Owner::Parked { pg: transfer.source, by: member.pi };
                 } else if !Self::release_idle_owner(inner, leaf) { inner.owners.get_mut(leaf).unwrap().owner = Owner::Orphaned; }
             }
             inner.panes.holders.remove(&member.pi);

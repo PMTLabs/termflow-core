@@ -17,7 +17,7 @@ fn open(f: &Fixture, keys: &HostKeys, leaf: &str, connection: &str) {
 fn reconcile(f: &Fixture, keys: &HostKeys) { f.registry.reconcile_owners(|leaf, expected| keys.ssh_owner_receipt(leaf).is_some_and(|current| expected == Some(current))); }
 #[tokio::test]
 async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
-    for transition in ["depart", "cancel", "self-take", "abort", "staged-exit", "reload-settle", "unstarted-depart"] {
+    for transition in ["depart", "cancel", "self-take", "abort", "staged-exit", "reload-settle", "unstarted-depart", "partial-adopt"] {
         let keys = HostKeys::default();
         let mut page = Page::new(&keys, "held-round2");
         let a = page.enter(&keys, "tm-a");
@@ -30,6 +30,18 @@ async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
                 page.op(&keys, PaneOp::Depart { pi: a.pi });
                 reconcile(&f, &keys);
                 assert!(f.registry.state("tm-a", false).is_ok(), "depart parked receipt");
+                let next = page.enter(&keys, "tm-a");
+                assert_eq!(page.admit(&keys, next.pi), receipt);
+            }
+            "partial-adopt" => {
+                let b = page.enter(&keys, "tm-b");
+                page.op(&keys, PaneOp::Stash { tx: "partial".into(), pairs: vec![a, b], ui: None });
+                let mut target = Page::new(&keys, "partial-target");
+                target.op(&keys, PaneOp::Take { tx: "partial".into() });
+                let b = target.entry("tm-b", false);
+                assert_eq!(target.op(&keys, PaneOp::Adopt { tx: "partial".into(), pairs: vec![b] }), PaneResult::Ok);
+                reconcile(&f, &keys);
+                assert!(f.registry.state("tm-a", false).is_ok(), "omitted member parked at source");
                 let next = page.enter(&keys, "tm-a");
                 assert_eq!(page.admit(&keys, next.pi), receipt);
             }
