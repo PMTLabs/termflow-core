@@ -53,7 +53,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("native_notify.rs", &["emit_activation"], "out of scope durable tab notification"),
     ("network_commands.rs", &["rotate_auth_token", "set_network_config", "start_servers", "stop_servers"], "network-operation mutex and owned listeners; out of scope network config"),
     ("output_pipeline.rs", &["spawn_output_consumer", "spawn_pipeline_watchdog"], "retained parser/history and immutable full pc events; advisory diagnostics"),
-    ("pty_host_client.rs", &["arm_detach", "attach", "disarm", "resize", "shutdown", "write_stdin"], "exact client-owned FIFO/alive flag; raw compatibility adapters, production shell callers retain ownership qualification"),
+    ("pty_host_client.rs", &["arm_detach", "attach", "disarm", "resize", "shutdown", "enqueue_stdin"], "exact client-owned FIFO/alive flag; stdin requires an unforgeable InputPermit retained through complete enqueue, ownership/client epoch rechecked by write_registered_admitted; input_gate controlled-race/real FIFO tests"),
     ("pty_host_client.rs", &["attach_confirmed_inner", "spawn_session_inner", "request_authorized"], "original session cg/pc/key plus bound client epoch under ownership mutex through enqueue"),
     ("pty_host_client.rs", &["list_sessions_numbered_within"], "source-client epoch under ownership mutex through numbered FIFO enqueue"),
     ("pty_host_client.rs", &["bind_sessions", "lost", "close_transport"], "exact retained ConnState; authority connect/disconnect compares binding epoch"),
@@ -102,7 +102,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("tray.rs", &["build_tray"], "out of scope window intent; global exit owns retained clients/children"),
 ];
 
-fn production(source: &str) -> String {
+pub(super) fn production(source: &str) -> String {
     let mut text = without_test_modules(&source.replace("\r\n", "\n"));
     let test_fn = Regex::new(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+").unwrap();
     // Standalone test-only fixture functions must not inflate production sinks.

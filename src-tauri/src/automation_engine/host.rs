@@ -47,6 +47,8 @@ pub trait EngineHost: Send + Sync {
 
     /// One terminal-bound write — the `TerminalWriter` port, by another name.
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String>;
+    fn input_lease(&self, _pc: &str) -> Result<Option<crate::pty_manager::input_gate::InputLease>, String> { Ok(None) }
+    fn write_leased(&self, pc: &str, bytes: &[u8], _lease: Option<&crate::pty_manager::input_gate::InputLease>) -> Result<(), String> { self.write(pc, bytes) }
 
     /// The terminal's name for a log line, resolved through `label_at` at DECIDE time (§2.8, §4.5).
     /// `None` is stored as NULL and rendered as an empty column — **never invented**.
@@ -100,5 +102,11 @@ impl ScreenSource for HostPort<'_> {
 impl TerminalWriter for HostPort<'_> {
     fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {
         self.0.write(pc, bytes)
+    }
+    fn input_lease(&self, pc: &str) -> Result<Option<crate::pty_manager::input_gate::InputLease>, String> {
+        self.0.input_lease(pc)
+    }
+    fn write_leased(&self, pc: &str, bytes: &[u8], lease: Option<&crate::pty_manager::input_gate::InputLease>) -> Result<(), String> {
+        self.0.write_leased(pc, bytes, lease)
     }
 }

@@ -182,7 +182,7 @@ pub(crate) async fn send_prompt_to_terminal<R: tauri::Runtime>(
     id: &str,
     payload: &ExecutePromptReq,
 ) -> Result<serde_json::Value, (StatusCode, String)> {
-    use crate::automation::send::{deliver, SubmitPattern, TerminalWriter};
+    use crate::automation::send::{deliver_leased, SubmitPattern, TerminalWriter};
     if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
         return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
     }
@@ -231,14 +231,16 @@ pub(crate) async fn send_prompt_to_terminal<R: tauri::Runtime>(
         // itself. It is the same `submit: false` the Automations "answer a confirmation" rule uses to
         // type a `1` without pressing Enter.
         let writer: &dyn TerminalWriter = state;
+        let lease = writer.input_lease(id).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         let is_probe = payload.cli_type.ends_with("-probe");
-        deliver(
+        deliver_leased(
             writer,
             id,
             &payload.cli_type,
             SubmitPattern { separator, end_indicator },
             &payload.prompt,
             !is_probe,
+            lease.as_ref(),
         )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -267,8 +269,11 @@ pub(crate) async fn send_prompt_to_terminal<R: tauri::Runtime>(
 
             for (seq, desc) in sequences {
                 log::debug!("  Attempting submission: {} (bytes: {:?})", desc, seq.as_bytes());
-                if let Err(e) = writer.write(id, seq.as_bytes()) {
+                if let Err(e) = writer.write_leased(id, seq.as_bytes(), lease.as_ref()) {
                     log::warn!("    Failed to write sequence: {}", e);
+                    if e.starts_with("InputLocked:") || e.starts_with("StaleAttempt:") {
+                        return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
+                    }
                     break;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;

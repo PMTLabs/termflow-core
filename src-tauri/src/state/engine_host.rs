@@ -65,6 +65,14 @@ impl<R: tauri::Runtime> crate::automation_engine::host::EngineHost for AppState<
         <Self as crate::automation::send::TerminalWriter>::write(self, pc, bytes)
     }
 
+    fn input_lease(&self, pc: &str) -> Result<Option<crate::pty_manager::input_gate::InputLease>, String> {
+        <Self as crate::automation::send::TerminalWriter>::input_lease(self, pc)
+    }
+
+    fn write_leased(&self, pc: &str, bytes: &[u8], lease: Option<&crate::pty_manager::input_gate::InputLease>) -> Result<(), String> {
+        <Self as crate::automation::send::TerminalWriter>::write_leased(self, pc, bytes, lease)
+    }
+
     fn label_for(&self, tm: &str) -> Option<String> {
         // `label_at` is the ONLY resolver (§2.8). The rule's stored snapshot is not reachable from
         // here — it is per `(rule, terminal)` and this port is per terminal — so a name for a

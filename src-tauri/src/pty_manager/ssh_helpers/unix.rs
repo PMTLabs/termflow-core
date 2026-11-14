@@ -8,6 +8,9 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
+// MetadataExt::mode() is u32 on both OSes, but Darwin's libc::S_ISVTX uses u16.
+const STICKY_BIT: u32 = 0o1000;
+
 pub(super) struct Dir {
     path: PathBuf,
     file: File,
@@ -83,7 +86,7 @@ impl Dir {
                     // all generated data still lives below the explicitly supplied app-data dir.
                     let uid = unsafe { libc::geteuid() };
                     if (meta.uid() != uid && meta.uid() != 0)
-                        || (meta.mode() & 0o022 != 0 && meta.mode() & libc::S_ISVTX == 0)
+                        || (meta.mode() & 0o022 != 0 && meta.mode() & STICKY_BIT == 0)
                     {
                         return Err(denied());
                     }

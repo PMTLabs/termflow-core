@@ -1125,6 +1125,10 @@ impl<R: Runtime> AppState<R> {
         host_registry::route_write(self.host_table.keys(), &self.host_terminals, &self.terminals, id, bytes, &|c| self.client_for_channel(c))
     }
 
+    pub(crate) fn host_write_admitted(&self, permit: &crate::pty_manager::input_gate::InputPermit<'_>, bytes: &[u8]) -> bool {
+        host_registry::route_write_admitted(self.host_table.keys(), permit, bytes, &|c| self.client_for_channel(c))
+    }
+
     /// If `id` is host-owned AND connected, forward the resize and return true.
     pub fn host_resize(&self, id: &str, cols: u16, rows: u16) -> bool {
         host_registry::route_resize(self.host_table.keys(), &self.host_terminals, &self.terminals, id, cols, rows, &|c| self.client_for_channel(c))

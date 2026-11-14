@@ -340,8 +340,14 @@ impl PtyHostClient {
     }
 
     pub(crate) fn write_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
+        keys.admit_input(process, None, |permit| {
+            Ok::<_, String>(self.write_registered_admitted(keys, permit, channel, key, bytes))
+        }).unwrap_or(false)
+    }
+
+    pub(crate) fn write_registered_admitted(&self, keys: &crate::state::HostKeys, permit: &crate::pty_manager::input_gate::InputPermit<'_>, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
         let binding = self.sessions.lock().unwrap().clone();
-        binding.channel == channel && keys.with_registered_on(process, channel, key, binding.epoch, || self.write_stdin(key, bytes)).unwrap_or(false)
+        binding.channel == channel && keys.with_registered_on(permit.process(), channel, key, binding.epoch, || self.enqueue_stdin(permit, key, bytes)).unwrap_or(false)
     }
 
     pub(crate) fn resize_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, cols: u16, rows: u16) -> bool {
@@ -560,6 +566,16 @@ impl PtyHostClient {
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
 
+    fn enqueue_stdin(&self, _permit: &crate::pty_manager::input_gate::InputPermit<'_>, tab_id: &str, bytes: &[u8]) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
+            tab_id: tab_id.to_string(),
+            bytes: bytes.to_vec(),
+        })).is_ok()
+    }
+
+    // Wire-level fixtures deliberately exercise disconnect/FIFO without a GUI owner. No
+    // production raw-stdin compatibility entry point: production needs an admission permit.
+    #[cfg(test)]
     pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) -> bool {
         self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
             tab_id: tab_id.to_string(),

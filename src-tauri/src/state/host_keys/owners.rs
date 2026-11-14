@@ -66,6 +66,7 @@ pub(super) fn shell_of(state: &OwnerState) -> Option<&StagedShell> {
 
 impl HostKeys {
     pub fn admit_create(&self, leaf: &str, mode: CreateMode) -> Result<Admission, String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         if let Some(row) = inner.owners.get(leaf) {
             return match &row.state {
@@ -95,6 +96,7 @@ impl HostKeys {
     }
 
     fn set_stage(&self, leaf: &str, cg: u64, process: &str, hosted: Option<(HostChannel, &str, StageMode)>, restage: bool) -> Result<(Option<KeyStage>, u32, Option<StagedShell>), String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let Some(row) = inner.owners.get(leaf).filter(|r| r.cg == cg) else { return Err(retry()) };
         let OwnerState::Placing { stage: old, .. } = &row.state else { return Err(retry()) };
@@ -134,6 +136,7 @@ impl HostKeys {
     }
 
     pub fn complete_shell(&self, leaf: &str, cg: u64, shell: &StagedShell) -> Completion {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let matching = inner.owners.get(leaf).is_some_and(|r| r.cg == cg && matches!(&r.state,
             OwnerState::Placing { stage: Some(s), .. } if s.process == shell.process));
@@ -168,6 +171,7 @@ impl HostKeys {
     }
 
     pub fn abort_create(&self, leaf: &str, cg: u64) -> Option<StagedShell> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         if !inner.owners.get(leaf).is_some_and(|r| r.cg == cg && matches!(r.state, OwnerState::Placing { .. })) { return None }
         let mut row = inner.owners.remove(leaf).unwrap();
@@ -177,6 +181,15 @@ impl HostKeys {
         Self::retain_present_receipt(&mut inner, leaf, &mut row);
         if matches!(row.state, OwnerState::Held) { inner.owners.insert(leaf.into(), row); }
         shell
+    }
+
+    pub(crate) fn input_stamp(&self, process: &str) -> Option<crate::pty_manager::input_gate::OwnerStamp> {
+        let inner = self.lock();
+        let row = inner.owners.values().find(|row| matches!(&row.state,
+            OwnerState::Registered(shell) if shell.process == process))?;
+        Some(crate::pty_manager::input_gate::OwnerStamp {
+            generation: row.cg, owner: format!("{:?}", row.owner),
+        })
     }
 
     pub fn owner_state(&self, leaf: &str) -> Option<(u64, OwnerState)> {
@@ -200,6 +213,7 @@ impl HostKeys {
     }
 
     pub fn close_process(&self, reference: &str, policy: CloseStorage) -> CloseAction {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let leaf = if reference.starts_with("tm-") { Some(reference.to_string()) } else {
             inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == reference)).map(|(l, _)| l.clone())
@@ -292,6 +306,7 @@ impl HostKeys {
 
     /// A placement can exit before its Spawn/Attach reply is delivered.
     pub fn note_exit(&self, process: &str) -> bool {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let Some(row) = inner.owners.values_mut().find(|r| shell_of(&r.state).is_some_and(|s| s.process == process)) else { return false };
         match &mut row.state {
@@ -337,17 +352,21 @@ impl HostKeys {
             let inner = self.lock();
             inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == process))?.0.clone()
         };
-        let (ended, mut inner) = super::super::leaf_storage::with_leaves(&[&leaf], || {
+        let (ended, mut inner, _input_order) = super::super::leaf_storage::with_leaves(&[&leaf], || {
             let valid = |r: &Row| match (&r.state, kind) {
                 (OwnerState::Registered(s), EndKind::Exit) | (OwnerState::Closing(s), EndKind::Close(_)) => s.process == process,
                 _ => false,
             };
             if !self.lock().owners.get(&leaf).is_some_and(&valid) { return None }
             storage(&leaf);
+            // Persistence may be slow and must not block admission/other stripes. Retain the
+            // input barrier only for the final lifetime mutation and Close FIFO enqueue.
+            let input_order = self.input_owner_change();
             let mut inner = self.lock();
             if !inner.owners.get(&leaf).is_some_and(valid) { return None }
             let row = inner.owners.remove(&leaf).unwrap();
             let shell = shell_of(&row.state).unwrap().clone();
+            self.input.forget(process);
             if let ShellStage::Hosted(stage) = &shell.stage {
                 self.routes.remove_key(stage.channel, &stage.key);
                 let close = if kind == EndKind::Exit { CloseState::None } else { CloseState::Pending };
@@ -361,7 +380,7 @@ impl HostKeys {
                 let (outcome, _) = tokio::sync::watch::channel(None);
                 inner.owners.insert(leaf.clone(), Row { cg: row.cg, ssh_reserved: row.ssh_reserved, state: OwnerState::Held, owner: row.owner, admitted_pg: None, started: false, outcome });
             }
-            Some((Ended { leaf: leaf.clone(), shell }, inner))
+            Some((Ended { leaf: leaf.clone(), shell }, inner, input_order))
         })?;
         // Retain ownership until the stripe is released and Close is enqueued:
         // reconnect must not send the newly Pending cell inside this section.

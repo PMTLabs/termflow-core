@@ -230,9 +230,10 @@ impl Session {
     }
 
     pub fn write_stdin(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut w = lock(&self.writer);
-        w.write_all(bytes)?;
-        w.flush()
+        // Core admission ends at this process-bound FIFO's acceptance, not a new wire ack.
+        // The manager retains this exact Session; both queued input and StartupReplies use
+        // this one complete-write/flush boundary, never an independent raw writer handle.
+        termflow_pty_protocol::da1::write_reply(&self.writer, bytes)
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {

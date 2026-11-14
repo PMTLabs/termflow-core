@@ -378,7 +378,14 @@ pub fn spawn_terminal(
         // the ConPTY startup-handshake filter, the 4KB-read UTF-8 carry (an incomplete
         // trailing scalar waits for the next read) and the ordered EOF/error tail.
         let mut da1 = termflow_pty_protocol::da1::StartupDa1::for_spawn(cursor_row);
-        let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone());
+        let reply_keys = app_state.host_table.keys().clone();
+        let reply_process = thread_id.clone();
+        let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone())
+            .with_admission(move |writer, bytes| {
+                reply_keys.admit_protocol_input(&reply_process, |_permit| {
+                    termflow_pty_protocol::da1::write_reply(writer, bytes)
+                })
+            });
         termflow_pty_protocol::pump::pump_output(
             &mut reader,
             find_utf8_boundary,

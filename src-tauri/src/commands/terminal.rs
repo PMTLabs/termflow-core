@@ -8,7 +8,6 @@ use tauri::State;
 use crate::state::{plan_restore, AppState, CursorFrame, ReplayPrefix};
 use crate::pty_manager;
 use std::collections::HashMap;
-use std::io::Write;
 use sysinfo::System;
 
 /// Which owner, if any, this create must reserve before it spawns.
@@ -950,17 +949,9 @@ pub async fn write_terminal(
         .ok_or_else(|| "Terminal not found".to_string())?;
     // Host-owned terminals: forward keystrokes to the sidecar (still tag the
     // user-input source below).
-    if !state.host_write(&id, data.as_bytes()) {
-        // Clone the Arc, dropping the DashMap shard guard before locking.
-        let writer_mutex = match state.shell_writer_channels.get(&id) {
-            Some(r) => r.clone(),
-            None => return Err("Terminal not found".to_string()),
-        };
-        {
-            let mut writer = writer_mutex.lock().map_err(|_| "Failed to lock writer".to_string())?;
-            writer.write_all(data.as_bytes()).map_err(|e| e.to_string())?;
-        }
-    }
+    crate::pty_manager::input_gate::write_input(&*state, &id,
+        crate::pty_manager::input_gate::InputSource::Renderer, None, data.as_bytes())
+        .map_err(|e| e.message)?;
     // Tag this terminal's last-write as user-driven (keystrokes/paste flow through
     // this invoke command, never the REST API). Drives the agent color-scheme
     // revert-on-user-exit behavior. Writer guard dropped above so we never nest the

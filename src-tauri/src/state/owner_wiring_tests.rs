@@ -118,7 +118,11 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
         assert!(body.contains(operation));
     }
     let writer = production(include_str!("../automation/send.rs"));
-    assert!(fn_body(&writer, "fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {").contains("ingress::registered_target(self.host_table.keys(), pc)"));
+    assert!(fn_body(&writer, "fn write(&self, pc: &str, bytes: &[u8]) -> Result<(), String> {").contains("self.write_leased(pc, bytes, None)"));
+    let implementation = &writer[writer.find("impl<R: tauri::Runtime> TerminalWriter").unwrap()..];
+    let leased = fn_body(implementation, "fn write_leased(");
+    assert!(leased.contains("ingress::registered_target(self.host_table.keys(), pc)"));
+    assert!(leased.contains("input_gate::write_input("));
     let fleet = production(include_str!("../api_server/fleet.rs"));
     assert!(fn_body(&fleet, "fn fleet_close(").contains("state.close_process(&body.terminal_id, crate::state::CloseStorage::Preserve)"));
     let run = fn_body(&fleet, "fn fleet_local_run(");
@@ -127,7 +131,12 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
     let ws = production(include_str!("../api_server/ws.rs"));
     let socket = fn_body(&ws, "fn handle_socket(");
     assert!(socket.contains("state.resolve_ref("));
-    assert!(socket.contains("ingress::registered_target(state.host_table.keys(), terminal_id)"));
+    assert!(socket.contains("input_gate::write_input("));
+    let gate = production(include_str!("../pty_manager/input_gate.rs"));
+    assert!(fn_body(&gate, "fn write_input(").contains(".admit_input("));
+    let admission = fn_body(&gate, "fn input_write<");
+    assert!(admission.contains("self.input_stamp(process)"));
+    assert!(admission.contains("self.input.ownership.read()"));
     let router = production(include_str!("../api_server/mod.rs"));
     assert!(router.contains("\"/api/terminals/:id/prompt\", post(execute_prompt)"));
     assert!(router.contains("\"/api/terminals/:id/execute\", post(execute_prompt)"));

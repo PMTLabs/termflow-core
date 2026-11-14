@@ -122,6 +122,7 @@ impl HostKeys {
     }
 
     pub(crate) fn pane_op_at(&self, label: &str, request: PaneRequest, now: Instant) -> Result<(PaneReply, PaneEffects), String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let page = inner.window_pages.sender(label, request.pg)?;
         let stream = inner.panes.streams.get(&page.pg).ok_or("page stream ended")?;
@@ -302,6 +303,7 @@ impl HostKeys {
         inner.panes.holders.remove(&pi);
     }
     pub(crate) fn admitted_work(&self, label: &str, pg: u64, leaf: &str, cg: u64) -> Result<CreateAdmission, String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         inner.window_pages.sender(label, pg)?;
         let row = inner.owners.get_mut(leaf).filter(|r| r.cg == cg && (r.admitted_pg == Some(pg) || matches!(r.owner, Owner::Pane(pi) if pi.pg == pg)))
@@ -318,6 +320,7 @@ impl HostKeys {
         }
     }
     pub(crate) fn close_process_reap(&self, pc: &str, reap: bool) -> (PaneResult, Vec<String>) {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let leaf = inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == pc)).map(|(l, _)| l.clone());
         let Some(leaf) = leaf else { return (PaneResult::Ok, Vec::new()); };

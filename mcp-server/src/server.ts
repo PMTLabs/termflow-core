@@ -17,6 +17,15 @@ export interface McpServerDeps {
     getCallerId: () => string | undefined;
 }
 
+// Only the two fixed admission refusals may cross from an HTTP error body. Do not
+// reflect arbitrary response text (which can include command/private-path details).
+function inputWriteError(error: unknown): string {
+    const body = (error as { response?: { data?: { error?: unknown } } } | null)?.response?.data?.error;
+    if (typeof body === "string" && body.startsWith("InputLocked:")) return "InputLocked: SSH launch is preparing";
+    if (typeof body === "string" && body.startsWith("StaleAttempt:")) return "StaleAttempt: terminal input lease expired";
+    return error instanceof Error ? error.message : String(error);
+}
+
 const ME_HINT = 'Use "me" for your own terminal, or pass an explicit id (e.g. $TERMFLOW_TERMINAL_ID).';
 
 /**
@@ -196,7 +205,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
+                const msg = inputWriteError(error);
                 return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
             }
         }
@@ -222,7 +231,7 @@ export function createMcpServer({ api, getCallerId }: McpServerDeps): McpServer 
                 const response = await api.post(`/terminals/${id}/input`, { data: parsed });
                 return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
             } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
+                const msg = inputWriteError(error);
                 return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
             }
         }

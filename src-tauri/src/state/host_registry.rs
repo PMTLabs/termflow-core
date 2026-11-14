@@ -105,6 +105,22 @@ pub(super) fn route_write(
     }
 }
 
+/// Already admitted input: the unforgeable permit retains the input/ownership barrier
+/// while the registered channel/epoch is rechecked at the actual FIFO enqueue.
+pub(super) fn route_write_admitted(
+    keys: &HostKeys,
+    permit: &crate::pty_manager::input_gate::InputPermit<'_>,
+    bytes: &[u8],
+    client_for: &dyn Fn(HostChannel) -> Option<PtyHostClient>,
+) -> bool {
+    let Some(shell) = keys.with_registered(permit.process(), Clone::clone) else { return false; };
+    let super::ShellStage::Hosted(stage) = &shell.stage else { return false; };
+    match client_for(stage.channel) {
+        Some(client) => client.write_registered_admitted(keys, permit, stage.channel, &stage.key, bytes),
+        None => false,
+    }
+}
+
 /// Forward a resize to the host that owns `id`; false as for [`route_write`].
 pub(super) fn route_resize(
     keys: &HostKeys,

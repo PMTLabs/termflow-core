@@ -649,29 +649,19 @@ pub(crate) fn write_data_to_terminal(
     id: &str,
     data: &str,
 ) -> Result<(), (StatusCode, String)> {
-    use std::io::Write;
+    use crate::pty_manager::input_gate::{write_input, InputSource, FailureKind};
     if crate::state::ingress::registered_target(state.host_table.keys(), id).is_none() {
         return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string()));
     }
-    // Host-owned terminals: forward to the sidecar.
-    if state.host_write(id, data.as_bytes()) {
-        emit_external_activity(state, id);
-        return Ok(());
-    }
-    // Clone the writer Arc out of the map, dropping the DashMap shard guard
-    // before locking the inner Mutex.
-    let writer_mutex = match state.shell_writer_channels.get(id) {
-        Some(r) => r.clone(),
-        None => return Err((StatusCode::NOT_FOUND, "Terminal not found".to_string())),
-    };
-    {
-        let mut writer = writer_mutex
-            .lock()
-            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "terminal writer mutex poisoned".to_string()))?;
-        writer
-            .write_all(data.as_bytes())
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    }
+    write_input(state, id, InputSource::Rest, None, data.as_bytes()).map_err(|e| {
+        let status = match e.kind {
+            FailureKind::Missing => StatusCode::NOT_FOUND,
+            FailureKind::Locked => StatusCode::LOCKED,
+            FailureKind::Stale => StatusCode::CONFLICT,
+            FailureKind::Write => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        (status, e.message)
+    })?;
     emit_external_activity(state, id);
     Ok(())
 }

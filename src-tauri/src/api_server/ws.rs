@@ -219,32 +219,9 @@ pub(crate) async fn handle_socket(socket: WebSocket, state: AppState) {
                                 );
                                 let data = value["payload"]["data"].as_str().unwrap_or("");
 
-                                use std::io::Write;
-                                // Host-owned terminals route to the sidecar; else
-                                // write to the local writer (parity with the REST/
-                                // Tauri input paths).
-                                let write_result: Result<(), String> = if crate::state::ingress::registered_target(state.host_table.keys(), terminal_id).is_none() {
-                                    Err("terminal not found".to_string())
-                                } else if state
-                                    .host_write(terminal_id, data.as_bytes())
-                                {
-                                    Ok(())
-                                } else {
-                                    // Clone the Arc, dropping the shard guard before locking.
-                                    let writer_arc = state
-                                        .shell_writer_channels
-                                        .get(terminal_id)
-                                        .map(|r| r.clone());
-                                    match writer_arc {
-                                        Some(writer_mutex) => match writer_mutex.lock() {
-                                            Ok(mut writer) => writer
-                                                .write_all(data.as_bytes())
-                                                .map_err(|e| e.to_string()),
-                                            Err(_) => Err("writer mutex poisoned".to_string()),
-                                        },
-                                        None => Err("terminal not found".to_string()),
-                                    }
-                                };
+                                let write_result = crate::pty_manager::input_gate::write_input(
+                                    &state, terminal_id, crate::pty_manager::input_gate::InputSource::WebSocket,
+                                    None, data.as_bytes()).map_err(|e| e.message);
 
                                 // WS input is an external channel (like the REST paths) —
                                 // tag the last-write source so an agent ended via WS stays

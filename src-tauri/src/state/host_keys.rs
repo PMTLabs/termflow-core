@@ -76,6 +76,7 @@ type EffectHook = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync>>>>;
 pub struct HostKeys {
     inner: Arc<Mutex<Inner>>,
     routes: HostRoutes,
+    pub(crate) input: Arc<crate::pty_manager::input_gate::InputDomain>,
     deliveries: Arc<std::sync::OnceLock<std::sync::mpsc::Sender<delivery::Delivery>>>,
     #[cfg(test)]
     pub(crate) route_hook: EffectHook,
@@ -98,7 +99,7 @@ impl HostKeys {
             window_pages: pages::WindowPages::default(), panes: panes::PaneTable::default(),
             closed_unowned: HashMap::new(), cap: ENDING_CAP,
             pending_deliveries: std::collections::HashSet::new(),
-        })), routes, deliveries: Arc::default(),
+        })), routes, input: Arc::default(), deliveries: Arc::default(),
             #[cfg(test)]
             route_hook: Arc::default(),
             #[cfg(test)]
