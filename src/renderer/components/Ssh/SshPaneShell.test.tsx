@@ -65,6 +65,32 @@ test('inline prompts do not steal or restore sibling focus and refusals render o
   sibling.remove();
 });
 
+test('two-hop prompts retain pending focus, chain, and restore only inside their scope', async () => {
+  let finish: () => void = () => {};
+  const submit = () => new Promise<void>(resolve => { finish = resolve; });
+  const render = (id?: string) => <div className="ssh-pane-shell"><button data-terminal>Terminal</button>{id && <SshSecretPrompt key={id} view={view('needs-secret')} onSubmit={submit} onCancel={jest.fn()} />}</div>;
+  act(() => root.render(render()));
+  const terminal = container.querySelector<HTMLButtonElement>('[data-terminal]')!;
+  terminal.focus();
+  act(() => root.render(render('jump')));
+  const jump = container.querySelector<HTMLInputElement>('input[type=password]')!;
+  expect(document.activeElement).toBe(jump);
+  act(() => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(jump.readOnly).toBe(true); expect(document.activeElement).toBe(jump);
+  await act(async () => { finish(); await flush(); });
+  act(() => root.render(render('target')));
+  expect(document.activeElement).toBe(container.querySelector('input[type=password]'));
+  act(() => root.render(render()));
+  expect(document.activeElement).toBe(terminal);
+  const outside = document.createElement('button'); document.body.append(outside); outside.focus();
+  act(() => root.render(render('unowned')));
+  expect(document.activeElement).toBe(outside);
+  container.querySelector<HTMLInputElement>('input[type=password]')!.focus();
+  act(() => root.render(render()));
+  expect(document.activeElement).not.toBe(outside);
+  outside.remove();
+});
+
 test('SshDisconnectedBanner reconnect_waits and double clicks do not launch twice', async () => {
   let resolve: () => void = () => {}; const reconnect = jest.fn(() => new Promise<void>(r => { resolve = r; }));
   act(() => root.render(<SshDisconnectedBanner onReconnect={reconnect} />));

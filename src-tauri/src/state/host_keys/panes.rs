@@ -234,6 +234,8 @@ impl HostKeys {
                     OwnerState::Held => {},
                     OwnerState::Closing(_) => unreachable!(),
                 }
+            } else if matches!(row.state, OwnerState::Held) && row.cg != 0 && Self::bindable(inner, &row.owner, page, &BindVia::Named("restore".into())) {
+                inner.owners.get_mut(leaf).unwrap().owner = Owner::Pane(pi);
             } else if matches!(row.state, OwnerState::Registered(_)) && Self::bindable(inner, &row.owner, page, &BindVia::Named("restore".into())) {
                 let row = inner.owners.get_mut(leaf).unwrap();
                 row.owner = Owner::Pane(pi);
@@ -258,7 +260,8 @@ impl HostKeys {
             cg
         };
         let (outcome, _) = tokio::sync::watch::channel(None);
-        inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Placing { stage: None, staged_exited: false, cancel: None },
+        let ssh_reserved = inner.owners.get(leaf).is_some_and(|r| r.ssh_reserved);
+        inner.owners.insert(leaf.into(), Row { cg, ssh_reserved, state: OwnerState::Placing { stage: None, staged_exited: false, cancel: None },
             owner: Owner::Pane(pi), admitted_pg: Some(page.pg), started: false, outcome });
         PaneResult::Create { cg }
     }
@@ -311,13 +314,14 @@ impl HostKeys {
             let cg = inner.sequence.checked_add(1)?;
             inner.sequence = cg;
             let (outcome, _) = tokio::sync::watch::channel(None);
-            inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Held, owner: Owner::Pane(pi), admitted_pg: None, started: false, outcome });
+            inner.owners.insert(leaf.into(), Row { cg, ssh_reserved: true, state: OwnerState::Held, owner: Owner::Pane(pi), admitted_pg: None, started: false, outcome });
         }
         if inner.owners.get(leaf)?.cg == 0 {
             let cg = inner.sequence.checked_add(1)?;
             inner.sequence = cg;
             inner.owners.get_mut(leaf)?.cg = cg;
         }
+        inner.owners.get_mut(leaf)?.ssh_reserved = true;
         let row = inner.owners.get(leaf)?;
         if matches!(row.owner, Owner::Orphaned | Owner::Headless) || matches!(row.state, OwnerState::Closing(_)) { None } else { Some(row.cg) }
     }

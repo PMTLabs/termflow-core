@@ -21,7 +21,7 @@ impl HostKeys {
             if let Some(row) = inner.owners.get_mut(leaf) { row.owner = Owner::Transfer { tx: tx.into(), taken: false }; }
             else {
                 let (outcome, _) = tokio::sync::watch::channel(None);
-                inner.owners.insert(leaf.clone(), Row { cg: 0, state: OwnerState::Held, owner: Owner::Transfer { tx: tx.into(), taken: false },
+                inner.owners.insert(leaf.clone(), Row { cg: 0, ssh_reserved: false, state: OwnerState::Held, owner: Owner::Transfer { tx: tx.into(), taken: false },
                     admitted_pg: None, started: false, outcome });
             }
             inner.panes.present.remove(&pair.pi);
@@ -123,7 +123,7 @@ impl HostKeys {
         for member in &transfer.members {
             let leaf = &member.descriptor.leaf;
             if inner.owners.get(leaf).is_some_and(|r| matches!(&r.owner, Owner::Transfer { tx: owner_tx, .. } if owner_tx == tx))
-                && !Self::release_idle_owner(inner, leaf) {
+                && !(if cancel && source_live { Self::release_idle_owner(inner, leaf) } else { Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf) }) {
                 inner.owners.get_mut(leaf).unwrap().owner = if cancel && source_live { Owner::Parked { pg: transfer.source, by: member.pi } } else { Owner::Orphaned };
             }
             inner.panes.holders.remove(&member.pi);
@@ -145,7 +145,7 @@ impl HostKeys {
             _ => false,
         }).map(|(leaf, _)| leaf.clone()).collect();
         for leaf in leaves {
-            if !Self::release_idle_owner(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned; }
+            if !(Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf)) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned; }
         }
         // A dead source cannot advertise a drag, but its carried members must
         // remain available to a destination that is still booting.

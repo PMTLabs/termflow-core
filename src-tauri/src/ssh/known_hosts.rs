@@ -34,21 +34,30 @@ pub(crate) fn canonical_host(host: &str) -> Result<String, SessionError> {
     if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
         return Ok(ip.to_string());
     }
+    let raw = raw.strip_suffix('.').unwrap_or(raw);
     if raw.len() > 253
         || raw.is_empty()
-        || !raw.trim_end_matches('.').split('.').all(|label| {
+        || !raw.split('.').all(|label| {
             !label.is_empty()
                 && label.len() <= 63
                 && !label.starts_with('-')
                 && !label.ends_with('-')
                 && label
                     .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
         })
     {
         return Err(SessionError::InvalidTarget);
     }
     Ok(raw.to_ascii_lowercase())
+}
+#[test]
+fn canonical_internal_labels_and_one_root_dot() {
+    assert_eq!(canonical_host("Web_01.Internal.").unwrap(), "web_01.internal");
+    assert_eq!(lookup_token("Web_01.Internal.", 22), "web_01.internal");
+    for host in ["host..", "host.example..", "a..b", ".."] {
+        assert_eq!(canonical_host(host), Err(SessionError::InvalidTarget));
+    }
 }
 pub fn lookup_token(host: &str, port: u16) -> String {
     let canonical = canonical_host(host).unwrap_or_else(|_| host.into());

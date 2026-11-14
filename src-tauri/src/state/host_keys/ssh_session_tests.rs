@@ -16,6 +16,69 @@ fn open(f: &Fixture, keys: &HostKeys, leaf: &str, connection: &str) {
 }
 fn reconcile(f: &Fixture, keys: &HostKeys) { f.registry.reconcile_owners(|leaf, expected| keys.ssh_owner_receipt(leaf).is_some_and(|current| expected == Some(current))); }
 #[tokio::test]
+async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
+    for transition in ["depart", "cancel", "self-take", "abort", "staged-exit"] {
+        let keys = HostKeys::default();
+        let mut page = Page::new(&keys, "held-round2");
+        let a = page.enter(&keys, "tm-a");
+        let receipt = keys.ssh_owner_receipt("tm-a").unwrap();
+        let f = fixture(); open(&f, &keys, "tm-a", "c-a");
+        wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
+        match transition {
+            "depart" => {
+                page.op(&keys, PaneOp::Depart { pi: a.pi });
+                reconcile(&f, &keys);
+                assert!(f.registry.state("tm-a", false).is_ok(), "depart parked receipt");
+                let next = page.enter(&keys, "tm-a");
+                assert_eq!(page.admit(&keys, next.pi), receipt);
+            }
+            "cancel" | "self-take" => {
+                page.op(&keys, PaneOp::Stash { tx: "round2".into(), pairs: vec![a], ui: None });
+                page.op(&keys, if transition == "cancel" { PaneOp::Cancel { tx: "round2".into() } } else { PaneOp::Take { tx: "round2".into() } });
+                reconcile(&f, &keys);
+                assert!(f.registry.state("tm-a", false).is_ok(), "cancel parked receipt");
+                let next = page.enter(&keys, "tm-a");
+                assert_eq!(page.admit(&keys, next.pi), receipt);
+            }
+            _ => {
+                assert_eq!(page.admit(&keys, a.pi), receipt);
+                keys.admitted_work(page.label, page.pg, "tm-a", receipt).unwrap();
+                if transition == "abort" { keys.abort_create("tm-a", receipt); }
+                else {
+                    let shell = StagedShell { process: "pc-early".into(), stage: ShellStage::Local };
+                    keys.stage_shell("tm-a", receipt, "pc-early", None).unwrap();
+                    keys.note_exit("pc-early");
+                    assert!(matches!(keys.complete_shell("tm-a", receipt, &shell), Completion::Exited));
+                }
+            }
+        }
+        assert_eq!(keys.ssh_owner_receipt("tm-a"), Some(receipt), "{transition}");
+        reconcile(&f, &keys);
+        assert!(f.registry.state("tm-a", false).is_ok(), "{transition}");
+        assert!(crate::commands::ssh_session::reconnect_core(&keys, &f.registry, "tm-a").is_ok(), "{transition}");
+        f.registry.shutdown().await;
+    }
+}
+#[tokio::test]
+async fn held_retiring_transitions_remove_session() {
+    for transition in ["close", "window", "expiry", "backend-close"] {
+        let keys = HostKeys::default(); let mut page = Page::new(&keys, "held-retire");
+        let a = page.enter(&keys, "tm-a"); let f = fixture(); open(&f, &keys, "tm-a", "c-a");
+        match transition {
+            "close" => { page.op(&keys, PaneOp::Close { pi: a.pi }); }
+            "backend-close" => { keys.close_process("tm-a", CloseStorage::Delete); }
+            "window" => { keys.destroy_window(page.label, page.wi); }
+            _ => {
+                page.op(&keys, PaneOp::Stash { tx: "expire-ssh".into(), pairs: vec![a], ui: None });
+                keys.expire_transfers(Instant::now() + Duration::from_secs(120));
+            }
+        }
+        reconcile(&f, &keys);
+        assert!(f.registry.state("tm-a", false).is_err(), "{transition}");
+        f.registry.shutdown().await;
+    }
+}
+#[tokio::test]
 async fn held_transfer_receipt_survives_admit_and_reconcile() {
     let keys = HostKeys::default();
     let mut source = Page::new(&keys, "held-source"); let mut target = Page::new(&keys, "held-target");

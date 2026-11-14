@@ -132,13 +132,16 @@ function jsDeps() {
 
 function resolveFabricDir() {
   const o = process.env.TERMFLOW_FABRIC_DIR;
-  const candidates = o?.trim() ? [isAbsolute(o) ? o : join(ROOT, o)] : [
-    join(ROOT, '..', 'termflow-fabric'),
-    join(dirname(resolve(ROOT, run('git', ['rev-parse', '--git-common-dir']).trim())), '..', 'termflow-fabric'),
-  ];
-  const found = candidates.find(dir => existsSync(join(dir, 'Cargo.toml')));
-  if (!found) throw new Error(`Fabric source not found (set TERMFLOW_FABRIC_DIR): ${candidates.join(', ')}`);
-  return found;
+  const direct = o?.trim() ? (isAbsolute(o) ? o : join(ROOT, o)) : join(ROOT, '..', 'termflow-fabric');
+  if (existsSync(join(direct, 'Cargo.toml'))) return direct;
+  if (o?.trim()) throw new Error(`Fabric source not found: ${direct}`);
+  try {
+    const common = run('git', ['rev-parse', '--git-common-dir']).trim();
+    const linked = join(dirname(resolve(ROOT, common)), '..', 'termflow-fabric');
+    if (existsSync(join(linked, 'Cargo.toml'))) return linked;
+  } catch { /* Archives and standalone core checkouts need neither git nor fabric. */ }
+  if (process.argv.includes('--require-fabric')) throw new Error('Fabric source not found (--require-fabric)');
+  return direct;
 }
 
 // --- collect ---------------------------------------------------------------

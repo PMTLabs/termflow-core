@@ -1,13 +1,14 @@
-import { useEffect, type RefObject } from 'react';
+import { useLayoutEffect, type RefObject } from 'react';
 
 /** Inline prompts never trap focus or interrupt a sibling pane. */
 export function useSshPromptFocus(root: RefObject<HTMLDivElement | null>, cancel: () => void, selector: string, active = true) {
-  useEffect(() => {
+  useLayoutEffect(() => {
     const node = root.current;
     if (!node || !active) return;
     const scope = node.closest('.ssh-pane-shell, .ssh-test-dialog') ?? node.parentElement;
-    const trigger = document.activeElement as HTMLElement | null;
-    if (trigger && scope?.contains(trigger)) node.querySelector<HTMLElement>(selector)?.focus();
+    const focused = document.activeElement as HTMLElement | null;
+    const trigger = focused && scope?.contains(focused) ? focused : null;
+    if (trigger) node.querySelector<HTMLElement>(selector)?.focus();
     const keydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancel(); }
     };

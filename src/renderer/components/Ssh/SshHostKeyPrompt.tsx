@@ -17,7 +17,7 @@ export function SshHostKeyPrompt({ view, onTrust, onCancel }: { view: SshSession
     <h3>{allowed ? 'Unknown SSH host key' : 'SSH host key refused'}</h3>
     <p>{target && `${target.hop === 'jump' ? 'Jump host' : 'Target'}: ${target.user}@${target.host}:${target.port}`}</p>
     <p>{view.hostKey?.algorithm}</p><code>{view.hostKey?.fingerprintSha256}</code>
-    <p>{allowed ? 'Verify this fingerprint independently before trusting.' : 'Update known_hosts with ssh-keygen. There is no override.'}</p>
+    <p>{allowed ? 'Verify this fingerprint independently before trusting.' : (view.reason ?? 'Update known_hosts with ssh-keygen. There is no override.')}</p>
     {error && <p role="alert">Host trust could not be saved.</p>}
     {allowed && <button disabled={pending} onClick={trust}>{pending ? 'Saving…' : 'Trust'}</button>}
     {allowed && <button data-dialog-cancel data-action="cancel" onClick={onCancel}>Cancel</button>}

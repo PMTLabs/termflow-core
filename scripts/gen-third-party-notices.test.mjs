@@ -25,12 +25,24 @@ test('notice cache fingerprints all JS manifests and preserves license-body divi
     }
   } finally { rmSync(ROOT, { recursive: true, force: true }); }
 });
-test('worktree fabric resolution uses common git checkout and missing fabric is fatal', () => {
+test('fabric resolution is lazy, optional for core, and strict only when requested', () => {
   const workspace = join(tmpdir(), 'tf-workspace');
   const fabric = join(workspace, 'termflow-fabric');
-  const context = vm.createContext({ ROOT: join(workspace, 'core/.claude/worktrees/ssh'), join, dirname, resolve, isAbsolute, existsSync: p => p === join(fabric, 'Cargo.toml'), process: { env: {} }, run: () => join(workspace, 'core/.git') });
+  const context = vm.createContext({ ROOT: join(workspace, 'core/.claude/worktrees/ssh'), join, dirname, resolve, isAbsolute, existsSync: p => p === join(fabric, 'Cargo.toml'), process: { env: {}, argv: [] }, run: () => join(workspace, 'core/.git') });
   vm.runInContext(functions, context);
   expect(vm.runInContext('resolveFabricDir()', context)).toBe(fabric);
+  const direct = join(context.ROOT, '..', 'termflow-fabric');
+  context.existsSync = p => p === join(direct, 'Cargo.toml');
+  context.run = () => { throw new Error('git unavailable'); };
+  expect(vm.runInContext('resolveFabricDir()', context)).toBe(direct);
   context.existsSync = () => false;
+  expect(vm.runInContext('resolveFabricDir()', context)).toBe(direct);
+  context.process.argv = ['--require-fabric'];
   expect(() => vm.runInContext('resolveFabricDir()', context)).toThrow('Fabric source not found');
+  context.process.argv = [];
+  context.process.env.TERMFLOW_FABRIC_DIR = 'bad';
+  expect(() => vm.runInContext('resolveFabricDir()', context)).toThrow('Fabric source not found');
+  context.process.env.TERMFLOW_FABRIC_DIR = fabric;
+  context.existsSync = p => p === join(fabric, 'Cargo.toml');
+  expect(vm.runInContext('resolveFabricDir()', context)).toBe(fabric);
 });

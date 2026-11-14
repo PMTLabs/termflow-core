@@ -266,8 +266,8 @@ mod tests {
         assert_eq!(exited.reason.as_deref(), Some("Local shell ended"));
         let reconnected = super::reconnect_core(&keys, &f.registry, "tm-a").unwrap();
         assert!(reconnected.generation > opened.generation);
-        // Force a genuine new local-shell placement, then reconnect must capture
-        // its CURRENT receipt rather than the old attempt's receipt.
+        // A failed spawn is not a genuine close: retry and reconnect must
+        // retain the current live SSH ownership receipt.
         let PaneResult::Create { cg } = op(
             3,
             serde_json::json!({"kind":"admit_create","pi":{"pg":pg,"seq":1},"mode":"Restart"}),
@@ -281,7 +281,7 @@ mod tests {
         ) else {
             panic!("restart again");
         };
-        assert!(new_cg > cg);
+        assert_eq!(new_cg, cg, "abort with the pane present must preserve SSH ownership");
         let latest = super::reconnect_core(&keys, &f.registry, "tm-a").unwrap();
         f.registry
             .reconcile_owners(|leaf, receipt| keys.ssh_owner_receipt(leaf) == receipt);

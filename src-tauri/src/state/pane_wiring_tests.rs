@@ -58,7 +58,7 @@ fn page_sender_and_original_window_end_remain_qualified_at_mutation() {
     let end = production(include_str!("host_keys/pane_transfers.rs"));
     let end = fn_body(&end, "fn end_pane_pages(");
     assert!(end.contains("pages.contains(&pi.pg)") && end.contains("pages.contains(&pg)"));
-    assert!(end.contains("Self::release_idle_owner(inner, &leaf)"));
+    assert!(end.contains("Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf)"));
     assert!(!end.contains("close_process") && !end.contains("kill_process") && !end.contains("emit("));
 }
 
