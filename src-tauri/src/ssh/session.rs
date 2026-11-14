@@ -100,7 +100,7 @@ pub struct SessionTarget {
     pub hops: Vec<SessionHop>,
 }
 impl SessionTarget {
-    fn validate(&self, connection: &str) -> Result<(), SessionError> {
+    fn validate(&mut self, connection: &str) -> Result<(), SessionError> {
         if self.hops.is_empty()
             || self.hops.len() > 2
             || self
@@ -113,7 +113,8 @@ impl SessionTarget {
         if self.hops.len() == 2 && self.hops[0].connection_id == self.hops[1].connection_id {
             return Err(SessionError::InvalidTarget);
         }
-        for h in &self.hops {
+        for h in &mut self.hops {
+            h.host = super::known_hosts::canonical_host(&h.host)?;
             if h.host.is_empty()
                 || h.host.starts_with('-')
                 || h.host.chars().any(|c| c.is_whitespace() || c.is_control())
@@ -285,6 +286,7 @@ struct EntryState {
     view: SessionView,
     pending: Option<Pending>,
     authenticated: bool,
+    unsaved_secret_warning: bool,
     launch: Option<LaunchState>,
     launch_seq: u64,
     process_id: Option<String>,
@@ -304,6 +306,7 @@ impl Entry {
         if self.cancel.is_cancelled() {
             return;
         }
+        let previous = state.view.clone();
         let was_connected = state.view.state == SessionState::Connected;
         operation(&mut state);
         if was_connected && state.view.state != SessionState::Connected {
@@ -312,7 +315,9 @@ impl Entry {
             state.pending.take();
             state.authenticated = false;
         }
-        self.publish_locked(&mut state);
+        if state.view != previous {
+            self.publish_locked(&mut state);
+        }
     }
     fn publish_locked(&self, state: &mut EntryState) {
         state.view.revision += 1;
@@ -335,6 +340,12 @@ impl Entry {
     }
     fn invalidate(&self, reason: Option<String>) {
         let mut s = self.inner.lock();
+        // The first terminal transition owns the diagnostic. Late transport
+        // callbacks/retirement must not erase a local-shell exit reason.
+        if self.cancel.is_cancelled() {
+            return;
+        }
+        let previous = s.view.clone();
         self.cancel.cancel();
         s.pending.take();
         s.authenticated = false;
@@ -350,7 +361,9 @@ impl Entry {
         clear_prompt(&mut s.view);
         s.view.host_key = host_key;
         s.view.prompt_target = prompt_target;
-        self.publish_locked(&mut s);
+        if s.view != previous {
+            self.publish_locked(&mut s);
+        }
     }
     async fn wait<T>(
         &self,
@@ -585,6 +598,7 @@ impl SessionRegistry {
                 view,
                 pending: None,
                 authenticated: false,
+                unsaved_secret_warning: false,
                 launch: None,
                 launch_seq: 0,
                 process_id: None,
@@ -661,8 +675,19 @@ impl SessionRegistry {
         id: &str,
         owner: impl Fn() -> bool,
     ) -> Result<SessionView, SessionError> {
-        let view = self.state(id, false)?;
         let receipt = self.entry(id, false)?.owner_receipt;
+        self.reconnect_owned(id, receipt, owner)
+    }
+    pub fn reconnect_owned(
+        self: &Arc<Self>,
+        id: &str,
+        receipt: Option<u64>,
+        owner: impl Fn() -> bool,
+    ) -> Result<SessionView, SessionError> {
+        if !owner() {
+            return Err(SessionError::OwnerRetired);
+        }
+        let view = self.state(id, false)?;
         self.close(id, false, Some(view.generation))?;
         self.open_owned(id, &view.connection_id, false, receipt, owner)
     }
@@ -737,6 +762,9 @@ impl SessionRegistry {
             clear_prompt(&mut s.view);
         } else if s.authenticated && launch == LaunchState::Running {
             s.view.state = SessionState::Connected;
+            s.view.reason = s
+                .unsaved_secret_warning
+                .then(|| SessionError::RememberUnavailable.reason());
         }
         e.publish_locked(&mut s);
         Ok(())
@@ -826,13 +854,13 @@ impl client::Handler for ClientHandler {
     ) -> Result<bool, Self::Error> {
         let result = self.verify_key(key).await;
         if let Err(error) = &result {
-            fail(&self.entry, error.clone());
             if matches!(
                 error,
                 SessionError::HostKeyChanged | SessionError::HostKeyRevoked
             ) {
                 if let PublicKeyOrCertificate::PublicKey { key, .. } = key {
                     self.entry.update(|s| {
+                        apply_failure(s, error.clone());
                         s.view.host_key = Some(HostKey {
                             algorithm: key.algorithm().to_string(),
                             fingerprint_sha256: key
@@ -843,6 +871,8 @@ impl client::Handler for ClientHandler {
                         s.view.prompt_target = Some(prompt_target(&self.hop, self.is_target));
                     });
                 }
+            } else {
+                fail(&self.entry, error.clone());
             }
         }
         Ok(result.is_ok())
@@ -932,7 +962,15 @@ fn acceptable_key(key: &ssh_key::PublicKey) -> bool {
         return false;
     }
     if let Some(rsa) = key.key_data().rsa() {
-        return rsa.key_size() >= 2048;
+        return rsa
+            .n()
+            .as_positive_bytes()
+            .and_then(|b| {
+                b.split_first()
+                    .map(|(msb, rest)| rest.len() * 8 + 8 - msb.leading_zeros() as usize)
+            })
+            .unwrap_or(0)
+            >= 2048;
     }
     true
 }
@@ -946,29 +984,30 @@ fn prompt_target(hop: &SessionHop, target: bool) -> PromptTarget {
     }
 }
 fn fail(entry: &Entry, error: SessionError) {
-    entry.update(|s| {
-        // Never relabel a security refusal from the callback as a network error.
-        if s.view.state == SessionState::Error {
-            return;
-        }
-        s.view.state = if error == SessionError::Cancelled {
-            SessionState::Disconnected
-        } else {
-            SessionState::Error
-        };
-        s.view.gate = if matches!(
-            error,
-            SessionError::TransportClosed | SessionError::TimedOut
-        ) && s.view.gate == Gate::Pending
-        {
-            Gate::NetworkError
-        } else {
-            Gate::Blocked
-        };
-        s.view.reason = Some(error.reason());
-        s.pending.take();
-        clear_prompt(&mut s.view);
-    });
+    entry.update(|s| apply_failure(s, error));
+}
+fn apply_failure(s: &mut EntryState, error: SessionError) {
+    // Never relabel a security refusal from the callback as a network error.
+    if s.view.state == SessionState::Error {
+        return;
+    }
+    s.view.state = if error == SessionError::Cancelled {
+        SessionState::Disconnected
+    } else {
+        SessionState::Error
+    };
+    s.view.gate = if matches!(
+        error,
+        SessionError::TransportClosed | SessionError::TimedOut
+    ) && s.view.gate == Gate::Pending
+    {
+        Gate::NetworkError
+    } else {
+        Gate::Blocked
+    };
+    s.view.reason = Some(error.reason());
+    s.pending.take();
+    clear_prompt(&mut s.view);
 }
 async fn run_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) {
     let result = connect_engine(entry.clone(), deps).await;
@@ -978,7 +1017,7 @@ async fn run_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) {
 }
 async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<(), SessionError> {
     let connection = entry.view().connection_id;
-    let target = entry
+    let mut target = entry
         .wait(Duration::from_secs(15), deps.targets.resolve(&connection))
         .await?;
     target.validate(&connection)?;
@@ -1062,6 +1101,8 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         } else {
             SessionState::Connecting
         };
+        s.view.reason = (s.view.state == SessionState::Connected && s.unsaved_secret_warning)
+            .then(|| SessionError::RememberUnavailable.reason());
         clear_prompt(&mut s.view);
     });
     // Handler callbacks observe real transport completion. Holding the bastion handle
@@ -1084,6 +1125,18 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
     }
     Ok(())
 }
+fn identity_path(home: &std::path::Path, identity: &str) -> PathBuf {
+    let relative = identity.strip_prefix("~/");
+    #[cfg(windows)]
+    let relative = relative.or_else(|| identity.strip_prefix("~\\"));
+    relative.map_or_else(|| PathBuf::from(identity), |relative| home.join(relative))
+}
+async fn connect_agent(
+    entry: &Entry,
+    agents: &dyn AgentFactory,
+) -> Result<DynamicAgent, SessionError> {
+    entry.wait(Duration::from_secs(30), agents.connect()).await
+}
 async fn authenticate(
     entry: &Arc<Entry>,
     deps: &Arc<Dependencies>,
@@ -1092,10 +1145,7 @@ async fn authenticate(
     handle: &mut client::Handle<ClientHandler>,
 ) -> Result<(), SessionError> {
     if hop.auth == AuthMethod::Agent {
-        let mut agent = entry
-            .wait(Duration::from_secs(30), deps.agents.connect())
-            .await
-            .map_err(|_| SessionError::AgentUnavailable)?;
+        let mut agent = connect_agent(entry, deps.agents.as_ref()).await?;
         let identities = entry
             .wait(Duration::from_secs(30), async {
                 agent
@@ -1104,6 +1154,7 @@ async fn authenticate(
                     .map_err(|_| SessionError::AgentUnavailable)
             })
             .await?;
+        let mut rejected = false;
         for identity in identities {
             let russh::keys::agent::AgentIdentity::PublicKey { key, .. } = identity else {
                 continue;
@@ -1132,19 +1183,20 @@ async fn authenticate(
             if accepted {
                 return Ok(());
             }
+            rejected = true;
         }
-        return Err(SessionError::AgentUnavailable);
+        return Err(if rejected {
+            SessionError::AuthRejected
+        } else {
+            SessionError::AgentUnavailable
+        });
     }
     let identity = if hop.auth == AuthMethod::Key {
         let identity = hop
             .identity_file
             .as_ref()
             .ok_or(SessionError::IdentityUnreadable)?;
-        let path = if let Some(relative) = identity.strip_prefix("~/") {
-            deps.home.join(relative)
-        } else {
-            PathBuf::from(identity)
-        };
+        let path = identity_path(&deps.home, identity);
         Some(
             entry
                 .wait(Duration::from_secs(15), async {
@@ -1304,7 +1356,7 @@ async fn authenticate(
                 .await;
                 if result.is_err() {
                     entry.update(|s| {
-                        s.view.reason = Some(SessionError::RememberUnavailable.reason())
+                        s.unsaved_secret_warning = true;
                     });
                 }
             }
@@ -1430,6 +1482,19 @@ impl SshSession {
             result
         }
     }
+    /// Evict only the failed lease, never a replacement opened concurrently.
+    pub async fn evict_sftp(&self, failed: &SftpLease) -> bool {
+        let mut cached = self.sftp.lock().await;
+        if cached
+            .as_ref()
+            .is_some_and(|client| Arc::ptr_eq(client, &failed.client))
+        {
+            *cached = None;
+            true
+        } else {
+            false
+        }
+    }
     pub async fn sftp(&self) -> Result<SftpLease, SessionError> {
         self.guard(Duration::from_secs(30), async {
             let mut cached = self.sftp.lock().await;
@@ -1503,6 +1568,9 @@ impl SftpLease {
         }
     }
 }
+#[cfg(test)]
+#[path = "review_tests.rs"]
+mod review_tests;
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;

@@ -32,6 +32,7 @@ pub struct Counters {
     pub subsystems: AtomicUsize,
     pub closed_channels: AtomicUsize,
     pub principals: Mutex<Vec<String>>,
+    pub direct_addresses: Mutex<Vec<(String, u32)>>,
 }
 #[derive(Clone)]
 pub struct Server {
@@ -140,7 +141,7 @@ impl server::Handler for Server {
                         break;
                     }
                 }
-                let _ = handle.close(ch).await;
+                // Leave the channel open: the output-cap reader must close it.
             });
             return Ok(());
         }
@@ -191,7 +192,10 @@ impl server::Handler for Server {
         if self.deny_jump {
             return Ok(());
         }
-        assert_eq!((host, port), ("target.test", 22));
+        self.counters
+            .direct_addresses
+            .lock()
+            .push((host.into(), port));
         if let Some(target) = self.target.clone() {
             reply.accept().await;
             target.start(Box::new(channel.into_stream()));
@@ -299,7 +303,11 @@ impl Fixture {
             );
             if let Some(target) = &server.target {
                 bytes.push_str(&format!(
-                    "target.test {}\n",
+                    "{} {}\n",
+                    super::known_hosts::lookup_token(
+                        &hops.last().unwrap().host,
+                        hops.last().unwrap().port
+                    ),
                     target.host.public_key().to_openssh().unwrap()
                 ));
             }
@@ -436,12 +444,21 @@ async fn exec_requires_ack_exit_and_bounded_output() {
         session.exec("no-exit").await,
         Err(SessionError::MissingExitStatus)
     );
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let closed_before = f.server.counters.closed_channels.load(Ordering::SeqCst);
     assert_eq!(
         session
             .exec_bounded("oversize", 1024, Duration::from_secs(2))
             .await,
         Err(SessionError::OutputTooLarge)
     );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while f.server.counters.closed_channels.load(Ordering::SeqCst) <= closed_before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(session.exec("fixture").await.is_ok());
     f.registry.shutdown().await;
 }

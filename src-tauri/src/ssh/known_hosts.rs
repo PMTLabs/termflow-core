@@ -19,8 +19,40 @@ pub enum Verdict {
     Verified,
     Unknown,
 }
+pub(crate) fn canonical_host(host: &str) -> Result<String, SessionError> {
+    let raw = if let Some(inner) = host.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        return inner
+            .parse::<std::net::Ipv6Addr>()
+            .map(|ip| ip.to_string())
+            .map_err(|_| SessionError::InvalidTarget);
+    } else {
+        host
+    };
+    if raw.contains([',', '*', '?', '!', '|', '@', '#', '[', ']', '/', '\\']) {
+        return Err(SessionError::InvalidTarget);
+    }
+    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        return Ok(ip.to_string());
+    }
+    if raw.len() > 253
+        || raw.is_empty()
+        || !raw.trim_end_matches('.').split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        })
+    {
+        return Err(SessionError::InvalidTarget);
+    }
+    Ok(raw.to_ascii_lowercase())
+}
 pub fn lookup_token(host: &str, port: u16) -> String {
-    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let canonical = canonical_host(host).unwrap_or_else(|_| host.into());
+    let host = canonical.as_str();
     if port == 22 {
         host.to_ascii_lowercase()
     } else {
@@ -129,7 +161,7 @@ pub fn classify(bytes: &[u8], token: &str, key: &PublicKey) -> Result<Verdict, S
         }
         match entry.marker() {
             Some(Marker::Revoked) => {
-                pinned = true;
+                // Revocation denies this key; it does not pin an unrelated key.
                 revoked |= entry.public_key().key_data() == key.key_data();
             }
             Some(Marker::CertAuthority) => ca = true,
@@ -243,6 +275,19 @@ fn trust_transaction(
     after_read: impl FnOnce(),
 ) -> Result<(), SessionError> {
     use fs4::FileExt;
+    let (host, port) = if let Some(rest) = token.strip_prefix('[') {
+        let (host, port) = rest.rsplit_once("]:").ok_or(SessionError::InvalidTarget)?;
+        (
+            host,
+            port.parse::<u16>()
+                .map_err(|_| SessionError::InvalidTarget)?,
+        )
+    } else {
+        (token, 22)
+    };
+    if port == 0 || lookup_token(&canonical_host(host)?, port) != token {
+        return Err(SessionError::InvalidTarget);
+    }
     private_parent(path)?;
     let lock_path = path.with_file_name(format!(
         "{}.termflow.lock",
@@ -345,12 +390,39 @@ mod tests {
             .join(".ssh/known_hosts")
     }
     #[test]
+    fn trust_rejects_pattern_injection_before_any_write() {
+        let path = temporary();
+        for token in [
+            "a,*.prod",
+            "*",
+            "?",
+            "!a",
+            "|1|a|b",
+            "@a",
+            "#a",
+            "[a]",
+            "a/b",
+            "a\\b",
+            "[a]:2222,[*.prod]:2222",
+        ] {
+            assert_eq!(
+                trust_transaction(&path, token, &key(1), &CancellationToken::new(), || {}),
+                Err(SessionError::InvalidTarget),
+                "{token}"
+            );
+            assert!(!path.exists());
+            assert!(!path.parent().unwrap().exists());
+        }
+    }
+    #[test]
     fn host_key_policy_table() {
         let (key, other) = (key(1), key(2));
         let k = key.to_openssh().unwrap();
         let o = other.to_openssh().unwrap();
         let rows = [
             (format!("host {o}"), Err(SessionError::HostKeyChanged)),
+            (format!("@revoked * {o}"), Ok(Verdict::Unknown)),
+            (format!("@revoked * {k}"), Err(SessionError::HostKeyRevoked)),
             (format!("host {o}\nhost {k}"), Ok(Verdict::Verified)),
             (
                 format!("host {k}\n@revoked host {k}"),

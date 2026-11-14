@@ -4,6 +4,7 @@ use aes_gcm::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub(crate) struct SecretError;
@@ -36,12 +37,15 @@ impl KeySource for OsKeySource {
             account: self.account,
         };
         Self::run(move || match source.entry()?.get_password() {
-            Ok(value) => STANDARD
-                .decode(value)
-                .map_err(|_| SecretError)?
-                .try_into()
-                .map(Some)
-                .map_err(|_| SecretError),
+            Ok(value) => {
+                let value = Zeroizing::new(value);
+                let bytes =
+                    Zeroizing::new(STANDARD.decode(value.as_bytes()).map_err(|_| SecretError)?);
+                let key = Zeroizing::new(
+                    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| SecretError)?,
+                );
+                Ok(Some(*key))
+            }
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(_) => Err(SecretError),
         })
@@ -52,13 +56,14 @@ impl KeySource for OsKeySource {
             account: self.account,
         };
         Self::run(move || {
-            let mut key = [0; 32];
-            OsRng.fill_bytes(&mut key);
+            let mut key = Zeroizing::new([0; 32]);
+            OsRng.fill_bytes(key.as_mut());
+            let encoded = Zeroizing::new(STANDARD.encode(key.as_ref()));
             source
                 .entry()?
-                .set_password(&STANDARD.encode(key))
+                .set_password(&encoded)
                 .map_err(|_| SecretError)?;
-            Ok(key)
+            Ok(*key)
         })
     }
 }
@@ -124,13 +129,13 @@ impl MessageCipher {
         if let Some(key) = cache.as_ref() {
             return Ok(zeroize::Zeroizing::new(**key));
         }
-        let key = match self.source.get()? {
+        let key = Zeroizing::new(match self.source.get()? {
             Some(key) => key,
             None if create => self.source.create()?,
             None => return Err(SecretError),
-        };
-        *cache = Some(zeroize::Zeroizing::new(key));
-        Ok(zeroize::Zeroizing::new(key))
+        });
+        *cache = Some(key.clone());
+        Ok(key)
     }
     pub(crate) fn encrypt(&self, text: &str) -> Result<String, SecretError> {
         let cipher =
@@ -152,14 +157,16 @@ impl MessageCipher {
         }
         let cipher =
             Aes256Gcm::new_from_slice(self.key(false)?.as_ref()).map_err(|_| SecretError)?;
-        let plain = cipher
-            .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
-            .map_err(|_| SecretError)?;
-        String::from_utf8(plain).map_err(|error| {
-            use zeroize::Zeroize;
-            error.into_bytes().zeroize();
-            SecretError
-        })
+        let plain = Zeroizing::new(
+            cipher
+                .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
+                .map_err(|_| SecretError)?,
+        );
+        // The returned String belongs to the caller; all intermediate plaintext
+        // (including invalid UTF-8 on the error path) is erased here.
+        std::str::from_utf8(&plain)
+            .map(str::to_owned)
+            .map_err(|_| SecretError)
     }
 }
 

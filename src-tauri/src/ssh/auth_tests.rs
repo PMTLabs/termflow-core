@@ -108,6 +108,22 @@ fn with_agent(f: &Fixture, agent: Arc<dyn AgentFactory>) {
         .unwrap();
 }
 #[tokio::test]
+async fn healthy_agent_server_rejection_is_auth_rejected() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    with_agent(
+        &f,
+        Arc::new(FakeAgent {
+            keys: vec![key(12)],
+            signs: Arc::new(AtomicUsize::new(0)),
+            locked: false,
+        }),
+    );
+    let id = f.registry.probe("c-a").unwrap();
+    let v = wait_state(&f.registry, &id, true, SessionState::Error).await;
+    assert_eq!(v.reason, Some(SessionError::AuthRejected.reason()));
+    f.registry.shutdown().await;
+}
+#[tokio::test]
 async fn agent_first_identity_refused_second_accepted() {
     let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
     let signs = Arc::new(AtomicUsize::new(0));

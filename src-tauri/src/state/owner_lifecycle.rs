@@ -82,12 +82,12 @@ impl<R: Runtime> AppState<R> {
 
     /// Keep storage ahead of removal; a successor cannot admit during this work.
     pub(crate) fn end_shell(&self, process: &str, kind: EndKind) -> bool {
-        let ssh_receipt = self.metadata_leaf(process).ok().flatten().and_then(|leaf| {
-            self.ssh_sessions.state(&leaf, false).ok().map(|view| (leaf, view.generation))
-        });
+        let mut ssh_receipt = None;
         let local_process = self.local_processes.get(process).map(|p| p.clone());
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, process);
         let ended = self.host_table.keys().end_process(process, kind, |leaf| {
+            // The authority supplies the stable leaf, not metadata_target's process id.
+            ssh_receipt = self.ssh_sessions.state(leaf, false).ok().map(|view| (leaf.to_owned(), view.generation));
             match kind {
                 EndKind::Exit => {
                     if super::history_key(Some(leaf)).is_some() {

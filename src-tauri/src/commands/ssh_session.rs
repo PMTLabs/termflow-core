@@ -19,12 +19,31 @@ pub(crate) fn native_registry<R: Runtime>(
         crate::ssh::session::Dependencies::native(Arc::new(TauriSshEvents(app))),
     ))
 }
-fn admitted<R: Runtime>(state: &AppState<R>, terminal_id: &str) -> bool {
-    state
-        .host_table
-        .keys()
+pub(crate) fn open_core(
+    keys: &crate::state::HostKeys,
+    registry: &Arc<crate::ssh::session::SessionRegistry>,
+    terminal_id: &str,
+    connection_id: &str,
+) -> Result<SessionView, SessionError> {
+    let receipt = keys
         .ssh_owner_receipt(terminal_id)
-        .is_some()
+        .ok_or(SessionError::OwnerRetired)?;
+    registry.open_owned(terminal_id, connection_id, false, Some(receipt), || {
+        keys.ssh_owner_receipt(terminal_id) == Some(receipt)
+    })
+}
+pub(crate) fn reconnect_core(
+    keys: &crate::state::HostKeys,
+    registry: &Arc<crate::ssh::session::SessionRegistry>,
+    terminal_id: &str,
+) -> Result<SessionView, SessionError> {
+    registry.state(terminal_id, false)?;
+    let receipt = keys
+        .ssh_owner_receipt(terminal_id)
+        .ok_or(SessionError::OwnerRetired)?;
+    registry.reconnect_owned(terminal_id, Some(receipt), || {
+        keys.ssh_owner_receipt(terminal_id) == Some(receipt)
+    })
 }
 #[tauri::command]
 pub fn ssh_session_open<R: Runtime>(
@@ -33,16 +52,12 @@ pub fn ssh_session_open<R: Runtime>(
     terminal_id: String,
     connection_id: String,
 ) -> Result<SessionView, SessionError> {
-    let receipt = state
-        .host_table
-        .keys()
-        .ssh_owner_receipt(&terminal_id)
-        .ok_or(SessionError::OwnerRetired)?;
-    state
-        .ssh_sessions
-        .open_owned(&terminal_id, &connection_id, false, Some(receipt), || {
-            state.host_table.keys().ssh_owner_receipt(&terminal_id) == Some(receipt)
-        })
+    open_core(
+        state.host_table.keys(),
+        &state.ssh_sessions,
+        &terminal_id,
+        &connection_id,
+    )
 }
 #[tauri::command]
 pub fn ssh_session_state<R: Runtime>(
@@ -67,9 +82,7 @@ pub fn ssh_session_reconnect<R: Runtime>(
     state: State<'_, AppState<R>>,
     terminal_id: String,
 ) -> Result<SessionView, SessionError> {
-    state
-        .ssh_sessions
-        .reconnect(&terminal_id, || admitted(&state, &terminal_id))
+    reconnect_core(state.host_table.keys(), &state.ssh_sessions, &terminal_id)
 }
 #[tauri::command]
 pub fn ssh_session_submit_secret<R: Runtime>(
@@ -181,13 +194,118 @@ mod tests {
     async fn commands_drive_real_engine_and_emit_only_authoritative_states() {
         use crate::ssh::{session::*, tests::*};
         let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
-        f.connected().await;
+        use crate::state::{
+            CreateMode, EndKind, HostKeys, PaneReply, PaneRequest, PaneResult, ShellStage,
+            StagedShell,
+        };
+        let keys = HostKeys::default();
+        keys.reserve_window("owner").unwrap().commit().unwrap();
+        let crate::state::PageRegistration::Registered { pg, .. } =
+            keys.register_page("owner").unwrap()
+        else {
+            panic!("page");
+        };
+        let op = |seq, value: serde_json::Value| {
+            let request: PaneRequest =
+                serde_json::from_value(serde_json::json!({"pg":pg,"seq":seq,"op":value})).unwrap();
+            let (reply, effects) = keys.pane_op("owner", request).unwrap();
+            for (leaf, receipt) in effects.ssh_retired {
+                f.registry.retire_owner(&leaf, receipt);
+            }
+            let PaneReply::Ack { result } = reply else {
+                panic!("ack");
+            };
+            result
+        };
+        op(
+            1,
+            serde_json::json!({"kind":"enter","panes":[{"pi":{"pg":pg,"seq":1},"paneId":"pane-a","leaf":"tm-a","restore":false}]}),
+        );
+        let opened = super::open_core(&keys, &f.registry, "tm-a", "c-a").unwrap();
+        let receipt = keys.ssh_owner_receipt("tm-a").unwrap();
+        let PaneResult::Create { cg } = op(
+            2,
+            serde_json::json!({"kind":"admit_create","pi":{"pg":pg,"seq":1},"mode":"Mount"}),
+        ) else {
+            panic!("admission");
+        };
+        assert_eq!(
+            cg, receipt,
+            "pre-admit receipt must survive Held -> Placing"
+        );
+        keys.stage_shell("tm-a", cg, "pc-a", None).unwrap();
+        keys.complete_shell(
+            "tm-a",
+            cg,
+            &StagedShell {
+                process: "pc-a".into(),
+                stage: ShellStage::Local,
+            },
+        );
+        let v = wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
+        f.registry
+            .submit_secret(
+                "tm-a",
+                false,
+                None,
+                v.prompt_id.as_deref(),
+                "password-alice".into(),
+                false,
+            )
+            .unwrap();
+        f.registry
+            .on_launch_lifecycle("tm-a", v.generation, 1, LaunchState::Running, None)
+            .unwrap();
+        wait_state(&f.registry, "tm-a", false, SessionState::Connected).await;
+        assert!(keys.end_process("pc-a", EndKind::Exit, |_| {}).is_some());
+        f.registry
+            .disconnect_generation("tm-a", opened.generation, "Local shell ended");
+        f.registry
+            .reconcile_owners(|leaf, receipt| keys.ssh_owner_receipt(leaf) == receipt);
+        let exited = f.registry.state("tm-a", false).unwrap();
+        assert_eq!(exited.reason.as_deref(), Some("Local shell ended"));
+        let reconnected = super::reconnect_core(&keys, &f.registry, "tm-a").unwrap();
+        assert!(reconnected.generation > opened.generation);
+        // Force a genuine new local-shell placement, then reconnect must capture
+        // its CURRENT receipt rather than the old attempt's receipt.
+        let PaneResult::Create { cg } = op(
+            3,
+            serde_json::json!({"kind":"admit_create","pi":{"pg":pg,"seq":1},"mode":"Restart"}),
+        ) else {
+            panic!("restart");
+        };
+        keys.abort_create("tm-a", cg);
+        let PaneResult::Create { cg: new_cg } = op(
+            4,
+            serde_json::json!({"kind":"admit_create","pi":{"pg":pg,"seq":1},"mode":"Restart"}),
+        ) else {
+            panic!("restart again");
+        };
+        assert!(new_cg > cg);
+        let latest = super::reconnect_core(&keys, &f.registry, "tm-a").unwrap();
+        f.registry
+            .reconcile_owners(|leaf, receipt| keys.ssh_owner_receipt(leaf) == receipt);
+        assert_eq!(
+            f.registry.state("tm-a", false).unwrap().generation,
+            latest.generation
+        );
+        assert!(matches!(
+            keys.admit_create("control", CreateMode::Mount),
+            Ok(_)
+        ));
         let events = f.events.0.lock().clone();
         assert!(!events.is_empty());
         assert!(events
             .iter()
             .all(|v| v.terminal_id.as_deref() == Some("tm-a") && v.connection_id == "c-a"));
-        assert_eq!(events.last().unwrap().state, SessionState::Connected);
+        assert!(events.iter().any(|v| v.state == SessionState::Connected));
+        op(
+            5,
+            serde_json::json!({"kind":"close","pi":{"pg":pg,"seq":1}}),
+        );
+        f.registry
+            .reconcile_owners(|leaf, receipt| keys.ssh_owner_receipt(leaf) == receipt);
+        assert_eq!(f.registry.state("tm-a", false), Err(SessionError::NotFound));
         f.registry.shutdown().await;
     }
     #[test]

@@ -16,6 +16,26 @@ async fn host_key_policy_table_blocks_auth_and_direct_trust() {
         format!("target.test,,bad {key}\n"),
         format!("|2|unsupported|bad {key}\n"),
     ];
+    for unreadable in ["directory", "oversized"] {
+        let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);
+        if unreadable == "directory" {
+            std::fs::create_dir(&f.path).unwrap();
+        } else {
+            std::fs::write(&f.path, vec![b' '; 8 * 1024 * 1024 + 1]).unwrap();
+        }
+        let before = std::fs::metadata(&f.path).unwrap().len();
+        let id = f.registry.probe("c-a").unwrap();
+        let v = wait_state(&f.registry, &id, true, SessionState::Error).await;
+        assert_eq!(v.reason, Some(SessionError::KnownHostsUnreadable.reason()));
+        assert_eq!(
+            f.registry.trust_host(&id, true, None, None, true),
+            Err(SessionError::StaleAttempt)
+        );
+        assert_eq!(f.server.counters.auth.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::metadata(&f.path).unwrap().len(), before);
+        assert!(!f.events.0.lock().iter().any(|v| v.gate == Gate::Verified));
+        f.registry.shutdown().await;
+    }
     for bytes in cases {
         let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);
         std::fs::write(&f.path, &bytes).unwrap();
@@ -41,7 +61,7 @@ async fn host_key_policy_table_blocks_auth_and_direct_trust() {
         f.registry.shutdown().await;
     }
     for bytes in [
-        format!("target.test {key}\n"),
+        format!("target.test {key}\n@revoked * {other}\n"),
         format!("target.test {rsa}\ntarget.test {key}\n"),
     ] {
         let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);

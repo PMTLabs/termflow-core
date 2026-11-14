@@ -3,6 +3,105 @@ use crate::ssh::{session::*, tests::*};
 use serde_json::{json, Value};
 use tauri::Manager;
 
+#[tokio::test]
+async fn ssh_session_invoke_real_appstate_exit_reconnect_close() {
+    use crate::state::{PaneReply, PaneRequest, PaneResult, ShellStage, StagedShell};
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let (tx, _) = tokio::sync::broadcast::channel(16);
+    let mut state = AppState::new(
+        tx,
+        app.handle().clone(),
+        crate::app_config::NetworkConfig::defaults(),
+    );
+    state.ssh_sessions = f.registry.clone();
+    app.manage(state);
+    let state = app.state::<AppState<tauri::test::MockRuntime>>();
+    let keys = state.host_table.keys();
+    keys.reserve_window("ssh-owner").unwrap().commit().unwrap();
+    let crate::state::PageRegistration::Registered { pg, .. } =
+        keys.register_page("ssh-owner").unwrap()
+    else {
+        panic!("page");
+    };
+    let op = |seq, value: Value| {
+        let request: PaneRequest =
+            serde_json::from_value(json!({"pg":pg,"seq":seq,"op":value})).unwrap();
+        let (reply, effects) = keys.pane_op("ssh-owner", request).unwrap();
+        for (leaf, receipt) in effects.ssh_retired {
+            f.registry.retire_owner(&leaf, receipt);
+        }
+        state.reconcile_ssh_owners();
+        let PaneReply::Ack { result } = reply else {
+            panic!("ack");
+        };
+        result
+    };
+    op(
+        1,
+        json!({"kind":"enter","panes":[{"pi":{"pg":pg,"seq":1},"paneId":"pane-a","leaf":"tm-a","restore":false}]}),
+    );
+    let opened = ssh_session_open(
+        app.handle().clone(),
+        app.state(),
+        "tm-a".into(),
+        "c-a".into(),
+    )
+    .unwrap();
+    let PaneResult::Create { cg } = op(
+        2,
+        json!({"kind":"admit_create","pi":{"pg":pg,"seq":1},"mode":"Mount"}),
+    ) else {
+        panic!("create");
+    };
+    keys.stage_shell("tm-a", cg, "pc-a", None).unwrap();
+    keys.complete_shell(
+        "tm-a",
+        cg,
+        &StagedShell {
+            process: "pc-a".into(),
+            stage: ShellStage::Local,
+        },
+    );
+    let v = wait_state(&f.registry, "tm-a", false, SessionState::NeedsSecret).await;
+    f.registry
+        .submit_secret(
+            "tm-a",
+            false,
+            None,
+            v.prompt_id.as_deref(),
+            "password-alice".into(),
+            false,
+        )
+        .unwrap();
+    f.registry
+        .on_launch_lifecycle("tm-a", opened.generation, 1, LaunchState::Running, None)
+        .unwrap();
+    wait_state(&f.registry, "tm-a", false, SessionState::Connected).await;
+    assert!(state.exit_process("pc-a"));
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let v = ssh_session_state(app.handle().clone(), app.state(), "tm-a".into()).unwrap();
+    assert_eq!(v.state, SessionState::Disconnected);
+    assert_eq!(v.reason.as_deref(), Some("Local shell ended"));
+    let next = ssh_session_reconnect(app.handle().clone(), app.state(), "tm-a".into()).unwrap();
+    assert!(next.generation > opened.generation);
+    state.reconcile_ssh_owners();
+    assert_eq!(
+        ssh_session_state(app.handle().clone(), app.state(), "tm-a".into())
+            .unwrap()
+            .generation,
+        next.generation
+    );
+    op(3, json!({"kind":"close","pi":{"pg":pg,"seq":1}}));
+    assert_eq!(
+        ssh_session_state(app.handle().clone(), app.state(), "tm-a".into()),
+        Err(SessionError::NotFound)
+    );
+    f.registry.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_session_invoke() {
     let app = tauri::test::mock_builder()

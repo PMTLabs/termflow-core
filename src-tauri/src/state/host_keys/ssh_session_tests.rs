@@ -16,6 +16,22 @@ fn open(f: &Fixture, keys: &HostKeys, leaf: &str, connection: &str) {
 }
 fn reconcile(f: &Fixture, keys: &HostKeys) { f.registry.reconcile_owners(|leaf, expected| keys.ssh_owner_receipt(leaf).is_some_and(|current| expected == Some(current))); }
 #[tokio::test]
+async fn held_transfer_receipt_survives_admit_and_reconcile() {
+    let keys = HostKeys::default();
+    let mut source = Page::new(&keys, "held-source"); let mut target = Page::new(&keys, "held-target");
+    let a = source.entry("tm-a", true);
+    source.op(&keys, PaneOp::Enter { panes: vec![a.clone()] });
+    source.op(&keys, PaneOp::Stash { ui: None, tx: "held-ssh".into(), pairs: vec![a] });
+    let receipt = keys.ssh_owner_receipt("tm-a").unwrap(); assert_ne!(receipt, 0);
+    let f = fixture(); crate::commands::ssh_session::open_core(&keys, &f.registry, "tm-a", "c-a").unwrap();
+    target.op(&keys, PaneOp::Take { tx: "held-ssh".into() });
+    let a = target.entry("tm-a", false); target.op(&keys, PaneOp::Adopt { tx: "held-ssh".into(), pairs: vec![a.clone()] });
+    assert_eq!(target.admit(&keys, a.pi), receipt);
+    reconcile(&f, &keys);
+    assert!(f.registry.state("tm-a", false).is_ok());
+    f.registry.shutdown().await;
+}
+#[tokio::test]
 async fn exact_owner_map_survives_split_swap_detach_and_reload() {
     let keys = HostKeys::default(); let mut source = Page::new(&keys, "ssh-source"); let mut destination = Page::new(&keys, "ssh-destination");
     let a = register_shell(&keys, &mut source, "tm-a", "pc-a"); let b = register_shell(&keys, &mut source, "tm-b", "pc-b");

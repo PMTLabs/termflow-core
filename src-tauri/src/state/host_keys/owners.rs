@@ -2,6 +2,7 @@
 //! reference never falls back to a leaf lookup, even after that leaf restarts.
 
 use super::*;
+use super::panes::Owner;
 use tokio::sync::watch;
 use std::time::Duration;
 
@@ -315,6 +316,12 @@ impl HostKeys {
                 Self::mark_end(&mut inner, stage.channel, &stage.key, close);
             }
             row.outcome.send_replace(Some(Ok(process.into())));
+            // A shell exit is not a pane close. Keep the placement receipt while
+            // its authoritative pane remains, until a real close/removal occurs.
+            if kind == EndKind::Exit && matches!(row.owner, Owner::Pane(pi) if inner.panes.present.get(&pi).is_some_and(|d| d.leaf == leaf)) {
+                let (outcome, _) = tokio::sync::watch::channel(None);
+                inner.owners.insert(leaf.clone(), Row { cg: row.cg, state: OwnerState::Held, owner: row.owner, admitted_pg: None, started: false, outcome });
+            }
             Some((Ended { leaf: leaf.clone(), shell }, inner))
         })?;
         // Retain ownership until the stripe is released and Close is enqueued:

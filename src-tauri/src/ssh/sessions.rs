@@ -12,7 +12,8 @@ where
 {
     let lease = registry.lease(terminal_id)?;
     let cancel = lease.cancellation();
-    let result = tokio::select! { biased; _ = cancel.cancelled() => return Err(SessionError::Cancelled), result = operation(lease) => result };
+    // Operations own cancellation cleanup (including joining channel readers).
+    let result = operation(lease).await;
     if cancel.is_cancelled() {
         Err(SessionError::Cancelled)
     } else {

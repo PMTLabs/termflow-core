@@ -250,8 +250,13 @@ impl HostKeys {
                 return PaneResult::Join { cg };
             } else { return PaneResult::Contended; }
         }
-        let Some(cg) = inner.sequence.checked_add(1) else { return PaneResult::Retry; };
-        inner.sequence = cg;
+        let cg = if let Some(row) = inner.owners.get(leaf).filter(|r| matches!(r.state, OwnerState::Held) && r.cg != 0) {
+            row.cg
+        } else {
+            let Some(cg) = inner.sequence.checked_add(1) else { return PaneResult::Retry; };
+            inner.sequence = cg;
+            cg
+        };
         let (outcome, _) = tokio::sync::watch::channel(None);
         inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Placing { stage: None, staged_exited: false, cancel: None },
             owner: Owner::Pane(pi), admitted_pg: Some(page.pg), started: false, outcome });
@@ -300,7 +305,19 @@ impl HostKeys {
     }
     /// Stable placement generation survives transfers/reload, but not final close.
     pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
-        let inner = self.lock();
+        let mut inner = self.lock();
+        if !inner.owners.contains_key(leaf) {
+            let pi = inner.panes.present.iter().filter(|(_, d)| d.leaf == leaf).map(|(pi, _)| *pi).max_by_key(|pi| (pi.pg, pi.seq))?;
+            let cg = inner.sequence.checked_add(1)?;
+            inner.sequence = cg;
+            let (outcome, _) = tokio::sync::watch::channel(None);
+            inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Held, owner: Owner::Pane(pi), admitted_pg: None, started: false, outcome });
+        }
+        if inner.owners.get(leaf)?.cg == 0 {
+            let cg = inner.sequence.checked_add(1)?;
+            inner.sequence = cg;
+            inner.owners.get_mut(leaf)?.cg = cg;
+        }
         let row = inner.owners.get(leaf)?;
         if matches!(row.owner, Owner::Orphaned | Owner::Headless) || matches!(row.state, OwnerState::Closing(_)) { None } else { Some(row.cg) }
     }
