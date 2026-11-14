@@ -105,19 +105,7 @@ async fn ssh_session_invoke_real_appstate_exit_reconnect_close() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_session_invoke() {
     let app = tauri::test::mock_builder()
-        .invoke_handler(tauri::generate_handler![
-            ssh_session_open,
-            ssh_session_state,
-            ssh_session_close,
-            ssh_session_reconnect,
-            ssh_session_submit_secret,
-            ssh_session_trust_host,
-            ssh_test_connection,
-            ssh_test_state,
-            ssh_test_close,
-            ssh_test_submit_secret,
-            ssh_test_trust_host,
-        ])
+        .invoke_handler(crate::ssh_handlers![])
         .build(tauri::test::mock_context(tauri::test::noop_assets()))
         .unwrap();
     let webview = tauri::WebviewWindowBuilder::new(&app, "ssh-test", Default::default())

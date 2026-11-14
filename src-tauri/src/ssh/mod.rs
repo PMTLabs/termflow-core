@@ -1,6 +1,9 @@
 //! Rust-owned saved SSH connection definitions (IPC-only).
 pub mod store;
 pub mod target;
+pub(crate) mod store_adapter;
+#[cfg(test)]
+mod t10_tests;
 pub mod auth;
 #[cfg(test)]
 mod auth_tests;

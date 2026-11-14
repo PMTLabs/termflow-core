@@ -1,4 +1,3 @@
-pub mod ssh;
 pub mod sibling_coord;
 pub mod identity_index;
 pub mod state;
@@ -920,17 +919,6 @@ pub fn run() {
     })
     .manage(crate::ssh::store::Store::new(crate::ssh::store::store_path()))
     .invoke_handler(crate::ssh_handlers![
-        commands::ssh_session_open,
-        commands::ssh_session_state,
-        commands::ssh_session_close,
-        commands::ssh_session_reconnect,
-        commands::ssh_session_submit_secret,
-        commands::ssh_session_trust_host,
-        commands::ssh_test_connection,
-        commands::ssh_test_state,
-        commands::ssh_test_close,
-        commands::ssh_test_submit_secret,
-        commands::ssh_test_trust_host,
         commands::create_terminal,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,

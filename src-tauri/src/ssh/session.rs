@@ -1,6 +1,6 @@
 //! One generation-fenced app transport per stable terminal identity; probes are separate.
 use super::{
-    auth::{AuthBinding, BoxFuture, CredentialCipher, NoSecrets, SecretKind, SecretSink},
+    auth::{AuthBinding, BoxFuture, CredentialCipher, SecretKind, SecretSink},
     known_hosts::{lookup_token, KnownHosts, Verdict},
 };
 use parking_lot::{Mutex, RwLock};
@@ -73,7 +73,7 @@ impl SessionError {
             Self::AgentUnavailable => "OpenSSH agent is missing, locked, empty, refused signing, or timed out.".into(),
             Self::IdentityUnreadable => "Cannot read or decode the selected identity file.".into(),
             Self::RememberUnavailable => "Connected; password was not saved (Remember unavailable).".into(),
-            Self::StoreUnavailable => "SSH connection store adapter is not installed yet.".into(),
+            Self::StoreUnavailable => "SSH connection store is unavailable; check saved connections.".into(),
             _ => format!("SSH operation failed: {}", serde_json::to_value(self).ok().and_then(|v| v["code"].as_str().map(str::to_owned)).unwrap_or_else(|| "operation-failed".into())),
         }
     }
@@ -100,7 +100,7 @@ pub struct SessionTarget {
     pub hops: Vec<SessionHop>,
 }
 impl SessionTarget {
-    fn validate(&mut self, connection: &str) -> Result<(), SessionError> {
+    pub(crate) fn validate(&mut self, connection: &str) -> Result<(), SessionError> {
         if self.hops.is_empty()
             || self.hops.len() > 2
             || self
@@ -472,15 +472,16 @@ pub struct Dependencies {
     pub home: PathBuf,
 }
 impl Dependencies {
-    pub fn native(events: Arc<dyn EventSink>) -> Self {
+    pub fn native(events: Arc<dyn EventSink>, store: crate::ssh::store::Store, changed: Arc<dyn Fn(&crate::ssh::store::Reply) + Send + Sync>) -> Self {
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
             .map(PathBuf::from)
             .unwrap_or_default();
+        let adapter = Arc::new(super::store_adapter::StoreAdapter::new(store, home.clone(), changed));
         Self {
-            targets: Arc::new(UnavailableTargets),
+            targets: adapter.clone(),
             streams: Arc::new(NativeStreams),
             agents: Arc::new(NativeAgent),
-            secrets: Arc::new(NoSecrets),
+            secrets: adapter,
             events,
             known_hosts: KnownHosts {
                 path: home.join(".ssh/known_hosts"),
@@ -1125,7 +1126,7 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
     }
     Ok(())
 }
-fn identity_path(home: &std::path::Path, identity: &str) -> PathBuf {
+pub(crate) fn identity_path(home: &std::path::Path, identity: &str) -> PathBuf {
     let relative = identity.strip_prefix("~/");
     #[cfg(windows)]
     let relative = relative.or_else(|| identity.strip_prefix("~\\"));

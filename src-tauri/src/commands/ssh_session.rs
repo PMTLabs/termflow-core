@@ -4,7 +4,7 @@ use crate::{
     state::AppState,
 };
 use std::sync::Arc;
-use tauri::{Emitter, Runtime, State};
+use tauri::{Emitter, Manager, Runtime, State};
 
 pub struct TauriSshEvents<R: Runtime>(pub tauri::AppHandle<R>);
 impl<R: Runtime> EventSink for TauriSshEvents<R> {
@@ -15,8 +15,14 @@ impl<R: Runtime> EventSink for TauriSshEvents<R> {
 pub(crate) fn native_registry<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Arc<crate::ssh::session::SessionRegistry> {
+    // Managed before setup; lazy test fallback creates no files or keyring access.
+    let store = app.try_state::<crate::ssh::store::Store>().map(|s| s.inner().clone())
+        .unwrap_or_else(|| crate::ssh::store::Store::new(crate::ssh::store::store_path()));
+    let emitter = app.clone();
     Arc::new(crate::ssh::session::SessionRegistry::new(
-        crate::ssh::session::Dependencies::native(Arc::new(TauriSshEvents(app))),
+        crate::ssh::session::Dependencies::native(Arc::new(TauriSshEvents(app)), store, Arc::new(move |reply| {
+            let _ = emitter.emit(crate::commands::ssh_store::CHANGED, reply);
+        })),
     ))
 }
 pub(crate) fn open_core(
@@ -310,7 +316,7 @@ mod tests {
     }
     #[test]
     fn ssh_commands_registered_and_bridged() {
-        let lib = include_str!("../lib.rs");
+        let lib = include_str!("ssh_store.rs");
         let bridge = include_str!("../../../src/renderer/api/tauri-bridge.ts");
         let browser = include_str!("../../../src/renderer/api/browser-bridge.ts");
         let contract = include_str!("../../../src/renderer/types/electron.d.ts");
@@ -328,10 +334,10 @@ mod tests {
             "ssh_test_trust_host",
         ];
         let registry = lib
-            .split(".invoke_handler(tauri::generate_handler![")
+            .split("macro_rules! ssh_handlers")
             .nth(1)
             .unwrap()
-            .split("])")
+            .split("pub trait StoreEmitter")
             .next()
             .unwrap();
         for name in names {

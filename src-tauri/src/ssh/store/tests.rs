@@ -216,7 +216,7 @@ fn failed_write_leaves_file_cache_and_revision_unchanged_and_emits_nothing() {
         let mut store = temp.store();
         let before = store.get().unwrap();
         let cache = store.cache.lock().unwrap().clone();
-        store.writer = Box::new(move |path, contents| {
+        store.writer = Arc::new(move |path, contents| {
             if stage == "rename" {
                 let staging = path.with_extension("test-tmp");
                 std::fs::write(&staging, contents).unwrap();
