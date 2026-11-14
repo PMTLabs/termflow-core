@@ -4,6 +4,7 @@ import { registerSshEditorGuard } from '../../../services/sshEditorGuard';
 import { parseArgs } from '../../../services/argParse';
 import { buildSshArgv } from '../../../services/buildSshArgv';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
+import { SshTestConnectionDialog } from '../../Ssh/SshTestConnectionDialog';
 import { refreshReadOnly, sshErrorMessage } from './sshErrors';
 function inputOf(c: SshConnection): SshConnectionInput { return { id:c.id, folderId:c.folderId, name:c.name, host:c.host, port:c.port, user:c.user, auth:c.auth, identityFile:c.identityFile, jumpConnectionId:c.jumpConnectionId, extraOptions:c.extraOptions, bookmarked:c.bookmarked }; }
 // Quote a Key=Value token only when parseArgs needs it to stay one token (whitespace, quotes or empty);
@@ -27,6 +28,12 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
   const [error, setError] = useState<SshError | null>(null); const [busy, setBusy] = useState(false); const [changed, setChanged] = useState(false); const [confirmDelete, setConfirmDelete] = useState(false);
   const dirty = JSON.stringify(draft) !== baseline.current || options !== baseOptions;
   const removed = !!connectionId && !existing;
+  const [testOpen, setTestOpen] = useState(false);
+  const sessionApi = window.electronAPI;
+  const canTest = !!existing && !!connectionId && !dirty && !changed && !readOnly && !busy
+    && JSON.stringify(inputOf(existing)) === baseline.current
+    && typeof sessionApi?.sshTestConnection === 'function';
+  useEffect(() => { if (!canTest) setTestOpen(false); }, [canTest]);
   useEffect(() => { if (readOnly || removed) setConfirmDelete(false); }, [readOnly, removed]);
   const jumpChoices = view.connections.filter(c => c.id !== connectionId && !c.jumpConnectionId && !view.connections.some(ref => ref.jumpConnectionId === connectionId));
   const reset = () => { const next = initial(); setDraft(next); baseline.current = JSON.stringify(next); const text = optionsText(next); setOptions(text); setBaseOptions(text); setError(null); setChanged(false); };
@@ -72,6 +79,10 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       {error && !['name','host','port','user','identityFile','extraOptions'].includes(error.field ?? '') && <p role="alert">{error.message}</p>}
       <div className="ssh-editor-actions"><button type="button" className="au-btn primary" onClick={() => void save()}>Save connection</button>{connectionId && <button type="button" className="au-btn danger" onClick={() => setConfirmDelete(true)}>Delete connection…</button>}</div>
     </fieldset>
+    <div className="ssh-editor-actions"><button type="button" className="au-btn" disabled={!canTest} aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test connection</button>
+      <small id="ssh-test-help">{!existing || dirty || changed ? 'Save changes before testing the saved connection.' : 'Tests the native app channel only; no terminal is opened.'}</small>
+    </div>
+    {testOpen && canTest && sessionApi && <SshTestConnectionDialog connectionId={connectionId!} api={sessionApi} onClose={() => setTestOpen(false)} />}
     <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
     <ConfirmDialog isOpen={confirmDelete && !readOnly && !removed} title="Delete connection" message={`Delete ${draft.name}?`} destructive confirmText="Delete" onCancel={() => setConfirmDelete(false)} onConfirm={async () => { if (readOnly || removed) { setConfirmDelete(false); return; } try { const reply = await api.deleteConnection({ id:connectionId! }); onSaved(reply,draft); onClose(); } catch (e) { setError({ code:'delete', message:sshErrorMessage(e) }); try { await refreshReadOnly(e,api,reply => onSaved(reply,draft)); } catch (refreshError) { setError({ code:'refresh', message:sshErrorMessage(refreshError) }); } } setConfirmDelete(false); }} />
   </div>;

@@ -47,6 +47,6 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
     {(view?.state === 'needs-hostkey' || (view?.state === 'error' && view.hostKey?.changed)) && <SshHostKeyPrompt key={view.promptId} view={view} onCancel={close} onTrust={() => api.sshTestTrustHost(view.probeId!, true, receipt)} />}
     {view?.state === 'connected' && <p role="status">Connected. File and metric capabilities have not been tested.{view.reason && ` ${view.reason}`}</p>}
     {((view?.state === 'error' && !view.hostKey?.changed) || view?.state === 'disconnected') && <p role="alert">{view.reason || 'Connection ended.'}</p>}
-    <button onClick={close}>Close</button>
+    <button type="button" className="au-btn" onClick={close}>Close</button>
   </div></div>, document.body);
 }

@@ -21,7 +21,7 @@ export function SshSecretPrompt({ view, onSubmit, onCancel }: SecretPromptProps)
     {view.reason && <p role="status">{view.reason}</p>}{error && <p role="alert">{error}</p>}
     <form onSubmit={submit}>
       <label>{view.secretKind === 'passphrase' ? 'Passphrase' : 'Password'}<input type="password" autoComplete="off" value={secret} readOnly={pending} onChange={e => setSecret(e.target.value)} /></label>
-      <label><input type="checkbox" checked={remember} disabled={pending} onChange={e => setRemember(e.target.checked)} />Remember for the app channel</label>
+      <label><input type="checkbox" checked={remember} aria-disabled={pending} onChange={e => { if (!pending) setRemember(e.target.checked); }} />Remember for the app channel</label>
       <button type="submit" aria-disabled={pending}>{pending ? 'Submitting…' : 'Continue'}</button>
       <button type="button" onClick={onCancel}>Cancel</button>
     </form>

@@ -55,6 +55,7 @@ test('inline prompts do not steal or restore sibling focus and refusals render o
   }
   act(() => root.render(<SshPaneShell {...props} view={{ ...view('error'), reason: 'Refused', hostKey: { ...view('error').hostKey!, changed: true } }} />));
   expect(container.querySelectorAll('.ssh-prompt')).toHaveLength(1);
+  expect(container.textContent).toContain('Refused');
   expect(container.textContent).not.toContain('SSH disconnected');
   expect(container.querySelector('[data-action=cancel]')).toBeNull();
   const warning = 'Connected; password was not saved (Remember unavailable).';
