@@ -945,3 +945,43 @@ describe('splitPane carries identity fields onto the surviving leaf', () => {
     });
   });
 });
+
+describe('panesSlice splitPaneInTab titleColor (API caller colour)', () => {
+  const twoPanes = (): ReturnType<typeof init> => {
+    let s = withActive('tb-1');
+    s = reducer(s, addTabTree({
+      tabId: 'tb-1',
+      tree: {
+        id: 'sp', type: 'split', direction: 'vertical', size: 100,
+        children: [
+          { id: 'pn-green', type: 'terminal', terminalId: 'tm-g', titleColor: '#22C55E' },
+          { id: 'pn-plain', type: 'terminal', terminalId: 'tm-p' },
+        ],
+      } as PaneNode,
+    }));
+    return s;
+  };
+  const leafByTerminal = (n: PaneNode | undefined, tid: string): PaneNode | undefined =>
+    !n ? undefined : n.terminalId === tid ? n : n.children?.map((c) => leafByTerminal(c, tid)).find(Boolean);
+
+  it('gives the new pane the caller colour even when the split target is a different, uncoloured pane', () => {
+    const s = reducer(twoPanes(), splitPaneInTab({
+      tabId: 'tb-1', paneId: 'pn-plain', direction: 'vertical', terminalId: 'tm-new', titleColor: '#22C55E',
+    }));
+    expect(leafByTerminal(s.treesByTabId['tb-1'], 'tm-new')?.titleColor).toBe('#22C55E');
+  });
+
+  it('falls back to the split target colour when no caller colour is given', () => {
+    const s = reducer(twoPanes(), splitPaneInTab({
+      tabId: 'tb-1', paneId: 'pn-green', direction: 'vertical', terminalId: 'tm-new',
+    }));
+    expect(leafByTerminal(s.treesByTabId['tb-1'], 'tm-new')?.titleColor).toBe('#22C55E');
+  });
+
+  it('seeds a tab with no terminal using the caller colour', () => {
+    const s = reducer(withActive('tb-1'), splitPaneInTab({
+      tabId: 'tb-e', direction: 'vertical', terminalId: 'tm-new', titleColor: '#22C55E',
+    }));
+    expect(s.treesByTabId['tb-e'].titleColor).toBe('#22C55E');
+  });
+});
