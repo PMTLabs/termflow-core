@@ -440,7 +440,8 @@ async fn swap_chmod_target_to_symlink_refuses() {
     f.registry.shutdown().await;
 }
 
-#[cfg(unix)]
+// `tauri::test` exists only with the Linux/macOS `integration-tests` feature.
+#[cfg(all(unix, feature = "integration-tests"))]
 #[tokio::test]
 async fn ipc_chmod_on_symlink_refused_by_backend() {
     use crate::{commands::ssh_fs_chmod, state::AppState};
