@@ -12,7 +12,7 @@ interface MetricsReading { sample: SshMetricsSample; deadline: number }
 export interface SshPaneState {
   connectionId: string; session?: SshSessionView; reattachedProcessId?: string; metrics?: Record<string, unknown>; files?: unknown[]; browserPath?: string;
   metricsFence?: MetricsFence; metricsReading?: MetricsReading; metricsLastStamp?: number;
-  metricsControl?: SshMetricsControl; metricsUnavailable?: string;
+  metricsControl?: SshMetricsControl; metricsUnavailable?: string; metricsDelayed?: boolean;
 }
 
 export function metricsClockChanged(fence: MetricsClock, now: MetricsClock): boolean {
@@ -56,6 +56,7 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
     if (view.state !== 'connected' || pane.session?.state !== 'connected' || pane.session.generation !== view.generation) {
       disarmMetrics(pane);
       delete pane.metricsLastStamp;
+      delete pane.metricsDelayed;
       delete pane.metricsControl;
       delete pane.metricsUnavailable;
     }
@@ -69,7 +70,10 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
   },
   sshMetricsDisarmed(state, { payload: id }: PayloadAction<string>) {
     const pane = state.byTerminal[id];
-    if (pane) disarmMetrics(pane);
+    if (pane) {
+      if (pane.metricsFence) pane.metricsDelayed = true;
+      disarmMetrics(pane);
+    }
   },
   sshMetricsUnavailable(state, { payload }: PayloadAction<{ terminalId: string; reason?: string }>) {
     const pane = state.byTerminal[payload.terminalId];
@@ -104,12 +108,16 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
     const deadline = Math.min(fence.mono + SSH_METRICS_MAX_AGE,
       fence.trustWall ? now.mono + SSH_METRICS_MAX_AGE - age : Infinity);
     if (now.mono >= deadline) return;
+    delete pane.metricsDelayed;
     pane.metricsLastStamp = sample.sampledAt;
     pane.metricsReading = { sample, deadline };
   },
   sshMetricsExpired(state, { payload }: PayloadAction<{ terminalId: string; mono: number }>) {
     const pane = state.byTerminal[payload.terminalId];
-    if (pane?.metricsReading && payload.mono >= pane.metricsReading.deadline) delete pane.metricsReading;
+    if (pane?.metricsReading && payload.mono >= pane.metricsReading.deadline) {
+      delete pane.metricsReading;
+      pane.metricsDelayed = true;
+    }
   },
 } });
 export const { sshOwnersChanged, sshAttachmentResolved, sshSessionObserved, sshLiveData, sshMetricsDisarmed, sshMetricsUnavailable,

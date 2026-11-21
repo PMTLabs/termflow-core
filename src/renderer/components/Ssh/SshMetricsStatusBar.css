@@ -1,0 +1,44 @@
+.ssh-metrics-status-bar {
+  box-sizing: border-box;
+  height: 26px;
+  flex: 0 0 26px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.ssh-metrics-status-bar:focus-visible {
+  outline: 1px solid var(--focus-border, var(--text-primary));
+  outline-offset: -1px;
+}
+
+.ssh-metrics-value,
+.ssh-metrics-state {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ssh-metrics-state,
+.ssh-metrics-value[data-metric='partitions'],
+.ssh-metrics-value[data-metric='nfs'] { max-width: 35%; }
+
+.ssh-metrics-state.is-live > span { color: #64c88b; }
+.light-theme .ssh-metrics-state.is-live > span { color: #207642; }
+
+.ssh-metrics-status-bar > button {
+  flex: none;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  font: inherit;
+}

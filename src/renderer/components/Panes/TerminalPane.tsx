@@ -30,6 +30,8 @@ import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
+import { SshMetricsStatusBar } from '../Ssh/SshMetricsStatusBar';
+import { useSshMetricsWatch } from '../Ssh/useSshMetrics';
 import { OwnedSshLaunchNotice } from '../Ssh/OwnedSshLaunchNotice';
 import { SshLaunchStrip } from '../Ssh/SshLaunchNotice';
 import { isAdminUacCancelled, takeOptimisticAdminTab } from '../../services/adminTabActions';
@@ -202,6 +204,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     ? findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.connectionId : undefined);
   const sshIssue = useSelector((state: RootState) => sshConnectionId ? savedSshConnectionIssue(state.ssh, sshConnectionId) : undefined);
   const sshUnavailable = !!sshIssue;
+  useSshMetricsWatch(sshConnectionId ? terminalId : undefined);
 
   // Initialize terminal when component mounts or terminalId changes
   useEffect(() => {
@@ -964,6 +967,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                   <button type="button" className="au-btn" onClick={() => openSettingsTab('ssh')}>Open SSH Connections</button>}
               </SshLaunchStrip>
         )}
+        <div className="terminal-pane-body">
         {/* SSH leaves (plan 070 T2, gap G1) wrap this content in the shared SSH shell; every other
             leaf renders it unchanged. Resolved by terminalId inside the slot, never by pane id. */}
         <SshPaneSlot terminalId={terminalId} isTabActive={isTabActive}>
@@ -1075,6 +1079,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           <EndedOverlay closedInfo={closedInfo} />
         </div>
         </SshPaneSlot>
+        </div>
         {/* In-flow below the terminal content (not overlaying it): the content
             area shrinks to make room, so the banner never covers the last rows. */}
         {closedInfo && (
@@ -1087,6 +1092,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             onDismiss={handleDismissBanner}
           />
         )}
+        {terminalId && sshConnectionId && <SshMetricsStatusBar key={JSON.stringify([terminalId, sshConnectionId])}
+          terminalId={terminalId} isTabActive={isTabActive} />}
       </div>
       {contextMenu && (
         <PaneContextMenu

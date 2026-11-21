@@ -140,7 +140,7 @@ test('all_hidden_can_reset_to_defaults', () => {
   expectPaneTags([reset.paneTree], { ...tags, 'tm-ssh': { ...sentinel, hiddenMetrics: [] } }, ['tm-local']);
 });
 
-test.todo('T7: all-hidden status bar has a reachable menu hit target that invokes Reset');
+// The all-hidden hit target and Reset are exercised in SshMetricsStatusBar.test.tsx.
 
 test('hidden_metrics_follow_terminal_through_split_swap_and_restore', () => {
   const expected = { ...tags, 'tm-ssh': { ...sentinel, hiddenMetrics: ['netUp', 'ram'] as MetricKey[] } };
