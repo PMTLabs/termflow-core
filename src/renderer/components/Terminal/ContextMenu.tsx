@@ -192,7 +192,9 @@ export interface ContextMenuItem {
   accelerator?: string;
   /** Hover tooltip explaining what the item does. */
   title?: string;
-  type?: 'normal' | 'separator' | 'new-pane';
+  type?: 'normal' | 'separator' | 'new-pane' | 'heading';
+  /** Controlled checkbox state for a normal leaf action. */
+  checked?: boolean;
   enabled?: boolean;
   click?: () => void;
   newPane?: NewPaneRowProps;
@@ -1224,6 +1226,10 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           return <div key={index} className="context-menu-separator" role="separator" />;
         }
 
+        if (item.type === 'heading') {
+          return bare ? null : <div key={index} className="context-menu-heading" role="presentation">{item.label}</div>;
+        }
+
         const disabled = item.enabled === false;
         const submenuOpen = openSubmenu === index;
         /**
@@ -1267,13 +1273,15 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         // never closes the menu on click. Everything below treats the two identically except
         // which kind of panel eventually gets rendered.
         const hasFlyout = !!(item.submenu || item.customFlyout);
+        const checked = hasFlyout ? undefined : item.checked;
 
         const button = (
           <button
             key={index}
             className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}${item.danger ? ' danger' : ''}`}
             disabled={disabled}
-            role="menuitem"
+            role={checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+            aria-checked={checked}
             tabIndex={-1}
             aria-disabled={disabled || undefined}
             // Two exemptions here, both documented on `useTooltipDwell`: a picker whose titles
@@ -1314,7 +1322,9 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
               onClose();
             }}
           >
-            <span className="context-menu-icon">{item.icon}</span>
+            {checked === undefined
+              ? <span className="context-menu-icon">{item.icon}</span>
+              : <span className="context-menu-icon" aria-hidden="true">{checked ? '✓' : ''}</span>}
             <span className="context-menu-label">{item.label}</span>
             {item.accelerator && (
               <span className="context-menu-accelerator">{item.accelerator}</span>
