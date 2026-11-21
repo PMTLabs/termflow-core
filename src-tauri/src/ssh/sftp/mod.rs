@@ -1,9 +1,13 @@
 //! SFTP primitives scoped to a browser's terminal and expected session generation.
+mod download;
+pub mod local_target;
 mod ops;
 mod types;
 #[cfg(test)]
 mod tests;
 
+pub use download::DownloadOutcome;
+pub use local_target::FileTarget;
 pub use types::*;
 
 use super::{

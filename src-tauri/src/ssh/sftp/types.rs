@@ -82,6 +82,7 @@ pub enum FsCode {
     Io,
     Cancelled,
     Stale,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

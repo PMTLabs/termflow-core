@@ -2,23 +2,23 @@ use super::*;
 use crate::ssh::{session::SessionState, tests::Fixture};
 use std::{fs, path::{Path, PathBuf}};
 
-struct Tree(PathBuf);
+pub(super) struct Tree(PathBuf);
 impl Tree {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let root = std::env::temp_dir().join(format!("tf-fs-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir(&root).unwrap();
         Self(root)
     }
 
-    fn fixture(&self) -> Fixture {
+    pub(super) fn fixture(&self) -> Fixture {
         Fixture::with_sftp_root(self.0.clone())
     }
 
-    fn path(&self, relative: &str) -> PathBuf {
+    pub(super) fn path(&self, relative: &str) -> PathBuf {
         self.0.join(relative)
     }
 
-    fn root(&self) -> &Path {
+    pub(super) fn root(&self) -> &Path {
         &self.0
     }
 }
@@ -28,13 +28,13 @@ impl Drop for Tree {
     }
 }
 
-fn generation(f: &Fixture) -> u64 {
+pub(super) fn generation(f: &Fixture) -> u64 {
     let state = f.registry.state("tm-a", false).unwrap();
     assert_eq!(state.state, SessionState::Connected);
     state.generation
 }
 
-fn browser(f: &Fixture) -> RemoteFs<'_> {
+pub(super) fn browser(f: &Fixture) -> RemoteFs<'_> {
     RemoteFs::new(&f.registry, "tm-a", generation(f))
 }
 
