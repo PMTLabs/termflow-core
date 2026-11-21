@@ -26,7 +26,12 @@ describe('editor layout', () => {
     expect(names[names.length - 1]).toBe('Save connection');
     expect(names.indexOf('Test connection')).toBeLessThan(names.indexOf('Save connection'));
     expect(actions[0].querySelectorAll('button.au-btn.primary')).toHaveLength(1);
-    expect((actions[0].lastElementChild as HTMLButtonElement).type).toBe('submit');
+    // Two groups as in the mockup: use actions, then the right-aligned edit group that ends with Save.
+    const groups = [...actions[0].children];
+    expect(groups.map(g => g.className)).toEqual(['ssh-actions-group', 'ssh-actions-group ssh-actions-end']);
+    expect(labels(groups[0])).toEqual(['Connect in new tab', 'Test connection']);
+    expect(labels(groups[1])).toEqual(['Delete connection…', 'Discard changes', 'Save connection']);
+    expect((groups[1].lastElementChild as HTMLButtonElement).type).toBe('submit');
     // Delete is separated from Save by Discard.
     expect(names.indexOf('Save connection') - names.indexOf('Delete connection…')).toBe(2);
   });

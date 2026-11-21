@@ -44,11 +44,10 @@
 .ssh-inline-row .setting-input { flex:1; width:auto; }
 .ssh-inline-row .au-btn { flex:none; align-self:stretch; }
 .ssh-connection-editor .ssh-editor-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
-.ssh-connection-editor .ssh-editor-actions .ssh-actions-end { margin-left:auto; }
+.ssh-connection-editor .ssh-actions-group { display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.ssh-connection-editor .ssh-actions-end { margin-left:auto; justify-content:flex-end; }
 .ssh-editor-help { display:flex; flex-direction:column; gap:2px; margin-top:8px; color:var(--text-secondary); }
 @container sshedit (max-width:440px) {
   .ssh-editor-grid { grid-template-columns:minmax(0, 1fr); }
-  .ssh-editor-grid > .ssh-span-2, .ssh-editor-grid > .ssh-span-all { grid-column:1 / -1; }
-  .ssh-connection-editor .ssh-editor-actions .ssh-actions-end { margin-left:0; }
-}
+  .ssh-editor-grid > .ssh-span-2, .ssh-editor-grid > .ssh-span-all { grid-column:1 / -1; }}
 .ssh-connection-editor select.setting-input { padding-block:calc(0.5rem - 1px); }

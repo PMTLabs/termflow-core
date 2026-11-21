@@ -239,13 +239,18 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
         {error && <p role="alert" className="ssh-span-all">{error.message}</p>}
       </div>
     </fieldset>
-    {/* One wrapping action row. DOM order is Tab order, so Save (primary) is last; Delete opens the end group, apart from Save. */}
+    {/* One wrapping action row in two groups, as in the mockup: use actions left, edit actions right. DOM order is
+        Tab order, so Save (primary) is last. The end group wraps as a unit and right-aligns, so Save stays bottom-right. */}
     <div className="ssh-editor-actions">
-      {canConnect && <button type="button" className="au-btn" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>}
-      <button type="button" className="au-btn" disabled={!canTest} aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test connection</button>
-      {connectionId && <button type="button" className="au-btn danger ssh-actions-end" disabled={locked} onClick={() => setConfirmDelete(true)}>Delete connection…</button>}
-      <button type="button" className={connectionId ? 'au-btn' : 'au-btn ssh-actions-end'} disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
-      <button type="submit" className="au-btn primary" disabled={locked}>Save connection</button>
+      <div className="ssh-actions-group">
+        {canConnect && <button type="button" className="au-btn" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>}
+        <button type="button" className="au-btn" disabled={!canTest} aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test connection</button>
+      </div>
+      <div className="ssh-actions-group ssh-actions-end">
+        {connectionId && <button type="button" className="au-btn danger" disabled={locked} onClick={() => setConfirmDelete(true)}>Delete connection…</button>}
+        <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
+        <button type="submit" className="au-btn primary" disabled={locked}>Save connection</button>
+      </div>
     </div>
     <div className="ssh-editor-help">
       {canConnect && <small id="ssh-connect-help">{dirty || changed ? 'Opens the last saved version; you will be asked about unsaved changes.' : 'Opens a new tab and starts this saved connection.'}</small>}
