@@ -95,6 +95,8 @@ it('wraps arrow navigation past disabled items and restores the invoker on Escap
         onClose.mockImplementation(() => root.render(null));
         await render([{ label: 'First' }, { label: 'Disabled', enabled: false }, { label: 'Last' }]);
         expect(menu().getAttribute('role')).toBe('menu');
+        expect(document.activeElement).toBe(menu());
+        await key(menu(), 'ArrowDown');
         expect(document.activeElement).toBe(menuItem('First'));
         await key(menuItem('First'), 'ArrowDown');
         expect(document.activeElement).toBe(menuItem('Last'));

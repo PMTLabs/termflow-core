@@ -1139,11 +1139,13 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
     if (!bare) {
       menu.setAttribute('role', 'menu');
       menu.tabIndex = -1;
-      (menuItems(menu)[0] ?? menu).focus();
+      // Focus the menu, not its first item: a focused item shows its tooltip at once, bypassing
+      // the hover dwell. ArrowDown/ArrowUp from the menu reach the first/last item.
+      menu.focus();
     }
     return () => {
       if (document.activeElement !== document.body && !menu.contains(document.activeElement)) return;
-      queueMicrotask(() => {
+      void Promise.resolve().then(() => { // not queueMicrotask: fake timers count that as a pending timer
         if (document.activeElement === document.body && invoker.current instanceof HTMLElement && invoker.current.isConnected) {
           invoker.current.focus();
         }
