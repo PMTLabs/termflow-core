@@ -184,6 +184,7 @@ test('tagged_tree_exists_before_first_terminal_mount', async () => {
 
 test('ssh_root_preseed_keeps_full_tag_and_default_profile', async () => {
   const h = harness();
+  store.dispatch(addTab({ id: 'tb-neighbors', title: 'Neighbors', shellType: 'neighbors', icon: '', isActive: false }));
   store.dispatch(addTabTree({ tabId: 'tb-neighbors', tree: split('neighbors', pane('local'), pane('other', other)) }));
   const published = jest.fn();
   const stop = store.subscribe(() => {
@@ -211,7 +212,8 @@ test('ssh_root_preseed_keeps_full_tag_and_default_profile', async () => {
     const expectedTags = { [placed.terminalId]: sentinel, 'tm-other': other };
     expectPaneTags(Object.values(store.getState().panes.treesByTabId), expectedTags, ['tm-local']);
     expectPaneTags(Object.values(getTabPanesGlobal()), expectedTags, ['tm-local']);
-    expect(h.create.mock.calls).toEqual([[expect.objectContaining({
+    // Only the ssh leaf is under test; the neighbour tab's local leaf creates on its own.
+    expect(h.create.mock.calls.filter(([request]) => request.leaf === placed.terminalId)).toEqual([[expect.objectContaining({
       leaf: placed.terminalId, profile: defaultShell.id, cwd: defaultShell.cwd, sshLaunchConnectionId: 'saved',
     })]]);
   } finally { stop(); }
@@ -265,6 +267,7 @@ test('adopted_live_ssh_queries_runtime_without_retyping', async () => {
     attempt: { sessionGeneration: 4, attemptReceipt: { generation: 4, gate: 'verified' },
       processIncarnation: 'pc-transferred', ownerIncarnation: { pg: 41, seq: 1 } },
   });
+  store.dispatch(addTab({ id: 'tb-neighbors', title: 'Neighbors', shellType: 'neighbors', icon: '', isActive: false }));
   store.dispatch(addTabTree({ tabId: 'tb-neighbors', tree: split('neighbors', pane('local'), pane('other', other)) }));
   await applyReattachByToken('transfer');
   await act(async () => { render(); await flush(); });
@@ -272,7 +275,8 @@ test('adopted_live_ssh_queries_runtime_without_retyping', async () => {
   expect(h.api.ssh.terminalLaunchState).toHaveBeenCalledWith('tm-ssh', expect.objectContaining({
     processIncarnation: 'pc-transferred', sessionGeneration: 4,
   }));
-  expect(h.create).not.toHaveBeenCalled();
+  // The neighbour tab's own local leaf is a legitimate create; the adopted ssh leaf must not be.
+  expect(h.create.mock.calls.filter(([request]) => request.leaf === 'tm-ssh')).toEqual([]);
   expect(h.api.sshSessionOpen).not.toHaveBeenCalled();
   expect(h.api.ssh.launchTerminal).not.toHaveBeenCalled();
   expectPaneTags(Object.values(store.getState().panes.treesByTabId), {
@@ -294,6 +298,7 @@ test.each(['background', 'connector'] as const)(
     const h = harness();
     store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: CANVAS_SHELL_TYPE, icon: '' }));
     const localTree = split('neighbors', pane('local'), pane('other', other));
+    store.dispatch(addTab({ id: 'tb-neighbors', title: 'Neighbors', shellType: 'neighbors', icon: '', isActive: false }));
     store.dispatch(addTabTree({ tabId: 'tb-neighbors', tree: localTree }));
     const placement = gesture === 'connector' ? { ...canvas, sourceTerminalId: 'tm-local' }
       : { kind: 'canvas' as const, rect };
@@ -379,6 +384,8 @@ test('legacy_and_admitted_create_both_carry_same_launch_metadata', async () => {
 
 test('join_existing_host_attach_and_strictmode_write_once', async () => {
   const h = harness();
+  // The mounted launch notice only observes (queries) when the native bridge can push launch state.
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
   const paneCreate = jest.spyOn(terminalService, 'createTerminal');
   try {
     await act(async () => { render(); launch(); await flush(); });
@@ -401,6 +408,8 @@ test.each<[PaneResult, boolean, boolean]>([
   [{ status: 'Create', cg: 7 }, true, true],
 ])('reuse does not open or launch (%j, hostAttach=%s)', async (admission, attach, invokesCreate) => {
   const h = harness(admission, attach);
+  // The mounted launch notice only observes (queries) when the native bridge can push launch state.
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
   await act(async () => { render(); launch(); await flush(); });
   expect(h.create).toHaveBeenCalledTimes(invokesCreate ? 1 : 0);
   if (admission.status === 'Join') expect(h.create.mock.calls[0][0]).not.toHaveProperty('sshLaunchConnectionId');

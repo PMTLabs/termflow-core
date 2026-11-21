@@ -1,4 +1,6 @@
 /** @jest-environment jsdom */
+jest.mock('../../api/tauri-bridge', () => ({ __esModule: true, default: {} }));
+
 import { store } from '..';
 import { addTabTree, patchSshPaneTag, resetPanes, setActiveTabId, setPaneTree } from '../slices/panesSlice';
 import { clearTabPanesInPlace, getTabPanesGlobal } from '../../services/tabPanesStore';

@@ -17,6 +17,7 @@ export function preparePicker() {
   const api = {
     sshSessionOpen: jest.fn(),
     sshSessionState: jest.fn(),
+    setDefaultProfile: jest.fn(),
     ssh: { launchTerminal: jest.fn(), markUsed: jest.fn(() => new Promise(() => {})) },
   };
   Object.defineProperty(window, 'electronAPI', { configurable: true, writable: true, value: api });

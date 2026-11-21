@@ -3,6 +3,7 @@ import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { Provider } from 'react-redux';
 
+jest.mock('../../../api/tauri-bridge', () => ({ __esModule: true, default: {} }));
 jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: new Map() }));
 jest.mock('../../../services/TerminalService', () => ({
   terminalService: { getProcessIdForTerminal: jest.fn(() => 'pc-ready'), beginUserElevatedAttempt: jest.fn() },

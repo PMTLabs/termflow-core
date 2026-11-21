@@ -1,4 +1,5 @@
 /** @jest-environment jsdom */
+jest.mock('../../api/tauri-bridge', () => ({ __esModule: true, default: {} }));
 jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: new Map() }));
 jest.mock('../TerminalService', () => ({ terminalService: {} }));
 

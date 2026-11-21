@@ -2,6 +2,7 @@
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { SshMenus } from '../SshConnections/SshMenus';
+import { TOOLTIP_DWELL_MS } from '../../../hooks/useTooltipDwell';
 import type { SshConnection, SshFolder, SshStoreApi, SshView } from '../../../types/ssh';
 
 const folder = (id: string, parentId: string | null, order: number): SshFolder => ({ id, parentId, name: id, icon: 'server', color: 'sky', order });
@@ -42,7 +43,15 @@ test('folder_connect_all_targets_the_right_clicked_folder_id_not_the_selection',
   // SshMenus: pass a different folder (e.g. the selection) to onConnectAll.
   mount(clicked);
   expect(item('Connect all in tabs').disabled).toBe(false);
-  expect(item('Connect all in tabs').title).toBe('Open 1 connection in new tabs');
+  // An enabled row's tooltip is withheld until the menu's hover dwell elapses (ContextMenu's
+  // `useTooltipDwell`); a disabled row shows it at once, which is why the empty case above can
+  // read `title` straight away. Earn the dwell the way a user would: hover, then wait.
+  jest.useFakeTimers();
+  try {
+    act(() => { item('Connect all in tabs').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); });
+    act(() => { jest.advanceTimersByTime(TOOLTIP_DWELL_MS + 50); });
+    expect(item('Connect all in tabs').title).toBe('Open 1 connection in new tabs');
+  } finally { jest.useRealTimers(); }
   await act(async () => item('Connect all in tabs').click());
   expect(onConnectAll.mock.calls).toEqual([['f-clicked']]);
   expect(onConnect).toHaveBeenCalledTimes(0);

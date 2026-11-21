@@ -56,7 +56,11 @@ beforeEach(() => {
   launch.mockClear();
   open.mockClear();
   global.fetch = jest.fn().mockResolvedValue({ ok: true, json: terminals });
-  (window as any).electronAPI = { ssh: { launchTerminal: launch }, sshSessionOpen: open };
+  // `new TerminalServiceClass()` subscribes to the global PTY streams on construction, so the
+  // stub carries inert subscriptions; the close paths under test use the injected api instead.
+  (window as any).electronAPI = {
+    ssh: { launchTerminal: launch }, sshSessionOpen: open, onTerminalData: jest.fn(), onTerminalExit: jest.fn(),
+  };
 });
 afterEach(() => {
   for (const id of ['tm-ssh', 'tm-local', 'tm-other', 'tm-moved']) terminalService.detachTerminal(id);
