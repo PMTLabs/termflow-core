@@ -121,13 +121,13 @@ impl NetworkConfig {
 /// THE config file path. Every reader and writer must come through here —
 /// `commands::save_config`/`load_config` used to build it themselves, which
 /// silently split settings across two files the moment either changed.
-pub fn config_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+pub fn config_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::PathBuf, String> {
     let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join(instance_config_name()))
 }
 
-fn read_root(app: &tauri::AppHandle) -> serde_json::Value {
+fn read_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> serde_json::Value {
     match config_path(app) {
         Ok(p) => read_root_at(&p),
         Err(e) => {
@@ -135,6 +135,11 @@ fn read_root(app: &tauri::AppHandle) -> serde_json::Value {
             serde_json::json!({})
         }
     }
+}
+
+pub(crate) fn default_editor<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<String> {
+    read_root(app).get("defaultEditor")?.as_str()
+        .map(str::trim).filter(|editor| !editor.is_empty()).map(str::to_owned)
 }
 
 /// Read the config root, complaining loudly about anything that is not simply

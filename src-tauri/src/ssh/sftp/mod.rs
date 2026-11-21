@@ -1,6 +1,7 @@
 //! SFTP primitives scoped to a browser's terminal and expected session generation.
 mod download;
 pub(crate) mod edit;
+pub(crate) mod launch;
 pub mod local_target;
 mod ops;
 mod types;

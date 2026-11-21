@@ -1,6 +1,6 @@
 //! One bounded-memory poller for all private editor copies.
 use super::{
-    edit::{remove_record, write_record, Baseline, EditJob, EditRecord, EditRegistry, EditState, JobData},
+    edit::{remove_record, write_record, Baseline, EditEventSink, EditJob, EditNotice, EditRecord, EditRegistry, EditState, JobData},
     local_target::{ensure_real_dir, is_link},
     upload::SftpUploader,
     BoxFuture, SessionError, SessionRegistry,
@@ -14,7 +14,6 @@ use std::{
     sync::{atomic::Ordering, Arc, Weak},
     time::{Duration, SystemTime},
 };
-use tauri::{AppHandle, Emitter};
 use tokio::time::{timeout_at, Instant};
 use uuid::Uuid;
 
@@ -73,12 +72,12 @@ impl Drop for EditSnapshot {
 
 impl EditRegistry {
     /// Call once from the app runtime. The task does not keep the registry alive.
-    pub(crate) fn start(self: &Arc<Self>, sessions: Arc<SessionRegistry>, app: AppHandle) {
+    pub(crate) fn start(self: &Arc<Self>, sessions: Arc<SessionRegistry>) {
         let uploader = Arc::new(SftpUploader::new(sessions.clone()));
-        self.start_with(sessions, uploader, Some(app));
+        self.start_with(sessions, uploader);
     }
 
-    pub(super) fn start_with(self: &Arc<Self>, sessions: Arc<SessionRegistry>, uploader: Arc<impl Uploader>, app: Option<AppHandle>) {
+    pub(super) fn start_with(self: &Arc<Self>, sessions: Arc<SessionRegistry>, uploader: Arc<impl Uploader>) {
         if self.poller_started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -97,7 +96,7 @@ impl EditRegistry {
                     if shutdown.is_cancelled() {
                         return;
                     }
-                    poll_job(job, &sessions, &uploader, &weak, app.as_ref()).await;
+                    poll_job(job, &sessions, &uploader, &weak).await;
                 }
             }
         });
@@ -111,12 +110,32 @@ impl EditRegistry {
     pub(crate) async fn shutdown(self: &Arc<Self>) {
         let deadline = Instant::now() + STOP_BUDGET;
         for job in self.fence_all() {
+            if Instant::now() >= deadline { break; }
             self.stop_before(&job, deadline, || {}).await;
         }
     }
 
+    pub(crate) async fn stop_terminal(self: &Arc<Self>, terminal: &str, generation: u64) {
+        // This runs off the UI thread. Fence every job first, then give each
+        // its own reconciliation budget so a slow copy cannot strand siblings.
+        for job in self.fence_terminal(terminal, generation) {
+            self.stop(&job).await;
+        }
+    }
+
+    pub(super) async fn stop_failed_launch(self: &Arc<Self>, job: &Arc<EditJob>, detail: &'static str) {
+        self.stop_impl(job, Instant::now() + STOP_BUDGET, || {}, Some(detail)).await;
+    }
+
     async fn stop_before(
         self: &Arc<Self>, job: &Arc<EditJob>, deadline: Instant, between_reads: impl FnOnce() + Send + 'static,
+    ) -> bool {
+        self.stop_impl(job, deadline, between_reads, None).await
+    }
+
+    async fn stop_impl(
+        self: &Arc<Self>, job: &Arc<EditJob>, deadline: Instant,
+        between_reads: impl FnOnce() + Send + 'static, launch_error: Option<&'static str>,
     ) -> bool {
         job.fence.cancel();
         let mut data = match timeout_at(deadline, job.data.clone().lock_owned()).await {
@@ -130,7 +149,9 @@ impl EditRegistry {
         }
         let local = data.record.local_path.clone();
         let mut clean = None;
-        let state = if matches!(data.record.state, EditState::Conflict | EditState::Error) {
+        let state = if launch_error.is_some() {
+            EditState::Error
+        } else if matches!(data.record.state, EditState::Conflict | EditState::Error) {
             data.record.state
         } else if data.in_flight || Instant::now() >= deadline {
             EditState::Paused
@@ -178,8 +199,16 @@ impl EditRegistry {
             }
             let retained = retained_state.is_some();
             data.stopped = Some(retained);
-            if !data.in_flight {
-                if let Some(registry) = registry.upgrade() {
+            if let Some(registry) = registry.upgrade() {
+                let mut notice = EditNotice::current(&data.record, launch_error);
+                if retained {
+                    registry.retained.lock().unwrap().insert(notice.edit_id, notice.clone());
+                } else {
+                    notice.state = "stopped";
+                    notice.local_path = None;
+                }
+                registry.sink.emit(notice);
+                if !data.in_flight {
                     registry.forget(&job);
                 }
             }
@@ -205,8 +234,9 @@ fn connected(job: &EditJob, record: &EditRecord, sessions: &SessionRegistry) -> 
 
 pub(super) async fn poll_job(
     job: Arc<EditJob>, sessions: &Arc<SessionRegistry>, uploader: &Arc<impl Uploader>,
-    registry: &Weak<EditRegistry>, app: Option<&AppHandle>,
+    registry: &Weak<EditRegistry>,
 ) {
+    let Some(sink) = registry.upgrade().map(|registry| registry.sink.clone()) else { return };
     let can_sample = |data: &JobData| {
         !job.fence.is_cancelled() && !data.in_flight
             && !matches!(data.record.state, EditState::Conflict | EditState::Error)
@@ -217,14 +247,10 @@ pub(super) async fn poll_job(
             return;
         }
         if let Err(state) = connected(&job, &data.record, sessions) {
-            let changed = data.record.state != state;
-            set_state(&mut data, state);
-            if changed {
-                emit_state(app, &data.record, state_name(state), state_detail(state));
-            }
+            set_state(&*sink, &mut data, state, state_detail(state));
             return;
         }
-        set_state(&mut data, EditState::Watching);
+        set_state(&*sink, &mut data, EditState::Watching, None);
         data.record.local_path.clone()
     };
     // Metadata checks bracket every read, but even unchanged metadata can hide
@@ -239,7 +265,7 @@ pub(super) async fn poll_job(
         let sample = match sample {
             Ok(Ok(sample)) => sample,
             _ => {
-                set_state(&mut data, EditState::Error);
+                set_state(&*sink, &mut data, EditState::Error, Some("Could not read the local editor copy."));
                 return;
             }
         };
@@ -255,7 +281,7 @@ pub(super) async fn poll_job(
         return;
     }
     if let Err(state) = connected(&job, &data.record, sessions) {
-        set_state(&mut data, state);
+        set_state(&*sink, &mut data, state, state_detail(state));
         return;
     }
     let snapshot = match spool {
@@ -265,7 +291,7 @@ pub(super) async fn poll_job(
             return;
         }
         _ => {
-            set_state(&mut data, EditState::Error);
+            set_state(&*sink, &mut data, EditState::Error, Some("Could not snapshot the local editor copy."));
             return;
         }
     };
@@ -275,12 +301,12 @@ pub(super) async fn poll_job(
     data.in_flight = true;
     data.candidate = None;
     data.record.state = EditState::Uploading;
+    sink.emit(EditNotice::current(&data.record, None));
     drop(data);
     let uploader = uploader.clone();
     let sessions = sessions.clone();
     let registry = registry.clone();
     let hash = snapshot.digest.clone();
-    let app = app.cloned();
     tokio::spawn(async move {
         let record = job.record().await;
         let result = if job.fence.is_cancelled() {
@@ -302,19 +328,22 @@ pub(super) async fn poll_job(
                 data.record.state = EditState::Watching;
             }
             persist(&mut data);
-            if data.stopped.is_none() {
-                emit_state(app.as_ref(), &data.record, "uploaded", None);
-            }
+            let mut uploaded = EditNotice::current(&data.record, None);
+            uploaded.state = "uploaded";
+            sink.emit(uploaded);
+            // An acknowledgement can arrive after Stop fenced an in-flight save.
+            // Publish the resulting state too, without reviving that watcher.
+            sink.emit(EditNotice::current(&data.record, (data.record.state == EditState::Error)
+                .then_some("Could not persist SSH edit recovery state.")));
         } else if data.stopped.is_none() {
-            let (state, name, detail) = match result {
-                UploadResult::Paused => (EditState::Paused, "paused", None),
-                UploadResult::Conflict => (EditState::Conflict, "conflict", state_detail(EditState::Conflict)),
-                UploadResult::Unsupported => (EditState::Error, "unsupported", Some("The server does not support atomic replacement.")),
-                UploadResult::Error(detail) => (EditState::Error, "error", Some(detail)),
+            let (state, detail) = match result {
+                UploadResult::Paused => (EditState::Paused, None),
+                UploadResult::Conflict => (EditState::Conflict, state_detail(EditState::Conflict)),
+                UploadResult::Unsupported => (EditState::Error, Some("The server does not support atomic replacement.")),
+                UploadResult::Error(detail) => (EditState::Error, Some(detail)),
                 UploadResult::Uploaded(_) => unreachable!(),
             };
-            set_state(&mut data, state);
-            emit_state(app.as_ref(), &data.record, name, detail);
+            set_state(&*sink, &mut data, state, detail);
         }
         if data.stopped.is_some() {
             if let Some(registry) = registry.upgrade() {
@@ -324,7 +353,7 @@ pub(super) async fn poll_job(
     });
 }
 
-fn state_name(state: EditState) -> &'static str {
+pub(super) fn state_name(state: EditState) -> &'static str {
     match state {
         EditState::Watching => "watching",
         EditState::Uploading => "uploading",
@@ -342,25 +371,14 @@ fn state_detail(state: EditState) -> Option<&'static str> {
     }
 }
 
-fn emit_state(app: Option<&AppHandle>, record: &EditRecord, state: &str, detail: Option<&str>) {
-    if let Some(app) = app {
-        let _ = app.emit("ssh-fs:edit-state", serde_json::json!({
-            "terminalId": record.terminal_id,
-            "editId": record.edit_id,
-            "path": record.remote_path,
-            "state": state,
-            "sessionGeneration": record.session_generation,
-            "localPath": record.local_path,
-            "error": detail,
-        }));
-    }
-}
-
-fn set_state(data: &mut JobData, state: EditState) {
+fn set_state(sink: &dyn EditEventSink, data: &mut JobData, state: EditState, detail: Option<&'static str>) {
     if data.record.state != state {
         data.candidate = None;
         data.record.state = state;
         persist(data);
+        sink.emit(EditNotice::current(&data.record, if data.record.state == state { detail } else {
+            Some("Could not persist SSH edit recovery state.")
+        }));
     }
 }
 

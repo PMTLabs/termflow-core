@@ -50,7 +50,7 @@ impl Harness {
     }
 
     async fn poll(&self) {
-        poll_job(self.job.clone(), &self.fixture.registry, &self.uploader, &Arc::downgrade(&self.edits), None).await;
+        poll_job(self.job.clone(), &self.fixture.registry, &self.uploader, &Arc::downgrade(&self.edits)).await;
     }
 
     fn requests(&self) -> Vec<(String, String)> {

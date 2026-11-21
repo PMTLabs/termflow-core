@@ -1,9 +1,14 @@
 //! IPC-only remote browser filesystem commands.
 use crate::{
-    ssh::sftp::{DownloadPicker, DownloadResult, FsError, RemoteFs, RemoteListing, RemoteStat},
+    ssh::sftp::{
+        edit::{EditRegistry, EditStatus, EditStop},
+        launch::{EditOpen, NativeEditor, OpenMode},
+        DownloadPicker, DownloadResult, FsError, RemoteFs, RemoteListing, RemoteStat,
+    },
     state::AppState,
 };
-use tauri::{Runtime, State, WebviewWindow};
+use std::sync::Arc;
+use tauri::{Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +39,52 @@ pub async fn ssh_fs_download<R: Runtime>(
                 .transpose()
         })
         .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ssh_fs_open<R: Runtime>(
+    window: WebviewWindow<R>,
+    state: State<'_, AppState<R>>,
+    edits: State<'_, Arc<EditRegistry>>,
+    terminal_id: String,
+    path: String,
+    expected_generation: u64,
+) -> Result<EditOpen, FsError> {
+    let editor = crate::app_config::default_editor(window.app_handle());
+    let fs = RemoteFs::new(&state.ssh_sessions, &terminal_id, expected_generation);
+    edits.inner().open(&fs, &path, OpenMode::Text(editor.as_deref()), &NativeEditor(window)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ssh_fs_open_with<R: Runtime>(
+    window: WebviewWindow<R>,
+    state: State<'_, AppState<R>>,
+    edits: State<'_, Arc<EditRegistry>>,
+    terminal_id: String,
+    path: String,
+    expected_generation: u64,
+) -> Result<EditOpen, FsError> {
+    let fs = RemoteFs::new(&state.ssh_sessions, &terminal_id, expected_generation);
+    edits.inner().open(&fs, &path, OpenMode::With, &NativeEditor(window)).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ssh_fs_edit_stop(
+    edits: State<'_, Arc<EditRegistry>>,
+    terminal_id: String,
+    path: String,
+    edit_id: uuid::Uuid,
+) -> Result<EditStop, FsError> {
+    edits.inner().stop_by_id(&terminal_id, &path, edit_id).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ssh_fs_edit_list(
+    edits: State<'_, Arc<EditRegistry>>,
+    terminal_id: String,
+    path: String,
+) -> Result<Vec<EditStatus>, FsError> {
+    edits.list(&terminal_id, &path).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

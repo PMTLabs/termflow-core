@@ -59,7 +59,70 @@ pub(crate) struct EditRecord {
     pub state: EditState,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EditNotice {
+    pub terminal_id: String,
+    pub edit_id: Uuid,
+    pub path: String,
+    pub state: &'static str,
+    pub session_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<&'static str>,
+}
+
+impl EditNotice {
+    pub(super) fn current(record: &EditRecord, error: Option<&'static str>) -> Self {
+        Self {
+            terminal_id: record.terminal_id.clone(), edit_id: record.edit_id,
+            path: record.remote_path.clone(), state: super::watch::state_name(record.state),
+            session_generation: record.session_generation,
+            local_path: Some(record.local_path.clone()), error,
+        }
+    }
+}
+
+/// Sinks may be called under job locks; they must not reenter the registry.
+pub(crate) trait EditEventSink: Send + Sync {
+    fn emit(&self, notice: EditNotice);
+}
+
+pub(crate) struct AppEditEvents(pub tauri::AppHandle);
+impl EditEventSink for AppEditEvents {
+    fn emit(&self, notice: EditNotice) {
+        use tauri::Emitter;
+        let _ = self.0.emit("ssh-fs:edit-state", notice);
+    }
+}
+
+struct NoEvents;
+impl EditEventSink for NoEvents {
+    fn emit(&self, _: EditNotice) {}
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EditStatus {
+    #[serde(flatten)]
+    pub notice: EditNotice,
+    pub retained: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EditStop {
+    pub retained: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_path: Option<PathBuf>,
+}
+
 pub(crate) struct EditJob {
+    pub(super) edit_id: Uuid,
+    pub(super) generation: u64,
+    local_path: PathBuf,
+    pub(super) launching: tokio::sync::Mutex<()>,
     pub(super) data: Arc<tokio::sync::Mutex<JobData>>,
     pub(super) fence: CancellationToken,
     pub(super) session: Arc<SshSession>,
@@ -94,6 +157,8 @@ pub(crate) struct EditRegistry {
     // fence when publishing so a download underway cannot register late.
     opening: tokio::sync::Mutex<()>,
     jobs: Mutex<HashMap<Key, Arc<EditJob>>>,
+    pub(super) retained: Mutex<HashMap<Uuid, EditNotice>>,
+    pub(super) sink: Arc<dyn EditEventSink>,
     pub(super) shutdown: CancellationToken,
     pub(super) clock: Arc<dyn PollClock>,
     pub(super) poller_started: std::sync::atomic::AtomicBool,
@@ -101,10 +166,16 @@ pub(crate) struct EditRegistry {
 
 impl EditRegistry {
     pub(crate) fn new(root: PathBuf, clock: Arc<dyn PollClock>) -> Self {
+        Self::with_sink(root, clock, Arc::new(NoEvents))
+    }
+
+    pub(crate) fn with_sink(root: PathBuf, clock: Arc<dyn PollClock>, sink: Arc<dyn EditEventSink>) -> Self {
         Self {
             root,
             opening: Default::default(),
             jobs: Default::default(),
+            retained: Default::default(),
+            sink,
             shutdown: CancellationToken::new(),
             clock,
             poller_started: false.into(),
@@ -120,7 +191,7 @@ impl EditRegistry {
             // A stale IPC call must not obtain an edit belonging to a successor.
             fs.registry.lease_at(fs.terminal_id, fs.generation)
                 .map_err(|e| session_error(OP, remote_path, e, false))?;
-            if job.fence.is_cancelled() {
+            if job.generation != fs.generation || job.fence.is_cancelled() {
                 return Err(error(OP, remote_path, FsCode::Conflict, FsOutcome::Unchanged,
                     "The previous edit is still stopping."));
             }
@@ -172,7 +243,11 @@ impl EditRegistry {
             };
             write_record(&record).map_err(|_| local_error(remote_path))?;
             let job = Arc::new(EditJob {
-                data: Arc::new(tokio::sync::Mutex::new(JobData { record, candidate: None, in_flight: false, stopped: None })),
+                edit_id,
+                generation: fs.generation,
+                local_path: record.local_path.clone(),
+                launching: Default::default(),
+                data: Arc::new(tokio::sync::Mutex::new(JobData { record: record.clone(), candidate: None, in_flight: false, stopped: None })),
                 fence: CancellationToken::new(),
                 session: a.session.clone(),
                 original_attrs,
@@ -182,9 +257,53 @@ impl EditRegistry {
             a.recheck().map_err(|e| session_error(OP, remote_path, e, false))?;
             jobs.insert(key, job.clone());
             dir.0.take();
+            self.sink.emit(EditNotice::current(&record, None));
             return Ok(job);
         }
         unreachable!("each edit download either succeeds or returns on the second attempt")
+    }
+
+    pub(crate) fn load_recovered(&self) -> io::Result<()> {
+        self.retained.lock().unwrap().extend(recover(&self.root)?.into_iter().map(|record| {
+            (record.edit_id, EditNotice::current(&record, None))
+        }));
+        Ok(())
+    }
+
+    pub(crate) async fn list(&self, terminal: &str, path: &str) -> Result<Vec<EditStatus>, FsError> {
+        if path != "." { validate("editList", path, true)?; }
+        let applies = |notice: &EditNotice| notice.terminal_id == terminal && (path == "." || notice.path == path);
+        let jobs: Vec<_> = self.jobs.lock().unwrap().iter().filter(|((id, p), _)| {
+            id == terminal && (path == "." || p == path)
+        }).map(|(_, job)| job.clone()).collect();
+        let mut statuses = HashMap::new();
+        for job in jobs {
+            let data = job.data.lock().await;
+            if data.stopped.is_none() {
+                let notice = EditNotice::current(&data.record, None);
+                statuses.insert(notice.edit_id, EditStatus { notice, retained: false });
+            }
+        }
+        for notice in self.retained.lock().unwrap().values().filter(|n| applies(n)) {
+            statuses.insert(notice.edit_id, EditStatus { notice: notice.clone(), retained: true });
+        }
+        let mut result: Vec<_> = statuses.into_values().collect();
+        result.sort_by(|a, b| (&a.notice.path, a.notice.edit_id).cmp(&(&b.notice.path, b.notice.edit_id)));
+        Ok(result)
+    }
+
+    pub(crate) async fn stop_by_id(self: &Arc<Self>, terminal: &str, path: &str, id: Uuid) -> Result<EditStop, FsError> {
+        validate("editStop", path, true)?;
+        let job = self.jobs.lock().unwrap().get(&(terminal.to_owned(), path.to_owned()))
+            .filter(|job| job.edit_id == id).cloned();
+        if let Some(job) = job {
+            let retained = self.stop(&job).await;
+            return Ok(EditStop { retained, local_path: retained.then(|| job.local_path.clone()) });
+        }
+        let local_path = self.retained.lock().unwrap().get(&id)
+            .filter(|notice| notice.terminal_id == terminal && notice.path == path)
+            .and_then(|notice| notice.local_path.clone());
+        Ok(EditStop { retained: local_path.is_some(), local_path })
     }
 
     fn check_open(&self, path: &str) -> Result<(), FsError> {
@@ -196,6 +315,14 @@ impl EditRegistry {
 
     pub(super) fn jobs(&self) -> Vec<Arc<EditJob>> {
         self.jobs.lock().unwrap().values().cloned().collect()
+    }
+
+    pub(super) fn fence_terminal(&self, terminal: &str, generation: u64) -> Vec<Arc<EditJob>> {
+        self.jobs.lock().unwrap().iter().filter_map(|((id, _), job)| {
+            if id != terminal || job.generation != generation { return None; }
+            job.fence.cancel();
+            Some(job.clone())
+        }).collect()
     }
 
     pub(super) fn fence_all(&self) -> Vec<Arc<EditJob>> {

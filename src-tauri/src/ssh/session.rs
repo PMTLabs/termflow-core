@@ -599,6 +599,7 @@ pub struct SessionRegistry {
     next: AtomicU64,
     retired: Mutex<Vec<JoinHandle<()>>>,
     deps: RwLock<Arc<Dependencies>>,
+    edits: RwLock<std::sync::Weak<super::sftp::edit::EditRegistry>>,
 }
 impl SessionRegistry {
     pub fn new(deps: Dependencies) -> Self {
@@ -611,6 +612,20 @@ impl SessionRegistry {
             next: AtomicU64::new(1),
             retired: Mutex::new(Vec::new()),
             deps: RwLock::new(Arc::new(deps)),
+            edits: RwLock::new(std::sync::Weak::new()),
+        }
+    }
+
+    pub(crate) fn set_edit_registry(&self, edits: &Arc<super::sftp::edit::EditRegistry>) {
+        *self.edits.write() = Arc::downgrade(edits);
+    }
+
+    fn stop_edits(&self, terminal_id: &str, generation: u64) {
+        if let Some(edits) = self.edits.read().upgrade() {
+            let terminal_id = terminal_id.to_owned();
+            // The caller already invalidated the generation's lease. Do not take
+            // edit locks here: admission takes them before its final lease check.
+            engine_runtime().spawn(async move { edits.stop_terminal(&terminal_id, generation).await });
         }
     }
     /// Install the 065 adapter before admitting any sessions. Never swaps dependencies under an attempt.
@@ -756,6 +771,10 @@ impl SessionRegistry {
     }
     fn retire_entry(&self, entry: &Entry) {
         entry.invalidate(None);
+        let view = entry.view();
+        if let Some(id) = view.terminal_id.as_deref() {
+            self.stop_edits(id, view.generation);
+        }
         if let Some(task) = entry.task.lock().take() {
             let mut retired = self.retired.lock();
             retired.retain(|task| !task.is_finished());
@@ -908,6 +927,10 @@ impl SessionRegistry {
             );
         }
         e.publish_locked(&mut s);
+        drop(s);
+        if launch == LaunchState::Ended {
+            self.stop_edits(terminal_id, generation);
+        }
         Ok(())
     }
     /// Terminal SSH can outlive its app channel. Keep the observed terminal
@@ -948,6 +971,7 @@ impl SessionRegistry {
         if let Some(e) = registry.panes.get(id) {
             if e.view().generation == generation {
                 e.invalidate(Some(reason.into()));
+                self.stop_edits(id, generation);
             }
         }
     }

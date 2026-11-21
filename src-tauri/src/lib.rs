@@ -660,13 +660,18 @@ pub fn run() {
         // Manage state in Tauri
         app.manage(state.clone());
         let edit_root = ssh::sftp::edit::edit_root(app.handle())?;
-        let ssh_edits = std::sync::Arc::new(ssh::sftp::edit::EditRegistry::new(
-            edit_root, std::sync::Arc::new(ssh::sftp::watch::TokioClock),
+        let ssh_edits = std::sync::Arc::new(ssh::sftp::edit::EditRegistry::with_sink(
+            edit_root,
+            std::sync::Arc::new(ssh::sftp::watch::TokioClock),
+            std::sync::Arc::new(ssh::sftp::edit::AppEditEvents(app.handle().clone())),
         ));
+        if let Err(error) = ssh_edits.load_recovered() {
+            log::warn!("Could not recover SSH editor copies: {error}");
+        }
+        state.ssh_sessions.set_edit_registry(&ssh_edits);
         app.manage(ssh_edits.clone());
-        let app_handle = app.handle().clone();
         let sessions = state.ssh_sessions.clone();
-        tauri::async_runtime::spawn(async move { ssh_edits.start(sessions, app_handle) });
+        tauri::async_runtime::spawn(async move { ssh_edits.start(sessions) });
         // Tauri has already built the configured window before calling setup.
         if let Some(main) = app.get_webview_window("main") {
             let build = window_lifetime::reserve(app.handle(), "main")?;
