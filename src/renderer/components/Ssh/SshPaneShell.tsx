@@ -75,7 +75,8 @@ function SshPaneChrome({ interactive, summaries, children }: {
 
   // Always reserve this height, even before the initial snapshot and on the non-owning
   // presentation. Neither notice changes nor ownership transfers should trigger a fit.
-  return <div className="ssh-pane-chrome" ref={row} tabIndex={interactive ? -1 : undefined}>
+  return <div className="ssh-pane-chrome" ref={row} tabIndex={interactive ? -1 : undefined}
+    data-canvas-passthrough={interactive ? 'scroll' : undefined} data-ssh-keyboard-owner={interactive ? '' : undefined}>
     {interactive && hasItems && <span role="status" title={summaries[0]}>{summaries[0]}</span>}
     {interactive && (hasItems || open) && <button ref={invoker} type="button" className="au-btn"
       aria-label={summaries.length > 1 ? `SSH notice details (+${summaries.length - 1} more)` : "SSH notice details"} aria-haspopup="dialog" aria-expanded={open}
@@ -92,6 +93,10 @@ function SshPaneChrome({ interactive, summaries, children }: {
 
 export function SshPaneShell(props: SshPaneShellProps) {
   const { view } = props, connected = view.state === 'connected';
+  // Truthful failure (plan 070 §4.1 C): live data only while the app channel is connected AND the
+  // launch seam has not ended/blocked/cancelled/failed. Every other state dims the browser and
+  // shows "—", in the pane and on Canvas alike, because both render this one shell.
+  const live = connected && !props.launchDisconnected;
   const showDisconnected = (connected && props.launchDisconnected) || view.state === 'disconnected'
     || (view.state === 'error' && !view.hostKey?.changed);
   const interactive = props.interactive ?? true;
@@ -115,14 +120,19 @@ export function SshPaneShell(props: SshPaneShellProps) {
     {status && <div>{status}</div>}
     {details}
   </SshPaneChrome>;
-  return <section className="ssh-pane-shell" aria-label="SSH session">
+  // Markers read by Canvas (`canvasGestures.ts`): `data-canvas-passthrough="scroll"` lets a wheel
+  // scroll this content instead of the canvas, `data-ssh-keyboard-owner` keeps Canvas shortcuts
+  // out of its controls, `data-ssh-interaction-owner` gates dialog focus restore (068 F5).
+  // Inert in a pane, where nothing reads them.
+  return <section className="ssh-pane-shell" aria-label="SSH session" data-ssh-interaction-owner={interactive ? 'true' : 'false'}>
     {interactive && view.terminalId
       ? <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult}>
           {(summaries, details) => renderChrome(summaries, details)}
         </SshEditWarning>
       : renderChrome([], null)}
     <div className="ssh-pane-body">
-      <aside className={props.browserCollapsed ? 'ssh-browser collapsed' : 'ssh-browser'} aria-label="Remote browser" style={browserStyle}>
+      <aside className={`ssh-browser${props.browserCollapsed ? ' collapsed' : ''}${live ? '' : ' offline'}`} aria-label="Remote browser"
+        style={browserStyle} data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
         <button type="button" className="au-btn ssh-browser-toggle" title={props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser'} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>
         {props.browserHandlesOffline ? <div hidden={props.browserCollapsed}>{props.browser}</div>
           : !props.browserCollapsed && (connected ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
@@ -130,6 +140,6 @@ export function SshPaneShell(props: SshPaneShellProps) {
       <div className="ssh-terminal-host">{props.terminal}</div>
     </div>
     {/* 069-rebase: SshMetricsStatusBar plugs into the `status` slot; the row height is fixed in CSS. */}
-    <div className="ssh-status" aria-label="SSH status">{connected ? props.status : '—'}</div>
+    <div className="ssh-status" aria-label="SSH status">{live ? props.status : '—'}</div>
   </section>;
 }

@@ -9,9 +9,32 @@ import { useRestartHotkey } from '../Panes/useRestartHotkey';
 import { useSearchHotkey } from '../Panes/useSearchHotkey';
 import type { SshPaneTag } from '../Ssh/ssh066Contract';
 import type { SshCanvasShellProps } from '../Ssh/SshTerminalComposition';
+import { sshSurfaceOwnsGesture } from './canvasGestures';
 
 /** Stable no-op, so the hotkey hook's dependency list does not churn when there is no chrome. */
 const NOOP = (): void => {};
+
+const EDITABLE_TARGET = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])';
+
+/**
+ * Plan 070 T4: keeps SSH presentation gestures away from the NODE's handlers.
+ *
+ * A press, double-click or right-click in the browser, the status row or the prompt overlay must
+ * not select, drag or enlarge the node or open its menu, and neither may one in an SSH menu or
+ * dialog: those are portalled to `<body>`, but React bubbles their events through this surface on
+ * the way to `CanvasNode`. Gestures in the terminal slot pass untouched (`sshSurfaceOwnsGesture`).
+ * Only React propagation is stopped. Native listeners, such as the shared menu's own outside-click
+ * dismissal, still see the event, and nothing here dismisses anything: the overlay backdrop is
+ * still the only dismiss path.
+ */
+function isolateSshGesture(e: React.SyntheticEvent<HTMLElement>): void {
+  if (!sshSurfaceOwnsGesture(e.target, e.currentTarget)) return;
+  e.stopPropagation();
+  // No second menu either: the native one is suppressed on SSH chrome, except over a text field
+  // (paste) and inside a portalled dialog, whose text stays copyable.
+  const inside = e.target instanceof Node && e.currentTarget.contains(e.target);
+  if (e.type === 'contextmenu' && inside && !(e.target as Element).closest?.(EDITABLE_TARGET)) e.preventDefault();
+}
 
 /**
  * Hosts a live terminal inside a canvas node.
@@ -201,7 +224,8 @@ const NodeTerminalImpl: React.FC<{
   // Plan 070 §4.1 A: the explicit frozen content envelope, raster zoom undone on THIS element so
   // it covers the browser and status row as well as the terminal (`Canvas.css`).
   return (
-    <div className="canvas-surface canvas-ssh-surface">
+    <div className="canvas-surface canvas-ssh-surface" onPointerDown={isolateSshGesture}
+      onMouseDown={isolateSshGesture} onDoubleClick={isolateSshGesture} onContextMenu={isolateSshGesture}>
       <SshShell terminalId={terminalId} sshTag={ssh} browserWidth={sshBrowserWidth} terminal={surface} />
     </div>
   );

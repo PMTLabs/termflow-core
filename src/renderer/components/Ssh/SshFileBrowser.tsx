@@ -149,7 +149,9 @@ function Browser(props: SshFileBrowserProps & { browser: SshBrowserController })
         }} />}
     </div>
     {active && menu && <div onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}>
-      <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}
+      {/* Client coordinates, never scaled by Canvas zoom: the menu portals to <body>. The class is
+          the Canvas keyboard-owner marker (`canvasGestures.sshOwnsKeyboard`). */}
+      <ContextMenu x={menu.x} y={menu.y} className="ssh-keyboard-owner" onClose={() => setMenu(undefined)}
         items={sshFileMenu(menu.entry, !!menu.scope?.isLive(), action => run(action, menu))} />
     </div>}
     {active && rowDialog && (() => {

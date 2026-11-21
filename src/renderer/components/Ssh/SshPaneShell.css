@@ -10,6 +10,8 @@
 .ssh-browser-toggle.au-btn { max-width:100%; padding:2px 4px; }
 .ssh-browser.collapsed .ssh-browser-toggle { writing-mode:vertical-rl; }
 .ssh-browser-unavailable { opacity:.55; }
+/* Not live (any non-connected session or ended launch): dim everything but the collapse toggle. */
+.ssh-browser.offline > :not(.ssh-browser-toggle) { opacity:.55; }
 .ssh-terminal-host { display:flex; flex:1; min-width:0; min-height:0; }
 .ssh-terminal-host > .terminal-pane-content { flex:1; min-width:0; min-height:0; }
 /* One fixed row (24px + its 1px border, as before): never wraps or grows with its contents.

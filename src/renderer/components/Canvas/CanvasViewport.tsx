@@ -6,6 +6,7 @@ import { Viewport } from './canvasGeometry';
 import { gridStyle, worldStyle, rasterStyle, lerpViewport, FLY_MS } from './viewportStyles';
 import {
   shouldArmSpacePan, shouldDisarmSpacePan, wheelAction, wheelPanDelta, CanvasWheelMode,
+  scrollRegionTakesWheel, sshOwnsKeyboard,
 } from './canvasGestures';
 
 /**
@@ -147,6 +148,9 @@ export const CanvasViewport: React.FC<{
         overlayId: overlayIdRef.current,
         mode: wheelModeRef.current,
         onFocusedTerminal: !!focused && terminalIdAt(e.target) === focused,
+        // Plan 070 T4: decided BEFORE any canvas mapping, so a scrollable SSH browser region
+        // gets its own wheel (no preventDefault) and the viewport does not move.
+        scrollRegion: scrollRegionTakesWheel(e.target, e),
       });
       if (action === 'passthrough') return;
       e.preventDefault();
@@ -211,6 +215,8 @@ export const CanvasViewport: React.FC<{
 
   useEffect(() => {
     const arm = (e: KeyboardEvent) => {
+      // An SSH menu, dialog or browser control owns Space (plan 070 T4).
+      if (sshOwnsKeyboard(e.target)) return;
       if (!shouldArmSpacePan(e as unknown as Parameters<typeof shouldArmSpacePan>[0], focusedId)) return;
       e.preventDefault();                          // Space also scrolls a page by default
       setSpacePan(true);

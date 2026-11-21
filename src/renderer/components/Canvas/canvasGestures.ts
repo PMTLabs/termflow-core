@@ -118,6 +118,9 @@ export interface WheelContext {
   /** Is the pointer over the terminal that currently holds the KEYBOARD? Only consulted in
    *  `'scroll'` mode, where it is what keeps font zoom reachable while you edit. */
   onFocusedTerminal: boolean;
+  /** Is the wheel's target inside a `data-canvas-passthrough="scroll"` region that can still
+   *  scroll in the wheel's direction (`scrollRegionTakesWheel`)? Optional: absent means no. */
+  scrollRegion?: boolean;
 }
 
 export function wheelAction(
@@ -127,6 +130,9 @@ export function wheelAction(
   // First, and in both modes: the overlay is a terminal at 1:1, and every wheel in it is its own.
   if (ctx.overlayId) return 'passthrough';
   const zoomChord = e.ctrlKey || e.metaKey;
+  // Plan 070 T4: a plain wheel over content that scrolls itself (the SSH file browser) is that
+  // content's, in both modes. The chord is not a scroll, so it keeps its canvas meaning.
+  if (ctx.scrollRegion && !zoomChord) return 'passthrough';
   if (ctx.mode === 'scroll') {
     if (zoomChord) return ctx.onFocusedTerminal ? 'passthrough' : 'zoom';
     return 'pan';
@@ -585,4 +591,108 @@ export function terminalKeyAction(
  *  held, which is far worse than an extra disarm. */
 export function shouldDisarmSpacePan(e: Pick<SpacePanKey, 'key' | 'code'>): boolean {
   return e.code === 'Space' || e.key === ' ';
+}
+
+/**
+ * Plan 070 T4 — the SSH presentation inside a canvas node.
+ *
+ * ONE data marker for content that scrolls itself: `data-canvas-passthrough="scroll"`. The SSH
+ * file browser column and the SSH prompt/banner overlay carry it (shared `Ssh/**` components, so
+ * the pane carries it too, where nothing reads it). `CanvasViewport`'s capture-phase wheel asks
+ * `scrollRegionTakesWheel` before any canvas mapping; a plain wheel inside a region that can still
+ * move in the wheel's direction is left completely alone, so the browser scrolls. At either
+ * scroll end the wheel is the canvas's again, so a region never traps zoom or pan. SSH menus and
+ * dialogs are portalled to `<body>`, outside the viewport's DOM, so a native wheel there never
+ * reaches the canvas listener and needs no marker.
+ */
+export const CANVAS_PASSTHROUGH_ATTR = 'data-canvas-passthrough';
+export const CANVAS_PASSTHROUGH_SCROLL = 'scroll';
+const SCROLL_REGION = `[${CANVAS_PASSTHROUGH_ATTR}="${CANVAS_PASSTHROUGH_SCROLL}"]`;
+
+/** The parts of an element the scroll decision reads. */
+interface ScrollBox {
+  scrollTop: number; scrollLeft: number; scrollHeight: number; scrollWidth: number;
+  clientHeight: number; clientWidth: number;
+}
+
+const SCROLLS = /^(auto|scroll|overlay)$/;
+
+function canScroll(el: ScrollBox, dx: number, dy: number): boolean {
+  // One CSS px of slack: fractional layouts leave scrollTop + clientHeight a hair short of the end.
+  if (dy > 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
+  if (dy < 0 && el.scrollTop > 0) return true;
+  if (dx > 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1) return true;
+  if (dx < 0 && el.scrollLeft > 0) return true;
+  return false;
+}
+
+/**
+ * Does a scroll region under this wheel still have room to move in its direction?
+ *
+ * Walks from the target up to the nearest marked region. The REGION is a declared scroller, so
+ * its own overflow is trusted; a descendant counts only when its computed overflow actually
+ * scrolls (an ellipsised file name is `overflow:hidden` and must not swallow a wheel).
+ */
+export function scrollRegionTakesWheel(
+  target: EventTarget | null,
+  e: { deltaX: number; deltaY: number },
+): boolean {
+  const start = elementOf(target);
+  const region = start?.closest(SCROLL_REGION);
+  if (!start || !region) return false;
+  const view = start.ownerDocument?.defaultView;
+  for (let el: Element | null = start; el; el = el.parentElement) {
+    if (el === region) return canScroll(el as unknown as ScrollBox, e.deltaX, e.deltaY);
+    const style = view?.getComputedStyle(el);
+    const scrolls = !!style && (SCROLLS.test(style.overflowY) || SCROLLS.test(style.overflowX));
+    if (scrolls && canScroll(el as unknown as ScrollBox, e.deltaX, e.deltaY)) return true;
+  }
+  return false;
+}
+
+function elementOf(target: EventTarget | null): Element | null {
+  const node = target as (Node & { closest?: unknown }) | null;
+  if (!node || typeof node.nodeType !== 'number') return null;
+  return node.nodeType === 1 ? (node as Element) : node.parentElement;
+}
+
+/**
+ * The SSH node's terminal slot. Pointer gestures that start there keep their node meaning
+ * (select on press, enlarge on double-click, the node or terminal context menu).
+ */
+export const SSH_TERMINAL_SLOT = '.ssh-terminal-host';
+
+/**
+ * Does this event belong to the SSH presentation rather than to the node?
+ *
+ * True for the browser, the status row and the prompt overlay of `surface` (an SSH node's
+ * `.canvas-ssh-surface`), and for every event whose target is OUTSIDE `surface`'s DOM. The second
+ * case is the portal case: the shared `ContextMenu` and the house dialogs render into `<body>`, but
+ * React bubbles their synthetic events through the React tree, through this surface and on to
+ * the node's select/drag/enlarge/menu handlers. The caller stops those; it never adds a global
+ * outside-click handler, so the overlay backdrop stays the only dismiss path.
+ */
+export function sshSurfaceOwnsGesture(target: EventTarget | null, surface: Element): boolean {
+  const el = elementOf(target);
+  if (!el || !surface.contains(el)) return true;
+  const slot = el.closest(SSH_TERMINAL_SLOT);
+  return !slot || !surface.contains(slot);
+}
+
+/**
+ * Where an SSH control owns the keyboard: the browser column (path input, rows, toolbar), the
+ * prompt overlay, SSH dialogs and SSH menus. Elements we render carry the data attribute; the
+ * shared `ContextMenu` takes only a `className`, so SSH menus carry the class instead.
+ *
+ * The canvas's window-CAPTURE key listeners (`CanvasMode` canvas keys and terminal-exit keys,
+ * `CanvasViewport` space-pan) run before any of these controls, so each one asks this first and
+ * leaves the key alone: `E` typed in the path box is a letter, an arrow in an SSH menu moves the
+ * menu, Esc in an SSH dialog closes the dialog.
+ */
+export const SSH_KEYBOARD_OWNER_ATTR = 'data-ssh-keyboard-owner';
+export const SSH_KEYBOARD_OWNER_CLASS = 'ssh-keyboard-owner';
+const SSH_KEYBOARD_OWNER = `[${SSH_KEYBOARD_OWNER_ATTR}], .${SSH_KEYBOARD_OWNER_CLASS}`;
+
+export function sshOwnsKeyboard(target: EventTarget | null): boolean {
+  return !!elementOf(target)?.closest(SSH_KEYBOARD_OWNER);
 }

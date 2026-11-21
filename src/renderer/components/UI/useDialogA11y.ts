@@ -51,6 +51,14 @@ export interface DialogA11yOptions {
    * the one part a non-modal dialog must not have.
    */
   trapFocus?: boolean;
+  /**
+   * Narrow opt-in veto on the close-time focus restore (068 F5, plan 070 T4). Omitted, which is
+   * every dialog but the SSH file dialogs: the trigger gets focus back (or the body, if the trigger
+   * is gone), as before. Given, it is asked at CLOSE time with the recorded trigger; `false` (or no
+   * trigger) leaves focus exactly where it is, with no body fallback either. For a dialog whose
+   * trigger may sit in a surface that has since stopped owning interaction but is still on screen.
+   */
+  restoreFocusIf?: (trigger: HTMLElement) => boolean;
 }
 
 /** Input types that accept free text (so bare-letter mnemonics must suppress). */
@@ -194,6 +202,8 @@ export function useDialogA11y(
     return () => {
       const trigger = triggerRef.current;
       triggerRef.current = null;
+      const restoreIf = optsRef.current.restoreFocusIf;
+      if (restoreIf && !(trigger && restoreIf(trigger))) return;
       // Guard against the trigger having been removed (e.g. its tab was closed):
       // restore focus to it if it's still in the DOM, else fall back to the body.
       if (trigger && trigger.isConnected && typeof trigger.focus === 'function') {

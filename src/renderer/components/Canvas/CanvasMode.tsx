@@ -54,7 +54,7 @@ import { neighbourhood } from './wireGeometry';
 import { CanvasMinimap } from './CanvasMinimap';
 import { CanvasBeacons } from './CanvasBeacons';
 import { beaconLayout, nearestGroupToCentre, stepNodeId } from './orientation';
-import { CanvasCombos, CanvasKey, canvasKeyAction, terminalKeyAction } from './canvasGestures';
+import { CanvasCombos, CanvasKey, canvasKeyAction, sshOwnsKeyboard, terminalKeyAction } from './canvasGestures';
 import { effectiveCombo } from '../../services/shortcutActions';
 import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
@@ -988,6 +988,9 @@ export const CanvasMode: React.FC = () => {
     const onKey = (e: KeyboardEvent) => {
       if (focusedId) return;
       if ((e.target as HTMLElement | null)?.closest?.('.ssh-picker')) return;
+      // Plan 070 T4: the SSH path box, rows, prompts, menus and dialogs own their keys. One shared
+      // guard (`canvasGestures.sshOwnsKeyboard`) rather than a veto per shortcut.
+      if (sshOwnsKeyboard(e.target)) return;
       const action = canvasKeyAction(
         e as unknown as CanvasKey,
         { node: !!selectedId, edge: !!selectedEdgeId },
@@ -1296,6 +1299,8 @@ export const CanvasMode: React.FC = () => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement | null)?.closest?.('.ssh-picker')) return;
+      // Same guard as the canvas keys: Esc in an SSH dialog closes the dialog, not the focus.
+      if (sshOwnsKeyboard(e.target)) return;
       const action = terminalKeyAction(e as unknown as CanvasKey, !!overlayIdRef.current, combos);
       // Completely untouched — no preventDefault, no stopPropagation — so it reaches the PTY.
       // This is the arm a bare `T` lands on, which is Tam's requirement from the inside: while a
