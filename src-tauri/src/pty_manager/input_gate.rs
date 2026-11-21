@@ -550,7 +550,12 @@ impl crate::state::HostKeys {
         let entry = self.input.processes.lock().get(process)?.clone();
         let state = entry.lock();
         state.ssh_prompt.as_ref()?;
-        Some(state.input_generation)
+        // An owner change (move/transfer) is applied lazily by the next qualified
+        // access, which bumps the generation. Stamp with the generation that access
+        // will see, so a prompt read after the move is not refused as pre-move.
+        // A further change before observation still mismatches and fails closed.
+        let owner_changed = self.ssh_prompt_stamp(process).is_some_and(|owner| owner != state.owner);
+        state.input_generation.checked_add(u64::from(owner_changed))
     }
 
     /// Reader-side observations wait for short admission metadata locks, never for
