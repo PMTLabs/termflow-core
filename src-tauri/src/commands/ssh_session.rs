@@ -304,10 +304,7 @@ mod tests {
             f.registry.state("tm-a", false).unwrap().generation,
             latest.generation
         );
-        assert!(matches!(
-            keys.admit_create("control", CreateMode::Mount),
-            Ok(_)
-        ));
+        assert!(keys.admit_create("control", CreateMode::Mount).is_ok());
         let events = f.events.0.lock().clone();
         assert!(!events.is_empty());
         assert!(events

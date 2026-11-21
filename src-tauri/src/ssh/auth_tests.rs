@@ -25,10 +25,7 @@ async fn fake_agent<S: AsyncRead + AsyncWrite + Unpin>(
     signs: Arc<AtomicUsize>,
     locked: bool,
 ) {
-    loop {
-        let Ok(length) = stream.read_u32().await else {
-            break;
-        };
+    while let Ok(length) = stream.read_u32().await {
         assert!(length < 256 * 1024);
         let mut bytes = vec![0; length as usize];
         if stream.read_exact(&mut bytes).await.is_err() {

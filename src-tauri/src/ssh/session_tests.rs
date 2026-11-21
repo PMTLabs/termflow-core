@@ -243,7 +243,12 @@ fn open_from_a_thread_without_a_tokio_runtime_does_not_panic() {
         .join()
         .expect("probe panicked outside a Tokio runtime")
         .unwrap();
-    let view = tauri::async_runtime::block_on(wait_state(&f.registry, &id, true, SessionState::NeedsSecret));
+    let view = tauri::async_runtime::block_on(wait_state(
+        &f.registry,
+        &id,
+        true,
+        SessionState::NeedsSecret,
+    ));
     assert_eq!(view.state, SessionState::NeedsSecret);
     f.registry.close(&id, true, None).unwrap();
     tauri::async_runtime::block_on(f.registry.shutdown());
