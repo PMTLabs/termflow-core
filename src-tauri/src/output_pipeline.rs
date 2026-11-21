@@ -39,7 +39,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
         let cwd_sink = |event: CwdEvent| {
             let _ = state.app_handle.emit("ssh-fs:cwd", event);
         };
-        let flush_cwd = || state.ssh_sessions.flush_remote_cwd(generation, &resolve_leaf, &cwd_sink);
+        let flush_cwd = || state.ssh_sessions.flush_remote_cwd(generation, resolve_leaf, &cwd_sink);
         log::info!("[PIPELINE] output consumer started (gen {})", generation);
         // Coalesce the renderer emit (terminal:data) so a TUI's back-to-back frames —
         // e.g. codex's redraw followed by its SEPARATE cursor-reposition frame — reach the
@@ -134,7 +134,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
             // This always reflects the true current screen and is what the
             // client hydrates from on reconnect (no heuristics involved).
             state.feed_screen(&payload.id, &payload.data);
-            state.ssh_sessions.feed_remote_cwd(generation, &payload, &resolve_leaf);
+            state.ssh_sessions.feed_remote_cwd(generation, &payload, resolve_leaf);
 
             // Track the shell-reported cwd from OSC 9;9 / OSC 7 sequences (backlog
             // 004). Authoritative for shells whose process cwd isn't live (PowerShell).

@@ -1261,8 +1261,8 @@ impl<R: Runtime> AppState<R> {
         // silently does nothing, which is invisible: the symptom is a restarted terminal that is
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
         let leaf = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone());
-        if let Some(leaf) = &leaf {
-            let owns_leaf = matches!(self.host_table.keys().owner_state(leaf),
+        if let Some(leaf) = leaf.clone() {
+            let owns_leaf = matches!(self.host_table.keys().owner_state(&leaf),
                 Some((_, super::OwnerState::Registered(s) | super::OwnerState::Closing(s))) if s.process == id);
             if owns_leaf { self.automations.runtime.forget_terminal(&leaf); }
         }
