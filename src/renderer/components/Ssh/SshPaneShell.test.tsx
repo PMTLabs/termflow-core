@@ -55,7 +55,7 @@ test('inline prompts do not steal or restore sibling focus and refusals render o
   }
   act(() => root.render(<SshPaneShell {...props} view={{ ...view('error'), reason: 'Refused', hostKey: { ...view('error').hostKey!, changed: true } }} />));
   expect(container.querySelectorAll('.ssh-prompt')).toHaveLength(1);
-  expect(container.textContent).toContain('Refused');
+  expect(container.textContent!.split('SSH host key refused')).toHaveLength(2); // refusal renders once
   expect(container.textContent).not.toContain('SSH disconnected');
   expect(container.querySelector('[data-action=cancel]')).toBeNull();
   const warning = 'Connected; password was not saved (Remember unavailable).';
@@ -104,12 +104,15 @@ test('SshTestConnectionDialog test_dialog_close_disposes_probe_even_during_auth'
   await act(async () => { root.render(<SshTestConnectionDialog connectionId="c-a" api={api} onClose={jest.fn()} />); await flush(); });
   expect(document.body.textContent).toContain('SSH password');
   const buttons = [...document.querySelectorAll<HTMLButtonElement>('.ssh-test-dialog button')];
-  const innerCancel = buttons.find(b => b.textContent === 'Cancel')!, outerClose = buttons.find(b => b.textContent === 'Close')!;
-  innerCancel.focus();
+  expect(buttons.some(b => b.textContent === 'Close')).toBe(false);
+  const credential = document.querySelector<HTMLInputElement>('.ssh-test-dialog input[type=password]')!;
+  const last = buttons[buttons.length - 1]; // house order: Cancel, then the primary action last
+  expect(last.textContent).toBe('Continue');
+  last.focus();
   const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
-  act(() => innerCancel.dispatchEvent(tab));
-  expect(tab.defaultPrevented).toBe(false); // Browser default may advance to outer Close.
-  outerClose.focus(); expect(document.activeElement).toBe(outerClose);
+  act(() => last.dispatchEvent(tab));
+  expect(tab.defaultPrevented).toBe(true);
+  expect(document.activeElement).toBe(credential);
   act(() => root.unmount()); root = createRoot(container); expect(close).toHaveBeenCalledWith('probe-a'); expect(unlisten).toHaveBeenCalledTimes(1);
   listener({ ...view('connected'), probeId: 'probe-a' }); expect(document.body.textContent).not.toContain('File and metric capabilities');
 });
@@ -122,10 +125,10 @@ test('SshTestConnectionDialog creation racing close still disposes the returned 
 test('SSH prompt and banner controls use the house button and checkbox classes', () => {
   const houseButtons = () => [...container.querySelectorAll('button')].map(b => [b.textContent, b.classList.contains('au-btn')]);
   act(() => root.render(<SshHostKeyPrompt view={view('needs-hostkey')} onTrust={jest.fn(async () => {})} onCancel={jest.fn()} />));
-  expect(houseButtons()).toEqual([['Trust', true], ['Cancel', true]]);
-  expect(container.querySelector('button')!.classList.contains('primary')).toBe(true);
+  expect(houseButtons()).toEqual([['Cancel', true], ['Trust', true]]);
+  expect(container.querySelector('button:last-of-type')!.classList.contains('primary')).toBe(true);
   act(() => root.render(<SshSecretPrompt view={view('needs-secret')} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
-  expect(houseButtons()).toEqual([['Continue', true], ['Cancel', true]]);
+  expect(houseButtons()).toEqual([['Cancel', true], ['Continue', true]]);
   const box = container.querySelector('input[type=checkbox]')!;
   expect(box.classList.contains('setting-checkbox')).toBe(true);
   expect(box.closest('label')!.classList.contains('ssh-prompt-check')).toBe(true);

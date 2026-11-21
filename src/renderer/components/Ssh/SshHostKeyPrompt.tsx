@@ -14,12 +14,19 @@ export function SshHostKeyPrompt({ view, onTrust, onCancel }: { view: SshSession
   };
   const target = view.promptTarget;
   return <div ref={root} role="region" aria-label="SSH host key" className="ssh-prompt">
-    <h3>{allowed ? 'Unknown SSH host key' : 'SSH host key refused'}</h3>
-    <p>{target && `${target.hop === 'jump' ? 'Jump host' : 'Target'}: ${target.user}@${target.host}:${target.port}`}</p>
-    <p>{view.hostKey?.algorithm}</p><code>{view.hostKey?.fingerprintSha256}</code>
-    <p>{allowed ? 'Verify this fingerprint independently before trusting.' : (view.reason ?? 'Update known_hosts with ssh-keygen. There is no override.')}</p>
-    {error && <p role="alert">Host trust could not be saved.</p>}
-    {allowed && <button className="au-btn primary" aria-disabled={pending} onClick={trust}>{pending ? 'Saving…' : 'Trust'}</button>}
-    {allowed && <button className="au-btn" data-dialog-cancel data-action="cancel" onClick={onCancel}>Cancel</button>}
+    <div className={allowed ? 'ssh-prompt-body' : 'ssh-prompt-error'} role={allowed ? undefined : 'alert'}>
+      <h3>{allowed ? 'Unknown SSH host key' : 'SSH host key refused'}</h3>
+      <p>{target && `${target.hop === 'jump' ? 'Jump host' : 'Target'}: ${target.user}@${target.host}:${target.port}`}</p>
+      <p>Fingerprint the server presented now ({view.hostKey?.algorithm}): <code>{view.hostKey?.fingerprintSha256}</code></p>
+      {allowed ? <>
+        <p>Verify this fingerprint independently before trusting.</p>
+        <p>Trust saves this host’s fingerprint and checks future connections against it.</p>
+      </> : <p>Confirm this fingerprint with the server’s administrator before updating the saved key in <code>{(target?.hop === 'jump' ? view.knownHostsPaths?.jump : view.knownHostsPaths?.target) ?? '~/.ssh/known_hosts'}</code>. There is no override.</p>}
+      {error && <p role="alert" className="ssh-prompt-error">Host trust could not be saved. Check access to known_hosts and try again.</p>}
+    </div>
+    {allowed && <div className="ssh-test-actions">
+      <button className="au-btn" data-dialog-cancel data-action="cancel" onClick={onCancel}>Cancel</button>
+      <button className="au-btn primary" aria-disabled={pending} onClick={trust}>{pending ? 'Saving…' : 'Trust'}</button>
+    </div>}
   </div>;
 }
