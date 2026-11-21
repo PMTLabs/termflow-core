@@ -461,7 +461,7 @@ async fn ipc_chmod_on_symlink_refused_by_backend() {
     state.ssh_sessions = f.registry.clone();
     app.manage(state);
     let err = ssh_fs_chmod::<tauri::test::MockRuntime>(
-        app.state(), "tm-a".into(), "/link".into(), generation(&f), 0o600,
+        app.handle().clone(), app.state(), "tm-a".into(), "/link".into(), generation(&f), 0o600,
     ).await.unwrap_err();
     assert_eq!((err.code, err.outcome), (FsCode::Unsupported, FsOutcome::Unchanged));
     assert_eq!(fs::metadata(tree.path("sentinel")).unwrap().permissions().mode() & 0o7777, 0o644);
