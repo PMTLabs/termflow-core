@@ -455,6 +455,12 @@ impl Entry {
             .map_err(|_| SessionError::StaleAttempt)
     }
 }
+/// The runtime that owns session engines: the caller's Tokio context when it
+/// has one, otherwise Tauri's shared runtime (sync commands have none).
+fn engine_runtime() -> tokio::runtime::Handle {
+    tokio::runtime::Handle::try_current()
+        .unwrap_or_else(|_| tauri::async_runtime::handle().inner().clone())
+}
 fn clear_prompt(view: &mut SessionView) {
     view.prompt_id = None;
     view.prompt_target = None;
@@ -626,7 +632,9 @@ impl SessionRegistry {
         }
         let result = entry.view();
         let task_entry = entry.clone();
-        let task = tokio::spawn(async move {
+        // Tauri runs sync commands on the main thread, outside any Tokio
+        // context, so a bare tokio::spawn panics there and aborts the app.
+        let task = engine_runtime().spawn(async move {
             run_engine(task_entry, deps).await;
         });
         *entry.task.lock() = Some(task);

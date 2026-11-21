@@ -233,3 +233,18 @@ async fn test_close_cancels_waiter_and_emits_no_late_success() {
     assert!(f.registry.owner_map().is_empty());
     f.registry.shutdown().await;
 }
+/// Tauri runs sync commands (ssh_test_connection, ssh_session_open) on the
+/// main thread with no Tokio context. Opening there must not panic.
+#[test]
+fn open_from_a_thread_without_a_tokio_runtime_does_not_panic() {
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let registry = f.registry.clone();
+    let id = std::thread::spawn(move || registry.probe("c-a"))
+        .join()
+        .expect("probe panicked outside a Tokio runtime")
+        .unwrap();
+    let view = tauri::async_runtime::block_on(wait_state(&f.registry, &id, true, SessionState::NeedsSecret));
+    assert_eq!(view.state, SessionState::NeedsSecret);
+    f.registry.close(&id, true, None).unwrap();
+    tauri::async_runtime::block_on(f.registry.shutdown());
+}
