@@ -44,7 +44,9 @@ fn assert_preflight_wiring() {
     let terminal = production(include_str!("../../commands/terminal.rs"));
     let legacy = fn_body(&terminal, "fn create_terminal(");
     let routed = fn_body(&terminal, "fn run_create(");
-    assert!(legacy.find("ssh_shell::validate_create(").unwrap() < legacy.find("pty_manager::spawn_terminal(").unwrap());
+    // The needle omits the call's `(`: a call-shaped literal would itself be counted
+    // as an unrouted spawn site by the api_spawn_routing census.
+    assert!(legacy.find("ssh_shell::validate_create(").unwrap() < legacy.find("pty_manager::spawn_terminal").unwrap());
     for effect in ["ensure_elevated_host()", "place_process_create(", "host_fallback(", "PreparedShell::register(", "spawn_owned("] {
         assert!(routed.find("ssh_shell::validate_create(").unwrap() < routed.find(effect).unwrap(), "before {effect}");
     }

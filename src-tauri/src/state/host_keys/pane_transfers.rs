@@ -138,7 +138,10 @@ impl HostKeys {
         }
     }
     pub(crate) fn expire_transfers(&self, now: Instant) {
-        let _input_order = self.input_owner_change(); Self::expire_transfers_locked(&mut self.lock(), now); }
+        let _input_order = self.input_owner_change();
+        let mut inner = self.lock();
+        Self::expire_transfers_locked(&mut inner, now);
+    }
     pub(super) fn expire_transfers_locked(inner: &mut Inner, now: Instant) {
         let expired: Vec<_> = inner.panes.transfers.iter().filter(|(_, t)| now.saturating_duration_since(t.stamp) >= TRANSFER_DEADLINE
             || t.destination.is_some_and(|pg| inner.window_pages.window_of(pg).is_none())).map(|(tx, _)| tx.clone()).collect();

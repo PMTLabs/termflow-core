@@ -92,7 +92,10 @@ pub(super) fn production_sources() -> Vec<(std::path::PathBuf, String)> {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                walk(&path, out);
+                // A `tests/` directory holds only `#[cfg(test)]` submodules.
+                if !path.file_name().is_some_and(|n| n == "tests") {
+                    walk(&path, out);
+                }
                 continue;
             }
             let name = path.file_name().unwrap().to_string_lossy().to_string();

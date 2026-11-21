@@ -155,6 +155,7 @@ fn ends(path: &str, suffix: &str) -> bool {
 // These tmux calls start a subprocess with a real configuration, but the tests
 // explicitly exercise the unavailable backend, which returns before launch.
 const ALLOW: &[(&str, &str)] = &[
+    ("ssh/launch_argv_tests.rs::openssh::jump_refuses_unproven_proxy_runtimes_before_publication", "this Rig::new is the in-process russh listener rig, not the MCP sidecar rig; the plan refuses before publishing and no ssh is run"),
     ("open_commands.rs::tests::permission_panes_are_fixed_and_external_guard_is_unchanged", "injected opener and rejected non-HTTP URLs do not invoke an OS opener"),
     ("pty_host_client/exe_origin_tests.rs::windows_lookup::record_less_legacy_host_origin_found_via_connection_pid", "named pipe is served by this test and the sidecar path does not exist"),
     ("pty_host_client/bundle_staging.rs::tests::debug_bare_override_still_installs", "bare fixture bypasses app-bundle signature checking and uses Rust file copying"),

@@ -102,6 +102,32 @@ const RAW_SINKS: &[(&str, &str, usize, &str)] = &[
         "NON_PTY: saved SSH definition writer; ssh::store tests",
     ),
     (
+        "core/ssh/store.rs",
+        "transact_checked",
+        1,
+        "NON_PTY: saved SSH definition writer for a launch-checked edit; ssh::store tests",
+    ),
+    (
+        "core/ssh/known_hosts.rs",
+        "trust_transaction",
+        1,
+        "NON_PTY: locked known_hosts append; known_hosts trust tests",
+    ),
+    (
+        "core/pty_manager/ssh_shell/argv_recorder.rs",
+        "main",
+        1,
+        "NON_PTY: standalone fixture executable compiled by real-shell tests, not linked into the app",
+    ),
+    // The saved-launch typing turn: hosted enqueue, local writer lookup and its write,
+    // all inside the fenced SSH admission (ticket + ready epoch + mounted owner).
+    (
+        "core/ssh/launch/drive.rs",
+        "tick",
+        3,
+        "submit_ssh_input_fenced",
+    ),
+    (
         "core/net_ports.rs",
         "write_restricted",
         1,
@@ -253,8 +279,11 @@ fn owner_mutation_violations(corpus: &BTreeMap<String, String>) -> Vec<String> {
     let sink = Regex::new(
         r"\.\s*owners\s*\.\s*(?:insert|remove(?:_entry)?|retain|clear|entry|get_mut|values_mut|iter_mut|drain|extract_if|append)\s*\(|&\s*mut\s+\w+\s*\.\s*owners\b|\.\s*(?:cg|owner|state|ssh_reserved)\s*=[^=]",
     ).unwrap();
-    let helper_call = Regex::new(r"\bSelf\s*::\s*(\w+)\s*\(").unwrap();
+    let helper_call = Regex::new(r"\b(?:Self\s*::|self\s*\.)\s*(\w+)\s*\(").unwrap();
     let receiver = Regex::new(r"\(\s*&\s*(?:mut\s+)?self\b").unwrap();
+    // `inner: &mut Inner` means the caller already holds the HostKeys lock, so such a
+    // method is a locked helper like an associated fn: its callers are checked instead.
+    let locked = Regex::new(r":\s*&\s*mut\s+Inner\b").unwrap();
     let barrier = Regex::new(r"\blet\s+\w+\s*=\s*self\.input_owner_change\(\)\s*;").unwrap();
     let lock = Regex::new(r"\bself\.lock\(\)").unwrap();
     let mut methods = Vec::new();
@@ -264,7 +293,9 @@ fn owner_mutation_violations(corpus: &BTreeMap<String, String>) -> Vec<String> {
             let header = &code[..body.start];
             let declaration = format!("fn {name}");
             let at = header.rfind(declaration.as_str()).unwrap();
-            methods.push((file, name, receiver.is_match(&header[at..]), code[body].to_owned()));
+            let signature = &header[at..];
+            let entry_point = receiver.is_match(signature) && !locked.is_match(signature);
+            methods.push((file, name, entry_point, code[body].to_owned()));
         }
     }
     let mut helpers = std::collections::BTreeSet::new();
@@ -321,6 +352,23 @@ fn owner_mutations_take_the_input_barrier_census() {
     }\n");
     assert_eq!(owner_mutation_violations(&corpus), vec![
         "host_keys/panes.rs:planted: owner mutation without input barrier before HostKeys lock"
+    ]);
+
+    // A `&self` helper that receives the locked `&mut Inner` is checked at its
+    // callers: a caller with no barrier is reported, the helper itself is not.
+    let panes = corpus.get_mut("host_keys/panes.rs").unwrap();
+    panes.push_str("\nimpl HostKeys {\n\
+        fn planted_locked(&self, inner: &mut Inner, leaf: &str) {\n\
+            inner.owners.remove(leaf);\n\
+        }\n\
+        fn planted_caller(&self, leaf: &str) {\n\
+            let mut inner = self.lock();\n\
+            self.planted_locked(&mut inner, leaf);\n\
+        }\n\
+    }\n");
+    assert_eq!(owner_mutation_violations(&corpus), vec![
+        "host_keys/panes.rs:planted: owner mutation without input barrier before HostKeys lock",
+        "host_keys/panes.rs:planted_caller: owner mutation without input barrier before HostKeys lock",
     ]);
 }
 
