@@ -1046,6 +1046,28 @@ impl SessionRegistry {
         let session = s.transport.clone().ok_or(SessionError::NotConnected)?;
         Ok((session, s.view.connection_id.clone()))
     }
+
+    /// Run a synchronous admission decision serialized against lease revocation.
+    /// The registry map lock is released before the callback. The callback must
+    /// not re-enter the session registry or perform async/native work.
+    pub(crate) fn admit_connected<T>(
+        &self,
+        id: &str,
+        admit: impl FnOnce(u64, &Arc<SshSession>) -> Result<T, SessionError>,
+    ) -> Result<T, SessionError> {
+        let registry = self.inner.lock();
+        let entry = registry.panes.get(id).ok_or(SessionError::NotConnected)?.clone();
+        let state = entry.inner.lock();
+        drop(registry);
+        if entry.cancel.is_cancelled() || state.view.state != SessionState::Connected {
+            return Err(SessionError::NotConnected);
+        }
+        admit(
+            state.view.generation,
+            state.transport.as_ref().ok_or(SessionError::NotConnected)?,
+        )
+    }
+
     pub fn owner_map(&self) -> HashMap<String, (String, SessionState)> {
         self.inner
             .lock()
@@ -1344,6 +1366,8 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         handle: tokio::sync::Mutex::new(handle),
         cancel: entry.cancel.clone(),
         sftp: tokio::sync::Mutex::new(None),
+        #[cfg(test)]
+        next_exec_cleanup_fault: Mutex::new(None),
     });
     entry.update(|s| {
         s.authenticated = true;
@@ -1662,6 +1686,8 @@ pub struct SshSession {
     handle: tokio::sync::Mutex<client::Handle<ClientHandler>>,
     cancel: CancellationToken,
     sftp: tokio::sync::Mutex<Option<Arc<SftpClient>>>,
+    #[cfg(test)]
+    pub(crate) next_exec_cleanup_fault: Mutex<Option<ExecCleanupFailure>>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecOutput {
@@ -1670,6 +1696,30 @@ pub struct ExecOutput {
     pub exit: u32,
 }
 pub type ExecResult = ExecOutput;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecCleanupFailure {
+    CloseFailed,
+    CloseTimedOut,
+    ReaderJoinFailed,
+}
+
+/// Opt-in diagnostics. A successful channel close does not prove remote work stopped.
+#[derive(Debug)]
+pub(crate) struct ExecOutcome {
+    pub result: Result<ExecOutput, SessionError>,
+    pub cleanup_failure: Option<ExecCleanupFailure>,
+}
+
+impl From<SessionError> for ExecOutcome {
+    fn from(error: SessionError) -> Self {
+        Self {
+            result: Err(error),
+            cleanup_failure: None,
+        }
+    }
+}
+
 pub struct ExecOpts {
     pub deadline: Duration,
     pub stdout_cap: usize,
@@ -1722,20 +1772,43 @@ impl SshSession {
         command: &str,
         opts: ExecOpts,
     ) -> Result<ExecOutput, SessionError> {
+        self.exec_inner(command, opts, false).await.result
+    }
+
+    /// Require an explicit remote channel close and surface failed local cleanup
+    /// alongside the exec result. Existing callers keep the legacy contract.
+    pub(crate) async fn exec_with_cleanup(&self, command: &str, opts: ExecOpts) -> ExecOutcome {
+        self.exec_inner(command, opts, true).await
+    }
+
+    async fn exec_inner(&self, command: &str, opts: ExecOpts, require_close: bool) -> ExecOutcome {
         let deadline = tokio::time::Instant::now() + opts.deadline;
-        let mut channel = tokio::select! {
+        let opened = tokio::select! {
             biased;
-            _ = self.cancel.cancelled() => return Err(SessionError::Cancelled),
-            _ = opts.cancel.cancelled() => return Err(SessionError::Cancelled),
-            result = tokio::time::timeout_at(deadline, async { self.handle.lock().await.channel_open_session().await }) =>
-                result.map_err(|_| SessionError::TimedOut)?.map_err(|_| SessionError::TransportClosed)?,
+            _ = self.cancel.cancelled() => return SessionError::Cancelled.into(),
+            _ = opts.cancel.cancelled() => return SessionError::Cancelled.into(),
+            result = tokio::time::timeout_at(deadline, async { self.handle.lock().await.channel_open_session().await }) => result,
+        };
+        let mut channel = match opened {
+            Ok(Ok(channel)) => channel,
+            Ok(Err(_)) => return SessionError::TransportClosed.into(),
+            Err(_) => return SessionError::TimedOut.into(),
         };
         let command = command.to_owned();
         let generation_cancel = self.cancel.clone();
         let request_cancel = opts.cancel;
+        #[cfg(test)]
+        let cleanup_fault = self.next_exec_cleanup_fault.lock().take();
         // The reader owns the channel and closes it on every failure. This task is
         // always joined before returning; request cancellation never touches the session.
         let reader = tokio::spawn(async move {
+            let append = |buffer: &mut Vec<u8>, bytes: &[u8], cap| {
+                if require_close {
+                    append_metrics_bounded(buffer, bytes, cap)
+                } else {
+                    append_bounded(buffer, bytes, cap)
+                }
+            };
             let result = tokio::select! {
                 biased;
                 _ = generation_cancel.cancelled() => Err(SessionError::Cancelled),
@@ -1744,31 +1817,58 @@ impl SshSession {
                 result = async {
                     channel.exec(true, command).await.map_err(|_| SessionError::TransportClosed)?;
                     let (mut stdout, mut stderr, mut exit, mut acknowledged) = (Vec::new(), Vec::new(), None, false);
+                    let mut closed = false;
                     while let Some(message) = channel.wait().await {
                         match message {
                             ChannelMsg::Success => acknowledged = true,
                             ChannelMsg::Failure => return Err(SessionError::CapabilityUnavailable),
-                            ChannelMsg::Data { data } => append_bounded(&mut stdout, &data, opts.stdout_cap.min(1024 * 1024))?,
-                            ChannelMsg::ExtendedData { data, .. } => append_bounded(&mut stderr, &data, opts.stderr_cap.min(1024 * 1024))?,
+                            ChannelMsg::Data { data } => append(&mut stdout, &data, opts.stdout_cap.min(1024 * 1024))?,
+                            ChannelMsg::ExtendedData { data, .. } => append(&mut stderr, &data, opts.stderr_cap.min(1024 * 1024))?,
                             ChannelMsg::ExitStatus { exit_status } => exit = Some(exit_status),
-                            _ => {},
+                            ChannelMsg::Close => closed = true,
+                            _ => {}
                         }
                     }
                     if !acknowledged { return Err(SessionError::CapabilityUnavailable); }
-                    Ok(ExecOutput { stdout, stderr, exit: exit.ok_or(SessionError::MissingExitStatus)? })
+                    let exit = exit.ok_or(SessionError::MissingExitStatus)?;
+                    if require_close && !closed { return Err(SessionError::TransportClosed); }
+                    Ok(ExecOutput { stdout, stderr, exit })
                 } => result,
             };
+            let mut cleanup_failure = None;
             if result.is_err() {
-                let _ = tokio::time::timeout(Duration::from_millis(250), channel.close()).await;
+                let close = async {
+                    #[cfg(test)]
+                    match cleanup_fault {
+                        Some(ExecCleanupFailure::CloseFailed) => return Err(russh::Error::SendError),
+                        Some(ExecCleanupFailure::CloseTimedOut) => std::future::pending::<()>().await,
+                        _ => {}
+                    }
+                    channel.close().await
+                };
+                cleanup_failure = match tokio::time::timeout(Duration::from_millis(250), close).await {
+                    Ok(Ok(())) => None,
+                    Ok(Err(_)) => Some(ExecCleanupFailure::CloseFailed),
+                    Err(_) => Some(ExecCleanupFailure::CloseTimedOut),
+                };
+                #[cfg(test)]
+                if cleanup_fault == Some(ExecCleanupFailure::ReaderJoinFailed) {
+                    panic!("injected exec reader join failure");
+                }
             }
-            result
+            ExecOutcome { result, cleanup_failure }
         });
-        let result = reader.await.map_err(|_| SessionError::TransportClosed)?;
+        let Ok(mut outcome) = reader.await else {
+            // Preserve exec_with's legacy precedence for a failed join.
+            return ExecOutcome {
+                result: Err(SessionError::TransportClosed),
+                cleanup_failure: Some(ExecCleanupFailure::ReaderJoinFailed),
+            };
+        };
         if self.cancel.is_cancelled() {
-            Err(SessionError::Cancelled)
-        } else {
-            result
+            outcome.result = Err(SessionError::Cancelled);
         }
+        outcome
     }
     /// Evict only the failed lease, never a replacement opened concurrently.
     pub async fn evict_sftp(&self, failed: &SftpLease) -> bool {
@@ -1881,6 +1981,24 @@ mod tests;
 pub fn append_bounded(buffer: &mut Vec<u8>, data: &[u8], cap: usize) -> Result<(), SessionError> {
     if data.len() > cap.saturating_sub(buffer.len()) {
         return Err(SessionError::OutputTooLarge);
+    }
+    buffer.extend_from_slice(data);
+    Ok(())
+}
+
+pub(crate) fn append_metrics_bounded(
+    buffer: &mut Vec<u8>,
+    data: &[u8],
+    cap: usize,
+) -> Result<(), SessionError> {
+    if data.len() > cap.saturating_sub(buffer.len()) {
+        return Err(SessionError::OutputTooLarge);
+    }
+    let needed = buffer.len() + data.len();
+    if needed > buffer.capacity() {
+        // Grow amortized without Vec's implicit over-allocation past cap.
+        let capacity = needed.max(buffer.capacity().saturating_mul(2)).min(cap);
+        buffer.reserve_exact(capacity - buffer.len());
     }
     buffer.extend_from_slice(data);
     Ok(())

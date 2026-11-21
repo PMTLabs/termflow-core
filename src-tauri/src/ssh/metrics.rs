@@ -1,7 +1,8 @@
-//! Static remote metrics collection. Session execution and scheduling are separate.
+//! Remote metrics collection, reduction, and per-terminal scheduling.
 pub mod model;
 pub mod protocol;
 pub mod reduce;
+pub mod sampler;
 
 const COLLECT: &str = include_str!("metrics/collect.sh");
 const UNAVAILABLE_EXIT: u32 = 125;

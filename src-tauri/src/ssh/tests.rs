@@ -38,6 +38,8 @@ pub struct Counters {
     /// Terminal (pty-req) channels: only a real OpenSSH client in a PTY asks.
     pub ptys: AtomicUsize,
 }
+type ExecFixture = dyn Fn(ChannelId, &[u8], &mut Session) -> Result<(), russh::Error> + Send + Sync;
+
 #[derive(Clone)]
 pub struct Server {
     pub host: ssh_key::PrivateKey,
@@ -51,6 +53,7 @@ pub struct Server {
     pub deny_jump: bool,
     pub sftp_faults: Arc<Mutex<SftpFaults>>,
     sftp_storage: Arc<SftpStorage>,
+    pub exec_fixture: Option<Arc<ExecFixture>>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     pub hostname_reply: Option<&'static str>,
     hostname_channels: HashSet<ChannelId>,
@@ -69,6 +72,7 @@ impl Server {
             deny_jump: false,
             sftp_faults: Arc::default(),
             sftp_storage: Arc::default(),
+            exec_fixture: None,
             channels: Arc::new(Mutex::new(HashMap::new())),
             hostname_reply: Some("fixture-host\r\n"),
             hostname_channels: HashSet::new(),
@@ -199,6 +203,9 @@ impl server::Handler for Server {
         if self.refuse {
             session.channel_failure(ch)?;
             return Ok(());
+        }
+        if let Some(fixture) = &self.exec_fixture {
+            return fixture(ch, data, session);
         }
         session.channel_success(ch)?;
         if data == b"hang" {
