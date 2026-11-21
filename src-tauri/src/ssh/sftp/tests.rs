@@ -244,30 +244,66 @@ async fn missing_attrs_stay_absent() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn stat_links_and_keep_unrepresentable_names_non_actionable() {
-    use std::{ffi::OsStr, os::unix::{ffi::OsStrExt, fs::symlink}};
-
+async fn stat_reports_symlink_kind_and_target() {
     let tree = Tree::new();
     fs::write(tree.path("target"), b"keep").unwrap();
-    symlink("target", tree.path("link")).unwrap();
-    let invalid = tree.root().join(OsStr::from_bytes(b"bad\xff"));
-    fs::write(&invalid, b"invalid-name").unwrap();
+    std::os::unix::fs::symlink("target", tree.path("link")).unwrap();
+
+    let f = tree.fixture();
+    f.connected().await;
+    let stat = browser(&f).stat("/link").await.unwrap();
+    assert_eq!(stat.entry.kind, RemoteKind::Symlink);
+    assert_eq!(stat.link_target.as_deref(), Some("target"));
+    f.registry.shutdown().await;
+}
+
+/// The name a REMOTE server sends for a file whose name is not UTF-8, as the client decodes it.
+/// Crafted at the wire level (an `SSH_FXP_NAME` carrying the raw bytes `bad\xff`), so no local
+/// filesystem has to store such a name; APFS refuses to (EILSEQ).
+fn wire_decoded_non_utf8_name() -> String {
+    use russh_sftp::protocol::Packet;
+    use tokio_util::bytes::{BufMut, Bytes, BytesMut};
+
+    let mut packet = BytesMut::new();
+    packet.put_u8(104); // SSH_FXP_NAME
+    packet.put_u32(7); // request id
+    packet.put_u32(1); // one entry
+    for field in [&b"bad\xff"[..], &b"-rw-r--r-- 1 u g 12 Jan 1 00:00 bad?"[..]] {
+        packet.put_u32(field.len() as u32);
+        packet.put_slice(field);
+    }
+    packet.put_u32(0); // no attributes
+    let Packet::Name(name) = Packet::try_from(&mut Bytes::from(packet)).unwrap() else {
+        panic!("not a NAME packet");
+    };
+    let decoded = name.files.into_iter().next().unwrap().filename;
+    assert_eq!(decoded, "bad\u{fffd}", "russh-sftp decodes a non-UTF-8 name lossily");
+    decoded
+}
+
+#[tokio::test]
+async fn unrepresentable_remote_names_stay_non_actionable() {
+    let tree = Tree::new();
+    fs::write(tree.path("target"), b"keep").unwrap();
+    // A real file whose (valid UTF-8) name contains U+FFFD: indistinguishable on the client from
+    // a lossily decoded name, so it must be just as non-actionable.
     fs::write(tree.path("bad\u{fffd}"), b"valid-but-ambiguous").unwrap();
 
     let f = tree.fixture();
     f.connected().await;
     let client = browser(&f);
-    let stat = client.stat("/link").await.unwrap();
-    assert_eq!(stat.entry.kind, RemoteKind::Symlink);
-    assert_eq!(stat.link_target.as_deref(), Some("target"));
+    // The server's first READDIR batch is the non-UTF-8 name; the next batch is the real tree.
+    f.server.sftp_faults.lock().readdir_names = Some(vec![wire_decoded_non_utf8_name()]);
     let listing = client.list("/").await.unwrap();
     let read_only: Vec<_> = listing.entries.iter().filter(|entry| entry.path.is_empty()).collect();
     assert_eq!(read_only.len(), 2);
     assert!(read_only.iter().all(|entry| entry.name.contains(r"\u{fffd}")));
+    assert!(listing.entries.iter().any(|entry| entry.path == "/target"));
     for path in ["", "/bad\u{fffd}"] {
         assert_eq!(client.rename(path, "/replacement").await.unwrap_err().code, FsCode::InvalidPath);
     }
-    assert_eq!(fs::read(invalid).unwrap(), b"invalid-name");
+    // Refused before anything reached the server.
+    assert!(!f.server.sftp_faults.lock().requests.iter().any(|(op, _)| op.contains("rename")));
     assert_eq!(fs::read(tree.path("bad\u{fffd}")).unwrap(), b"valid-but-ambiguous");
     assert!(!tree.path("replacement").exists());
     f.registry.shutdown().await;
