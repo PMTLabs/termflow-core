@@ -42,10 +42,10 @@ export function SshConnectionsPanel() {
       try { await refreshReadOnly(error,api!,reply => dispatch(applyView(reply))); } catch (refreshError) { dispatch(addToast({ type:'error', message:sshErrorMessage(refreshError) })); }
       return false; }
   };
-  if (!api || state.status === 'desktop-only') return <section data-testid="ssh-connections-panel"><h2>SSH Connections</h2><p>SSH connections are available in the desktop app.</p></section>;
-  if (state.status === 'loading') return <section data-testid="ssh-connections-panel">Loading SSH connections…</section>;
-  if (state.status === 'error') return <section data-testid="ssh-connections-panel"><p role="alert">{state.error}</p><button className="au-btn" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button></section>;
-  return <section className="ssh-connections" data-testid="ssh-connections-panel"><h2>SSH Connections</h2>
+  if (!api || state.status === 'desktop-only') return <section className="settings-section" data-testid="ssh-connections-panel"><h2>SSH Connections</h2><p>SSH connections are available in the desktop app.</p></section>;
+  if (state.status === 'loading') return <section className="settings-section" data-testid="ssh-connections-panel">Loading SSH connections…</section>;
+  if (state.status === 'error') return <section className="settings-section" data-testid="ssh-connections-panel"><p role="alert">{state.error}</p><button className="au-btn" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button></section>;
+  return <section className="settings-section ssh-connections" data-testid="ssh-connections-panel"><h2>SSH Connections</h2>
     {state.view.loadError && <div role="alert" className="ssh-read-only">Read-only: {state.view.loadError.message} <button className="au-btn sm" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button></div>}
     <div className="ssh-toolbar"><button className="au-btn" disabled={readOnly} onClick={() => newFolder(null)}>New folder</button><button className="au-btn primary" disabled={readOnly} onClick={() => newConnection(null)}>New SSH connection</button></div>
     <label className="ssh-search">Filter connections<input type="search" value={filter} onChange={event => setFilter(event.target.value)} onKeyDown={event => { if (event.key !== 'ArrowDown') return; const first = treePaneRef.current?.querySelector<HTMLElement>('.ssh-tree-row'); if (first) { event.preventDefault(); first.focus(); } }} /></label>
