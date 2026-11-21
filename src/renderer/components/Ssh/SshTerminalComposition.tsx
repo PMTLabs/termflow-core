@@ -82,8 +82,10 @@ function SshPaneOwner({ terminalId, sshTag, isTabActive, children }: {
   const dispatch = useDispatch();
   // The canonical tag on the leaf, by terminalId (066 patchSshPaneTag).
   const onPatchTag = useCallback((patch: SshBrowserTagPatch) => { dispatch(patchSshPaneTag({ terminalId, patch })); }, [dispatch, terminalId]);
-  // The ONE controller. Live while either surface shows the terminal; Canvas reads it below.
-  const browser = useSshFileBrowser({ terminalId, sshTag, surfaceActive: isTabActive || canvasOwns, onPatchTag });
+  // The ONE controller, live for the owner's whole mount. Not gated on the tab or on Canvas: a
+  // tab switch into Canvas would otherwise drop and re-list it on every entry. It never polls;
+  // it lists on navigation, toggle and Follow-cd reports only. Canvas reads it below.
+  const browser = useSshFileBrowser({ terminalId, sshTag, surfaceActive: true, onPatchTag });
   useLayoutEffect(() => publishSshPresentation(terminalId, { browser, onPatchTag }), [terminalId, browser, onPatchTag]);
   const view = useSshView(terminalId, sshTag.connectionId);
   const actions = useSshShellActions(terminalId, view);

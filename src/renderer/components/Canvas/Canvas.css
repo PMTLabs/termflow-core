@@ -342,6 +342,29 @@
 .canvas-node[data-lod="chip"] .canvas-surface,
 .canvas-node[data-lod="group"] .canvas-surface { visibility: hidden; content-visibility: hidden; }
 
+/* ---- SSH nodes (plan 070 §4.1 A-C) ---------------------------------------
+   An SSH node's `.canvas-surface` is the frozen CONTENT ENVELOPE — browser column, terminal slot
+   and status row — sized by `--node-host-w/h` (the envelope, from `CanvasNode`) and carrying the
+   raster-zoom cancellation above, so the browser and bar get the same `R * 1/R = 1` layout zoom
+   and `s * z` screen scale as the terminal. They are content, not counter-scaled chrome.
+   The registered host is the inner `.terminal-display`, sized by the shell's remainder: never a
+   percentage of the node body (which collapses at the chip tier). */
+.canvas-ssh-surface > .ssh-pane-shell { box-sizing: border-box; width: 100%; height: 100%; }
+.canvas-ssh-surface .ssh-terminal-host > .terminal-display-wrapper {
+  flex: 1 1 0;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are
+   hidden, under the snapshot drawn INSIDE the terminal slot. `inherit`, never `visible`, so a
+   culled or collapsed node (hidden on `.canvas-node` itself) still hides everything. */
+.canvas-node[data-lod="snapshot"] .canvas-surface.canvas-ssh-surface { visibility: inherit; content-visibility: visible; }
+.canvas-node[data-lod="snapshot"] .canvas-ssh-surface .terminal-display { visibility: hidden; content-visibility: hidden; }
+/* Chip and group tiers keep the rule above: the whole SSH surface is hidden, never removed. */
+
 /* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
    not removed, so the terminal host inside it keeps a resolvable layout box. */
 .canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: var(--node-radius); cursor: zoom-in; }

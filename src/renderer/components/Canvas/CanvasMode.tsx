@@ -1526,7 +1526,7 @@ export const CanvasMode: React.FC = () => {
               {/* The exact opposite rule, and for the exact opposite reason: this one is
                   culled hard, because what it owns is a timer rather than a terminal. An SSH
                   node draws it inside its terminal slot instead (above), never over the browser. */}
-              {snapshotIds.has(n.terminalId) && !sshTags[n.terminalId] && <NodeSnapshot terminalId={n.terminalId} />}
+              {!sshTags[n.terminalId] && snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}
             </CanvasNode>
           );
         })}

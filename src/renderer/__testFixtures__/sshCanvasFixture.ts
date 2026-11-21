@@ -77,9 +77,11 @@ export function seedSshPane(cache: Map<string, unknown>, terminalId: string, o: 
 /** A minimal xterm double for the REAL FitAddon, as `canvasHostBoxes.test.ts` builds it. */
 export function fitTerminal(element: HTMLElement) {
   const term = {
-    element, cols: 0, rows: 0, options: { scrollback: 1000 }, resize: jest.fn(),
+    element, cols: 0, rows: 0, options: { scrollback: 1000 },
     _core: { _renderService: { dimensions: { css: { cell: { width: CELL_W, height: CELL_H } } }, clear: jest.fn() } },
   } as any;
+  // Applies the grid like xterm does, so a later fit compares against the CURRENT grid.
+  term.resize = jest.fn((cols: number, rows: number) => { term.cols = cols; term.rows = rows; });
   const fit = new FitAddon();
   fit.activate(term);
   Object.assign(term, fit.proposeDimensions());

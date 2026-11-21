@@ -8,6 +8,7 @@ import { EyeIcon } from './EyeIcon';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import { isBandCue, type CanvasBusyCue } from './canvasBusyCue';
 import type { CanvasCombos } from './canvasGestures';
+import { sshContain } from './canvasSshGeometry';
 
 /**
  * One terminal on the canvas.
@@ -111,6 +112,10 @@ export const CanvasNode: React.FC<{
   const host = hostBox ?? { w: fallback.hostW, h: fallback.hostH };
   // What the outer surface is sized to: the terminal box for a local node, the envelope for SSH.
   const surface = sshEnvelope ?? host;
+  // SSH only (plan 070 §4.1 B): CONTAIN the whole envelope and bottom-align it, so the browser
+  // toolbar and status row are never clipped the way width-only portrait shifting would clip
+  // them. Local nodes keep the width-only scale and shift below, byte for byte.
+  const sshFit = sshEnvelope ? sshContain(sshEnvelope, w, h - HEAD_H) : null;
 
   // The title bar stops growing once it has reached its natural size — see `headScale`.
   // Above zoom 1 it counter-scales, so the header holds a constant HEAD_H on screen and every
@@ -188,12 +193,12 @@ export const CanvasNode: React.FC<{
         // Per node rather than global, so a node of any width scales its host correctly.
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
-        ['--node-surface-scale' as string]: `${w / surface.w}`,
+        ['--node-surface-scale' as string]: sshFit ? `${sshFit.scale}` : `${w / surface.w}`,
         // The scale above fits by WIDTH, so a portrait pane's replica is taller than the body
         // and the body clips the overflow off the bottom — where the newest rows are. This
         // lifts it back (`plan/020` §1). Zero whenever the surface already fits, and provably
         // zero in the overlay, whose `h` is `hostH * w / hostW + HEAD_H` by construction.
-        ['--node-surface-shift' as string]: `${surfaceShift(surface, w, h - HEAD_H)}px`,
+        ['--node-surface-shift' as string]: sshFit ? `${sshFit.shift}px` : `${surfaceShift(surface, w, h - HEAD_H)}px`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}
