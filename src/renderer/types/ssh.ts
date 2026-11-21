@@ -1,3 +1,7 @@
+import type { SshFileApi } from '../components/Ssh/sshFileTypes';
+
+export type SshBridgeApi = SshStoreApi & SshFileApi;
+
 export type SshAuth = 'keyFile' | 'agent' | 'password';
 export interface SshError { field?: string | null; code: string; message: string }
 export interface SshFolderInput { id?: string; parentId: string | null; name: string; icon: string; color: string }

@@ -14,7 +14,7 @@ const WS_URL = `ws://localhost:${API_PORT}/api/ws`;
 console.log('Initializing Browser Bridge...');
 
 class BrowserBridge implements ElectronAPI {
-    ssh = browserSshBridge;
+    ssh = browserSshBridge; // Store and filesystem stubs never use this bridge's HTTP/WS transport.
     pickFile = async (): Promise<null> => null;
   // ssh_session_open: desktop-only, never return a fabricated session.
   async sshSessionOpen(_terminalId: string, _connectionId: string): Promise<SshSessionView> { throw new Error('SSH is desktop-only'); }

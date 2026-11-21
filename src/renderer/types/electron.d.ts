@@ -4,6 +4,8 @@
 // runtime payload is also what `get_automation_runtime` returns, so it is needed here.
 import type { SshAPI } from './ssh';
 // SSH IPC census: ssh_session_open, ssh_session_state, ssh_session_close, ssh_session_reconnect, ssh_session_submit_secret, ssh_session_trust_host, ssh_test_connection, ssh_test_state, ssh_test_close, ssh_test_submit_secret, ssh_test_trust_host
+// SSH file IPC census: ssh_fs_list, ssh_fs_stat, ssh_fs_mkdir, ssh_fs_create, ssh_fs_rename, ssh_fs_delete, ssh_fs_chmod, ssh_fs_chown,
+// ssh_fs_download, ssh_fs_open, ssh_fs_open_with, ssh_fs_insert_path, ssh_fs_edit_stop, ssh_fs_edit_list
 import type { AutomationStatePayload } from '../services/automationEvents';
 
 // Faithful styled snapshot of a terminal's current visible screen, used for
@@ -149,7 +151,7 @@ export type ExpectedPermissionSubject = PermissionView['subject'] & { target: Pe
 
 export interface ElectronAPI extends SshAPI {
   pickFile?: (title?: string) => Promise<string | null>;
-  ssh?: import('./ssh').SshStoreApi & import('./ssh').SshLaunchApi;
+  ssh?: import('./ssh').SshBridgeApi & import('./ssh').SshLaunchApi;
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;

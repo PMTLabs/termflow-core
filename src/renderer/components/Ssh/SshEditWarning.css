@@ -1,0 +1,10 @@
+.ssh-edit-warning {
+  padding: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+  overflow-wrap: anywhere;
+}
+.ssh-edit-warning ul { margin: 4px 0 0; padding-inline-start: 1.5em; }
+.ssh-edit-warning li + li { margin-top: 8px; }
+.ssh-edit-warning .au-btn { margin: 4px; }
