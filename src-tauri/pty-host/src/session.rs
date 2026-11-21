@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn ssh_prompt_is_live_only_and_absent_from_the_replay_ring() {
-        let (events, rx) = channel(16);
+        let (events, mut rx) = channel(16);
         let ring = Arc::new(Mutex::new(ReplayRing::new(1024)));
         let nonce = "0123456789abcdef0123456789abcdef";
         let marker = format!("\x1b]633;TermFlowSshReady;{nonce};1\x1b\\");
@@ -1017,7 +1017,7 @@ mod tests {
             },
             StartupDa1::new(false),
         );
-        let events = drain(&rx);
+        let events = drain(&mut rx);
         assert_eq!(events.iter().filter(|event| matches!(event,
             Data::SshPrompt { tab_id, nonce: observed, sequence: 1, stdin_writes: 0 }
             if tab_id == "tab-ssh" && observed == nonce
