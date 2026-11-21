@@ -53,6 +53,11 @@ interface ConfirmDialogProps {
    * so it reads as the dangerous ALTERNATIVE and not as a second primary competing for the eye.
    */
   secondaryDestructive?: boolean;
+  /** Optional close-time focus-restore veto, passed to `useDialogA11y` (068 F5, plan 070 T4). */
+  restoreFocusIf?: (trigger: HTMLElement) => boolean;
+  /** Marks the dialog as owning the keyboard, so Canvas capture shortcuts leave its keys alone
+   *  (`canvasGestures.sshOwnsKeyboard`). Off by default. */
+  sshKeyboardOwner?: boolean;
 }
 
 export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
@@ -71,6 +76,8 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   secondaryText,
   onSecondary,
   secondaryDestructive = false,
+  restoreFocusIf,
+  sshKeyboardOwner = false,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -84,6 +91,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
     onCancel: () => { if (!cancelDisabled) onCancel(); },
     mnemonics,
     initialFocus: destructive ? 'cancel' : 'confirm',
+    restoreFocusIf,
   });
 
   if (!isOpen) return null;
@@ -109,6 +117,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
+        data-ssh-keyboard-owner={sshKeyboardOwner ? '' : undefined}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="confirm-dialog-header">
