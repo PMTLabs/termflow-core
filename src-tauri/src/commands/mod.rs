@@ -4,6 +4,8 @@
 //! split needed no edits to `lib.rs`'s `tauri::generate_handler![...]` list.
 
 pub mod ssh_session;
+pub(crate) mod ssh_launch;
+pub(crate) use ssh_launch::*;
 pub use ssh_session::*;
 mod config_history;
 mod drag;

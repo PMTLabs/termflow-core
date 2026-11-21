@@ -18,6 +18,7 @@ mod lifecycle;
 #[cfg(test)]
 mod prompt_tests;
 pub mod session;
+pub(crate) mod launch;
 pub mod sessions;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -105,11 +105,11 @@ fn built_in_windows_shell_names_resolve_without_path_lookup() {
 }
 
 #[test]
-fn ssh_opt_in_reaches_both_create_paths() {
+fn legacy_and_admitted_create_both_carry_same_launch_metadata() {
     let terminal = production(include_str!("../../commands/terminal.rs"));
     let legacy = fn_body(&terminal, "fn create_terminal(");
     assert!(legacy.contains("ssh_launch_connection_id,"));
-    assert!(legacy.contains("ssh_launch_connection_id.is_some(),"));
+    assert!(legacy.contains("ssh_launch_connection_id.as_deref(),"));
     let admitted = production(include_str!("../../commands/panes.rs"));
     assert!(fn_body(&admitted, "fn create_admitted_terminal(")
         .contains("ssh_launch_connection_id: request.ssh_launch_connection_id,"));
@@ -121,6 +121,10 @@ fn ssh_opt_in_reaches_both_create_paths() {
     let local = production(include_str!("../spawn.rs"));
     let local = fn_body(&local, "fn spawn_terminal(");
     assert!(local.find("PreparedShell::register(").unwrap() < local.find("open_pty(").unwrap());
+    assert!(fn_body(&terminal, "fn host_fallback(").contains("ssh_launch_connection_id,"));
+    assert!(routed.contains("if let Some(connection_id) = ssh_launch_connection_id.as_deref()"));
+    assert!(routed.contains("&mut spec, true, connection_id)"));
+    assert!(local.contains("&mut spec, false, connection_id)"));
     assert!(local.find("ssh_prompt_nonce(").unwrap() < local.find("thread::spawn(").unwrap());
 
     for hosted in [false, true] {
@@ -136,12 +140,26 @@ fn ssh_opt_in_reaches_both_create_paths() {
         let mut spec = shell_spec(shell, &[]);
         let fixture = Fixture::new();
         let root = HelperRoot::open_app_data(&fixture.0).unwrap();
-        let prepared = PreparedShell::register_in(&root, &keys, PROCESS, cg, &mut spec, hosted, |_| None).unwrap();
+        let prepared = PreparedShell::register_in(&root, &keys, PROCESS, cg, &mut spec, hosted, "saved-id", |_| None).unwrap();
         assert_eq!(spec.args[0], "--rcfile");
+        assert_eq!(keys.ssh_launch_connection(PROCESS).as_deref(), Some("saved-id"));
         let nonce = keys.ssh_prompt_nonce(PROCESS).expect("registered before launch");
         let entry = spec.env.iter().find(|(key, _)| key == HOST_REGISTRATION_ENV);
         assert_eq!(entry.map(|(_, value)| value.as_str()), hosted.then_some(nonce.as_str()));
         assert!(!spec.args.iter().any(|arg| arg.contains(nonce.as_str())));
         drop(prepared); // never submitted
+    }
+}
+
+#[test]
+fn api_and_fleet_spawn_requests_have_no_ssh_launch_metadata() {
+    for (src, name) in [
+        (include_str!("../../api_server/terminals/mod.rs"), "fn create_terminal("),
+        (include_str!("../../api_server/fleet.rs"), "fn fleet_local_run("),
+    ] {
+        let src = production(src);
+        let create = fn_body(&src, name);
+        let request = create.split("SpawnRequest {").nth(1).expect("production spawn request");
+        assert!(request.split('}').next().unwrap().contains("ssh_launch_connection_id: None,"));
     }
 }

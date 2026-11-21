@@ -329,6 +329,24 @@ impl HostKeys {
         Self::close_leaf_locked(&mut inner, &leaf, CloseStorage::Delete, &mut effects);
         (PaneResult::Ok, effects)
     }
+    /// Read under the input owner barrier. The pane incarnation (unlike cg)
+    /// changes on transfer. Neither a parked copy nor a headless process grants
+    /// launch authority to a window.
+    pub(crate) fn launch_placement(
+        &self, label: &str, leaf: &str, pi: PaneIdentity, process: &str,
+    ) -> Option<u64> {
+        let inner = self.lock();
+        inner.window_pages.sender(label, pi.pg).ok()?;
+        let row = inner.owners.get(leaf)?;
+        if row.owner != Owner::Pane(pi)
+            || !inner.panes.present.get(&pi).is_some_and(|pane| pane.leaf == leaf)
+            || !matches!(&row.state, OwnerState::Registered(shell) if shell.process == process)
+        {
+            return None;
+        }
+        Some(row.cg)
+    }
+
     /// Stable placement generation survives transfers/reload, but not final close.
     pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
         let _input_order = self.input_owner_change();

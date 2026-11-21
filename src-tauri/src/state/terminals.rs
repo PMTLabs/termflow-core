@@ -219,6 +219,7 @@ impl<R: Runtime> AppState<R> {
 
         Self {
             ssh_sessions: crate::commands::ssh_session::native_registry(app_handle.clone()),
+            ssh_launches: Default::default(),
             pending_open_path: Arc::new(std::sync::Mutex::new(None)),
             terminals: Arc::new(DashMap::new()),
             root_leaf_claims: Arc::new(RootLeafClaims::default()),

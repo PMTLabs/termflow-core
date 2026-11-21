@@ -15,7 +15,7 @@ mod effects;
 mod delivery;
 mod pages;
 pub(super) mod panes;
-pub(crate) use panes::{PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
+pub(crate) use panes::{PaneIdentity, PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
 pub(crate) use pages::{PageRegistration, WindowBuildGuard};
 #[cfg(test)]
 pub(crate) use pages::PageIdentity;

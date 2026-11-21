@@ -87,16 +87,16 @@ pub(crate) struct PreparedShell(Option<posix::PosixAdapter>);
 impl PreparedShell {
     pub(crate) fn register<R: tauri::Runtime>(
         app: &tauri::AppHandle<R>, keys: &HostKeys, process: &str, cg: u64,
-        spec: &mut termflow_pty_protocol::SpawnSpec, hosted: bool,
+        spec: &mut termflow_pty_protocol::SpawnSpec, hosted: bool, connection_id: &str,
     ) -> Result<Self, String> {
         use super::ssh_helpers::HelperRoot;
         let root = HelperRoot::for_app(app).map_err(adapter_error)?;
-        Self::register_in(&root, keys, process, cg, spec, hosted, |key| std::env::var(key).ok())
+        Self::register_in(&root, keys, process, cg, spec, hosted, connection_id, |key| std::env::var(key).ok())
     }
 
     fn register_in(
         root: &super::ssh_helpers::HelperRoot, keys: &HostKeys, process: &str, cg: u64,
-        spec: &mut termflow_pty_protocol::SpawnSpec, hosted: bool, inherited: impl Fn(&str) -> Option<String>,
+        spec: &mut termflow_pty_protocol::SpawnSpec, hosted: bool, connection_id: &str, inherited: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         use super::ssh_helpers::ProcessIdentity;
         let owner = ProcessIdentity::capture(std::process::id()).map_err(adapter_error)?;
@@ -104,7 +104,7 @@ impl PreparedShell {
         let adapter = posix::instrument_posix(spec, &nonce, root, owner, inherited)
             .map_err(adapter_error)?;
         let prepared = Self(Some(adapter));
-        keys.register_ssh_prompt(process, cg, &nonce)
+        keys.register_tagged_ssh_prompt(process, cg, &nonce, Some(connection_id))
             .map_err(|error| format!("SSH readiness registration failed: {error:?}"))?;
         *spec = prepared.0.as_ref().expect("newly prepared").spec.clone();
         if hosted {

@@ -283,7 +283,7 @@ pub fn spawn_terminal(
     // caller decided `history_seed` on the same fact, so it asks only when it will be.
     initial_cursor_row: Option<u16>,
     admission: Option<u64>,
-    ssh_opt_in: bool,
+    ssh_launch_connection_id: Option<&str>,
 ) -> Result<String, String> {
     let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
     let leaf = renderer_terminal_id.as_deref().unwrap_or(&id);
@@ -313,13 +313,13 @@ pub fn spawn_terminal(
     };
 
     let proxy_exemption = app_state.exempt_loopback_from_proxy.load(std::sync::atomic::Ordering::Relaxed);
-    let (cmd_builder, prompt_hook, prepared) = if ssh_opt_in {
+    let (cmd_builder, prompt_hook, prepared) = if let Some(connection_id) = ssh_launch_connection_id {
         let mut spec = super::build_spawn_spec(
             &id, Some(&shell_identity), shell_path.as_deref(), &shell_name,
             shell_args.as_deref(), cwd.as_deref(), cols, rows, proxy_exemption,
         );
         spec.args = shell_args.unwrap_or_default();
-        let prepared = super::ssh_shell::PreparedShell::register(&app_state.app_handle, keys, &id, cg, &mut spec, false)?;
+        let prepared = super::ssh_shell::PreparedShell::register(&app_state.app_handle, keys, &id, cg, &mut spec, false, connection_id)?;
         let mut builder = CommandBuilder::new(&spec.shell);
         builder.args(&spec.args);
         for key in &spec.env_remove { builder.env_remove(key); }

@@ -812,6 +812,27 @@ impl SessionRegistry {
     ) -> Result<watch::Receiver<SessionPhase>, SessionError> {
         Ok(self.entry(terminal_id, false)?.transitions.subscribe())
     }
+    /// Hold the registry fence across the launch transaction. Take the input
+    /// barrier inside the callback, not before entering this method:
+    /// open_owned's membership callback also takes it in that order.
+    pub(super) fn with_launch_session<T, E>(
+        &self,
+        terminal_id: &str,
+        f: impl FnOnce(Option<(&SessionView, Option<u64>, bool, &dyn Fn() -> SessionView)>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let registry = self.inner.lock();
+        let Some(entry) = registry.panes.get(terminal_id) else {
+            return f(None);
+        };
+        let view = entry.view();
+        let cancelled = entry.cancel.is_cancelled();
+        let cancel = || {
+            entry.invalidate(Some("SSH launch cancelled".into()));
+            entry.view()
+        };
+        f(Some((&view, entry.owner_receipt, cancelled, &cancel)))
+    }
+
     pub fn current_launch(&self, terminal_id: &str) -> Option<CurrentLaunch> {
         let e = self.entry(terminal_id, false).ok()?;
         let s = e.inner.lock();

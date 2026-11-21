@@ -199,6 +199,7 @@ struct Attempt {
     submitted: bool,
 }
 struct RegisteredPrompt {
+    connection_id: Option<String>,
     generation: u64,
     nonce: String,
     prompt_order: termflow_pty_protocol::ssh_prompt::PromptOrder,
@@ -360,6 +361,11 @@ impl crate::state::HostKeys {
 
     pub fn prepare_ssh_input(&self, process: &str) -> Result<LaunchTicket, Refusal> {
         let _order = self.input.ownership.read();
+        self.prepare_ssh_input_ordered(process)
+    }
+
+    // Callers must already hold the input ownership barrier.
+    pub(crate) fn prepare_ssh_input_ordered(&self, process: &str) -> Result<LaunchTicket, Refusal> {
         let owner = self.input_stamp(process).ok_or(Refusal::NotFound)?;
         let entry = self.input.process(process, &owner);
         let mut state = entry.lock();
@@ -399,7 +405,14 @@ impl crate::state::HostKeys {
         state.invalidate_ready()
     }
 
+    #[cfg(test)]
     pub(crate) fn register_ssh_prompt(&self, process: &str, generation: u64, nonce: &str) -> Result<(), Refusal> {
+        self.register_tagged_ssh_prompt(process, generation, nonce, None)
+    }
+
+    pub(crate) fn register_tagged_ssh_prompt(
+        &self, process: &str, generation: u64, nonce: &str, connection_id: Option<&str>,
+    ) -> Result<(), Refusal> {
         let _order = self.input.ownership.read();
         let owner = self.ssh_prompt_stamp(process).ok_or(Refusal::StaleAttempt)?;
         if owner.generation != generation || !termflow_pty_protocol::ssh_prompt::valid_nonce(nonce) {
@@ -411,7 +424,30 @@ impl crate::state::HostKeys {
         if state.ssh_prompt.is_some() || state.input_generation != 0 {
             return Err(Refusal::StaleAttempt);
         }
-        state.ssh_prompt = Some(RegisteredPrompt { generation, nonce: nonce.into(), prompt_order: Default::default(), stdin_writes: 0 });
+        state.ssh_prompt = Some(RegisteredPrompt { connection_id: connection_id.map(str::to_owned), generation, nonce: nonce.into(), prompt_order: Default::default(), stdin_writes: 0 });
+        Ok(())
+    }
+
+    pub(crate) fn ssh_launch_connection(&self, process: &str) -> Option<String> {
+        let entry = self.input.processes.lock().get(process)?.clone();
+        let state = entry.lock();
+        state.ssh_prompt.as_ref()?.connection_id.clone()
+    }
+
+    // The caller has already verified the live pane, process and session under
+    // the ownership barrier. Use the exact ticket id even after adoption
+    // changes the owner stamp. Takeover or a successor ticket makes this a no-op.
+    pub(crate) fn cancel_registered_launch_ordered(&self, ticket: &LaunchTicket) -> Result<(), Refusal> {
+        let entry = self.input.processes.lock().get(&ticket.lease.process).cloned();
+        let Some(entry) = entry else { return Ok(()) };
+        let mut state = entry.lock();
+        if state.attempt.as_ref().map(|a| a.id) != Some(ticket.id) {
+            return Ok(());
+        }
+        let next_epoch = state.lease_epoch.checked_add(1).ok_or(Refusal::StaleAttempt)?;
+        state.invalidate_ready()?;
+        state.attempt = None;
+        state.lease_epoch = next_epoch;
         Ok(())
     }
 

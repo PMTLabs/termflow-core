@@ -172,7 +172,7 @@ pub async fn create_terminal(
         seed,
         cursor_row,
         None,
-        ssh_launch_connection_id.is_some(),
+        ssh_launch_connection_id.as_deref(),
     )?;
 
     if let Some(prefix) = staged {
@@ -445,7 +445,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
         // land here now that every supported OS is default-on): in-process is the
         // intended behaviour, not a degraded one.
         if !crate::pty_host_client::enabled() {
-            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled", cg, ssh_opt_in);
+            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled", cg, ssh_launch_connection_id.as_deref());
         }
         // Ensure the hosts are up, pick the one this create belongs on, and take
         // its admission. A refusal (the app is exiting or updating, or the session
@@ -457,7 +457,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
             crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
             crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
             crate::state::Placement::InProcess { reason } => {
-                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason, cg, ssh_opt_in);
+                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason, cg, ssh_launch_connection_id.as_deref());
             }
         }
     };
@@ -536,11 +536,11 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
             .exempt_loopback_from_proxy
             .load(std::sync::atomic::Ordering::Relaxed),
     );
-    let prepared = if ssh_opt_in {
+    let prepared = if let Some(connection_id) = ssh_launch_connection_id.as_deref() {
         // Use the profile's raw arguments, not the ordinary name-based PowerShell injection.
         // The selected executable's adapter installs the appropriate integration.
         spec.args = shell_args.clone().unwrap_or_default();
-        Some(ssh_shell::PreparedShell::register(&state.app_handle, state.host_table.keys(), &process_id, cg, &mut spec, true)?)
+        Some(ssh_shell::PreparedShell::register(&state.app_handle, state.host_table.keys(), &process_id, cg, &mut spec, true, connection_id)?)
     } else { None };
     let prompt_hook = if ssh_opt_in { ssh_shell::has_cwd_hook(&spec.shell) } else { prompt_hook };
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
@@ -584,7 +584,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
                 // Do not start a second SSH-prepared shell on an ambiguous host result.
                 Err(format!("SSH readiness host spawn failed: {e}"))
             } else {
-                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e, cg, false)
+                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e, cg, None)
             }
         }
     }
@@ -808,7 +808,7 @@ fn host_fallback(
     name: Option<&str>,
     reason: &str,
     cg: u64,
-    ssh_opt_in: bool,
+    ssh_launch_connection_id: Option<&str>,
 ) -> Result<String, String> {
     // A sidecar that is switched OFF is not a failure but an explicit
     // `TERMFLOW_PTY_HOST=0`, so warning here would fire on every single spawn
@@ -841,7 +841,7 @@ fn host_fallback(
         seed,
         cursor_row,
         Some(cg),
-        ssh_opt_in,
+        ssh_launch_connection_id,
     )?;
     if let Some(prefix) = staged {
         state.replay_prefix.insert(fallback_id.clone(), prefix);

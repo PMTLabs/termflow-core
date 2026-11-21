@@ -3,7 +3,7 @@ mod incarnation_ids;
 mod host_routes;
 mod host_keys;
 pub(crate) mod ingress;
-pub(crate) use host_keys::{SessionIdentity, PageRegistration, WindowBuildGuard, PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
+pub(crate) use host_keys::{SessionIdentity, PageRegistration, WindowBuildGuard, PaneIdentity, PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
 #[cfg(test)]
 pub(crate) use host_keys::PageIdentity;
 mod terminals;
