@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useId, useRef, useState } from 'react';
 import { useSshPromptFocus } from './useSshPromptFocus';
 import type { SshSessionView } from '../../types/ssh';
 export interface SecretPromptProps { view: SshSessionView; onSubmit(secret: string, remember: boolean): Promise<void>; onCancel(): void }
@@ -14,16 +14,27 @@ export function SshSecretPrompt({ view, onSubmit, onCancel }: SecretPromptProps)
     finally { setSecret(''); setPending(false); busy.current = false; }
   };
   const target = view.promptTarget;
+  const errorId = useId();
+  const reason = view.reason === 'Authentication was not accepted. Check the server\'s allowed methods and the saved sign-in settings.'
+    ? view.secretKind === 'passphrase' ? "That passphrase didn't unlock the key. Check it and try again." : "That password wasn't accepted. Check it and try again."
+    : view.reason;
+  const warning = reason?.startsWith('Saved credential unavailable.');
+  const fieldError = error ?? (warning ? undefined : reason);
   return <div ref={root} role="region" aria-label="SSH authentication" className="ssh-prompt">
-    <h3>{view.secretKind === 'passphrase' ? 'Unlock SSH key' : 'SSH password'}</h3>
-    <p>{target ? `${target.hop === 'jump' ? 'Jump host' : 'Target'}: ${target.user}@${target.host}:${target.port}` : 'SSH authentication'}</p>
-    <p>The app channel signs in separately. This credential is never typed into the terminal.</p>
-    {view.reason && <p role="status">{view.reason}</p>}{error && <p role="alert">{error}</p>}
     <form onSubmit={submit}>
-      <label>{view.secretKind === 'passphrase' ? 'Passphrase' : 'Password'}<input type="password" autoComplete="off" value={secret} readOnly={pending} onChange={e => setSecret(e.target.value)} /></label>
-      <label className="ssh-prompt-check"><input type="checkbox" className="setting-checkbox" checked={remember} aria-disabled={pending} onChange={e => { if (!pending) setRemember(e.target.checked); }} />Remember for the app channel</label>
-      <button type="submit" className="au-btn primary" aria-disabled={pending}>{pending ? 'Submitting…' : 'Continue'}</button>
-      <button type="button" className="au-btn" onClick={onCancel}>Cancel</button>
+      <div className="ssh-prompt-body">
+        <h3>{view.secretKind === 'passphrase' ? 'Unlock SSH key' : 'SSH password'}</h3>
+        <p>{target ? `${target.hop === 'jump' ? 'Jump host' : 'Target'}: ${target.user}@${target.host}:${target.port}` : 'SSH authentication'}</p>
+        <p>{view.secretKind === 'passphrase' ? 'The app unlocks the key locally. The passphrase is not sent to the server or typed into the terminal.' : 'The app channel signs in separately. This credential is never typed into the terminal.'}</p>
+        {warning && <p role="status">{reason}</p>}
+        {fieldError && <p id={errorId} role="alert" className="ssh-prompt-error">{fieldError}</p>}
+        <label>{view.secretKind === 'passphrase' ? 'Passphrase' : 'Password'}<input type="password" autoComplete="off" aria-invalid={fieldError ? true : undefined} aria-describedby={fieldError ? errorId : undefined} value={secret} readOnly={pending} onChange={e => setSecret(e.target.value)} /></label>
+        <label className="ssh-prompt-check"><input type="checkbox" className="setting-checkbox" checked={remember} aria-disabled={pending} onChange={e => { if (!pending) setRemember(e.target.checked); }} />Remember for the app channel</label>
+      </div>
+      <div className="ssh-test-actions">
+        <button type="button" className="au-btn" onClick={onCancel}>Cancel</button>
+        <button type="submit" className="au-btn primary" aria-disabled={pending}>{pending ? 'Submitting…' : 'Continue'}</button>
+      </div>
     </form>
   </div>;
 }

@@ -17,3 +17,21 @@
 .ssh-disconnected { padding:8px; background:var(--bg-secondary); }
 .ssh-test-backdrop { position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center; background:#0006; }
 .ssh-test-dialog { width:min(520px, 95vw); max-height:90vh; overflow:auto; padding:16px; color:var(--text-primary); background:var(--bg-secondary); border:1px solid var(--border-color); border-radius:8px; }
+
+.ssh-test-dialog { display:flex; flex-direction:column; box-sizing:border-box; overflow:hidden; }
+.ssh-test-dialog > h2 { flex:none; margin:0 0 12px; }
+.ssh-test-dialog > .ssh-prompt, .ssh-test-dialog > .ssh-prompt > form { display:flex; flex-direction:column; min-height:0; }
+.ssh-test-dialog > .ssh-prompt { padding:0; }
+.ssh-test-body, .ssh-test-dialog .ssh-prompt-body { min-height:0; overflow:auto; padding:2px 4px; }
+.ssh-test-dialog .ssh-test-actions { display:flex; flex:none; justify-content:flex-end; gap:8px; padding-top:16px; }
+.ssh-test-progress { display:flex; align-items:center; gap:8px; }
+.ssh-spinner { flex:none; box-sizing:border-box; width:16px; height:16px; border:2px solid var(--border-color, #3e3e42); border-top-color:var(--accent-color, #007acc); border-radius:50%; animation:ssh-spin 1s linear infinite; }
+@keyframes ssh-spin { to { transform:rotate(360deg); } }
+@media (prefers-reduced-motion:reduce) { .ssh-spinner { animation:none; } }
+.ssh-prompt-error { padding:10px 12px; border:1px solid #6b2a24; background:#2b1715; border-radius:4px; color:#f4b4ab; overflow-wrap:anywhere; }
+.ssh-prompt code { overflow-wrap:anywhere; }
+.ssh-prompt-check > .setting-checkbox { appearance:none; display:grid; place-content:center; flex:none; border:1px solid var(--border-color); border-radius:3px; background:var(--bg-primary); }
+.ssh-prompt-check > .setting-checkbox:checked { background:var(--accent-color, #007acc); color:white; }
+.ssh-prompt-check > .setting-checkbox:checked::before { content:'✓'; font-size:12px; line-height:1; }
+.ssh-prompt-check > .setting-checkbox:focus-visible { outline:2px solid var(--accent-color, #007acc); outline-offset:2px; }
+@media (forced-colors:active) { .ssh-prompt-check > .setting-checkbox { appearance:auto; } .ssh-prompt-check > .setting-checkbox:checked::before { content:none; } }
