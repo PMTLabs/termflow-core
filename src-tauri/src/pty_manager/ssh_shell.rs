@@ -14,6 +14,10 @@
 //! consumes it as metadata, not as inherited shell environment. Do not register
 //! reattached/replayed output. Neither source calls a writer or waits for one.
 
+// Prepared for the SSH-only create opt-in; ordinary spawns never enter it.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod posix;
+
 use super::input_gate::ReadyEpoch;
 use crate::{elevated_host::HostChannel, state::HostKeys};
 use termflow_pty_protocol::{da1::StartupDrain, ssh_prompt::PromptParser};

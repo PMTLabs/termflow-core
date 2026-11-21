@@ -176,15 +176,17 @@ impl HelperRoot {
     ) -> io::Result<Helper> {
         let _lock = lock_root(&self.dir)?;
         process.validate()?;
-        if !matches!(extension, "ps1" | "cmd" | "sh" | "fish" | "json")
-            || content.len() as u64 > MAX_FILE
-        {
+        let file = match extension {
+            "ps1" | "cmd" | "sh" | "fish" | "json" => format!("helper.{extension}"),
+            ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin" if kind == HelperKind::ShellHook => extension.into(),
+            _ => return Err(denied()),
+        };
+        if content.len() as u64 > MAX_FILE {
             return Err(denied());
         }
         let name = entry.to_string();
         // Exclusive directory reservation. A collision is an error, never reuse/rewrite.
         let dir = self.dir.create_child(&name)?;
-        let file = format!("helper.{extension}");
         let manifest = Manifest {
             feature: FEATURE.into(),
             entry,
@@ -255,10 +257,10 @@ fn verified_manifest(dir: &platform::Dir, id: Uuid) -> io::Result<Manifest> {
         return Err(denied());
     }
     component(&manifest.file)?;
-    if !["ps1", "cmd", "sh", "fish", "json"]
-        .iter()
-        .any(|ext| manifest.file == format!("helper.{ext}"))
-        || digest(&dir.read_file(&manifest.file)?) != manifest.sha256
+    let valid_name = matches!(manifest.file.as_str(), "helper.ps1" | "helper.cmd" | "helper.sh" | "helper.fish" | "helper.json")
+        || (manifest.kind == HelperKind::ShellHook
+            && matches!(manifest.file.as_str(), ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin"));
+    if !valid_name || digest(&dir.read_file(&manifest.file)?) != manifest.sha256
     {
         return Err(denied());
     }
@@ -355,6 +357,15 @@ impl Helper {
     pub fn retire_after_process_end(&self) -> io::Result<bool> {
         if !self.inner.manifest.process.definitely_dead() {
             return Ok(false);
+        }
+        self.retire()
+    }
+
+    /// Pre-spawn hooks have a supervisor in the manifest because the child does not
+    /// yet have a PID. Its holder must prove the shell never started or has exited.
+    pub(crate) fn retire_quiescent_shell_hook(&self) -> io::Result<bool> {
+        if self.inner.manifest.kind != HelperKind::ShellHook {
+            return Err(denied());
         }
         self.retire()
     }
