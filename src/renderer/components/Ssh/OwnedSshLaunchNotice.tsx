@@ -101,9 +101,10 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
         || latest?.generation !== receipt.generation || latest.promptId !== receipt.promptId) throw staleSshLaunch;
   };
 
-  // Never display the prior process/copy's controls while waiting for adoption.
-  if (!window.electronAPI?.onSshLaunchState || (snapshot && snapshot.attempt.processIncarnation !== processId)) return null;
-  const current = snapshot && (view?.generation ?? 0) <= snapshot.attempt.sessionGeneration ? snapshot : undefined;
+  if (!window.electronAPI?.onSshLaunchState) return null;
+  // Keep the strip while waiting for adoption, but never show stale controls.
+  const current = snapshot?.attempt.processIncarnation === processId && (view?.generation ?? 0) <= snapshot.attempt.sessionGeneration
+    ? snapshot : undefined;
   const notice = <SshLaunchNotice snapshot={current} view={view} failure={failure} retrying={retrying}
     onCancel={cancel} onReconnect={reconnect}
     onTrust={async receipt => {

@@ -65,16 +65,18 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
   const reconnect = stage === 'ended' || ((stage === 'typed' || stage === 'running') && currentView?.state === 'disconnected');
   return <section className="ssh-launch-notice" aria-label="SSH launch">
     <div className="ssh-launch-strip">
-      <span role="status">{stageCopy[stage]}</span>
+      <span role="status" title={stageCopy[stage]}>{stageCopy[stage]}</span>
       {waiting && snapshot && props.canCancel !== false && !host && !secret &&
         <button type="button" className="au-btn" onClick={cancel}>Cancel</button>}
       {(stage === 'blocked' || stage === 'error' || stage === 'cancelled' || reconnect) &&
         <button type="button" className="au-btn" disabled={props.retrying} onClick={props.onReconnect}>{reconnect ? 'Reconnect' : 'Retry'}</button>}
     </div>
-    {snapshot?.error?.code === 'Timeout' && <div role="status">Return to the local shell prompt</div>}
-    {reason && <div role="alert">{reason}</div>}
-    {failure && !(reason && failure.code === shown?.code) && <div role="alert">{failure.message}</div>}
-    {host && receipt && <SshHostKeyPrompt key={promptKey} view={currentView} onTrust={() => props.onTrust(receipt)} onCancel={cancel} />}
-    {secret && receipt && <SshSecretPrompt key={promptKey} view={currentView} onSubmit={(value, remember) => props.onSecret(value, remember, receipt)} onCancel={cancel} />}
+    <div className="ssh-launch-overlay">
+      {snapshot?.error?.code === 'Timeout' && <div role="status">Return to the local shell prompt</div>}
+      {reason && <div role="alert">{reason}</div>}
+      {failure && !(reason && failure.code === shown?.code) && <div role="alert">{failure.message}</div>}
+      {host && receipt && <SshHostKeyPrompt key={promptKey} view={currentView} onTrust={() => props.onTrust(receipt)} onCancel={cancel} />}
+      {secret && receipt && <SshSecretPrompt key={promptKey} view={currentView} onSubmit={(value, remember) => props.onSecret(value, remember, receipt)} onCancel={cancel} />}
+    </div>
   </section>;
 }

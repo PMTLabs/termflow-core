@@ -1,5 +1,7 @@
 /** @jest-environment jsdom */
 import React, { act } from 'react';
+import path from 'path';
+import { readSource } from '../../utils/readSource';
 import { createRoot } from 'react-dom/client';
 import { SshLaunchNotice } from './SshLaunchNotice';
 import type { LaunchSnapshot, SshSessionView } from '../../types/ssh';
@@ -16,6 +18,31 @@ afterEach(() => { act(() => root.unmount()); el.remove(); });
 const props = () => ({ onCancel: jest.fn(), onReconnect: jest.fn(), onTrust: jest.fn(async () => {}), onSecret: jest.fn(async () => {}) });
 const button = (name: string) => [...el.querySelectorAll('button')].find(b => b.textContent === name);
 
+function expectFixedStrip() {
+  const notice = el.querySelector('.ssh-launch-notice')!;
+  const overlay = notice.querySelector('.ssh-launch-overlay');
+  expect([...notice.children].filter(child => child !== overlay).map(child => child.className)).toEqual(['ssh-launch-strip']);
+  const status = notice.querySelector('.ssh-launch-strip [role=status]');
+  expect(status?.getAttribute('title')).toBe(status?.textContent);
+  return overlay;
+}
+
+test('keeps the strip before a snapshot exists', () => {
+  act(() => root.render(<SshLaunchNotice {...props()} />));
+  expectFixedStrip();
+});
+
+test('CSS reserves only the fixed one-line strip outside Canvas', () => {
+  const css = readSource(path.join(__dirname, 'SshLaunchNotice.css')).replace(/\/\*[\s\S]*?\*\//g, '');
+  const rules = [...css.matchAll(/([^{}]+)\{([^{}]+)\}/g)];
+  const rule = (selector: string) => rules.find(([, name]) => name.trim() === selector)?.[2] ?? '';
+  expect(rule('.ssh-launch-strip')).toMatch(/\bheight:\s*\d+px;/);
+  expect(rule('.ssh-launch-strip > [role="status"]')).toMatch(/white-space:\s*nowrap;/);
+  expect(rule('.ssh-launch-overlay')).toMatch(/position:\s*absolute;/);
+  expect(rules.filter(([, name, body]) => name.trim().endsWith('.ssh-launch-notice') && /position:\s*absolute;/.test(body))
+    .map(([, name]) => name.trim())).toEqual(['.canvas-surface > .ssh-launch-notice']);
+});
+
 test.each([
   ['preparing', 'Preparing SSH…', 'Cancel'],
   ['waiting-ready', 'Waiting for the local shell prompt…', 'Cancel'],
@@ -29,6 +56,7 @@ test.each([
 ] as const)('stage %s has truthful copy and the matching control', (stage, text, action) => {
   act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage }} />));
   expect(el.querySelector('[role=status]')?.textContent).toBe(text);
+  expectFixedStrip();
   expect([...el.querySelectorAll('button')].map(b => b.textContent)).toEqual(action ? [action] : []);
 });
 
@@ -37,6 +65,7 @@ test('timeout guidance and backend reason are shown without test-connection word
   act(() => root.render(<SshLaunchNotice {...callbacks} snapshot={{ ...base, stage: 'error', error: { code: 'Timeout', message: 'Exact backend reason.' } }} />));
   expect(el.querySelector('[role=alert]')?.textContent).toBe('Exact backend reason.');
   expect(el.textContent).toContain('Return to the local shell prompt');
+  expect(expectFixedStrip()?.querySelector('[role=status]')?.textContent).toBe('Return to the local shell prompt');
   expect(el.textContent).not.toMatch(/test connection/i);
   act(() => button('Retry')!.click());
   expect(callbacks.onReconnect).toHaveBeenCalledTimes(1);
@@ -73,6 +102,7 @@ test('jump trust and target secret preserve their exact prompt receipts without 
   };
   act(() => root.render(<SshLaunchNotice {...callbacks} snapshot={base} view={jump} />));
   expect(el.textContent).toContain('Jump host: alice@jump.test:22');
+  expect(expectFixedStrip()?.querySelector('.ssh-prompt')?.textContent).toContain('Jump host: alice@jump.test:22');
   await act(async () => button('Trust')!.click());
   const target: SshSessionView = {
     ...jump, state: 'needs-secret', promptId: 'target-secret',
@@ -80,6 +110,7 @@ test('jump trust and target secret preserve their exact prompt receipts without 
   };
   act(() => root.render(<SshLaunchNotice {...callbacks} snapshot={base} view={target} />));
   expect(el.textContent).toContain('Target: bob@target.test:2222');
+  expect(expectFixedStrip()?.querySelector('.ssh-prompt')?.textContent).toContain('Target: bob@target.test:2222');
   expect(button('Trust')).toBeUndefined();
   await act(async () => button('Continue')!.click());
   expect(callbacks.onTrust.mock.calls).toEqual([[{ generation: 3, promptId: 'jump-trust' }]]);
@@ -109,6 +140,7 @@ test.each([
     attempt: { ...base.attempt, attemptReceipt: { ...base.attempt.attemptReceipt, ...receipt } } };
   act(() => root.render(<SshLaunchNotice {...props()} snapshot={snapshot} failure={failure} />));
   expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual(alerts);
+  expect([...expectFixedStrip()!.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual(alerts);
 });
 
 test.each([
