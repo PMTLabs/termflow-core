@@ -41,7 +41,7 @@ test('opening tests the persisted id; dialog Close disposes without a pane or us
 });
 test('editor unmount disposes the probe and read-only/deleted rows cannot open one', async () => {
   render(); await open(); act(() => root.unmount()); root = createRoot(host);
-  expect(close).toHaveBeenCalledWith('probe-settings'); expect(stop).toHaveBeenCalledTimes(1);
+  expect(close).toHaveBeenCalledWith('probe-settings'); await act(async () => { await flush(); }); expect(stop).toHaveBeenCalledTimes(1);
   render(true, { ...view, loadError:{ code:'read-only', message:'Repair store' } }); expect(testButton().disabled).toBe(true);
   render(true, { ...view, connections:[] }); expect(testButton().disabled).toBe(true);
 });

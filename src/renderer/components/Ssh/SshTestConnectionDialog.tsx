@@ -12,29 +12,37 @@ import './SshPaneShell.css';
 
 /** Owns exactly one probe, including creation racing a dialog close/row change. */
 export function startSshProbe(api: SshAPI, connectionId: string, observed: (view: SshSessionView) => void, failed: (error: unknown) => void): () => void {
-  let disposed = false, id: string | undefined, unlisten: (() => void) | undefined, latest: SshSessionView | undefined;
+  let disposed = false, creating = false, id: string | undefined, unlisten: (() => void) | undefined, latest: SshSessionView | undefined;
   const early = new Map<string, SshSessionView>();
   const accept = (view: SshSessionView) => {
     if (disposed || view.connectionId !== connectionId || !view.probeId) return;
     if (!id) { if ((early.has(view.probeId) || early.size < 32) && newerSshView(early.get(view.probeId), view)) early.set(view.probeId, view); return; }
     if (view.probeId === id && newerSshView(latest, view)) { latest = view; observed(view); }
   };
+  // The one teardown: the backend close emits a final state event, so the bridge listener
+  // stays registered until that close settles; removing it first leaves Tauri an orphaned callback id.
+  const retire = (probe?: string) => {
+    const stop = unlisten; unlisten = undefined;
+    if (!probe) { stop?.(); return; }
+    void api.sshTestClose(probe).catch(() => {}).finally(() => stop?.());
+  };
   void (async () => {
     try {
       const stop = await api.onSshTestState(accept);
       if (disposed) { stop(); return; } unlisten = stop;
-      const reply = await api.sshTestConnection(connectionId); id = reply.probeId;
-      if (disposed) { await api.sshTestClose(id); return; }
+      creating = true;
+      try { id = (await api.sshTestConnection(connectionId)).probeId; }
+      finally { creating = false; if (disposed) retire(id); }
+      if (disposed) return;
       const queued = early.get(id); early.clear(); if (queued) accept(queued);
       const snapshot = await api.sshTestState(id); accept(snapshot);
     } catch (error) { if (!disposed) failed(error); }
   })();
   return () => {
     if (disposed) return;
-    disposed = true; // Fence queued events before retiring the bridge listener.
+    disposed = true; // Fence queued events; the listener itself outlives the backend close.
     early.clear();
-    try { unlisten?.(); }
-    finally { if (id) void api.sshTestClose(id).catch(() => {}); }
+    if (!creating) retire(id); // While creating, the creation path retires the probe it gets back.
   };
 }
 

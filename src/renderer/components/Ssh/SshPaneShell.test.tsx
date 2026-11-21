@@ -113,7 +113,7 @@ test('SshTestConnectionDialog test_dialog_close_disposes_probe_even_during_auth'
   act(() => last.dispatchEvent(tab));
   expect(tab.defaultPrevented).toBe(true);
   expect(document.activeElement).toBe(credential);
-  act(() => root.unmount()); root = createRoot(container); expect(close).toHaveBeenCalledWith('probe-a'); expect(unlisten).toHaveBeenCalledTimes(1);
+  act(() => root.unmount()); root = createRoot(container); expect(close).toHaveBeenCalledWith('probe-a'); await act(async () => { await flush(); }); expect(unlisten).toHaveBeenCalledTimes(1);
   listener({ ...view('connected'), probeId: 'probe-a' }); expect(document.body.textContent).not.toContain('File and metric capabilities');
 });
 test('SshTestConnectionDialog creation racing close still disposes the returned probe', async () => {
@@ -121,6 +121,32 @@ test('SshTestConnectionDialog creation racing close still disposes the returned 
   const api = { onSshTestState: async () => stop, sshTestConnection: () => new Promise<{ probeId: string }>(r => { created = r; }), sshTestClose: close } as unknown as SshAPI;
   const dispose = startSshProbe(api, 'c-a', jest.fn(), jest.fn()); await flush(); dispose(); dispose(); created({ probeId: 'late-probe' }); await flush();
   expect(close).toHaveBeenCalledTimes(1); expect(close).toHaveBeenCalledWith('late-probe'); expect(stop).toHaveBeenCalledTimes(1);
+});
+test('startSshProbe keeps the bridge listener until the backend close settles, on every dispose path', async () => {
+  // Backlog 018: unlisten before ssh_test_close lets the close's final event hit a removed Tauri callback.
+  const events: string[] = []; let settle: () => void = () => {};
+  const close = jest.fn(() => { events.push('close-start'); return new Promise<void>(r => { settle = () => { events.push('close-done'); r(); }; }); });
+  const stop = jest.fn(() => { events.push('unlisten'); });
+  const settled = (probe: () => Promise<{ probeId: string }>) => ({ onSshTestState: async () => stop, sshTestConnection: probe,
+    sshTestState: async () => ({ ...view('connected'), terminalId: undefined, probeId: 'probe-a' }), sshTestClose: close } as unknown as SshAPI);
+  // Probe created, then disposed (Close button, Escape and host-key Cancel all call this disposer).
+  const dispose = startSshProbe(settled(async () => ({ probeId: 'probe-a' })), 'c-a', jest.fn(), jest.fn()); await flush();
+  dispose(); dispose(); await flush();
+  expect(events).toEqual(['close-start']); expect(stop).not.toHaveBeenCalled();
+  settle(); await flush(); expect(events).toEqual(['close-start', 'close-done', 'unlisten']); expect(close).toHaveBeenCalledTimes(1);
+  // Disposed while creation is in flight: the returned probe is closed, then the listener goes.
+  events.length = 0; let created: (v: { probeId: string }) => void = () => {};
+  const racing = startSshProbe(settled(() => new Promise(r => { created = r; })), 'c-a', jest.fn(), jest.fn()); await flush();
+  racing(); await flush(); expect(events).toEqual([]);
+  created({ probeId: 'late' }); await flush(); expect(events).toEqual(['close-start']);
+  settle(); await flush(); expect(events).toEqual(['close-start', 'close-done', 'unlisten']);
+  // A rejected close still retires the listener, and creation failing after dispose leaves nothing behind.
+  events.length = 0; close.mockImplementationOnce(async () => { events.push('close-start'); throw new Error('gone'); });
+  const failing = startSshProbe(settled(async () => ({ probeId: 'probe-a' })), 'c-a', jest.fn(), jest.fn()); await flush();
+  failing(); await flush(); expect(events).toEqual(['close-start', 'unlisten']);
+  events.length = 0; let reject: (e: unknown) => void = () => {}; const failed = jest.fn();
+  const refused = startSshProbe(settled(() => new Promise((_, r) => { reject = r; })), 'c-a', jest.fn(), failed); await flush();
+  refused(); reject(new Error('refused')); await flush(); expect(events).toEqual(['unlisten']); expect(failed).not.toHaveBeenCalled();
 });
 test('SSH prompt and banner controls use the house button and checkbox classes', () => {
   const houseButtons = () => [...container.querySelectorAll('button')].map(b => [b.textContent, b.classList.contains('au-btn')]);
