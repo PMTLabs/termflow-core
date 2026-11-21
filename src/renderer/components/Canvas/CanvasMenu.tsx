@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import '../Panes/PaneContextMenu.css';
 
@@ -60,6 +60,25 @@ export const CanvasMenu: React.FC<{
       window.removeEventListener('keydown', onKey);
     };
   }, []);
+
+  /**
+   * Keep the whole menu on screen. A menu opened near the right or bottom edge used to run
+   * off the window, and the SSH section (066) made the background menu tall enough that its
+   * last items were unreachable. One pass from the anchor and the menu's SIZE, never from the
+   * position this effect writes, so it cannot oscillate; a menu taller than the window scrolls.
+   */
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const margin = 4;
+    const maxHeight = window.innerHeight - margin * 2;
+    el.style.maxHeight = `${maxHeight}px`;
+    el.style.overflowY = 'auto';
+    const width = el.offsetWidth;
+    const height = Math.min(el.offsetHeight, maxHeight);
+    el.style.left = `${Math.max(margin, Math.min(x, window.innerWidth - width - margin))}px`;
+    el.style.top = `${Math.max(margin, Math.min(y, window.innerHeight - height - margin))}px`;
+  }, [x, y]);
 
   return createPortal(
     <div
