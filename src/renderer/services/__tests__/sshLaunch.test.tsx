@@ -19,7 +19,7 @@ import { setDefaultProfile, setShellProfiles } from '../../store/slices/settings
 import { applyView } from '../../store/slices/sshSlice';
 import { markSessionClosed } from '../../store/slices/sessionExitSlice';
 import { addTab, removeTab } from '../../store/slices/tabsSlice';
-import { removeTabTree } from '../../store/slices/panesSlice';
+import { addTabTree, patchSshPaneTag, removeTabTree } from '../../store/slices/panesSlice';
 import { CANVAS_SHELL_TYPE } from '../tabKinds';
 import { installPaneIncarnations, PaneIncarnations, type PaneBridge, type PaneResult } from '../paneIncarnations';
 import { terminalService, TerminalServiceClass } from '../TerminalService';
@@ -28,6 +28,11 @@ import { sshOwnersChanged } from '../../store/slices/sshSessionSlice';
 import { observeOwnedSshLaunch } from '../sshLaunchAttempt';
 import { getTabPanesGlobal, clearTabPanesInPlace } from '../tabPanesStore';
 import type { LaunchAttemptRef, LaunchSnapshot, SshSessionView } from '../../types/ssh';
+import { buildCanvasModel } from '../../components/Canvas/canvasSelectors';
+import { useSurfaceRelocation } from '../../components/Terminal/useSurfaceRelocation';
+import { clearSurfaceHost, setSurfaceHost } from '../surfaceHosts';
+import { applyReattachByToken } from '../../components/Panes/dnd/detach';
+import { expectPaneTags, pane, split, sentinel, other } from '../../__testFixtures__/sshPaneCensus';
 
 const tag = { connectionId: 'saved', browserCollapsed: false, followCd: false, hiddenMetrics: [] };
 const defaultShell = { id: 'default-shell', name: 'Local Shell', path: '/native/default', args: [], env: { SOURCE: 'default' }, cwd: '/default-cwd' };
@@ -38,7 +43,7 @@ const canvas = { kind: 'canvas' as const, rect, sourceTerminalId: 'tm-source' };
 const makeSnapshot = (terminalId: string, connectionId: string, attempt: LaunchAttemptRef): LaunchSnapshot =>
   ({ terminalId, connectionId, attempt, stage: 'preparing', revision: 1, launchSeq: 1 });
 
-function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = false) {
+function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = false, take?: PaneResult) {
   let generation = 0;
   const sessions = new Map<string, SshSessionView>();
   const snapshots = new Map<string, LaunchSnapshot>();
@@ -81,7 +86,8 @@ function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = f
   const bridge = (async (cmd: string, args: any) => {
     if (cmd === 'register_page') return { status: 'Registered', pg: 41, wi: 5 };
     if (cmd === 'create_admitted_terminal') return create(args.request);
-    return { status: 'Ack', result: args.request.op.kind === 'admit_create' ? admission : { status: 'Ok' } };
+    const kind = args.request.op.kind;
+    return { status: 'Ack', result: kind === 'admit_create' ? admission : kind === 'take' ? take : { status: 'Ok' } };
   }) as PaneBridge;
   const client = new PaneIncarnations(bridge);
   installPaneIncarnations(client);
@@ -151,6 +157,155 @@ test('tagged_tree_exists_before_first_terminal_mount', async () => {
     expect(h.api.ssh.markUsed.mock.calls).toEqual([['saved']]);
   } finally { stop(); }
 });
+
+test('ssh_root_preseed_keeps_full_tag_and_default_profile', async () => {
+  const h = harness();
+  store.dispatch(addTabTree({ tabId: 'tb-neighbors', tree: split('neighbors', pane('local'), pane('other', other)) }));
+  const published = jest.fn();
+  const stop = store.subscribe(() => {
+    const { tabs, panes } = store.getState();
+    const tab = tabs.tabs.find(t => t.shellType === defaultShell.id);
+    if (tab && !published.mock.calls.length) {
+      published(panes.treesByTabId[tab.id], getTabPanesGlobal()[tab.id]);
+    }
+  });
+  try {
+    const placed = launch();
+    const expected = { ...tag };
+    expect(published.mock.calls[0][0]).toMatchObject({ terminalId: placed.terminalId, shellType: defaultShell.id, ssh: expected });
+    expect(published.mock.calls[0][1]).toEqual(published.mock.calls[0][0]);
+    expect(placed.terminalId).toMatch(/^tm-/);
+    // New launches must begin with defaults. Exercise nondefaults on that same
+    // leaf before first mount, including an independently set metric preference.
+    const leaf = store.getState().panes.treesByTabId[placed.tabId]!;
+    store.dispatch(addTabTree({ tabId: placed.tabId, tree: { ...leaf, ssh: { ...expected, hiddenMetrics: [...sentinel.hiddenMetrics] } } }));
+    store.dispatch(patchSshPaneTag({
+      terminalId: placed.terminalId,
+      patch: { browserCollapsed: true, browserPath: '/srv/a b', followCd: true },
+    }));
+    await act(async () => { render(); await flush(); });
+    const expectedTags = { [placed.terminalId]: sentinel, 'tm-other': other };
+    expectPaneTags(Object.values(store.getState().panes.treesByTabId), expectedTags, ['tm-local']);
+    expectPaneTags(Object.values(getTabPanesGlobal()), expectedTags, ['tm-local']);
+    expect(h.create.mock.calls).toEqual([[expect.objectContaining({
+      leaf: placed.terminalId, profile: defaultShell.id, cwd: defaultShell.cwd, sshLaunchConnectionId: 'saved',
+    })]]);
+  } finally { stop(); }
+});
+
+test('missing_saved_connection_remains_unavailable_without_creating_a_shell', async () => {
+  const h = harness();
+  store.dispatch(addTabTree({ tabId: 'tb-unavailable', tree: pane('ssh', { ...sentinel, connectionId: 'missing' }) }));
+  store.dispatch(addTab({ id: 'tb-unavailable', title: 'Unavailable', shellType: defaultShell.id, icon: '' }));
+  await act(async () => { render(); await flush(); });
+  expect(element.textContent).toContain('This saved SSH connection is unavailable.');
+  expectPaneTags(Object.values(store.getState().panes.treesByTabId), {
+    'tm-ssh': { ...sentinel, connectionId: 'missing' },
+  });
+  expect(h.create).not.toHaveBeenCalled();
+  expect(h.api.createTerminal).not.toHaveBeenCalled();
+  expect(h.api.sshSessionOpen).not.toHaveBeenCalled();
+});
+
+test('adopted_ssh_without_a_live_descriptor_does_not_launch_on_mount', async () => {
+  const tree = pane('ssh', sentinel);
+  const h = harness({ status: 'Create', cg: 7 }, false, {
+    status: 'Taken', payload: {
+      panes: [{ paneId: tree.id, leaf: tree.terminalId!, restore: false }],
+      ui: { kind: 'pane', tabId: 'tb-transferred', tabTitle: 'Transfer', paneTree: tree, terminals: [] },
+    },
+  });
+  await applyReattachByToken('transfer');
+  expect(h.client.isAdopted(h.client.capture('tm-ssh', 'pn-ssh')!)).toBe(true);
+  await act(async () => { render(); await flush(); });
+  expect(h.create).toHaveBeenCalledTimes(1);
+  expect(h.create.mock.calls[0][0]).not.toHaveProperty('sshLaunchConnectionId');
+  expect(h.api.sshSessionOpen).not.toHaveBeenCalled();
+  expectPaneTags(Object.values(store.getState().panes.treesByTabId), { 'tm-ssh': sentinel });
+});
+
+test('adopted_live_ssh_queries_runtime_without_retyping', async () => {
+  const tree = pane('ssh', sentinel);
+  const h = harness({ status: 'Create', cg: 7 }, false, {
+    status: 'Taken', payload: {
+      panes: [{ paneId: tree.id, leaf: 'tm-ssh', restore: false }],
+      ui: { kind: 'pane', tabId: 'tb-transferred', tabTitle: 'Transfer', paneTree: tree,
+        terminals: [{ terminalId: 'tm-ssh', processId: 'pc-transferred' }] },
+    },
+  });
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
+  h.sessions.set('tm-ssh', { terminalId: 'tm-ssh', connectionId: 'saved', state: 'connected',
+    generation: 4, revision: 1, gate: 'verified' });
+  h.api.ssh.terminalLaunchState.mockResolvedValueOnce({
+    terminalId: 'tm-ssh', connectionId: 'saved', stage: 'running', launchSeq: 1, revision: 1,
+    attempt: { sessionGeneration: 4, attemptReceipt: { generation: 4, gate: 'verified' },
+      processIncarnation: 'pc-transferred', ownerIncarnation: { pg: 41, seq: 1 } },
+  });
+  store.dispatch(addTabTree({ tabId: 'tb-neighbors', tree: split('neighbors', pane('local'), pane('other', other)) }));
+  await applyReattachByToken('transfer');
+  await act(async () => { render(); await flush(); });
+  expect(h.api.sshSessionState).toHaveBeenCalledWith('tm-ssh');
+  expect(h.api.ssh.terminalLaunchState).toHaveBeenCalledWith('tm-ssh', expect.objectContaining({
+    processIncarnation: 'pc-transferred', sessionGeneration: 4,
+  }));
+  expect(h.create).not.toHaveBeenCalled();
+  expect(h.api.sshSessionOpen).not.toHaveBeenCalled();
+  expect(h.api.ssh.launchTerminal).not.toHaveBeenCalled();
+  expectPaneTags(Object.values(store.getState().panes.treesByTabId), {
+    'tm-ssh': sentinel, 'tm-other': other,
+  }, ['tm-local']);
+});
+
+function RelocationProbe({ terminalId, surface }: { terminalId: string; surface: HTMLElement }) {
+  const engineRef = React.useRef({
+    relocateTo: (target: HTMLElement) => { target.appendChild(surface); return 'relocated' as const; },
+  });
+  const paneRef = React.useRef<HTMLDivElement>(null);
+  useSurfaceRelocation({ terminalId, engineRef, paneRef, onRelocated() {}, onAborted() {} });
+  return <div data-relocation-home ref={paneRef} />;
+}
+
+test.each(['background', 'connector'] as const)(
+  'canvas_spawn_and_relocation_keep_one_tagged_terminal_identity (%s)', async gesture => {
+    const h = harness();
+    store.dispatch(addTab({ id: 'tb-canvas', title: 'Canvas', shellType: CANVAS_SHELL_TYPE, icon: '' }));
+    const localTree = split('neighbors', pane('local'), pane('other', other));
+    store.dispatch(addTabTree({ tabId: 'tb-neighbors', tree: localTree }));
+    const placement = gesture === 'connector' ? { ...canvas, sourceTerminalId: 'tm-local' }
+      : { kind: 'canvas' as const, rect };
+    const result = launchSshConnection('saved', placement);
+    if (!result.ok) throw new Error(result.error.message);
+    const leaf = store.getState().panes.treesByTabId[result.tabId]!;
+    store.dispatch(addTabTree({ tabId: result.tabId, tree: { ...leaf, ssh: sentinel } }));
+    await act(async () => { render(); await flush(); });
+    const node = buildCanvasModel(store.getState()).nodes.find(n => n.terminalId === result.terminalId)!;
+    expect(node).toMatchObject({ terminalId: result.terminalId, tabId: result.tabId, rect });
+    expect(node).not.toHaveProperty('ssh');
+    expect(store.getState().tabs.activeTabId).toBe('tb-canvas');
+
+    const host = document.body.appendChild(document.createElement('div'));
+    const home = document.body.appendChild(document.createElement('div'));
+    const surface = document.createElement('div');
+    const probe = createRoot(home);
+    try {
+      await act(async () => { probe.render(<RelocationProbe terminalId={result.terminalId} surface={surface} />); });
+      expect(home.contains(surface)).toBe(true);
+      await act(async () => setSurfaceHost(node.terminalId, host));
+      expect(host.firstChild).toBe(surface);
+      expectPaneTags(Object.values(store.getState().panes.treesByTabId), {
+        [result.terminalId]: sentinel, 'tm-other': other,
+      }, ['tm-local']);
+      expect(h.create).toHaveBeenCalledTimes(1);
+      expect(h.api.sshSessionOpen.mock.calls).toEqual([[result.terminalId, 'saved']]);
+      await act(async () => clearSurfaceHost(node.terminalId, host));
+      expect(home.contains(surface)).toBe(true);
+    } finally {
+      await act(async () => { clearSurfaceHost(node.terminalId, host); probe.unmount(); });
+      home.remove();
+      host.remove();
+    }
+  },
+);
 
 test('ssh_uses_configured_default_not_connection_or_first_profile', async () => {
   const h = harness();
