@@ -10,6 +10,8 @@ mod upload;
 pub(crate) mod watch;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod round_trip_tests;
 
 pub use download::{DownloadOutcome, DownloadPicker, DownloadResult, FileDownloadOutcome};
 pub use edit::{EditNotice, EditRegistry, EditState, EditStatus, EditStop};
