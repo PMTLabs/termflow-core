@@ -87,6 +87,29 @@ const labels = (depth = 0) =>
     rows(depth).map((r) => r.querySelector('.context-menu-flyout-label')!.textContent);
 const activeIndex = (depth = 0) => rows(depth).findIndex((r) => r.classList.contains('is-active'));
 
+it('wraps arrow navigation past disabled items and restores the invoker on Escape', async () => {
+    const invoker = document.createElement('textarea');
+    container.before(invoker);
+    try {
+        invoker.focus();
+        onClose.mockImplementation(() => root.render(null));
+        await render([{ label: 'First' }, { label: 'Disabled', enabled: false }, { label: 'Last' }]);
+        expect(menu().getAttribute('role')).toBe('menu');
+        expect(document.activeElement).toBe(menu());
+        await key(menu(), 'ArrowDown');
+        expect(document.activeElement).toBe(menuItem('First'));
+        await key(menuItem('First'), 'ArrowDown');
+        expect(document.activeElement).toBe(menuItem('Last'));
+        await key(menuItem('Last'), 'ArrowDown');
+        expect(document.activeElement).toBe(menuItem('First'));
+        await key(menuItem('First'), 'Escape');
+        expect(menu()).toBeNull();
+        expect(document.activeElement).toBe(invoker);
+    } finally {
+        invoker.remove();
+    }
+});
+
 describe('dismissal suppression and action flashes', () => {
     const flyout = (actions: NonNullable<ContextMenuItem['submenu']>['headerActions'] = []) => ({
         rows: [row('one', 'One')],
@@ -2125,7 +2148,7 @@ describe('snippet row context actions', () => {
         expect(document.querySelector('.context-menu-flyout-row-actions')).toBeNull();
 
         await fire(input, new KeyboardEvent('keydown', { key: 'ContextMenu', bubbles: true, cancelable: true }));
-        const reopened = document.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+        const reopened = document.querySelector<HTMLButtonElement>('.context-menu-flyout-row-actions [role="menuitem"]')!;
         await fire(reopened, new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
         expect(copy).toHaveBeenCalledTimes(1);
         expect(insert).not.toHaveBeenCalled();

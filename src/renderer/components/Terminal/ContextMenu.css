@@ -40,6 +40,11 @@
   background-color: var(--menu-hover-background, #094771);
 }
 
+/* Destructive item (`ContextMenuItem.danger`): same light red as `.canvas-menu`'s danger rows. */
+.context-menu-item.danger:not(:disabled) {
+  color: #ffaea8;
+}
+
 .context-menu-item:disabled {
   opacity: 0.5;
   cursor: default;

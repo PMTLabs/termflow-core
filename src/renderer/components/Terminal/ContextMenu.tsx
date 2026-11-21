@@ -770,6 +770,15 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
     <div
       ref={panelRef}
       className={`context-menu-flyout${flip.left ? ' flip-left' : ''}${narrow ? ' is-narrow' : ''}`}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.defaultPrevented || suppressDismiss) return;
+        if (e.key === 'Escape' || (!depth && e.key === 'ArrowLeft' && !centered &&
+          (!(e.target instanceof HTMLInputElement) || (e.target.selectionStart === 0 && e.target.selectionEnd === 0)))) {
+          e.preventDefault();
+          onCloseSelf();
+        }
+      }}
       data-flyout-depth={depth}
       style={flip.shiftY ? { top: flip.shiftY } : undefined}
       // Deliberate: a right-click anywhere in the flyout — the search box included —
@@ -944,8 +953,19 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
  * list: just the caller's own content, in its own hook instance (a `.map()` callback may not
  * call hooks directly — this component exists so each open custom flyout gets one).
  */
+// Merged into `ContextMenuItem` above; declared here to keep that interface's lines unchanged.
+export interface ContextMenuItem {
+  /** Destructive action (delete, remove): rendered in the danger colour. */
+  danger?: boolean;
+}
+
 const CustomFlyoutPanel: React.FC<{ flyout: ContextMenuCustomFlyout }> = ({ flyout }) => {
   const { panelRef, flip } = useSubmenuEdgeFlip(true, [flyout.content]);
+  useEffect(() => {
+    // The content's own effects run first: keep a focus it already placed (e.g. the selected icon).
+    if (panelRef.current?.contains(document.activeElement)) return;
+    panelRef.current?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')?.focus();
+  }, [panelRef]);
   return (
     <div
       ref={panelRef}
@@ -1100,6 +1120,73 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
     };
   }, [onClose, suppressDismiss]);
 
+  const invoker = useRef<Element | null>(null);
+  const menuItems = (menu: HTMLElement) => Array.from(menu.querySelectorAll<HTMLButtonElement>(
+    ':scope > button.context-menu-item:not(:disabled), :scope > .context-menu-submenu-host > button.context-menu-item:not(:disabled), :scope > .new-pane-row button:not(:disabled)',
+  ));
+
+  useLayoutEffect(() => {
+    menuRef.current?.querySelectorAll<HTMLButtonElement>(':scope > .new-pane-row button').forEach((button) => {
+      button.setAttribute('role', 'menuitem');
+      button.tabIndex = -1;
+      button.setAttribute('aria-disabled', String(button.disabled));
+    });
+  });
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current!;
+    invoker.current ??= document.activeElement;
+    if (!bare) {
+      menu.setAttribute('role', 'menu');
+      menu.tabIndex = -1;
+      // Focus the menu, not its first item: a focused item shows its tooltip at once, bypassing
+      // the hover dwell. ArrowDown/ArrowUp from the menu reach the first/last item.
+      menu.focus();
+    }
+    return () => {
+      if (document.activeElement !== document.body && !menu.contains(document.activeElement)) return;
+      void Promise.resolve().then(() => { // not queueMicrotask: fake timers count that as a pending timer
+        if (document.activeElement === document.body && invoker.current instanceof HTMLElement && invoker.current.isConnected) {
+          invoker.current.focus();
+        }
+      });
+    };
+  }, [bare]);
+
+  useLayoutEffect(() => {
+    const menu = menuRef.current!;
+    const handleKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (target.closest('[data-flyout-depth]')) return; // The search flyout owns its keyboard handling.
+      event.stopPropagation();
+      const parent = target.closest('.context-menu-submenu-host')?.firstElementChild as HTMLButtonElement | undefined;
+      const buttons = menuItems(menu);
+      const index = buttons.indexOf(target as HTMLButtonElement);
+      const { key } = event;
+      if (!bare && parent?.matches('button[aria-expanded="true"]') && (key === 'ArrowLeft' || (key === 'Escape' && !suppressDismiss))) {
+        cancelPendingOpen();
+        cancelPendingClose();
+        setOpenSubmenu(null);
+        parent.focus();
+      } else if (key === 'Escape' && !suppressDismiss) onClose();
+      else if (index < 0 && target !== menu) return;
+      else if (key === 'ArrowDown') buttons[(index + 1) % buttons.length]?.focus();
+      else if (key === 'ArrowUp') buttons[(Math.max(index, 0) - 1 + buttons.length) % buttons.length]?.focus();
+      else if (key === 'Home') buttons[0]?.focus();
+      else if (key === 'End') buttons[buttons.length - 1]?.focus();
+      else if (key === 'Enter' || key === ' ' || (key === 'ArrowRight' && target.hasAttribute('aria-haspopup'))) {
+        buttons[index]?.click();
+        if (parent === target && parent.getAttribute('aria-expanded') === 'true') {
+          parent.nextElementSibling?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')?.focus();
+        }
+      }
+      else if (key !== 'Tab') return;
+      event.preventDefault();
+    };
+    menu.addEventListener('keydown', handleKey);
+    return () => menu.removeEventListener('keydown', handleKey);
+  }, [bare, onClose, suppressDismiss, cancelPendingOpen, cancelPendingClose]);
+
   // Adjust position to keep menu on screen
   useEffect(() => {
     if (centered) return;
@@ -1127,7 +1214,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         // would otherwise draw lines across an otherwise empty box.
         if (bare && index !== standaloneSubmenu) return null;
         if (item.type === 'separator') {
-          return <div key={index} className="context-menu-separator" />;
+          return <div key={index} className="context-menu-separator" role="separator" />;
         }
 
         const disabled = item.enabled === false;
@@ -1177,8 +1264,11 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         const button = (
           <button
             key={index}
-            className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}`}
+            className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}${item.danger ? ' danger' : ''}`}
             disabled={disabled}
+            role="menuitem"
+            tabIndex={-1}
+            aria-disabled={disabled || undefined}
             // Two exemptions here, both documented on `useTooltipDwell`: a picker whose titles
             // ARE its content, and a disabled item (which dispatches no mouse events, and whose
             // tooltip is the only thing saying why it is dimmed). The third — an item reached by
@@ -1254,7 +1344,10 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
                   // With no menu behind it, retiring the panel alone would leave an empty
                   // box on screen still swallowing the next outside click. Escape and Tab
                   // therefore mean "dismiss", which is what they already meant to the user.
-                  onCloseSelf={bare ? onClose : () => setOpenSubmenu(null)}
+                  onCloseSelf={bare ? onClose : () => {
+                    menuRef.current?.querySelector<HTMLButtonElement>('.context-menu-item.is-submenu-open')?.focus();
+                    setOpenSubmenu(null);
+                  }}
                   onCloseMenu={onClose}
                   suppressDismiss={suppressDismiss}
                 />
