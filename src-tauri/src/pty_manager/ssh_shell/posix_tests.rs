@@ -336,6 +336,63 @@ fn rc_foreground_program_blocks_until_it_returns() {
     adapter.finish_after_shell_quiescence().unwrap();
 }
 
+/// zsh's compinit stops on "insecure directories ... [y]/[n]?" when an fpath
+/// directory is group/world-writable (Ubuntu's global zshrc runs compinit). That
+/// question must hold the gate like any rc foreground read, and no directory the
+/// helpers create may be one compaudit refuses.
+#[cfg(unix)]
+#[test]
+fn zsh_compinit_question_holds_the_gate_and_helper_dirs_pass_compaudit() {
+    use std::os::unix::fs::PermissionsExt;
+    fn dirs_below(dir: &Path, skip: &Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() && !path.is_symlink() && path != skip {
+                out.push(path.clone());
+                dirs_below(&path, skip, out);
+            }
+        }
+    }
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+    for login in [false, true] {
+        let f = Fixture::new();
+        let ordinary = spec(&f, Dialect::Zsh, login);
+        let paths = classify(&ordinary.shell).unwrap().1;
+        let insecure = f.0.join("insecure fpath");
+        fs::create_dir(&insecure).unwrap();
+        fs::set_permissions(&insecure, fs::Permissions::from_mode(0o777)).unwrap();
+        f.write("zdot/.zshrc", &format!("fpath=({} $fpath)\nautoload -Uz compinit\ncompinit -d {}\n",
+            sh_quote(&f.shell_path(paths, "insecure fpath")), sh_quote(&f.shell_path(paths, "zcompdump"))));
+        let compaudit = |dirs: &[PathBuf]| std::process::Command::new(&ordinary.shell)
+            .args(["-fc", "autoload -Uz compaudit; compaudit \"$@\"", "compaudit"]).args(dirs).output().unwrap();
+        assert!(!compaudit(&[insecure.clone()]).status.success(), "compaudit must refuse the planted directory");
+
+        let adapter = f.instrument(&ordinary);
+        let mut shell = Running::start(&adapter.spec);
+        let mut prompts = Prompts::new();
+        prompts.until(&shell, |p| String::from_utf8_lossy(&p.visible).contains("insecure directories"));
+        prompts.stays_blocked(&shell);
+
+        // Every directory under the app-data root, helper ZDOTDIRs included. The
+        // root's own parent is the test temp dir, which is not ours.
+        let mut dirs = Vec::new();
+        dirs_below(&f.0, &insecure, &mut dirs);
+        // The adapter appends its ZDOTDIR after the user's; the last entry is the one the child gets.
+        let helper = adapter.spec.env.iter().rfind(|(k, _)| k == "ZDOTDIR").map(|(_, v)| PathBuf::from(v)).unwrap();
+        assert_ne!(helper, f.0.join("zdot"), "found the user's ZDOTDIR, not the helper's");
+        assert!(dirs.contains(&helper), "audit covers the helper ZDOTDIR {helper:?}");
+        let audit = compaudit(&dirs);
+        assert!(audit.status.success(), "login={login} helper dirs refused by compaudit: {}{}",
+            String::from_utf8_lossy(&audit.stdout), String::from_utf8_lossy(&audit.stderr));
+
+        shell.send("y"); // compinit reads one key
+        prompts.until(&shell, |p| p.count == 1);
+        shell.send("exit\r");
+        shell.wait_success();
+        adapter.finish_after_shell_quiescence().unwrap();
+    }
+}
+
 #[test]
 fn nonce_is_not_exported_to_child_processes() {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
