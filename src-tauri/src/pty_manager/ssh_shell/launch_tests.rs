@@ -32,7 +32,7 @@ fn table(unicode: bool) -> Vec<String> {
         "with spaces",
         "apostrophe's",
         "double\"quote",
-        r"slash-before\"quote",
+        r#"slash-before\"quote"#,
         "trailing\\",
         "$(touch launch-canary)",
         "`touch launch-canary`",

@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     elevated_host::HostChannel,
-    pty_host_client::{wire_client, PtyHostClient, PtyHostDeps},
+    pty_host_client::{wire_client, PtyHostDeps},
     pty_manager::{input_gate::{write_input, InputSource}, ssh_helpers::HelperKind, ssh_shell::posix},
     ssh::sessions,
     state::{CloseStorage, EndKind},

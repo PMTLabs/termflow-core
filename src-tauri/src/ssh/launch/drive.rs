@@ -211,7 +211,7 @@ impl LaunchRegistry {
         self: &Arc<Self>, state: AppState<R>, store: Store, snapshot: &LaunchSnapshot,
     ) {
         let sessions = state.ssh_sessions.clone();
-        self.start(Arc::new(state), sessions, store, super::session::native_home(), snapshot);
+        self.start(Arc::new(state), sessions, store, crate::ssh::session::native_home(), snapshot);
     }
 
     pub(super) fn start<P: LaunchPort + Send + Sync + 'static>(
