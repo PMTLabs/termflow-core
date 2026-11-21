@@ -795,3 +795,55 @@ fn startup_replies_drain_before_ready() {
         "a later protocol reply invalidates an unconsumed prompt epoch"
     );
 }
+
+#[tokio::test]
+async fn retry_reuses_exact_unsubmitted_prompt() {
+    for ordered in [false, true] {
+        let (backend, mut peer) = Backend::new(false);
+        let keys = &backend.keys;
+        let first = keys.prepare_ssh_input(PC).unwrap();
+        let ready = backend.ready();
+        if ordered {
+            let _order = keys.input_owner_change();
+            keys.cancel_registered_launch_ordered(&first).unwrap();
+        } else {
+            keys.cancel_ssh_input(&first).unwrap();
+        }
+        let mut next = keys.prepare_ssh_input(PC).unwrap();
+        let retained = keys.launch_ready_ordered(&mut next).unwrap().expect("retry must see the original prompt");
+        assert_eq!((retained.epoch, retained.input_generation), (ready.epoch, ready.input_generation));
+        keys.submit_ssh_input(&next, &retained, |p| backend.enqueue(p, LAUNCH)).unwrap();
+        assert_eq!(backend.bytes(&mut peer).await, [LAUNCH.to_vec()]);
+    }
+}
+
+#[test]
+fn retry_requires_fresh_prompt_after_submission_input_or_transfer() {
+    for ordered in [false, true] {
+        for change in ["submitted", "submitted with intervening prompt", "ordinary", "transfer"] {
+            let (backend, _) = Backend::new(false);
+            let keys = &backend.keys;
+            let first = keys.prepare_ssh_input(PC).unwrap();
+            let ready = backend.ready();
+            if change.starts_with("submitted") {
+                keys.submit_ssh_input(&first, &ready, |p| backend.enqueue(p, LAUNCH)).unwrap();
+                if change.ends_with("prompt") { backend.ready(); }
+            }
+            if ordered {
+                let _order = keys.input_owner_change();
+                keys.cancel_registered_launch_ordered(&first).unwrap();
+            } else {
+                keys.cancel_ssh_input(&first).unwrap();
+            }
+            if change == "ordinary" {
+                write_input(&*backend, PC, SOURCES[0].1, None, b"human input").unwrap();
+            } else if change == "transfer" {
+                transfer(keys);
+            }
+            let mut next = keys.prepare_ssh_input(PC).unwrap();
+            assert!(keys.launch_ready_ordered(&mut next).unwrap().is_none(), "{change}, ordered={ordered}");
+            let fresh = backend.ready();
+            assert_eq!(keys.launch_ready_ordered(&mut next).unwrap().unwrap().epoch, fresh.epoch);
+        }
+    }
+}

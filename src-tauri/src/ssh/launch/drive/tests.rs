@@ -35,6 +35,7 @@ struct Recorded {
     bytes: Mutex<Vec<u8>>,
     calls: Mutex<usize>,
     partial: AtomicBool,
+    before_partial_error: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 struct Recorder(Arc<Recorded>);
 impl Write for Recorder {
@@ -42,7 +43,10 @@ impl Write for Recorder {
         let mut calls = self.0.calls.lock();
         *calls += 1;
         if self.0.partial.load(Ordering::SeqCst) {
-            if *calls > 1 { return Err(std::io::Error::other("injected write failure")); }
+            if *calls > 1 {
+                if let Some(hook) = self.0.before_partial_error.lock().take() { hook(); }
+                return Err(std::io::Error::other("injected write failure"));
+            }
             self.0.bytes.lock().extend_from_slice(&bytes[..3]);
             return Ok(3);
         }
@@ -492,6 +496,139 @@ async fn verified_and_typed_network_error_require_ready_and_current_receipt() {
         assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
         f.shutdown().await;
     }
+}
+
+async fn retry_unsubmitted(path: &str) {
+    let f = Fixture::direct();
+    if path != "trust" && path != "cancel" { f.seed(&pin("target.test", &f.server)); }
+    let a = f.open();
+    f.register(&a);
+    if path != "late timeout" { f.ready(1); }
+    let next = match path {
+        "cancel" => {
+            f.phase(SessionState::NeedsHostkey).await;
+            assert_eq!(f.access(&a, Operation::Cancel).unwrap().stage, LaunchStage::Cancelled);
+            f.seed(&pin("target.test", &f.server));
+            None
+        }
+        "trust" => {
+            f.trust(&f.phase(SessionState::NeedsHostkey).await, false).unwrap();
+            f.phase(SessionState::Disconnected).await;
+            assert!(!f.tick(&a));
+            assert_eq!(f.access(&a, Operation::Query).unwrap().error.unwrap().code, Code::TrustBlocked);
+            f.seed(&pin("target.test", &f.server));
+            None
+        }
+        "timeout" | "late timeout" => {
+            f.gate(Gate::Verified).await;
+            f.port.bare.store(false, Ordering::SeqCst);
+            let start = Instant::now();
+            assert!(f.driver(&a).tick(start));
+            assert!(!f.driver(&a).tick(start + READY_TIMEOUT));
+            assert_eq!(f.access(&a, Operation::Query).unwrap().error.unwrap().code, Code::Timeout);
+            if path == "late timeout" { f.ready(1); }
+            assert!(!f.tick(&a));
+            f.port.bare.store(true, Ordering::SeqCst);
+            None
+        }
+        "blocked replacement" => {
+            f.seed("target.test ssh-ed25519 !!!\n");
+            let blocked = f.reference(&reconnect_core(f.keys(), &f.sessions, LEAF).unwrap());
+            f.phase(SessionState::Error).await;
+            assert!(f.launches.0.lock()[LEAF].ticket.is_some());
+            assert_eq!(f.register(&blocked).error.unwrap().code, Code::TrustBlocked);
+            assert!(f.launches.0.lock()[LEAF].ticket.is_none());
+            f.seed(&pin("target.test", &f.server));
+            None
+        }
+        "stale" | "replacement" => {
+            let next = f.reference(&reconnect_core(f.keys(), &f.sessions, LEAF).unwrap());
+            if path == "stale" {
+                assert!(!f.tick(&a));
+                let entries = f.launches.0.lock();
+                assert_eq!(entries[LEAF].snapshot.error.as_ref().unwrap().code, Code::StaleAttempt);
+                assert!(entries[LEAF].ticket.is_none());
+            } else {
+                assert!(f.launches.0.lock()[LEAF].ticket.is_some());
+            }
+            Some(next)
+        }
+        _ => unreachable!(),
+    };
+    let next = next.unwrap_or_else(|| f.reference(&reconnect_core(f.keys(), &f.sessions, LEAF).unwrap()));
+    f.register(&next);
+    f.gate(Gate::Verified).await;
+    f.zero();
+    assert!(!f.tick(&next), "{path}: retry must type without a second prompt");
+    assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
+    assert_eq!(*f.port.record.calls.lock(), 1);
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn retry_after_user_cancel() { retry_unsubmitted("cancel").await; }
+#[tokio::test]
+async fn retry_after_trust_blocked() { retry_unsubmitted("trust").await; }
+#[tokio::test]
+async fn retry_after_ready_timeout() { retry_unsubmitted("timeout").await; }
+#[tokio::test]
+async fn retry_after_late_prompt() { retry_unsubmitted("late timeout").await; }
+#[tokio::test]
+async fn retry_after_stale_driver_end() { retry_unsubmitted("stale").await; }
+#[tokio::test]
+async fn retry_after_replacement() { retry_unsubmitted("replacement").await; }
+#[tokio::test]
+async fn retry_after_blocked_replacement() { retry_unsubmitted("blocked replacement").await; }
+
+#[tokio::test]
+async fn retry_after_submitted_cancel() { retry_after_submission("cancel").await; }
+#[tokio::test]
+async fn retry_after_submitted_replacement() { retry_after_submission("replacement").await; }
+#[tokio::test]
+async fn retry_after_partial_write() { retry_after_submission("partial").await; }
+
+async fn retry_after_submission(path: &str) {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    f.port.record.partial.store(path == "partial", Ordering::SeqCst);
+    if path == "partial" {
+        let port = Arc::downgrade(&f.port);
+        *f.port.record.before_partial_error.lock() = Some(Box::new(move || {
+            // Model a prompt arriving during local I/O, before the driver ends the attempt.
+            let port = port.upgrade().unwrap();
+            let input_generation = port.keys.ssh_prompt_input_generation(PROCESS).unwrap();
+            port.keys.observe_shell_prompt(PROCESS, NONCE, 2, PromptProof::Local {
+                drain: &StartupDrain::default(), input_generation,
+            }).unwrap();
+        }));
+    }
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.gate(Gate::Verified).await;
+    assert!(!f.tick(&a));
+    if path == "cancel" {
+        // Even a prompt observed between submission and cancellation is discarded.
+        f.ready(2);
+        assert_eq!(f.access(&a, Operation::Cancel).unwrap().stage, LaunchStage::Cancelled);
+    } else if path == "partial" {
+        assert_eq!(f.register(&a).error.unwrap().code, Code::WriteFailed);
+        f.port.record.partial.store(false, Ordering::SeqCst);
+    }
+    let bytes = f.port.record.bytes.lock().clone();
+    let calls = *f.port.record.calls.lock();
+    assert!(!bytes.is_empty());
+    let next = f.reference(&reconnect_core(f.keys(), &f.sessions, LEAF).unwrap());
+    f.register(&next);
+    f.gate(Gate::Verified).await;
+    assert!(f.tick(&next), "{path}: must wait for a fresh prompt after submission");
+    assert_eq!(*f.port.record.bytes.lock(), bytes);
+    assert_eq!(*f.port.record.calls.lock(), calls);
+    f.ready(3);
+    assert!(!f.tick(&next));
+    assert_eq!(*f.port.record.bytes.lock(), [bytes, f.typed_bytes()].concat());
+    assert_eq!(*f.port.record.calls.lock(), calls + 1);
+    f.shutdown().await;
 }
 
 #[tokio::test]

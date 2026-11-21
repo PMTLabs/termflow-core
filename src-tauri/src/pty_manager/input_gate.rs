@@ -332,6 +332,17 @@ impl ProcessInput {
         self.ready = None;
         Ok(())
     }
+    fn cancel_attempt(&mut self, submitted: bool) -> Result<(), Refusal> {
+        let next_epoch = self.lease_epoch.checked_add(1).ok_or(Refusal::StaleAttempt)?;
+        // Unsubmitted cancellation is not input: preserve the exact prompt and
+        // its input generation. A submitted turn may have written even on error.
+        if submitted {
+            self.invalidate_ready()?;
+        }
+        self.attempt = None;
+        self.lease_epoch = next_epoch;
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -427,15 +438,9 @@ impl crate::state::HostKeys {
         let mut state = entry.lock();
         state.owner(&owner)?;
         state.check_lease(&ticket.lease.process, &ticket.lease)?;
-        if state.attempt.as_ref().map(|a| a.id) != Some(ticket.id) {
-            return Err(Refusal::StaleAttempt);
-        }
-        state.attempt = None;
-        state.lease_epoch = state
-            .lease_epoch
-            .checked_add(1)
-            .ok_or(Refusal::StaleAttempt)?;
-        state.invalidate_ready()
+        let submitted = state.attempt.as_ref().filter(|a| a.id == ticket.id)
+            .ok_or(Refusal::StaleAttempt)?.submitted;
+        state.cancel_attempt(submitted)
     }
 
     #[cfg(test)]
@@ -530,14 +535,9 @@ impl crate::state::HostKeys {
         let entry = self.input.processes.lock().get(&ticket.lease.process).cloned();
         let Some(entry) = entry else { return Ok(()) };
         let mut state = entry.lock();
-        if state.attempt.as_ref().map(|a| a.id) != Some(ticket.id) {
-            return Ok(());
-        }
-        let next_epoch = state.lease_epoch.checked_add(1).ok_or(Refusal::StaleAttempt)?;
-        state.invalidate_ready()?;
-        state.attempt = None;
-        state.lease_epoch = next_epoch;
-        Ok(())
+        let Some(attempt) = state.attempt.as_ref().filter(|a| a.id == ticket.id) else { return Ok(()) };
+        let submitted = attempt.submitted;
+        state.cancel_attempt(submitted)
     }
 
     pub(crate) fn ssh_prompt_nonce(&self, process: &str) -> Option<String> {
