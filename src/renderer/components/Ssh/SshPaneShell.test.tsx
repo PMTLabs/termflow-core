@@ -183,6 +183,10 @@ test('Test dialog and prompt pick copy from errorCode, never from the reason tex
   expect(await dialogFor(connected(undefined))).not.toContain('The credential was not saved.');
   const prompt = (errorCode?: string): SshSessionView => ({ ...view('needs-secret'), reason: odd, errorCode });
   expect(await dialogFor(prompt('saved-credential-unavailable'))).toContain(odd);
+  // No secretKind: the dialog's own auth copy must reach the prompt, which only happens if the dialog
+  // withholds errorCode (the prompt would otherwise substitute its password copy).
+  const kindless = await dialogFor({ ...prompt('auth-rejected'), secretKind: undefined });
+  expect(kindless).toContain("Authentication was not accepted. Check the server's allowed methods"); expect(kindless).not.toContain("That password wasn't accepted.");
   const rejected = await dialogFor(prompt('auth-rejected'));
   expect(rejected).toContain("That password wasn't accepted. Check it and try again."); expect(rejected).not.toContain(odd);
   // The pane prompt maps the same codes on its own.

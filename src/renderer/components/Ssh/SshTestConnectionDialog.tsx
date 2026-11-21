@@ -146,7 +146,8 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
     <h2>Test SSH connection</h2>
     {secretPrompt && view ? <SshSecretPrompt key={view.promptId} view={{
       ...view, reason: code === 'auth-rejected' ? authCopy(view.secretKind) : code === savedCredentialUnavailable ? view.reason : view.reason ? fallback : undefined,
-      // Only the warning keeps its code: the prompt would otherwise re-map this dialog's auth copy.
+      // Only the warning keeps its code. With auth-rejected the prompt would swap in its own copy, which
+      // differs from authCopy when secretKind is absent.
       errorCode: code === savedCredentialUnavailable ? code : undefined,
     }} onCancel={close} onSubmit={(secret, remember) => api.sshTestSubmitSecret(view.probeId!, secret, remember, receipt)} />
       : !failure && trustPrompt && view ? <SshHostKeyPrompt key={view.promptId} view={view} onCancel={close} onTrust={() => api.sshTestTrustHost(view.probeId!, true, receipt)} />

@@ -5,8 +5,8 @@ import { failureCopy, testDialogCopy } from './SshTestConnectionDialog';
 import { savedCredentialUnavailable } from './SshSecretPrompt';
 
 // Snapshots carry the backend code as `errorCode` (backlog 017), so the renderer keys its copy by
-// code and never reads the reason text. This pins the code sets on both sides and keeps text
-// matching from coming back.
+// code and never reads the reason text. This pins the code sets on both sides, and a source scan
+// flags the usual ways of decoding reason text (a line-level scan; it cannot see every spelling).
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..');
 const session = readSource(path.resolve(ROOT, 'src-tauri', 'src', 'ssh', 'session.rs'));
 const fnBody = (signature: string) => {
@@ -27,7 +27,7 @@ test('every backend code has renderer copy, and nothing else does', () => {
 });
 
 test('the saved-credential warning code matches the backend constant', () => {
-  expect(session).toContain(`pub const SAVED_CREDENTIAL_UNAVAILABLE: &str = "${savedCredentialUnavailable}";`);
+  expect(session).toContain(`pub(crate) const SAVED_CREDENTIAL_UNAVAILABLE: &str = "${savedCredentialUnavailable}";`);
   expect(codes).not.toContain(savedCredentialUnavailable);
 });
 
@@ -45,9 +45,19 @@ test('Test dialog copy only overrides backend codes and names its next step', ()
   }
 });
 
-// A comparison of `reason` against text, or a text probe on it, means a reader is decoding the
-// backend's English again instead of using `errorCode`.
-const textMatch = /\breason\??\.(?:startsWith|endsWith|includes|match|test)\(|\breason\s*[!=]==?\s*['"`]|['"`]\s*[!=]==?\s*(?:\w+\??\.)*reason\b|\bfailureCopy\b[^;\n]*\breason\b|\breasonCode\b/;
+// A comparison of `reason` against text, a text probe on it, or a lookup keyed by it means a reader
+// is decoding the backend's English again instead of using `errorCode`.
+const fieldRef = String.raw`(?:\w+\??\.)*reason\b`;
+const textMatchers = [
+  /\breason\??\.(?:startsWith|endsWith|includes|match|matchAll|test|replace|replaceAll|indexOf|lastIndexOf|search|localeCompare|split|slice|substring|trim)\(/,
+  new RegExp(String.raw`\.(?:test|exec|get|has)\(\s*${fieldRef}`),
+  /\breason\s*[!=]==?\s*(?!undefined\b|null\b)[\w'"`]/,
+  new RegExp(String.raw`[\w'"\x60)\]]\s*[!=]==?\s*${fieldRef}`),
+  new RegExp(String.raw`\bswitch\s*\(\s*${fieldRef}`),
+  /\breasonCode\b/,
+  /\bfailureCopy\b[^;\n]*\breason\b/,
+];
+const decodes = (line: string) => textMatchers.some(re => re.test(line));
 
 test('the text-match detector catches each spelling and passes code checks', () => {
   for (const bad of [
@@ -57,20 +67,40 @@ test('the text-match detector catches each spelling and passes code checks', () 
     "'text' === view?.reason",
     'for (const [key, message] of failureCopy) if (message === view.reason) return key;',
     'const code = reasonCode(view.reason);',
-  ]) expect([bad, textMatch.test(bad)]).toEqual([bad, true]);
+    // The spellings the deleted reasonCode() and its callers used:
+    "const code = reason.replace(/^SSH operation failed: /, '');",
+    'if (/^An entry in known_hosts could not be read at line \\d+\\./.test(reason)) return x;',
+    'view.reason === savedCredentialWarning ? a : b',
+    'switch (view.reason) {',
+    "const code = byText.get(view?.reason ?? '');",
+    'if (reason.indexOf(prefix) === 0) {',
+  ]) expect([bad, decodes(bad)]).toEqual([bad, true]);
   for (const ok of [
     "view.errorCode === 'auth-rejected'",
     '{view.reason && <span role="status">{view.reason}</span>}',
     "reason: code === 'auth-rejected' ? authCopy(view.secretKind) : view.reason ? fallback : undefined,",
-  ]) expect([ok, textMatch.test(ok)]).toEqual([ok, false]);
+    "const reason = view.errorCode === 'auth-rejected'",
+    'if (view.reason === undefined) return;',
+  ]) expect([ok, decodes(ok)]).toEqual([ok, false]);
 });
 
-test('no SSH renderer source matches on reason text', () => {
-  const dir = path.resolve(__dirname);
-  const files = fs.readdirSync(dir).filter(f => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f));
-  expect(files).toEqual(expect.arrayContaining(['SshTestConnectionDialog.tsx', 'SshSecretPrompt.tsx', 'SshPaneShell.tsx']));
-  const hits = files.flatMap(f => readSource(path.join(dir, f)).split('\n')
-    .map((line, i) => ({ at: `${f}:${i + 1}`, line: line.trim() }))
-    .filter(({ line }) => !line.startsWith('//') && textMatch.test(line)));
+test('no renderer source that handles SSH session views matches on reason text', () => {
+  const renderer = path.resolve(__dirname, '..', '..');
+  const files: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'node_modules' && entry.name !== '__tests__') walk(full); }
+      else if (/\.tsx?$/.test(entry.name) && !/\.(test|cases)\.tsx?$/.test(entry.name)) files.push(full);
+    }
+  };
+  walk(renderer);
+  const ssh = files.filter(f => /[\\/]Ssh/.test(path.relative(renderer, f)) || readSource(f).includes('SshSessionView'));
+  const names = ssh.map(f => path.relative(renderer, f).replace(/\\/g, '/'));
+  expect(names).toEqual(expect.arrayContaining(['components/Ssh/SshTestConnectionDialog.tsx', 'components/Ssh/SshSecretPrompt.tsx',
+    'components/Ssh/SshPaneShell.tsx', 'store/slices/sshSessionSlice.ts', 'components/Settings/SshConnections/SshConnectionEditor.tsx']));
+  const hits = ssh.flatMap(f => readSource(f).split('\n')
+    .map((line, i) => ({ at: `${path.relative(renderer, f)}:${i + 1}`, line: line.trim() }))
+    .filter(({ line }) => !line.startsWith('//') && !line.startsWith('*') && decodes(line)));
   expect(hits).toEqual([]);
 });

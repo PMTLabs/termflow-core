@@ -366,34 +366,108 @@ async fn every_failure_snapshot_carries_its_error_code() {
         .unwrap()
         .get("errorCode")
         .is_none());
+    // A refusal keeps its pair when the entry is later invalidated (the Error branch of invalidate).
+    {
+        let mut s = e.inner.lock();
+        s.view.state = SessionState::Connecting;
+        apply_failure(&mut s, SessionError::HostKeyRevoked);
+    }
+    e.invalidate(Some("Local shell ended".into()));
+    let view = e.inner.lock().view.clone();
+    assert_eq!(
+        (view.state, view.reason, view.error_code.as_deref()),
+        (
+            SessionState::Error,
+            Some(SessionError::HostKeyRevoked.reason()),
+            Some("host-key-revoked")
+        )
+    );
     f.registry.shutdown().await;
 }
 #[test]
 fn view_reason_has_one_writer() {
-    // Every reason write goes through set_reason, so the code cannot drift from the text.
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ssh/session.rs"),
-    )
-    .unwrap()
-    .replace(
-        "
-", "
-",
+    // The fields are pub, so this walks every non-test source in the crate: any write to a
+    // view's reason or code outside set_reason could split the code from its text.
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if name.ends_with(".rs") && !name.contains("tests") {
+                out.push((name, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
     );
-    let writes: Vec<&str> = source
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with("//"))
-        .filter(|l| {
-            let compact: String = l.chars().filter(|c| !c.is_whitespace()).collect();
-            compact.contains(".reason=") || compact.contains(".error_code=")
-        })
-        .collect();
+    assert!(files.len() > 100, "crate walk found {} files", files.len());
+    let mut writes = Vec::new();
+    let mut literals = 0;
+    for (name, text) in &files {
+        for line in text.lines().map(str::trim).filter(|l| !l.starts_with("//")) {
+            let c: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if writes_reason(&c) {
+                writes.push(format!("{name}: {line}"));
+            }
+            if c.contains("SessionView{")
+                && !c.contains("->SessionView{")
+                && !c.contains("structSessionView{")
+            {
+                literals += 1;
+            }
+        }
+    }
     assert_eq!(
         writes,
         vec![
-            "view.error_code = reason.as_ref().and(code).map(str::to_string);",
-            "view.reason = reason;"
+            "session.rs: view.error_code = reason.as_ref().and(code).map(str::to_string);",
+            "session.rs: view.reason = reason;"
         ]
     );
+    assert_eq!(literals, 1, "only the registry builds a SessionView");
+}
+/// A whitespace-free source line that writes a view's `reason` or `error_code`.
+fn writes_reason(c: &str) -> bool {
+    ["view.reason", "view.error_code"].iter().any(|field| {
+        c.match_indices(field).any(|(at, _)| {
+            let rest = &c[at + field.len()..];
+            (rest.starts_with('=') && !rest.starts_with("=="))
+                || [
+                    ".take(",
+                    ".replace(",
+                    ".insert(",
+                    ".get_or_insert",
+                    ".as_mut(",
+                ]
+                .iter()
+                .any(|m| rest.starts_with(m))
+        }) || (c.contains("mem::") && c.contains(field))
+    })
+}
+#[test]
+fn the_reason_writer_detector_catches_each_spelling() {
+    for bad in [
+        "s.view.reason=Some(x);",
+        "s.view.error_code=None;",
+        "s.view.error_code.take();",
+        "s.view.reason.replace(x);",
+        "s.view.reason.insert(x);",
+        "s.view.error_code.get_or_insert_with(f);",
+        "std::mem::take(&muts.view.reason);",
+        "mem::replace(&mute.view.error_code,None);",
+    ] {
+        assert!(writes_reason(bad), "{bad}");
+    }
+    for ok in [
+        "assert_eq!(v.reason,x);",
+        "ifs.view.reason==x{",
+        "letr=s.view.reason.clone();",
+        "self.view.state=SessionState::Error;",
+    ] {
+        assert!(!writes_reason(ok), "{ok}");
+    }
 }

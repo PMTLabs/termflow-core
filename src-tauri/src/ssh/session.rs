@@ -278,8 +278,10 @@ pub struct SessionView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Code for `reason` when it has one (a `SessionError` code, or
-    /// `saved-credential-unavailable`); `None` for free-text disconnect reasons.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `saved-credential-unavailable`). Free-text disconnect reasons carry none,
+    /// including "SSH transport closed": readers show their generic copy for it,
+    /// as they did before codes existed. Written only through `set_reason`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_hosts_paths: Option<KnownHostsPaths>,
@@ -511,7 +513,7 @@ fn engine_runtime() -> tokio::runtime::Handle {
         .unwrap_or_else(|_| tauri::async_runtime::handle().inner().clone())
 }
 /// Prompt warning code: a saved secret could not be read, so the prompt asks again.
-pub const SAVED_CREDENTIAL_UNAVAILABLE: &str = "saved-credential-unavailable";
+pub(crate) const SAVED_CREDENTIAL_UNAVAILABLE: &str = "saved-credential-unavailable";
 /// The only writer of `view.reason`: the code travels with the text it names.
 fn set_reason(view: &mut SessionView, reason: Option<String>, code: Option<&str>) {
     view.error_code = reason.as_ref().and(code).map(str::to_string);
