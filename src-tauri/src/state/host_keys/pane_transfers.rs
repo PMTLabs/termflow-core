@@ -82,7 +82,7 @@ impl HostKeys {
                     && inner.window_pages.window_of(transfer.source).is_some() {
                     // Partial adoption must not silently close an omitted SSH
                     // pane. Return its receipt to the live source for re-entry.
-                    inner.owners.get_mut(leaf).unwrap().owner = Owner::Parked { pg: transfer.source, by: member.pi };
+                    Self::park_owner(inner, leaf, transfer.source, member.pi);
                 } else if !Self::release_idle_owner(inner, leaf) { inner.owners.get_mut(leaf).unwrap().owner = Owner::Orphaned; }
             }
             inner.panes.holders.remove(&member.pi);
@@ -127,9 +127,12 @@ impl HostKeys {
         let source_live = inner.window_pages.window_of(transfer.source).is_some();
         for member in &transfer.members {
             let leaf = &member.descriptor.leaf;
-            if inner.owners.get(leaf).is_some_and(|r| matches!(&r.owner, Owner::Transfer { tx: owner_tx, .. } if owner_tx == tx))
-                && !(if cancel && source_live { Self::release_idle_owner(inner, leaf) } else { Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf) }) {
-                inner.owners.get_mut(leaf).unwrap().owner = if cancel && source_live { Owner::Parked { pg: transfer.source, by: member.pi } } else { Owner::Orphaned };
+            if inner.owners.get(leaf).is_some_and(|r| matches!(&r.owner, Owner::Transfer { tx: owner_tx, .. } if owner_tx == tx)) {
+                if cancel && source_live {
+                    Self::park_owner(inner, leaf, transfer.source, member.pi);
+                } else if !(Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf)) {
+                    inner.owners.get_mut(leaf).unwrap().owner = Owner::Orphaned;
+                }
             }
             inner.panes.holders.remove(&member.pi);
         }
@@ -158,7 +161,7 @@ impl HostKeys {
             if row.ssh_reserved && !matches!(row.state, OwnerState::Closing(_)) {
                 if let Some(pg) = successor {
                     let by = match row.owner { Owner::Pane(pi) | Owner::Parked { by: pi, .. } => pi, _ => unreachable!() };
-                    inner.owners.get_mut(&leaf).unwrap().owner = Owner::Parked { pg, by };
+                    Self::park_owner(inner, &leaf, pg, by);
                     continue;
                 }
             }

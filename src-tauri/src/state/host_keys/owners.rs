@@ -2,7 +2,7 @@
 //! reference never falls back to a leaf lookup, even after that leaf restarts.
 
 use super::*;
-use super::panes::Owner;
+use super::panes::{Owner, PaneIdentity};
 use tokio::sync::watch;
 use std::time::Duration;
 
@@ -250,6 +250,12 @@ impl HostKeys {
             row.state = OwnerState::Held;
             row.started = false;
             row.admitted_pg = None;
+        }
+    }
+
+    pub(super) fn park_owner(inner: &mut Inner, leaf: &str, pg: u64, by: PaneIdentity) {
+        if !Self::release_idle_owner(inner, leaf) {
+            inner.owners.get_mut(leaf).unwrap().owner = Owner::Parked { pg, by };
         }
     }
 

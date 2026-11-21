@@ -242,9 +242,12 @@ impl HostKeys {
                 let pc = shell_of(&row.state).unwrap().process.clone();
                 inner.panes.holders.remove(&pi);
                 return PaneResult::Existing { pc };
-            } else if matches!(row.state, OwnerState::Placing { .. }) && row.started && row.owner == Owner::Orphaned {
-                // An orphaned started placement can be claimed by a successor pane, which
-                // joins the existing work instead of contending or spawning again.
+            } else if matches!(row.state, OwnerState::Placing { .. }) && row.started
+                && (row.owner == Owner::Orphaned
+                    || (row.ssh_reserved && matches!(row.owner, Owner::Parked { .. })
+                        && Self::bindable(inner, &row.owner, page, &BindVia::Named("restore".into()))))
+            {
+                // Join existing work instead of contending or spawning again.
                 let row = inner.owners.get_mut(leaf).unwrap();
                 row.owner = Owner::Pane(pi);
                 let cg = row.cg;
@@ -276,7 +279,7 @@ impl HostKeys {
     fn depart_pane(inner: &mut Inner, pi: PaneIdentity) {
         let leaves: Vec<_> = inner.owners.iter().filter(|(_, r)| r.owner == Owner::Pane(pi)).map(|(l, _)| l.clone()).collect();
         for leaf in leaves {
-            if !Self::release_idle_owner(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Parked { pg: pi.pg, by: pi }; }
+            Self::park_owner(inner, &leaf, pi.pg, pi);
         }
         inner.panes.present.remove(&pi);
         inner.panes.holders.remove(&pi);

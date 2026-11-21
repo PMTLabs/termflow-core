@@ -80,6 +80,99 @@ async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
         f.registry.shutdown().await;
     }
 }
+#[derive(Clone, Copy)]
+enum Parking {
+    ReplacePage,
+    Depart,
+    CancelTransfer,
+    PartialAdopt,
+}
+
+async fn check_parked_placement(started: bool, transition: Parking) {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "park-source");
+    let a = page.enter(&keys, "tm-a");
+    let f = fixture();
+    open(&f, &keys, "tm-a", "c-a");
+    let receipt = keys.ssh_owner_receipt("tm-a").unwrap();
+    assert_eq!(page.admit(&keys, a.pi), receipt);
+    if started {
+        assert!(matches!(
+            keys.admitted_work(page.label, page.pg, "tm-a", receipt).unwrap(),
+            CreateAdmission::Run(cg) if cg == receipt
+        ));
+    }
+
+    match transition {
+        Parking::ReplacePage => {
+            page = Page::register(&keys, page.label, page.wi);
+            assert_eq!(page.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
+        }
+        Parking::Depart => {
+            assert_eq!(page.op(&keys, PaneOp::Depart { pi: a.pi }), PaneResult::Ok);
+        }
+        Parking::CancelTransfer | Parking::PartialAdopt => {
+            let tx = "park-transfer".to_string();
+            let mut pairs = vec![a];
+            if matches!(transition, Parking::PartialAdopt) {
+                pairs.push(page.enter(&keys, "tm-b"));
+            }
+            assert_eq!(page.op(&keys, PaneOp::Stash { tx: tx.clone(), pairs, ui: None }), PaneResult::Ok);
+            if matches!(transition, Parking::PartialAdopt) {
+                let mut target = Page::new(&keys, "park-target");
+                target.op(&keys, PaneOp::Take { tx: tx.clone() });
+                let b = target.entry("tm-b", false);
+                assert_eq!(target.op(&keys, PaneOp::Adopt { tx, pairs: vec![b] }), PaneResult::Ok);
+            } else {
+                assert_eq!(page.op(&keys, PaneOp::Cancel { tx }), PaneResult::Ok);
+            }
+        }
+    }
+
+    assert_eq!(keys.ssh_owner_receipt("tm-a"), Some(receipt));
+    let next = page.enter(&keys, "tm-a");
+    let result = page.op(&keys, PaneOp::AdmitCreate { pi: next.pi, mode: CreateMode::Mount });
+    assert_eq!(result, if started { PaneResult::Join { cg: receipt } } else { PaneResult::Create { cg: receipt } });
+    assert_eq!(keys.ssh_owner_receipt("tm-a"), Some(receipt));
+    reconcile(&f, &keys);
+    assert!(f.registry.state("tm-a", false).is_ok());
+    f.registry.shutdown().await;
+}
+
+macro_rules! parked_placement_cases {
+    ($($name:ident: $started:literal, $transition:ident;)*) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                check_parked_placement($started, Parking::$transition).await;
+            }
+        )*
+    };
+}
+
+parked_placement_cases! {
+    unstarted_placement_re_admits_after_replace_page: false, ReplacePage;
+    unstarted_placement_re_admits_after_depart: false, Depart;
+    unstarted_placement_re_admits_after_cancel_transfer: false, CancelTransfer;
+    unstarted_placement_re_admits_after_partial_adopt: false, PartialAdopt;
+    started_placement_joins_after_replace_page: true, ReplacePage;
+    started_placement_joins_after_depart: true, Depart;
+    started_placement_joins_after_cancel_transfer: true, CancelTransfer;
+    started_placement_joins_after_partial_adopt: true, PartialAdopt;
+}
+
+#[test]
+fn unstarted_non_ssh_placement_gets_new_generation_after_replace_page() {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "local-source");
+    let a = page.enter(&keys, "tm-local");
+    let original = page.admit(&keys, a.pi);
+    let mut next = Page::register(&keys, page.label, page.wi);
+    assert_eq!(next.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
+    let a = next.enter(&keys, "tm-local");
+    assert_ne!(next.admit(&keys, a.pi), original);
+}
+
 #[tokio::test]
 async fn held_retiring_transitions_remove_session() {
     for transition in ["close", "window", "expiry", "backend-close"] {
