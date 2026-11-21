@@ -319,14 +319,18 @@ impl HostKeys {
             let (outcome, _) = tokio::sync::watch::channel(None);
             inner.owners.insert(leaf.into(), Row { cg, ssh_reserved: true, state: OwnerState::Held, owner: Owner::Pane(pi), admitted_pg: None, started: false, outcome });
         }
-        if inner.owners.get(leaf)?.cg == 0 {
+        let row = inner.owners.get(leaf)?;
+        if matches!(row.owner, Owner::Orphaned | Owner::Headless) || matches!(row.state, OwnerState::Closing(_)) {
+            return None;
+        }
+        if row.cg == 0 {
             let cg = inner.sequence.checked_add(1)?;
             inner.sequence = cg;
             inner.owners.get_mut(leaf)?.cg = cg;
         }
-        inner.owners.get_mut(leaf)?.ssh_reserved = true;
-        let row = inner.owners.get(leaf)?;
-        if matches!(row.owner, Owner::Orphaned | Owner::Headless) || matches!(row.state, OwnerState::Closing(_)) { None } else { Some(row.cg) }
+        let row = inner.owners.get_mut(leaf)?;
+        row.ssh_reserved = true;
+        Some(row.cg)
     }
     #[cfg(test)]
     pub(crate) fn pane_owner(&self, leaf: &str) -> Option<Owner> { self.lock().owners.get(leaf).map(|r| r.owner.clone()) }

@@ -80,6 +80,131 @@ async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
         f.registry.shutdown().await;
     }
 }
+#[tokio::test]
+async fn shell_termination_retains_only_live_ssh_receipt_holders() {
+    let leaf = "tm-a";
+    let process = "pc-receipt";
+    for ending in ["abort", "staged-exit", "natural-exit"] {
+        for holder in ["pane", "parked", "transfer", "dead-window", "ended-transfer", "missing-member"] {
+            let case = format!("{ending}/{holder}");
+            let keys = HostKeys::default();
+            let mut page = Page::new(&keys, "receipt-holder");
+            let a = page.enter(&keys, leaf);
+            let pi = a.pi;
+            let f = fixture();
+            open(&f, &keys, leaf, "c-a");
+            let cg = keys.ssh_owner_receipt(leaf).unwrap();
+            assert_eq!(page.admit(&keys, pi), cg);
+            keys.admitted_work(page.label, page.pg, leaf, cg).unwrap();
+            let shell = StagedShell { process: process.into(), stage: ShellStage::Local };
+            if ending != "abort" {
+                keys.stage_shell(leaf, cg, process, None).unwrap();
+            }
+            if ending == "natural-exit" {
+                assert!(matches!(keys.complete_shell(leaf, cg, &shell), Completion::Registered));
+            }
+
+            let tx = "receipt-drag";
+            let owner = match holder {
+                "pane" => Owner::Pane(pi),
+                "parked" | "dead-window" => {
+                    assert_eq!(page.op(&keys, PaneOp::Depart { pi }), PaneResult::Ok);
+                    // Inject a stale holder without letting page cleanup rewrite it.
+                    let pg = if holder == "parked" { page.pg } else { u64::MAX };
+                    let owner = Owner::Parked { pg, by: pi };
+                    if holder == "dead-window" {
+                        let mut inner = keys.lock();
+                        assert!(inner.window_pages.window_of(pg).is_none());
+                        inner.owners.get_mut(leaf).unwrap().owner = owner.clone();
+                    }
+                    owner
+                }
+                _ => {
+                    let b = page.enter(&keys, "tm-b");
+                    assert_eq!(page.op(&keys, PaneOp::Stash { tx: tx.into(), pairs: vec![a, b], ui: None }), PaneResult::Ok);
+                    // Leave the row pointing at a stale transfer or missing member.
+                    if holder == "ended-transfer" {
+                        keys.lock().panes.transfers.remove(tx).unwrap();
+                    } else if holder == "missing-member" {
+                        keys.lock().panes.transfers.get_mut(tx).unwrap().members.retain(|m| m.descriptor.leaf != leaf);
+                    }
+                    Owner::Transfer { tx: tx.into(), taken: false }
+                }
+            };
+            assert_eq!(keys.pane_owner(leaf), Some(owner.clone()), "{case}");
+            match ending {
+                "abort" => assert!(keys.abort_create(leaf, cg).is_none(), "{case}"),
+                "staged-exit" => {
+                    assert!(!keys.note_exit(process), "{case}");
+                    assert!(matches!(keys.complete_shell(leaf, cg, &shell), Completion::Exited), "{case}");
+                }
+                _ => assert!(keys.end_process(process, EndKind::Exit, |_| {}).is_some(), "{case}"),
+            }
+
+            let live = matches!(holder, "pane" | "parked" | "transfer");
+            if live {
+                assert!(matches!(keys.owner_state(leaf), Some((current, OwnerState::Held)) if current == cg), "{case}");
+                assert_eq!(keys.pane_owner(leaf), Some(owner), "{case}");
+                assert_eq!(keys.ssh_owner_receipt(leaf), Some(cg), "{case}");
+            } else {
+                assert!(keys.owner_state(leaf).is_none(), "{case}");
+                assert_eq!(keys.ssh_owner_receipt(leaf), None, "{case}");
+            }
+            reconcile(&f, &keys);
+            assert_eq!(f.registry.state(leaf, false).is_ok(), live, "{case}");
+            f.registry.shutdown().await;
+        }
+    }
+}
+
+#[test]
+fn non_ssh_natural_exit_removes_owner_before_depart() {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "local-exit");
+    let pi = page.enter(&keys, "tm-local").pi;
+    let cg = page.admit(&keys, pi);
+    keys.admitted_work(page.label, page.pg, "tm-local", cg).unwrap();
+    let shell = StagedShell { process: "pc-local".into(), stage: ShellStage::Local };
+    keys.stage_shell("tm-local", cg, "pc-local", None).unwrap();
+    assert!(matches!(keys.complete_shell("tm-local", cg, &shell), Completion::Registered));
+    assert!(keys.end_process("pc-local", EndKind::Exit, |_| {}).is_some());
+    assert!(keys.owner_state("tm-local").is_none());
+    assert_eq!(page.op(&keys, PaneOp::Depart { pi }), PaneResult::Ok);
+    assert!(keys.owner_state("tm-local").is_none());
+}
+
+#[test]
+fn depart_releases_non_ssh_held_owner_with_generation() {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "local-held");
+    let pi = page.enter(&keys, "tm-local").pi;
+    let cg = page.admit(&keys, pi);
+    assert_ne!(cg, 0);
+    keys.lock().owners.get_mut("tm-local").unwrap().state = OwnerState::Held;
+    assert_eq!(page.op(&keys, PaneOp::Depart { pi }), PaneResult::Ok);
+    assert!(keys.owner_state("tm-local").is_none());
+}
+
+#[test]
+fn refused_ssh_receipt_does_not_mutate_orphan() {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "orphan-receipt");
+    let pi = page.enter(&keys, "tm-orphan").pi;
+    page.admit(&keys, pi);
+    {
+        let mut inner = keys.lock();
+        let row = inner.owners.get_mut("tm-orphan").unwrap();
+        row.owner = Owner::Orphaned;
+        row.cg = 0;
+        assert!(!row.ssh_reserved);
+    }
+    assert_eq!(keys.ssh_owner_receipt("tm-orphan"), None);
+    let inner = keys.lock();
+    let row = &inner.owners["tm-orphan"];
+    assert_eq!(row.cg, 0);
+    assert!(!row.ssh_reserved);
+}
+
 #[derive(Clone, Copy)]
 enum Parking {
     ReplacePage,

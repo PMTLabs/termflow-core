@@ -245,8 +245,19 @@ impl HostKeys {
         true
     }
 
+    fn live_receipt_holder(inner: &Inner, leaf: &str, row: &Row) -> bool {
+        match &row.owner {
+            Owner::Pane(pi) => inner.panes.present.get(pi).is_some_and(|d| d.leaf == leaf),
+            Owner::Parked { pg, .. } => row.ssh_reserved && inner.window_pages.window_of(*pg).is_some(),
+            Owner::Transfer { tx, .. } => row.ssh_reserved && inner.panes.transfers.get(tx)
+                .is_some_and(|transfer| transfer.members.iter().any(|m| m.descriptor.leaf == leaf)),
+            Owner::Orphaned | Owner::Headless => false,
+        }
+    }
+
     fn retain_present_receipt(inner: &mut Inner, leaf: &str, row: &mut Row) {
-        if row.ssh_reserved && row.cg != 0 && !matches!(row.state, OwnerState::Placing { cancel: Some(_), .. }) && matches!(row.owner, Owner::Pane(pi) if inner.panes.present.get(&pi).is_some_and(|d| d.leaf == leaf)) {
+        if row.ssh_reserved && row.cg != 0 && !matches!(row.state, OwnerState::Placing { cancel: Some(_), .. })
+            && Self::live_receipt_holder(inner, leaf, row) {
             row.state = OwnerState::Held;
             row.started = false;
             row.admitted_pg = None;
@@ -267,7 +278,7 @@ impl HostKeys {
         }
         // A processless SSH receipt is still a live capability. Callers park it
         // on layout transitions; genuine retirement uses remove_held directly.
-        if inner.owners.get(leaf).is_some_and(|r| r.cg != 0 && matches!(r.state, OwnerState::Held)) { return false; }
+        if inner.owners.get(leaf).is_some_and(|r| r.ssh_reserved && r.cg != 0 && matches!(r.state, OwnerState::Held)) { return false; }
         Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf)
     }
 
@@ -343,9 +354,10 @@ impl HostKeys {
                 Self::mark_end(&mut inner, stage.channel, &stage.key, close);
             }
             row.outcome.send_replace(Some(Ok(process.into())));
-            // A shell exit is not a pane close. Keep the placement receipt while
-            // its authoritative pane remains, until a real close/removal occurs.
-            if kind == EndKind::Exit && matches!(row.owner, Owner::Pane(pi) if inner.panes.present.get(&pi).is_some_and(|d| d.leaf == leaf)) {
+            // A shell exit is not a pane close. Keep the SSH receipt while
+            // its holder is still live.
+            if kind == EndKind::Exit && row.ssh_reserved && row.cg != 0
+                && Self::live_receipt_holder(&inner, &leaf, &row) {
                 let (outcome, _) = tokio::sync::watch::channel(None);
                 inner.owners.insert(leaf.clone(), Row { cg: row.cg, ssh_reserved: row.ssh_reserved, state: OwnerState::Held, owner: row.owner, admitted_pg: None, started: false, outcome });
             }
