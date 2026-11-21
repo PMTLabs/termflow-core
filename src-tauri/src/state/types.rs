@@ -374,10 +374,12 @@ mod generation_slot_tests {
 
     /// A process that has already exited, carrying a launch record only `port` identifies.
     fn process(port: u16) -> McpProcess {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         #[cfg(windows)]
-        let child = std::process::Command::new("cmd").args(["/c", "exit", "0"]).spawn().expect("spawn a trivial child");
+        let mut child = std::process::Command::new("cmd").args(["/c", "exit", "0"]).spawn().expect("spawn a trivial child");
         #[cfg(not(windows))]
-        let child = std::process::Command::new("sh").args(["-c", "true"]).spawn().expect("spawn a trivial child");
+        let mut child = std::process::Command::new("sh").args(["-c", "true"]).spawn().expect("spawn a trivial child");
+        assert!(child.wait().expect("reap the trivial child").success());
         McpProcess {
             handle: McpProcessHandle::Legacy(child),
             launch: McpLaunch { port, bind_host: "127.0.0.1".into(), auth_token: Some(format!("tok-{port}")) },

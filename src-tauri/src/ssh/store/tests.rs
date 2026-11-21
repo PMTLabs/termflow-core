@@ -648,6 +648,7 @@ fn initial_corrupt_zero_revision_recovers_at_one_and_unchanged_reload_emits_noth
 
 #[test]
 fn path_is_dev_file_scoped_once() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     // A subprocess owns its OnceLock identity; do not race other unit tests.
     const CHILD: &str = "TF_SSH_PATH_TEST_CHILD";
     if std::env::var_os(CHILD).is_some() {

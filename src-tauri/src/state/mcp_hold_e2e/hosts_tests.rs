@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn downgrade_disarm_before_claim_stops_holder_and_preserves_shell() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
@@ -34,6 +35,7 @@ async fn downgrade_disarm_before_claim_stops_holder_and_preserves_shell() {
 
 #[tokio::test]
 async fn accepted_pending_transaction_rollback_cannot_start_a_holder() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
@@ -137,6 +139,7 @@ async fn accepted_pending_transaction_rollback_cannot_start_a_holder() {
 }
 
 async fn generations(empty_holder: bool) {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
@@ -266,6 +269,7 @@ async fn owned_shell_exit(pid: u32) {
 
 #[tokio::test]
 async fn late_frozen_claim_is_released_by_registry_finalizer() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
@@ -328,6 +332,7 @@ async fn late_frozen_claim_is_released_by_registry_finalizer() {
 #[tokio::test]
 #[ignore = "requires explicitly built pre-PR128 host fixture"]
 async fn new_app_old_host_uses_normal_search() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(true).await else {
         return;
     };

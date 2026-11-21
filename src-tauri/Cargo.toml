@@ -116,6 +116,8 @@ sha1 = "0.10"
 tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
+proc-macro2 = "1"
+syn = { version = "2", features = ["full", "visit"] }
 # `test-util` is NOT part of tokio's `full`, and it is what lets a test drive a
 # timeout in virtual time (`#[tokio::test(start_paused = true)]`). Without it the
 # quit-path disarm timeouts would have to elapse for real in every test run.

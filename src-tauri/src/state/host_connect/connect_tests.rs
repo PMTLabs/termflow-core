@@ -69,6 +69,7 @@ async fn adopted_socket_preserves_kernel_peer_pid() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn adopted_signed_socket_has_verified_audit_evidence() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     use std::process::{Command, Stdio};
     use std::io::Read;
     use crate::state::permissions::{host_identity::ProductionVerifier, HostIdentityVerifier, IdentityVerdict};
@@ -93,7 +94,7 @@ int main(int argc, char **argv) {
 "#).unwrap();
     assert!(Command::new("/usr/bin/cc").arg(&source).arg("-o").arg(&exe).status().unwrap().success());
     assert!(Command::new("/usr/bin/codesign").args(["--force", "-s", "-", "--identifier", "app.termflow.desktop.pty-host"]).arg(&exe).status().unwrap().success());
-    let mut child = Command::new(&exe).arg(&path).stdout(Stdio::piped()).spawn().unwrap();
+    let mut child = crate::pty_host_client::real_process::OwnedChild(Command::new(&exe).arg(&path).stdout(Stdio::piped()).spawn().unwrap());
     let mut ready = [0u8; 6];
     child.stdout.take().unwrap().read_exact(&mut ready).unwrap();
     assert_eq!(&ready, b"ready\n");
@@ -104,7 +105,7 @@ int main(int argc, char **argv) {
     let verifier = ProductionVerifier::new([client.clone()]);
     assert!(matches!(verifier.verify(child.id()), IdentityVerdict::Matches(_)));
     client.close_transport().await;
-    assert!(child.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }

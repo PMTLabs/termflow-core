@@ -602,6 +602,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn find_pwsh_matches_a_where_lookup() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         // Live check on the build machine: if `where pwsh` finds one, so must we.
         let where_found = std::process::Command::new("where")
             .arg("pwsh")

@@ -3,6 +3,7 @@ use super::*;
 use std::sync::atomic::Ordering;
 
 async fn full_chain(bind: &str) {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
@@ -94,6 +95,7 @@ async fn handover_and_reclaim_wildcard() {
 
 #[tokio::test]
 async fn foreign_identity_is_stopped_and_normal_search_runs() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
@@ -139,6 +141,7 @@ async fn foreign_identity_is_stopped_and_normal_search_runs() {
     port.close().await;
 }
 async fn changed(change_bind: bool) {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };
