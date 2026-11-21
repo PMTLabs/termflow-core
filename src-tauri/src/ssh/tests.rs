@@ -34,6 +34,8 @@ pub struct Counters {
     pub principals: Mutex<Vec<String>>,
     pub direct_addresses: Mutex<Vec<(String, u32)>>,
     pub environment: Mutex<Vec<(String, String)>>,
+    /// Terminal (pty-req) channels: only a real OpenSSH client in a PTY asks.
+    pub ptys: AtomicUsize,
 }
 #[derive(Clone)]
 pub struct Server {
@@ -131,6 +133,22 @@ impl server::Handler for Server {
         _: &mut Session,
     ) -> Result<(), Self::Error> {
         self.counters.environment.lock().push((name.into(), value.into()));
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn pty_request(
+        &mut self,
+        ch: ChannelId,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.counters.ptys.fetch_add(1, Ordering::SeqCst);
+        session.channel_success(ch)?;
         Ok(())
     }
     async fn shell_request(

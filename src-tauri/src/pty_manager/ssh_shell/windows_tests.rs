@@ -23,11 +23,13 @@ fn visible_has(p: &Prompts, text: &str) -> bool {
 
 #[test]
 fn powershell_original_prompt_and_cwd_hook_survive() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     assert_powershell_prompt_and_cwd(false);
 }
 
 #[test]
 fn powershell_readiness_works_under_restricted_execution_policy() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     assert_powershell_prompt_and_cwd(true);
 }
 
@@ -93,6 +95,7 @@ fn assert_powershell_prompt_and_cwd(restricted: bool) {
 /// Native cmd AutoRun ordering not executed (registry-only); covered by a /D /K prelude substitute.
 #[test]
 fn cmd_prompt_and_prelude_survive() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let cmd = installed("TERMFLOW_TEST_CMD", system32().join("cmd.exe"));
     for delayed in ["/V:OFF", "/V:ON"] {
         let f = Fixture::new();

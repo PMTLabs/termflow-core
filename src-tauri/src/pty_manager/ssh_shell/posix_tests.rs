@@ -8,7 +8,7 @@ use termflow_pty_protocol::{da1::{StartupDa1, StartupDrain, StartupReplies}, pum
 mod baseline;
 
 #[path = "launch_tests.rs"]
-mod launch_tests;
+pub(crate) mod launch_tests;
 
 #[cfg(windows)]
 #[path = "windows_tests.rs"]
@@ -233,6 +233,7 @@ fn log_line(name: &str) -> String { format!("printf '%s\\n' {name} >> \"$TF_LOG\
 
 #[test]
 fn login_rc_files_run_in_original_order_once() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     for dialect in matrix() {
         for login in [false, true] {
             let f = Fixture::new();
@@ -294,6 +295,7 @@ fn login_rc_files_run_in_original_order_once() {
 
 #[test]
 fn slow_rc_cannot_receive_launch_before_real_prompt() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let ordinary = spec(&f, Dialect::Bash, false);
     let path = f.shell_path(classify(&ordinary.shell).unwrap().1, "release");
@@ -314,6 +316,7 @@ fn slow_rc_cannot_receive_launch_before_real_prompt() {
 
 #[test]
 fn rc_foreground_program_blocks_until_it_returns() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let ordinary = spec(&f, Dialect::Bash, false);
     f.write(".bashrc", "/bin/sh -c 'printf \"FIXTURE_CHILD_RUNNING\\n\"; IFS= read -r gate; [ \"$gate\" = release ]'\n");
@@ -331,6 +334,7 @@ fn rc_foreground_program_blocks_until_it_returns() {
 
 #[test]
 fn nonce_is_not_exported_to_child_processes() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     for dialect in matrix() {
         let f = Fixture::new();
         let ordinary = spec(&f, dialect, true);

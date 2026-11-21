@@ -76,6 +76,7 @@ fn extra_options_allowlist_is_case_insensitive_and_rejects_unlisted_or_malformed
 #[cfg(windows)]
 #[test]
 fn real_native_windows_openssh_parses_direct_launch_with_a_spaced_receipt_path() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let ssh = std::env::var("TERMFLOW_TEST_NATIVE_SSH")
         .expect("set TERMFLOW_TEST_NATIVE_SSH to the native Windows OpenSSH executable");
     let (target, mut trust) = direct();
@@ -272,6 +273,7 @@ mod openssh {
     #[cfg(windows)]
     #[tokio::test]
     async fn real_native_windows_openssh_jump_reaches_target_through_isolated_proxy() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let ssh = crate::pty_manager::ssh_shell::system_shell(r"OpenSSH\ssh.exe").unwrap();
         assert!(Path::new(&ssh).is_file(), "required native Windows OpenSSH is missing: {ssh}");
         // This connection's actual key and receipt paths contain spaces, a
@@ -353,6 +355,7 @@ mod openssh {
     #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_known_hosts_paths_with_spaces_reach_target_and_jump_verbatim() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let rig = Rig::new(true, "paths with spaces", "target.test").await;
         let ssh = rig.recording_ssh(&real_ssh());
         let output = rig.run(&ssh, "/bin/sh", false, &rig.trust).await;
@@ -364,6 +367,7 @@ mod openssh {
     #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_proxy_helper_preserves_inner_argv_under_fish_login_shell() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let fish = std::env::var("TERMFLOW_TEST_FISH").unwrap_or_else(|_| "/usr/bin/fish".into());
         assert!(Path::new(&fish).is_file(), "required fish fixture missing (TERMFLOW_TEST_FISH)");
         let rig = Rig::new(true, "fish ' \\ % é $(touch${IFS}local-canary)", "target.test").await;
@@ -393,6 +397,7 @@ mod openssh {
     #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_uses_distinct_receipt_known_hosts_paths_per_hop() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let rig = Rig::new(true, "separate", "target.test").await;
         let ssh = real_ssh();
         assert_login(&rig.run(&ssh, "/bin/sh", false, &rig.trust).await);
@@ -408,6 +413,7 @@ mod openssh {
     #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_accepted_option_combinations_never_run_local_canary() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let mut rig = Rig::new(false, "allowed-options", "127.0.0.1").await;
         let reservation = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = reservation.local_addr().unwrap().port();
@@ -450,6 +456,7 @@ mod openssh {
     #[tokio::test]
     #[ignore = "requires externally staged user and system config in an isolated OpenSSH account/container"]
     async fn real_openssh_target_and_bastion_ignore_hostile_user_and_system_config() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         // Do not change ~/.ssh or /etc/ssh from this test. A dedicated fixture
         // account/container supplies the passwd-home and compiled sysconf files.
         // The baseline makes a wrong executable/home/config path a hard failure.

@@ -15,6 +15,8 @@ use tokio::{io::DuplexStream, net::{TcpListener, TcpStream}, sync::{broadcast, m
 
 const DEADLINE: Duration = Duration::from_secs(15);
 
+mod end_to_end;
+
 struct NativeShell {
     child: Box<dyn Child + Send + Sync>,
     _master: Box<dyn MasterPty + Send>,
@@ -28,6 +30,10 @@ struct NativeShell {
 }
 
 fn instrument(f: &Fixture) -> posix::PosixAdapter {
+    instrument_env(f, Vec::new())
+}
+
+fn instrument_env(f: &Fixture, extra: Vec<(String, String)>) -> posix::PosixAdapter {
     #[cfg(windows)]
     let (shell, args) = (crate::pty_manager::ssh_shell::system_shell("powershell.exe").unwrap(), vec!["-NoProfile".into(), "-NoLogo".into()]);
     #[cfg(not(windows))]
@@ -35,7 +41,7 @@ fn instrument(f: &Fixture) -> posix::PosixAdapter {
     let home = f.port.home.to_str().unwrap().to_owned();
     let spec = SpawnSpec {
         shell, args, cwd: Some(home.clone()), cols: 100, rows: 30, initial_cursor_row: None,
-        env: vec![("HOME".into(), home), ("TERM".into(), "xterm".into())],
+        env: [("HOME".to_owned(), home), ("TERM".into(), "xterm".into())].into_iter().chain(extra).collect(),
         env_remove: ["BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELLOPTS", "POSIXLY_CORRECT", "SSH_AUTH_SOCK", "SSH_ASKPASS"].map(str::to_owned).to_vec(),
     };
     posix::instrument_posix(&spec, NONCE, &f.port.helper_root().unwrap(), ProcessIdentity::capture(std::process::id()).unwrap(), |_| None).unwrap()
@@ -120,6 +126,13 @@ impl Write for Tee {
 }
 
 fn configured(port: u16) -> Fixture {
+    let f = keyed(port);
+    f.seed(&format!("{} {}\n", lookup_token("127.0.0.1", port), f.server.host.public_key().to_openssh().unwrap()));
+    f
+}
+
+/// The saved loopback key-file row with nothing pinned in its trust file yet.
+fn keyed(port: u16) -> Fixture {
     let server = Server::new(1, "alice");
     let mut f = Fixture::unplaced(server.clone(), Arc::new(MemoryStreams(server.clone())));
     Arc::get_mut(&mut f.port).unwrap().native_bare = true;
@@ -136,7 +149,6 @@ fn configured(port: u16) -> Fixture {
         row.identity_file = Some(identity.path().to_str().unwrap().into());
         Ok(())
     }, |_| {}).unwrap();
-    f.seed(&format!("{} {}\n", lookup_token("127.0.0.1", port), server.host.public_key().to_openssh().unwrap()));
     f
 }
 
@@ -195,6 +207,7 @@ async fn incoming(listen: &TcpListener) -> TcpStream {
 
 #[tokio::test]
 async fn ssh_exit_emits_ended_while_local_shell_stays_alive() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, mut shell) = local(port).await;
     let shell_id = ProcessIdentity::capture(shell.pid()).unwrap();
@@ -220,6 +233,7 @@ async fn ssh_exit_emits_ended_while_local_shell_stays_alive() {
 
 #[tokio::test]
 async fn healthy_app_channel_cannot_mask_terminal_ssh_end() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, _shell) = local(port).await;
     let a = f.open();
@@ -239,6 +253,7 @@ async fn healthy_app_channel_cannot_mask_terminal_ssh_end() {
 
 #[tokio::test]
 async fn immediate_ssh_failure_never_claims_running() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, mut shell) = local(port).await;
     let a = f.open();
@@ -259,6 +274,7 @@ async fn immediate_ssh_failure_never_claims_running() {
 
 #[tokio::test]
 async fn real_emitter_calls_ingress_before_renderer_event() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, _shell) = local(port).await;
     let a = f.open();
@@ -274,6 +290,7 @@ async fn real_emitter_calls_ingress_before_renderer_event() {
 
 #[tokio::test]
 async fn queued_old_generation_or_launch_seq_cannot_disconnect_new_session() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, mut shell) = local(port).await;
     let a = f.open();
@@ -309,6 +326,7 @@ async fn queued_old_generation_or_launch_seq_cannot_disconnect_new_session() {
 
 #[tokio::test]
 async fn detach_reattach_adopts_watcher_without_second_write() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, _shell) = local(port).await;
     let a = f.open();
@@ -338,6 +356,7 @@ async fn detach_reattach_adopts_watcher_without_second_write() {
 
 #[tokio::test]
 async fn close_cleans_observer_and_session_exact_map() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, _shell) = local(port).await;
     let a = f.open();
@@ -398,6 +417,7 @@ async fn stdin_frame(peer: &mut DuplexStream) -> Vec<u8> {
 
 #[tokio::test]
 async fn hosted_queue_acceptance_is_typed_not_running() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (f, _shell, mut peer) = hosted().await;
     let a = f.open();
     f.accepted(&a).await;
@@ -411,6 +431,7 @@ async fn hosted_queue_acceptance_is_typed_not_running() {
 
 #[tokio::test]
 async fn host_write_error_after_enqueue_before_running_ends_visibly() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (f, _shell, mut peer) = hosted().await;
     let a = f.open();
     f.accepted(&a).await;
@@ -433,6 +454,7 @@ async fn host_write_error_after_enqueue_before_running_ends_visibly() {
 
 #[tokio::test]
 async fn host_connection_loss_after_enqueue_is_not_replayed() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (f, _shell, mut peer) = hosted().await;
     let a = f.open();
     f.accepted(&a).await;
@@ -458,6 +480,7 @@ async fn host_connection_loss_after_enqueue_is_not_replayed() {
 
 #[tokio::test]
 async fn revoked_app_channel_does_not_hide_the_terminal_exit() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let (tcp, port) = listener().await;
     let (f, _shell) = local(port).await;
     let a = f.open();
@@ -480,6 +503,7 @@ async fn revoked_app_channel_does_not_hide_the_terminal_exit() {
 #[tokio::test]
 #[ignore = "requires an isolated native sidecar binary in TERMFLOW_TEST_PTY_HOST"]
 async fn real_pty_host_accepts_once_and_observes_native_ssh_lifecycle() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     use std::process::Stdio;
     let binary = std::env::var_os("TERMFLOW_TEST_PTY_HOST").expect("path to the matching-OS termflow-pty-host executable");
     let (tcp, port) = listener().await;

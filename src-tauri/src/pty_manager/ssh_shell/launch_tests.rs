@@ -6,7 +6,13 @@ fn owner() -> ProcessIdentity {
 }
 
 fn recorder(f: &Fixture) -> PathBuf {
-    let destination = f.0.join(format!("argv recorder's binary{}", std::env::consts::EXE_SUFFIX));
+    compile_argv_recorder(&f.0)
+}
+
+/// Also the outer recording `ssh` of the saved-launch end-to-end test (066 T10).
+/// Callers hold the child-process gate.
+pub(crate) fn compile_argv_recorder(dir: &Path) -> PathBuf {
+    let destination = dir.join(format!("argv recorder's binary{}", std::env::consts::EXE_SUFFIX));
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/pty_manager/ssh_shell/argv_recorder.rs");
     let compiler = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
@@ -86,6 +92,7 @@ fn exercise(
 
 #[test]
 fn each_shell_receives_exact_argv_not_shell_code() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     for dialect in matrix() {
         let f = Fixture::new();
         let spec = spec(&f, dialect, false);
@@ -122,6 +129,7 @@ fn each_shell_receives_exact_argv_not_shell_code() {
 #[cfg(windows)]
 #[test]
 fn cmd_batch_delayed_expansion_is_scoped() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     use super::windows_tests::{installed, ordinary, system32};
 
     let cmd = installed("TERMFLOW_TEST_CMD", system32().join("cmd.exe"));

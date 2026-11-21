@@ -342,4 +342,4 @@ end
 
 #[cfg(test)]
 #[path = "posix_tests.rs"]
-mod tests;
+pub(crate) mod tests;

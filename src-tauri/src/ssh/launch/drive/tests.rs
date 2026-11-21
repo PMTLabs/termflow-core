@@ -60,6 +60,8 @@ struct Port {
     events: Mutex<Vec<Value>>,
     bare: AtomicBool,
     native_bare: bool,
+    // T10: an outer recording executable in place of the native ssh path.
+    ssh: Option<String>,
     before_encode: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     host: Option<crate::pty_host_client::PtyHostClient>,
     at_emit: Option<Arc<SessionRegistry>>,
@@ -81,7 +83,7 @@ impl LaunchPort for Port {
     fn helper_root(&self) -> Result<HelperRoot, LaunchError> {
         HelperRoot::open_app_data(&self.home).map_err(|_| Code::UnsupportedContext.into())
     }
-    fn open_ssh(&self) -> Result<String, LaunchError> { native_ssh() }
+    fn open_ssh(&self) -> Result<String, LaunchError> { self.ssh.clone().map_or_else(native_ssh, Ok) }
     fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool {
         if let Some(hook) = self.before_encode.lock().take() { hook(); }
         self.bare.load(Ordering::SeqCst) && (!self.native_bare || native_bare_shell(shell, identity))
@@ -167,7 +169,7 @@ impl Fixture {
         let writer: LocalWriter = Arc::new(std::sync::Mutex::new(Box::new(Recorder(record.clone()))));
         let port = Arc::new(Port {
             keys: HostKeys::default(), home, writer, record, events: Mutex::default(),
-            bare: AtomicBool::new(true), native_bare: false, before_encode: Mutex::default(),
+            bare: AtomicBool::new(true), native_bare: false, ssh: None, before_encode: Mutex::default(),
             host: None, at_emit: Some(sessions.clone()), ingressed: Mutex::default(),
         });
         let owner = Self::page(&port.keys, SOURCE);

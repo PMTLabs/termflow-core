@@ -19,7 +19,7 @@ import { setDefaultProfile, setShellProfiles } from '../../store/slices/settings
 import { applyView } from '../../store/slices/sshSlice';
 import { markSessionClosed } from '../../store/slices/sessionExitSlice';
 import { addTab, removeTab } from '../../store/slices/tabsSlice';
-import { addTabTree, patchSshPaneTag, removeTabTree } from '../../store/slices/panesSlice';
+import { addTabTree, movePaneToTab, patchSshPaneTag, removeTabTree, splitPaneInTab, type PaneNode } from '../../store/slices/panesSlice';
 import { CANVAS_SHELL_TYPE } from '../tabKinds';
 import { installPaneIncarnations, PaneIncarnations, type PaneBridge, type PaneResult } from '../paneIncarnations';
 import { terminalService, TerminalServiceClass } from '../TerminalService';
@@ -33,6 +33,10 @@ import { useSurfaceRelocation } from '../../components/Terminal/useSurfaceReloca
 import { clearSurfaceHost, setSurfaceHost } from '../surfaceHosts';
 import { applyReattachByToken } from '../../components/Panes/dnd/detach';
 import { expectPaneTags, pane, split, sentinel, other } from '../../__testFixtures__/sshPaneCensus';
+import { key } from '../../__testFixtures__/sshPickerFixture';
+import { AllSshConnectionsDialog } from '../../components/Ssh/AllSshConnectionsDialog';
+import { launchSshInTab } from '../sshPicker';
+import { connectAllInTabs, connectSavedInTab } from '../sshConnectAll';
 
 const tag = { connectionId: 'saved', browserCollapsed: false, followCd: false, hiddenMetrics: [] };
 const defaultShell = { id: 'default-shell', name: 'Local Shell', path: '/native/default', args: [], env: { SOURCE: 'default' }, cwd: '/default-cwd' };
@@ -43,7 +47,9 @@ const canvas = { kind: 'canvas' as const, rect, sourceTerminalId: 'tm-source' };
 const makeSnapshot = (terminalId: string, connectionId: string, attempt: LaunchAttemptRef): LaunchSnapshot =>
   ({ terminalId, connectionId, attempt, stage: 'preparing', revision: 1, launchSeq: 1 });
 
-function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = false, take?: PaneResult) {
+/** `backend` (T10) models the Rust pane registry: a remounted live leaf is Existing, an explicit close
+ *  retires its session, and a transfer take returns `transfer.payload`. Off, every op keeps its fixed reply. */
+function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = false, take?: PaneResult, backend = false) {
   let generation = 0;
   const sessions = new Map<string, SshSessionView>();
   const snapshots = new Map<string, LaunchSnapshot>();
@@ -82,11 +88,29 @@ function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = f
   };
   (window as any).electronAPI = api;
   let pc = 0;
-  const create = jest.fn(async (_request: object) => `pc-${++pc}`);
+  const leaves = new Map<string, string>();
+  const live = new Map<string, string>();
+  const transfer: { payload?: any } = {};
+  const create = jest.fn(async (request: any) => {
+    const id = `pc-${++pc}`;
+    if (backend) live.set(request.leaf, id);
+    return id;
+  });
   const bridge = (async (cmd: string, args: any) => {
     if (cmd === 'register_page') return { status: 'Registered', pg: 41, wi: 5 };
     if (cmd === 'create_admitted_terminal') return create(args.request);
     const kind = args.request.op.kind;
+    if (backend) {
+      const op = args.request.op;
+      const key = (pi: { pg: number; seq: number }) => `${pi.pg}:${pi.seq}`;
+      if (kind === 'enter' || kind === 'adopt') for (const p of op.panes ?? op.pairs) leaves.set(key(p.pi), p.leaf);
+      const leaf = op.pi ? leaves.get(key(op.pi)) : undefined;
+      if (kind === 'admit_create' && op.mode === 'Mount' && leaf && live.has(leaf)) {
+        return { status: 'Ack', result: { status: 'Existing', pc: live.get(leaf)! } };
+      }
+      if (kind === 'close' && leaf) { live.delete(leaf); sessions.delete(leaf); snapshots.delete(leaf); }
+      if (kind === 'take') return { status: 'Ack', result: { status: 'Taken', payload: transfer.payload } };
+    }
     return { status: 'Ack', result: kind === 'admit_create' ? admission : kind === 'take' ? take : { status: 'Ok' } };
   }) as PaneBridge;
   const client = new PaneIncarnations(bridge);
@@ -101,7 +125,7 @@ function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = f
       order: 0, lastUsedAt: null, hasSavedSecret: false,
     }],
   } }));
-  return { api, client, create, snapshots, sessions };
+  return { api, client, create, snapshots, sessions, bridge, live, transfer };
 }
 
 const launch = (placement?: typeof canvas) => {
@@ -543,4 +567,186 @@ test('displacement_during_open_receipt_never_invokes_launch', async () => {
   resolveOpen({ terminalId: 'tm-open', connectionId: 'saved', generation: 1, state: 'connecting', gate: 'pending' });
   expect(await pending).toBeUndefined();
   expect(api.ssh.launchTerminal).not.toHaveBeenCalled();
+});
+
+test('ssh_launch_all_surfaces_restore_move_reconnect_exact_owner_map', async () => {
+  // Mutation targets: splitLeafInTree/survivingLeaf (tag copied to the new sibling or lost); movePaneToTab or
+  // applyDetachPayload dropping `ssh`; TerminalService opening/launching (not querying) an Existing or adopted
+  // SSH leaf; observeOwnedSshLaunch 'reconnect' not taking the fresh generation; closeTerminal not closing the pane.
+  const h = harness(undefined, false, undefined, true);
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
+  const ids = ['tab-host', 'canvas-host', 'picker-host', 'single-host', 'batch-a', 'batch-b'];
+  const revision = store.getState().ssh.revision + 1;
+  store.dispatch(applyView({ revision, view: { revision, loadError: null,
+    folders: [{ id: 'f-batch', parentId: null, name: 'Batch', icon: '', color: '', order: 0 }],
+    connections: ids.map((id, order) => ({
+      id, name: `Saved ${id}`, host: `${id}.test`, user: 'user', port: 22, auth: 'agent' as const, identityFile: null,
+      folderId: id.startsWith('batch') ? 'f-batch' : null, jumpConnectionId: null, extraOptions: [] as [string, string][],
+      bookmarked: false, order, lastUsedAt: null, hasSavedSecret: false,
+    })),
+  } }));
+
+  type Owners = Record<string, { connectionId: string; sessionGeneration: number | undefined }>;
+  const leavesOf = (node: PaneNode | null | undefined, out: PaneNode[] = []): PaneNode[] => {
+    if (node?.type === 'terminal') out.push(node);
+    else node?.children?.forEach(child => leavesOf(child, out));
+    return out;
+  };
+  const trees = () => store.getState().panes.treesByTabId;
+  const tabOf = (terminalId: string) => Object.entries(trees()).find(([, tree]) =>
+    leavesOf(tree).some(leaf => leaf.terminalId === terminalId))![0];
+  const paneOf = (terminalId: string) => leavesOf(trees()[tabOf(terminalId)]).find(leaf => leaf.terminalId === terminalId)!;
+  const paneOwners = (): Owners => Object.fromEntries(Object.values(trees()).flatMap(tree => leavesOf(tree))
+    .filter(leaf => leaf.ssh).map(leaf => [leaf.terminalId!, {
+      connectionId: leaf.ssh!.connectionId, sessionGeneration: h.sessions.get(leaf.terminalId!)?.generation,
+    }]));
+  const backendOwners = (): Owners => Object.fromEntries([...h.sessions].map(([id, view]) =>
+    [id, { connectionId: view.connectionId, sessionGeneration: view.generation }]));
+  const local: string[] = [];
+  const expectOwners = (expected: Owners) => {
+    expect(paneOwners()).toStrictEqual(expected);
+    expect(backendOwners()).toStrictEqual(expected);
+    for (const [id, owner] of Object.entries(expected)) {
+      const last = h.api.ssh.launchTerminal.mock.calls.filter(([terminalId]) => terminalId === id).at(-1);
+      expect(last?.[2].sessionGeneration).toBe(owner.sessionGeneration);
+    }
+    expectPaneTags(Object.values(trees()), Object.fromEntries(Object.entries(expected)
+      .map(([id, owner]) => [id, { ...tag, connectionId: owner.connectionId }])), local);
+  };
+  const calls = (open: number, launches: number, creates: number) => {
+    expect(h.api.sshSessionOpen).toHaveBeenCalledTimes(open);
+    expect(h.api.ssh.launchTerminal).toHaveBeenCalledTimes(launches);
+    expect(h.create).toHaveBeenCalledTimes(creates);
+  };
+  const launched: Record<string, string> = {};
+  const surface = async (expected: number, run: () => unknown) => {
+    const before = new Set(Object.keys(paneOwners()));
+    await act(async () => { await run(); await flush(); });
+    const added = Object.keys(paneOwners()).filter(id => !before.has(id));
+    expect(added).toHaveLength(expected);
+    for (const id of added) launched[id] = paneOf(id).ssh!.connectionId;
+    return added;
+  };
+
+  await act(async () => { render(); await flush(); });
+  // 1. Every launch surface: tab menu, Canvas placement, picker, Settings single, Settings folder batch.
+  const [tabHost] = await surface(1, () => expect(launchSshInTab('tab-host')).toBeNull());
+  const [canvasHost] = await surface(1, () => expect(launchSshConnection('canvas-host', { kind: 'canvas', rect }).ok).toBe(true));
+  const pickerHost = document.body.appendChild(document.createElement('div'));
+  const picker = createRoot(pickerHost);
+  const closePicker = jest.fn();
+  await act(async () => {
+    picker.render(<Provider store={store}><AllSshConnectionsDialog request={{ invoker: null, launch: launchSshInTab }} onClose={closePicker} /></Provider>);
+  });
+  const [pickerTerminal] = await surface(1, () => { key(document.querySelector('input[role="combobox"]')!, 'Enter'); });
+  expect(closePicker).toHaveBeenCalledTimes(1);
+  await act(async () => { picker.unmount(); });
+  pickerHost.remove();
+  const [single] = await surface(1, async () => expect(await connectSavedInTab('single-host')).toEqual({ error: null, recentFailed: true }));
+  await surface(2, async () => expect(await connectAllInTabs('f-batch')).toMatchObject({ attempted: 2, started: 2, failures: [] }));
+  expect(Object.values(launched).sort()).toEqual([...ids.filter(id => id !== 'picker-host'), launched[pickerTerminal]].sort());
+  expect(launched).toMatchObject({ [tabHost]: 'tab-host', [canvasHost]: 'canvas-host', [single]: 'single-host' });
+  const afterLaunch = backendOwners();
+  expect(Object.fromEntries(Object.entries(afterLaunch).map(([id, owner]) => [id, owner.connectionId]))).toStrictEqual(launched);
+  expect(Object.values(afterLaunch).map(owner => owner.sessionGeneration).sort()).toEqual([1, 2, 3, 4, 5, 6]);
+  expectOwners(afterLaunch);
+  calls(6, 6, 6);
+
+  // 2. Restore the persisted layout (JSON round trip) over the still-live backend: attach, never re-type.
+  const persisted = JSON.parse(JSON.stringify({ tabs: store.getState().tabs.tabs, trees: trees() }));
+  await act(async () => { root?.unmount(); });
+  root = undefined;
+  element.remove();
+  await act(async () => {
+    for (const saved of persisted.tabs) store.dispatch(removeTab(saved.id));
+    for (const [id, tree] of Object.entries(persisted.trees)) {
+      leavesOf(tree as PaneNode).forEach(leaf => terminalService.detachTerminal(leaf.terminalId!));
+      store.dispatch(removeTabTree(id));
+    }
+    clearTabPanesInPlace();
+    await flush();
+  });
+  expect(paneOwners()).toStrictEqual({});
+  expect(backendOwners()).toStrictEqual(afterLaunch);
+  await act(async () => {
+    for (const saved of persisted.tabs) {
+      store.dispatch(addTabTree({ tabId: saved.id, tree: persisted.trees[saved.id] }));
+      store.dispatch(addTab(saved));
+    }
+    render();
+    await flush();
+  });
+  expectOwners(afterLaunch);
+  calls(6, 6, 6);
+
+  // 3. Split the tab-surface SSH pane: the new sibling is a plain local terminal.
+  const splitTab = tabOf(tabHost);
+  await act(async () => {
+    store.dispatch(splitPaneInTab({ tabId: splitTab, paneId: paneOf(tabHost).id, direction: 'horizontal', shellType: defaultShell.id }));
+    await flush();
+  });
+  const sibling = leavesOf(trees()[splitTab]).find(leaf => leaf.terminalId !== tabHost)!.terminalId!;
+  local.push(sibling);
+  expectOwners(afterLaunch);
+  calls(6, 6, 7);
+  expect(h.create.mock.calls[6][0]).toMatchObject({ leaf: sibling });
+  expect(h.create.mock.calls[6][0]).not.toHaveProperty('sshLaunchConnectionId');
+
+  // 4. Move the SSH pane into another tab, then detach the Settings-single tab and adopt it back.
+  const batchTab = tabOf(Object.keys(launched).find(id => launched[id] === 'batch-a')!);
+  await act(async () => {
+    store.dispatch(movePaneToTab({ sourceTabId: splitTab, sourcePaneId: paneOf(tabHost).id,
+      targetTabId: batchTab, targetPaneId: leavesOf(trees()[batchTab])[0].id, zone: 'right' }));
+    await flush();
+  });
+  expect(tabOf(tabHost)).toBe(batchTab);
+  expect(tabOf(sibling)).toBe(splitTab);
+  expectOwners(afterLaunch);
+  calls(6, 6, 7);
+
+  const detachedTab = tabOf(single);
+  const detachedTree = JSON.parse(JSON.stringify(trees()[detachedTab]));
+  await act(async () => {
+    terminalService.detachTerminal(single);
+    store.dispatch(removeTab(detachedTab));
+    store.dispatch(removeTabTree(detachedTab));
+    await flush();
+  });
+  const { [single]: away, ...remaining } = afterLaunch;
+  expect(paneOwners()).toStrictEqual(remaining);
+  expect(backendOwners()).toStrictEqual(afterLaunch);
+  h.transfer.payload = {
+    panes: [{ paneId: detachedTree.id, leaf: single, restore: false }],
+    ui: { kind: 'pane', tabId: 'tb-transferred', tabTitle: 'Transfer', paneTree: detachedTree,
+      terminals: [{ terminalId: single, processId: h.live.get(single) }] },
+  };
+  await act(async () => { await applyReattachByToken('t10-detach'); await flush(); });
+  expect(paneOf(single).ssh).toEqual({ ...tag, connectionId: away.connectionId });
+  expectOwners(afterLaunch);
+  calls(6, 6, 7);
+
+  // 5. Reconnect the moved pane: same terminal, the fresh generation, one more typed launch.
+  h.snapshots.set(tabHost, { ...h.snapshots.get(tabHost)!, stage: 'ended' });
+  h.api.ssh.launchTerminal.mockImplementationOnce(async (terminalId, connectionId, attempt) =>
+    ({ ...makeSnapshot(terminalId, connectionId, attempt), stage: 'typed' }));
+  let reconnected;
+  await act(async () => { reconnected = await reconnectSshTerminal(tabHost); await flush(); });
+  expect(reconnected).toEqual({ ok: true, snapshot: expect.objectContaining({ terminalId: tabHost, stage: 'typed' }) });
+  const afterReconnect = { ...afterLaunch, [tabHost]: { connectionId: 'tab-host', sessionGeneration: 7 } };
+  expectOwners(afterReconnect);
+  calls(6, 7, 7);
+  expect(h.api.sshSessionReconnect.mock.calls).toEqual([[tabHost]]);
+
+  // 6. Close the Canvas-placed pane: its owner is retired; nobody else changes.
+  const canvasTab = tabOf(canvasHost);
+  await act(async () => {
+    await terminalService.closeTerminal(canvasHost);
+    store.dispatch(removeTab(canvasTab));
+    store.dispatch(removeTabTree(canvasTab));
+    await flush();
+  });
+  const { [canvasHost]: closed, ...afterClose } = afterReconnect;
+  expect(closed.connectionId).toBe('canvas-host');
+  expectOwners(afterClose);
+  calls(6, 7, 7);
 });

@@ -292,3 +292,37 @@ test('profile_admin_canvas_settings_items_keep_existing_handlers', () => {
   expect(api.ssh.markUsed).not.toHaveBeenCalled();
   expect(launch).not.toHaveBeenCalled();
 });
+
+test('ac8_existing_new_tab_shortcuts_and_profiles_unchanged', () => {
+  // NewTabDropdown (`+` handler / profile row onClick) and InputHandler (Ctrl+Shift+T): resolve anything but
+  // resolveDefaultProfile, change buildNewTabFields titles, or route any of them through the SSH launcher.
+  replaceSaved([saved('server', { bookmarked: true }), saved('other-host')]);
+  store.dispatch(addTab({ id: 'existing', title: profile.name, shellType: profile.id, icon: '' }));
+  const opened = () => store.getState().tabs.tabs.slice(1).map(({ title, shellType, icon, isActive }) => ({ title, shellType, icon, isActive }));
+  render(<NewTabDropdown />);
+  act(() => container.querySelector<HTMLButtonElement>('.new-tab-button')!.click());
+  act(() => { key(window, 't', { ctrlKey: true, shiftKey: true }); });
+  // Every profile row, in menu order, with the SSH section rendered alongside it.
+  const rows = () => Array.from(dropdown().querySelector('.dropdown-section')!.querySelectorAll<HTMLElement>('.dropdown-item'));
+  act(() => invoker().click());
+  expect(dropdown().textContent).toContain('All SSH Connections…');
+  expect(rows().map(row => row.querySelector('.profile-name')?.textContent)).toEqual([otherProfile.name, profile.name]);
+  for (const index of [0, 1]) {
+    if (index) act(() => invoker().click());
+    act(() => rows()[index].click());
+  }
+  // develop: default profile (not first), "+N" unique titles, the generic icon, the new tab active.
+  expect(opened()).toEqual([
+    { title: 'Local Shell 1', shellType: profile.id, icon: '🖥️', isActive: true },
+    { title: 'Local Shell 2', shellType: profile.id, icon: '🖥️', isActive: true },
+    { title: otherProfile.name, shellType: otherProfile.id, icon: '🖥️', isActive: true },
+    { title: 'Local Shell 3', shellType: profile.id, icon: '🖥️', isActive: true },
+  ].map((tab, i, all) => ({ ...tab, isActive: i === all.length - 1 })));
+  // Zero SSH calls of any kind, and no tagged trees.
+  expect(launch).not.toHaveBeenCalled();
+  expect(api.ssh.launchTerminal).not.toHaveBeenCalled();
+  expect(api.ssh.markUsed).not.toHaveBeenCalled();
+  expect(api.sshSessionOpen).not.toHaveBeenCalled();
+  expect(api.sshSessionState).not.toHaveBeenCalled();
+  expect(Object.values(store.getState().panes.treesByTabId).filter(tree => JSON.stringify(tree ?? null).includes('"ssh"'))).toEqual([]);
+});

@@ -3,6 +3,7 @@ use super::*;
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 #[tokio::test]
 async fn pid_reuse_unrelated_manual_ssh_and_proxy_child_do_not_claim_launch() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     use std::process::Stdio;
     use tokio::{net::TcpListener, process::Command as Spawn};
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

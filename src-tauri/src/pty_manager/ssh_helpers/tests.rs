@@ -135,6 +135,7 @@ fn unsafe_permissions(path: &Path) {
 
 #[test]
 fn helper_root_rejects_links_reparse_and_foreign_permissions() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let f = Fixture::new();
     let safe = f.0.join("safe app data ü");
     fs::create_dir(&safe).unwrap();
@@ -207,6 +208,7 @@ fn helper_root_rejects_links_reparse_and_foreign_permissions() {
 
 #[test]
 fn hostile_temp_cannot_replace_immutable_attempt_helper() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     if let Some(data) = std::env::var_os(CHILD_DATA) {
         let root = HelperRoot::open_app_data(Path::new(&data)).unwrap();
         let helper = payload(&root);
@@ -289,6 +291,7 @@ fn hostile_temp_cannot_replace_immutable_attempt_helper() {
 
 #[test]
 fn helper_exclusive_publish_and_safe_sweep() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     if let Some(data) = std::env::var_os(CHILD_DATA) {
         let root = HelperRoot::open_app_data(Path::new(&data)).unwrap();
         root.publish(owner(), HelperKind::ShellHook, "sh", b"dead shell hook")
