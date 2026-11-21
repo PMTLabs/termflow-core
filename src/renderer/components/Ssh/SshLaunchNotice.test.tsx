@@ -20,6 +20,9 @@ const button = (name: string) => [...el.querySelectorAll('button')].find(b => b.
 
 function expectFixedStrip() {
   const notice = el.querySelector('.ssh-launch-notice')!;
+  // 070's Canvas surface matches the notice root by this class and attribute.
+  expect(notice.parentElement).toBe(el);
+  expect(notice.hasAttribute('data-ssh-keyboard-owner')).toBe(true);
   const overlay = notice.querySelector('.ssh-launch-overlay');
   expect([...notice.children].filter(child => child !== overlay).map(child => child.className)).toEqual(['ssh-launch-strip']);
   const status = notice.querySelector('.ssh-launch-strip [role=status]');

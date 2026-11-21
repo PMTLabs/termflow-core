@@ -63,7 +63,7 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
   const reason = stage === 'ended' ? sshLaunchEndReason(snapshot?.error) : shown?.message;
   const cancel = () => { if (snapshot) props.onCancel(snapshot.attempt); };
   const reconnect = stage === 'ended' || ((stage === 'typed' || stage === 'running') && currentView?.state === 'disconnected');
-  return <section className="ssh-launch-notice" aria-label="SSH launch">
+  return <section className="ssh-launch-notice" data-ssh-keyboard-owner="" aria-label="SSH launch">
     <div className="ssh-launch-strip">
       <span role="status" title={stageCopy[stage]}>{stageCopy[stage]}</span>
       {waiting && snapshot && props.canCancel !== false && !host && !secret &&
