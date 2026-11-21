@@ -19,6 +19,9 @@
 .context-menu.ssh-menu { padding:5px; }
 .ssh-menu .context-menu-icon { width:16px; margin-right:10px; }
 .ssh-picker-flyout { position:absolute; top:0; left:100%; margin-left:2px; width:max-content; z-index:1000; }
+/* The picker takes .ssh-connections for its colour variables; that class's inline-size containment
+   would give the max-content panel a zero content width, so the icon grid spilled over the menu. */
+.ssh-icon-picker.ssh-connections { container-type:normal; }
 .ssh-picker-flyout.flip-left { left:auto; right:100%; margin-left:0; margin-right:2px; }
 .ssh-icon-grid button { box-sizing:border-box; width:36px; height:36px; }
 .ssh-read-only { padding:8px 10px; font-size:0.8rem; flex-wrap:wrap; }

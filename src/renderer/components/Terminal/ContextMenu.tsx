@@ -971,6 +971,9 @@ const CustomFlyoutPanel: React.FC<{ flyout: ContextMenuCustomFlyout }> = ({ flyo
       ref={panelRef}
       className={`${flyout.panelClassName}${flip.left ? ' flip-left' : ''}`}
       style={flip.shiftY ? { top: flip.shiftY } : undefined}
+      data-custom-flyout=""
+      // Keys the content leaves unhandled stop here, as the menu stops its own.
+      onKeyDown={(e) => e.stopPropagation()}
       // Same right-click swallow `FlyoutPanel` applies — see its own comment.
       onContextMenu={(e) => {
         e.preventDefault();
@@ -1158,6 +1161,10 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
     const handleKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (target.closest('[data-flyout-depth]')) return; // The search flyout owns its keyboard handling.
+      // A custom flyout's content owns its keys (an icon grid's arrows). Stopping them here, on the
+      // native listener, would keep them from React's root and the content's onKeyDown never runs.
+      // Escape and Tab still close the flyout or the menu below; the panel stops the rest itself.
+      if (target.closest('[data-custom-flyout]') && event.key !== 'Escape' && event.key !== 'Tab') return;
       event.stopPropagation();
       const parent = target.closest('.context-menu-submenu-host')?.firstElementChild as HTMLButtonElement | undefined;
       const buttons = menuItems(menu);
