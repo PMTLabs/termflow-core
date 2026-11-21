@@ -50,4 +50,6 @@
 @container sshedit (max-width:440px) {
   .ssh-editor-grid { grid-template-columns:minmax(0, 1fr); }
   .ssh-editor-grid > .ssh-span-2, .ssh-editor-grid > .ssh-span-all { grid-column:1 / -1; }}
-.ssh-connection-editor select.setting-input { padding-block:calc(0.5rem - 1px); }
+/* Selects and inputs size differently per engine and DPR (a padding trim measured equal in headless Edge left
+   selects 1 device px short in WebView2 at 150%), so side-by-side fields share one explicit height (house ≈34-35px). */
+.ssh-connection-editor input.setting-input, .ssh-connection-editor select.setting-input { box-sizing:border-box; height:2.4em; }
