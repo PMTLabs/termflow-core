@@ -34,15 +34,16 @@ pub async fn ssh_fs_insert_path<R: Runtime>(
         if crate::state::ingress::registered_target(state.host_table.keys(), process_id).as_deref() != Some(process_id) {
             return Err("Terminal is no longer registered.".into());
         }
-        let bytes = quoted.as_bytes();
-        if state.host_write(process_id, bytes) {
-            return Ok(());
-        }
-        let writer = state.shell_writer_channels.get(process_id)
-            .map(|entry| entry.clone())
-            .ok_or_else(|| "Terminal writer is unavailable.".to_string())?;
-        let mut writer = writer.lock().map_err(|_| "Terminal writer lock failed.".to_string())?;
-        writer.write_all(bytes).map_err(|err| err.to_string())
+        // Through 066's input gate like every renderer keystroke: a locked or trust-blocked
+        // terminal refuses the insertion instead of receiving bytes behind the gate's back.
+        crate::pty_manager::input_gate::write_input(
+            &*state,
+            process_id,
+            crate::pty_manager::input_gate::InputSource::Renderer,
+            None,
+            quoted.as_bytes(),
+        )
+        .map_err(|failure| failure.message)
     })?;
     Ok(InsertPath { written: true })
 }

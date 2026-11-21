@@ -210,6 +210,8 @@ async fn sftp_server_editor_save_conflict_preserves_both_copies() {
 #[cfg(all(unix, feature = "integration-tests"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_fs_commands_invoke_real_server() {
+    // Spawns a real shell for the insertion check, so it holds the child-process gate.
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     use crate::state::AppState;
     use serde::Deserialize;
     use serde_json::{json, Value};

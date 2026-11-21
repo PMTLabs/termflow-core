@@ -96,6 +96,36 @@ const RAW_SINKS: &[(&str, &str, usize, &str)] = &[
         "NON_PTY: private helper file publication; ssh_helpers filesystem tests",
     ),
     (
+        "core/ssh/sftp/download.rs",
+        "stream",
+        1,
+        "NON_PTY: SFTP download into the user-picked local file; sftp download tests",
+    ),
+    (
+        "core/ssh/sftp/local_target.rs",
+        "write_all",
+        1,
+        "NON_PTY: fenced local download target file; sftp local_target tests",
+    ),
+    (
+        "core/ssh/sftp/upload.rs",
+        "write_snapshot",
+        1,
+        "NON_PTY: remote SFTP upload of a watched edit; sftp upload tests",
+    ),
+    (
+        "core/ssh/sftp/watch.rs",
+        "read_sample",
+        1,
+        "NON_PTY: hashing a local edit copy; sftp watch tests",
+    ),
+    (
+        "core/ssh/sftp_test_server.rs",
+        "write",
+        1,
+        "NON_PTY: in-process SFTP test server channel; sftp round-trip tests",
+    ),
+    (
         "core/ssh/store.rs",
         "transact",
         1,
