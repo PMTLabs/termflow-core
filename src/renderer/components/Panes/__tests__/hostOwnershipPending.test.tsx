@@ -40,7 +40,11 @@ import { restoreTabPanesInPlace } from '../../../services/tabPanesStore';
 import { pushUndo, __resetLayoutUndoForTests } from '../../../services/layoutUndo';
 import { captureWorkspaceSnapshot } from '../../../services/workspaceSnapshot';
 
-const makeStore = () => configureStore({ reducer: { tabs, panes, settings, zoom, canvas, sessionExit, ui } });
+import ssh, { applyView } from '../../../store/slices/sshSlice';
+
+import sshSession, { sshLaunchReducer as sshLaunch } from '../../../store/slices/sshSessionSlice';
+
+const makeStore = () => configureStore({ reducer: { tabs, panes, settings, zoom, canvas, sessionExit, ui, ssh, sshSession, sshLaunch } });
 const leaf = (terminalId: string) => ({ id: terminalId, type: 'terminal' as const, terminalId });
 const apiFor = (createTerminal: jest.Mock) => ({
   createTerminal, onTerminalData: jest.fn(), onTerminalExit: jest.fn(),
@@ -497,6 +501,72 @@ test('a moved waiting pane joins the original placement through the stream and m
     expect(api.createTerminal).not.toHaveBeenCalled();
   } finally {
     source.stop();
+    installPaneIncarnations(new PaneIncarnations());
+  }
+});
+
+
+test('TerminalPane reserves one SSH strip across availability and ownership changes', async () => {
+  const id = 'tm-strip';
+  const owner = Promise.resolve({ pg: 4, seq: 1 });
+  const client = new PaneIncarnations(jest.fn() as PaneBridge);
+  const capture = jest.spyOn(client, 'capture').mockReturnValue(owner);
+  installPaneIncarnations(client);
+  seed(activeStore, { ...leaf(id), ssh: { connectionId: 'saved', browserCollapsed: false, followCd: false, hiddenMetrics: [] } });
+  activeService = useService(activeStore, { ...apiFor(jest.fn()), onSshLaunchState: jest.fn() } as any);
+  activeService.registerExistingTerminal(id, 'pc-strip');
+  jest.spyOn(activeService, 'authorizeExisting').mockResolvedValue(true);
+  let layout: string[] | undefined;
+  const check = (label: string, count = 1, status?: string, buttons: string[] = []) => {
+    const display = container.querySelector('[data-process-id="pc-strip"]')!;
+    expect(display).not.toBeNull();
+    const pane = display.closest('.terminal-pane')!;
+    const notices = pane.querySelectorAll(':scope > .ssh-launch-notice');
+    expect({ label, count: notices.length }).toEqual({ label, count });
+    if (!count) return;
+    expect(notices[0].hasAttribute('data-ssh-keyboard-owner')).toBe(true);
+    expect(notices[0].querySelectorAll('.ssh-launch-strip')).toHaveLength(1);
+    if (status) {
+      expect(notices[0].querySelector('[role=status]')?.textContent).toBe(status);
+      expect([...notices[0].querySelectorAll('button')].map(b => b.textContent)).toEqual(buttons);
+      expect(notices[0].querySelectorAll('.ssh-launch-overlay > *')).toHaveLength(0);
+      // The saved-connection issue lives in the strip, never as a second in-flow status.
+      expect(pane.querySelectorAll(':scope > .terminal-startup-status')).toHaveLength(0);
+    }
+    const children = [...pane.children];
+    const beforeContent = children.slice(0, children.findIndex(child => child.contains(display)))
+      .map(child => `${child.tagName}.${child.className}`);
+    layout ??= beforeContent;
+    expect(beforeContent).toEqual(layout);
+  };
+  const availability = async (revision: number, available: boolean) => {
+    act(() => activeStore.dispatch(applyView({ revision, view: {
+      revision, folders: [], connections: available ? [{ id: 'saved' } as any] : [], loadError: null,
+    } })));
+    await flush();
+  };
+  try {
+    act(() => mount(id));
+    await flush();
+    check('loading', 1, 'Loading SSH connections…');
+    await availability(1, true);
+    check('ready');
+    await availability(2, false);
+    check('removed', 1, 'This saved SSH connection was deleted. Pick another from SSH Connections.', ['Open SSH Connections']);
+    await availability(3, true);
+    check('restored');
+    capture.mockReturnValue(undefined);
+    act(() => mount(id));
+    check('owner mismatch', 1, 'Preparing SSH…');
+    capture.mockReturnValue(owner);
+    act(() => mount(id));
+    await flush();
+    check('owner match');
+    act(() => activeStore.dispatch(addTabTree({ tabId: 'tb-wait', tree: leaf(id) })));
+    await flush();
+    check('untagged', 0);
+  } finally {
+    act(() => root.render(null));
     installPaneIncarnations(new PaneIncarnations());
   }
 });

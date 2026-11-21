@@ -44,7 +44,7 @@
 
 .ssh-launch-overlay {
   position: absolute;
-  z-index: 3;
+  z-index: 7;
   inset: 100% 0 auto;
   box-sizing: border-box;
   max-height: min(65cqh, max(0px, calc(100cqh - 72px)));

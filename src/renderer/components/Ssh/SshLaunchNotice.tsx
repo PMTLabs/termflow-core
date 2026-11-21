@@ -42,6 +42,20 @@ export interface SshLaunchNoticeProps {
   onSecret(secret: string, remember: boolean, receipt: SshPromptReceipt): Promise<void>;
 }
 
+export function SshLaunchStrip({ status = stageCopy.preparing, children, overlay }: {
+  status?: string;
+  children?: React.ReactNode;
+  overlay?: React.ReactNode;
+}) {
+  return <section className="ssh-launch-notice" data-ssh-keyboard-owner="" aria-label="SSH launch">
+    <div className="ssh-launch-strip">
+      <span role="status" title={status}>{status}</span>
+      {children}
+    </div>
+    {overlay}
+  </section>;
+}
+
 export function SshLaunchNotice(props: SshLaunchNoticeProps) {
   const { snapshot, view, failure } = props;
   const stage = snapshot?.stage ?? (failure ? 'error' : 'preparing');
@@ -63,20 +77,16 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
   const reason = stage === 'ended' ? sshLaunchEndReason(snapshot?.error) : shown?.message;
   const cancel = () => { if (snapshot) props.onCancel(snapshot.attempt); };
   const reconnect = stage === 'ended' || ((stage === 'typed' || stage === 'running') && currentView?.state === 'disconnected');
-  return <section className="ssh-launch-notice" data-ssh-keyboard-owner="" aria-label="SSH launch">
-    <div className="ssh-launch-strip">
-      <span role="status" title={stageCopy[stage]}>{stageCopy[stage]}</span>
-      {waiting && snapshot && props.canCancel !== false && !host && !secret &&
-        <button type="button" className="au-btn" onClick={cancel}>Cancel</button>}
-      {(stage === 'blocked' || stage === 'error' || stage === 'cancelled' || reconnect) &&
-        <button type="button" className="au-btn" disabled={props.retrying} onClick={props.onReconnect}>{reconnect ? 'Reconnect' : 'Retry'}</button>}
-    </div>
-    <div className="ssh-launch-overlay">
+  return <SshLaunchStrip status={stageCopy[stage]} overlay={<div className="ssh-launch-overlay">
       {snapshot?.error?.code === 'Timeout' && <div role="status">Return to the local shell prompt</div>}
       {reason && <div role="alert">{reason}</div>}
       {failure && !(reason && failure.code === shown?.code) && <div role="alert">{failure.message}</div>}
       {host && receipt && <SshHostKeyPrompt key={promptKey} view={currentView} onTrust={() => props.onTrust(receipt)} onCancel={cancel} />}
       {secret && receipt && <SshSecretPrompt key={promptKey} view={currentView} onSubmit={(value, remember) => props.onSecret(value, remember, receipt)} onCancel={cancel} />}
-    </div>
-  </section>;
+    </div>}>
+      {waiting && snapshot && props.canCancel !== false && !host && !secret &&
+        <button type="button" className="au-btn" onClick={cancel}>Cancel</button>}
+      {(stage === 'blocked' || stage === 'error' || stage === 'cancelled' || reconnect) &&
+        <button type="button" className="au-btn" disabled={props.retrying} onClick={props.onReconnect}>{reconnect ? 'Reconnect' : 'Retry'}</button>}
+  </SshLaunchStrip>;
 }

@@ -35,15 +35,53 @@ test('keeps the strip before a snapshot exists', () => {
   expectFixedStrip();
 });
 
+function cssRules(file: string) {
+  const css = readSource(path.join(__dirname, file)).replace(/\/\*[\s\S]*?\*\//g, '');
+  return [...css.matchAll(/([^{}]+)\{([^{}]+)\}/g)];
+}
+
+const declarations = (rules: ReturnType<typeof cssRules>, selector: string) => rules
+  .filter(([, name]) => name.split(',').some(part => part.trim() === selector))
+  .map(([, , body]) => body).join('\n');
+const values = (body: string, property: string) => body.split(';').flatMap(declaration => {
+  const colon = declaration.indexOf(':');
+  return colon >= 0 && declaration.slice(0, colon).trim() === property
+    ? [declaration.slice(colon + 1).trim()] : [];
+});
+
 test('CSS reserves only the fixed one-line strip outside Canvas', () => {
-  const css = readSource(path.join(__dirname, 'SshLaunchNotice.css')).replace(/\/\*[\s\S]*?\*\//g, '');
-  const rules = [...css.matchAll(/([^{}]+)\{([^{}]+)\}/g)];
-  const rule = (selector: string) => rules.find(([, name]) => name.trim() === selector)?.[2] ?? '';
-  expect(rule('.ssh-launch-strip')).toMatch(/\bheight:\s*\d+px;/);
+  const rules = cssRules('SshLaunchNotice.css');
+  const rule = (selector: string) => declarations(rules, selector);
+  const strip = rule('.ssh-launch-strip');
+  expect(strip).toMatch(/\bheight:\s*\d+px;/);
+  expect(values(strip, 'height')).toEqual(['36px']);
+  expect(values(strip, 'min-height')).toEqual([]);
+  expect(values(strip, 'box-sizing')).toEqual(['border-box']);
   expect(rule('.ssh-launch-strip > [role="status"]')).toMatch(/white-space:\s*nowrap;/);
+  expect(values(rule('.ssh-launch-strip > [role="status"]'), 'white-space')).toEqual(['nowrap']);
+  expect(values(strip, 'white-space').every(value => value === 'nowrap')).toBe(true);
+  expect(values(rule('.ssh-launch-notice'), 'flex')).toEqual(['none']);
+  expect(values(rule('.ssh-launch-overlay:empty'), 'display')).toEqual(['none']);
   expect(rule('.ssh-launch-overlay')).toMatch(/position:\s*absolute;/);
   expect(rules.filter(([, name, body]) => name.trim().endsWith('.ssh-launch-notice') && /position:\s*absolute;/.test(body))
     .map(([, name]) => name.trim())).toEqual(['.canvas-surface > .ssh-launch-notice']);
+});
+
+test('SSH prompts paint above pane chrome and below the solo header', () => {
+  const indices = (file: string, selector: string) => values(declarations(cssRules(file), selector), 'z-index').map(Number);
+  const overlay = indices('SshLaunchNotice.css', '.ssh-launch-overlay');
+  expect(overlay).toHaveLength(1);
+  for (const [file, selector] of [
+    ['SshPaneShell.css', '.ssh-pane-chrome'],
+    ['../Terminal/AgentChip.css', '.agent-chip'],
+    ['../Terminal/ScrollToBottomButton.css', '.scroll-to-bottom-button'],
+    ['../Terminal/RemoteSuggestChip.css', '.remote-suggest-chip'],
+  ]) {
+    const chrome = indices(file, selector);
+    expect(chrome.length).toBeGreaterThan(0);
+    expect(overlay[0]).toBeGreaterThan(Math.max(...chrome));
+  }
+  expect(overlay[0]).toBeLessThan(8);
 });
 
 test.each([
