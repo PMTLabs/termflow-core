@@ -283,6 +283,7 @@ pub fn spawn_terminal(
     // caller decided `history_seed` on the same fact, so it asks only when it will be.
     initial_cursor_row: Option<u16>,
     admission: Option<u64>,
+    ssh_opt_in: bool,
 ) -> Result<String, String> {
     let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
     let leaf = renderer_terminal_id.as_deref().unwrap_or(&id);
@@ -311,18 +312,38 @@ pub fn spawn_terminal(
         pixel_height: 0,
     };
 
-    let (cmd_builder, prompt_hook) = build_local_shell_command(
-        &id, &shell_identity, shell_path, &shell_name, shell_args, cwd,
-        app_state.exempt_loopback_from_proxy.load(std::sync::atomic::Ordering::Relaxed),
-        |k| std::env::var(k).ok(),
-    );
+    let proxy_exemption = app_state.exempt_loopback_from_proxy.load(std::sync::atomic::Ordering::Relaxed);
+    let (cmd_builder, prompt_hook, prepared) = if ssh_opt_in {
+        let mut spec = super::build_spawn_spec(
+            &id, Some(&shell_identity), shell_path.as_deref(), &shell_name,
+            shell_args.as_deref(), cwd.as_deref(), cols, rows, proxy_exemption,
+        );
+        spec.args = shell_args.unwrap_or_default();
+        let prepared = super::ssh_shell::PreparedShell::register(&app_state.app_handle, keys, &id, cg, &mut spec, false)?;
+        let mut builder = CommandBuilder::new(&spec.shell);
+        builder.args(&spec.args);
+        for key in &spec.env_remove { builder.env_remove(key); }
+        for (key, value) in &spec.env { builder.env(key, value); }
+        if let Some(dir) = &spec.cwd { builder.cwd(dir); }
+        (builder, super::ssh_shell::has_cwd_hook(&spec.shell), Some(prepared))
+    } else {
+        let (builder, prompt_hook) = build_local_shell_command(
+            &id, &shell_identity, shell_path, &shell_name, shell_args, cwd,
+            proxy_exemption, |k| std::env::var(k).ok(),
+        );
+        (builder, prompt_hook, None)
+    };
 
     let pair = open_pty(size, cursor_row.is_some())?;
     
     let child = pair.slave.spawn_command(cmd_builder).map_err(|e| e.to_string())?;
     let pid = child.process_id().unwrap_or(0);
-    let process = LocalProcess::new(child);
+    let process = if prepared.is_some() { LocalProcess::with_exit_probe(child) } else { LocalProcess::new(child) };
     let mut unpublished = UnpublishedChild(Some(process.clone()));
+    if let Some(prepared) = prepared {
+        let shell = process.clone();
+        super::ssh_shell::retain_until_quiescent(prepared.submitted(), move || shell.child_exited());
+    }
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     // Note: taking the writer might make the master unusable for writing if not cloned? 

@@ -67,6 +67,7 @@ pub async fn create_terminal(
     // primary one. `None` (an older renderer bundle) means false — this
     // parameter is optional only so that build still invokes cleanly.
     elevated: Option<bool>,
+    ssh_launch_connection_id: Option<String>,
 ) -> Result<String, String> {
     let (shell_name, shell_path, shell_args, shell_cwd) = resolve_profile(profile_id.as_deref(), cwd);
     
@@ -134,6 +135,7 @@ pub async fn create_terminal(
                 // keeps that one definition in `terminal_display_name`.
                 name: None,
                 elevated: elevated.unwrap_or(false),
+                ssh_launch_connection_id,
             },
         )
         .await;
@@ -146,6 +148,10 @@ pub async fn create_terminal(
     // terminal's first hydration, and the engine's reset()+write replay of it shows
     // "old scrollback → divider → fresh prompt". The replay is placed so the renderer's
     // cursor is on the row ConPTY believes the prompt is on (`state::restore_frame`).
+    let ssh_shell_path = pty_manager::ssh_shell::validate_create(
+        ssh_launch_connection_id.as_deref(), shell_path.as_deref(), shell_args.as_deref(),
+    )?;
+    let shell_path = ssh_shell_path.or(shell_path);
     let history_prefix = tab_id.as_ref().and_then(|t| restore_prefix(state.inner(), t));
     let (seed, cursor_row, staged) = plan_in_process_restore(history_prefix, rows, cols);
 
@@ -166,6 +172,7 @@ pub async fn create_terminal(
         seed,
         cursor_row,
         None,
+        ssh_launch_connection_id.is_some(),
     )?;
 
     if let Some(prefix) = staged {
@@ -350,6 +357,8 @@ pub(crate) struct SpawnRequest {
     /// every construction site must state it explicitly. The API/MCP spawn
     /// paths always pass `false` — elevation via REST/MCP is out of scope.
     pub elevated: bool,
+    /// Internal IPC opt-in only; not a command, session receipt or persisted field.
+    pub ssh_launch_connection_id: Option<String>,
 }
 
 /// THE spawn decision, for every caller.
@@ -397,7 +406,14 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
         cwd,
         name,
         elevated,
+        ssh_launch_connection_id,
     } = req;
+    use pty_manager::ssh_shell;
+    let ssh_shell_path = ssh_shell::validate_create(
+        ssh_launch_connection_id.as_deref(), shell_path.as_deref(), shell_args.as_deref(),
+    )?;
+    let shell_path = ssh_shell_path.or(shell_path);
+    let ssh_opt_in = ssh_launch_connection_id.is_some();
 
     // Which sidecar this spawn targets, its connected client, and whether the
     // session already lives there (`Some(pid)`: attach to it instead of
@@ -429,7 +445,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
         // land here now that every supported OS is default-on): in-process is the
         // intended behaviour, not a degraded one.
         if !crate::pty_host_client::enabled() {
-            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled", cg);
+            return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), "sidecar not enabled", cg, ssh_opt_in);
         }
         // Ensure the hosts are up, pick the one this create belongs on, and take
         // its admission. A refusal (the app is exiting or updating, or the session
@@ -441,10 +457,13 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
             crate::state::Placement::Attach { channel, client, pid, ticket, session_key } => (process_id, channel, client, Some(pid), Some(ticket), session_key),
             crate::state::Placement::Spawn { channel, client, ticket, session_key } => (process_id, channel, client, None, Some(ticket), session_key),
             crate::state::Placement::InProcess { reason } => {
-                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason, cg);
+                return host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &reason, cg, ssh_opt_in);
             }
         }
     };
+    if claimed_pid.is_none() {
+        ssh_shell::require_host_registration(ssh_opt_in, client.ssh_prompt_registration())?;
+    }
     let ticket = ticket.expect("hosted placement has admission");
     let staged = crate::state::StagedShell { process: process_id.clone(),
         stage: crate::state::ShellStage::Hosted(ticket.key_stage().expect("hosted key staged")) };
@@ -496,14 +515,12 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
     // has a registered screen to land in instead of being dropped by the
     // consumer's "unknown id" gate.
     let ident = host_identity_for_process(&process_id, &session_key, Some(&id), owning_tab_id.as_deref());
-    register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
     // Seed + stage BEFORE the spawn so restored history precedes the shell's
     // first output in the parser. On spawn failure, cleanup_terminal_state
     // removes both the parser and the staged prefix; host_fallback restages.
     // A restore needs ConPTY's cursor frame to match the replay the renderer is about to show
     // (see `state::restore_frame`): ask the host to start the child on the row the replay ends on
     // when it can, otherwise push the replay above the viewport so row 1 is true.
-    let cursor_row = stage_scrollback(state, &id, &process_id, CursorFrame::choose(client.inherit_cursor()), rows, cols);
     let mut spec = pty_manager::build_spawn_spec(
         &session_key,
         // The LEAF, not the session key: this is what the child shell reads as
@@ -519,12 +536,22 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
             .exempt_loopback_from_proxy
             .load(std::sync::atomic::Ordering::Relaxed),
     );
-    spec.initial_cursor_row = cursor_row;
+    let prepared = if ssh_opt_in {
+        // Use the profile's raw arguments, not the ordinary name-based PowerShell injection.
+        // The selected executable's adapter installs the appropriate integration.
+        spec.args = shell_args.clone().unwrap_or_default();
+        Some(ssh_shell::PreparedShell::register(&state.app_handle, state.host_table.keys(), &process_id, cg, &mut spec, true)?)
+    } else { None };
+    let prompt_hook = if ssh_opt_in { ssh_shell::has_cwd_hook(&spec.shell) } else { prompt_hook };
+    register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
+    spec.initial_cursor_row = stage_scrollback(state, &id, &process_id, CursorFrame::choose(client.inherit_cursor()), rows, cols);
     // Timed because this round trip is the user-visible "how long until my new
     // tab appears": the sidecar answers `Spawn` from ONE sequential frame loop,
     // so any slow inline work in another frame's handler (notably a `Close`'s
     // process-tree kill) shows up here as latency and nowhere else.
     let spawn_started = std::time::Instant::now();
+    // Once submitted, a timeout/disconnect is not evidence the child never started.
+    let adapter = prepared.map(ssh_shell::PreparedShell::submitted);
     let spawned = client.spawn_owned(&identity, &spec).await;
     let spawn_ms = spawn_started.elapsed().as_millis();
     if spawn_ms >= 250 {
@@ -534,6 +561,7 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
     }
     match spawned {
         Ok(pid) => {
+            if let Some(adapter) = adapter { ssh_shell::retain_hosted(adapter, pid); }
             if let Some(mut t) = state.terminals.get_mut(&process_id) {
                 t.pid = pid;
             }
@@ -552,8 +580,11 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
                 // Never host_fallback for an elevated request (R7): fail visibly
                 // instead of silently spawning an unprivileged shell.
                 Err(format!("elevated spawn failed: {e}"))
+            } else if ssh_opt_in {
+                // Do not start a second SSH-prepared shell on an ambiguous host result.
+                Err(format!("SSH readiness host spawn failed: {e}"))
             } else {
-                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e, cg)
+                host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e, cg, false)
             }
         }
     }
@@ -777,6 +808,7 @@ fn host_fallback(
     name: Option<&str>,
     reason: &str,
     cg: u64,
+    ssh_opt_in: bool,
 ) -> Result<String, String> {
     // A sidecar that is switched OFF is not a failure but an explicit
     // `TERMFLOW_PTY_HOST=0`, so warning here would fire on every single spawn
@@ -809,6 +841,7 @@ fn host_fallback(
         seed,
         cursor_row,
         Some(cg),
+        ssh_opt_in,
     )?;
     if let Some(prefix) = staged {
         state.replay_prefix.insert(fallback_id.clone(), prefix);

@@ -144,6 +144,18 @@ pub(crate) fn instrument_posix(
     Ok(output)
 }
 
+pub(super) fn is_powershell(executable: &str) -> bool {
+    windows::dialect(executable) == Some(true)
+}
+
+pub(super) fn validate_profile(executable: &str, args: &[String]) -> io::Result<()> {
+    if let Some(ps) = windows::dialect(executable) {
+        return windows::validate_profile(executable, args, ps);
+    }
+    let (dialect, _) = classify(executable)?;
+    inspect_args(dialect, args).map(|_| ())
+}
+
 fn classify(executable: &str) -> io::Result<(Dialect, Paths)> {
     let base = executable.rsplit(['/', '\\']).next().unwrap_or_default();
     let dialect = match base.to_ascii_lowercase().trim_end_matches(".exe") {

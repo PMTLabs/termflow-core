@@ -108,7 +108,7 @@ interface ElectronAPI extends SshAPI {
   /// directly. `screen` is the whole viewport in one string, not a row array.
   getTerminalScreenText: (terminalId: string) => Promise<{ screen: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => Promise<string>;
   /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
   /// window, so dialogs a console program parents to `GetConsoleWindow()` (the
   /// `az login` WAM prompt) open in front instead of behind the app. Fired on
@@ -470,7 +470,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Terminal Operations
-  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean) => {
+  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => {
     // We pass profile (id) to Rust, it resolves to path/args
     // We also pass cwd if provided; use fitted size when known, else fall back to 80×24
     return invoke('create_terminal', {
@@ -487,6 +487,7 @@ const tauriBridge: ElectronAPI = {
       sessionKey,
       // Plan 045: spawn against the elevated sidecar instead of the primary one.
       elevated,
+      ...(sshLaunchConnectionId === undefined ? {} : { sshLaunchConnectionId }),
     });
   },
 

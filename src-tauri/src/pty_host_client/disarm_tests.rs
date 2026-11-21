@@ -1,5 +1,31 @@
 use super::*;
 
+#[tokio::test]
+async fn hosted_ssh_create_requires_registration_capable_host() {
+    use termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV;
+    let (host, mut frames) = client();
+    let ordinary = crate::pty_manager::build_spawn_spec("tm-a", None, None, "default", None, None, 80, 24, false);
+    let mut opted = ordinary.clone();
+    let nonce = "0123456789abcdef0123456789abcdef";
+    opted.env.push((HOST_REGISTRATION_ENV.into(), nonce.into()));
+    let refusal = host.spawn_session("tm-a", &opted).await.unwrap_err();
+    assert!(refusal.contains("does not support SSH prompt registration"));
+    assert!(frames.try_recv().is_err(), "no Spawn, and no nonce, reached the old host");
+
+    for (capable, spec, expected) in [(false, &ordinary, None), (true, &opted, Some(nonce))] {
+        host.set_ssh_prompt_registration(capable);
+        let serve = async {
+            let Frame::Ctrl(Control::Spawn { req, tab_id, spec }) = frames.recv().await.unwrap() else { panic!("wanted Spawn") };
+            let actual = spec.env.iter().find(|(key, _)| key == HOST_REGISTRATION_ENV).map(|(_, val)| val.as_str());
+            assert_eq!(actual, expected);
+            let reply = host.pending.lock().unwrap().remove(&req).unwrap();
+            reply.send(Response::Spawned { req, tab_id, pid: 42 }).unwrap();
+        };
+        let (result, ()) = tokio::join!(host.spawn_session("tm-a", spec), serve);
+        assert_eq!(result.unwrap(), 42);
+    }
+}
+
 fn token() -> Option<crate::state::permissions::host_identity::AuditToken> {
     Some(crate::state::permissions::host_identity::AuditToken([0, 0, 0, 0, 0, 41, 0, 1]))
 }
@@ -20,6 +46,7 @@ fn client() -> (PtyHostClient, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
             inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ssh_prompt_registration: Arc::default(),
             identity_cache: Arc::default(),
             peer_token: Arc::default(),
             lifecycle: Arc::new(HostRetention::Unknown),

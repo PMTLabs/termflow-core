@@ -98,6 +98,10 @@ impl ProcessIdentity {
         Ok(())
     }
 
+    pub(super) fn pid_quiescent(pid: u32) -> bool {
+        pid != 0 && platform::process_absent(pid)
+    }
+
     // Only positive OS evidence of absence permits deletion. A reused PID, access denial or
     // unavailable process metadata retains the entry, even if its start time differs.
     fn definitely_dead(&self) -> bool {

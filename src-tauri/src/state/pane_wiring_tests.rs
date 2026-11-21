@@ -67,11 +67,13 @@ fn admitted_create_json_accepts_optional_renderer_fields_without_renaming() {
     let request: crate::commands::AdmittedCreateRequest = serde_json::from_value(serde_json::json!({
         "pg": 7, "cg": 12, "leaf": "tm-json", "profile": "pwsh", "name": "named", "cwd": "directory",
         "cols": 100, "rows": 40, "owningTabId": "tb-json", "sessionKey": "legacy-json", "elevated": true,
+        "sshLaunchConnectionId": "saved-id",
     })).unwrap();
     assert_eq!((request.pg, request.cg), (7, 12));
     assert_eq!((request.leaf.as_str(), request.profile.as_str()), ("tm-json", "pwsh"));
     assert_eq!(request.owning_tab_id.as_deref(), Some("tb-json"));
     assert_eq!(request.session_key.as_deref(), Some("legacy-json"));
+    assert_eq!(request.ssh_launch_connection_id.as_deref(), Some("saved-id"));
     assert_eq!((request.cols, request.rows, request.elevated), (Some(100), Some(40), Some(true)));
     assert_eq!(request.name.as_deref(), Some("named"));
     assert_eq!(request.cwd.as_deref(), Some("directory"));

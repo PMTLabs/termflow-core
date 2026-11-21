@@ -1,5 +1,17 @@
     use super::*;
 
+    #[test]
+    fn public_create_ignores_internal_ssh_launch_opt_in() {
+        for opt_in in [serde_json::json!("saved-id"), serde_json::json!({"cannotBeAnInternalId": true})] {
+            let req: CreateTerminalReq = serde_json::from_value(serde_json::json!({
+                "name": "ordinary", "sshLaunchConnectionId": opt_in,
+            })).unwrap();
+            assert_eq!(req.name.as_deref(), Some("ordinary"));
+        }
+        let src = include_str!("mod.rs").split("#[cfg(test)]").next().unwrap();
+        assert!(src.contains("ssh_launch_connection_id: None,"));
+    }
+
     // Design §12: this codebase has already shipped a silent serde-key misroute once (the
     // Fleet MCP `targetOS` bug), where a field deserialised to None and the feature simply
     // did nothing. `parent_terminal_id` fails exactly that way — the spawn still succeeds and

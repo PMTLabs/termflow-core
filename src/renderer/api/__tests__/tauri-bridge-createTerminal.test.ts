@@ -47,6 +47,12 @@ describe('tauriBridge permission requests', () => {
 });
 
 describe('tauriBridge restore intent contract', () => {
+  it('forwards SSH readiness only on an explicitly opted-in legacy create', async () => {
+    await tauriBridge.createTerminal('default', undefined, undefined, 'tm-opted', 80, 24, 'tb-owner', undefined, false, 'saved-id');
+    expect(invokeMock).toHaveBeenLastCalledWith('create_terminal', expect.objectContaining({ sshLaunchConnectionId: 'saved-id' }));
+    await tauriBridge.createTerminal('default', undefined, undefined, 'tm-ordinary');
+    expect(invokeMock.mock.calls[1]?.[1]).not.toHaveProperty('sshLaunchConnectionId');
+  });
   it('round-trips full process ids and exact recovered session overrides', async () => {
     const processId = 'pc-0123456789ab4cde8fab0123456789ab';
     const sessionKey = 'tm-original~0123456789ab4cde8fab0123456789ac';

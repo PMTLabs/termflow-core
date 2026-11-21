@@ -65,6 +65,7 @@ pub(crate) struct AdmittedCreateRequest {
     pub owning_tab_id: Option<String>,
     pub session_key: Option<String>,
     pub elevated: Option<bool>,
+    pub ssh_launch_connection_id: Option<String>,
 }
 
 #[tauri::command]
@@ -80,6 +81,7 @@ pub(crate) async fn create_admitted_terminal(window: WebviewWindow, state: State
                 leaf_id: request.leaf, session_key: request.session_key, owning_tab_id: request.owning_tab_id,
                 cols: request.cols.unwrap_or(80), rows: request.rows.unwrap_or(24),
                 shell_name, shell_path, shell_args, cwd, name: request.name, elevated: request.elevated.unwrap_or(false),
+                ssh_launch_connection_id: request.ssh_launch_connection_id,
             }, cg).await
         }
     }

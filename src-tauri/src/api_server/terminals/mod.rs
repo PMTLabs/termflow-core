@@ -383,6 +383,7 @@ pub(crate) async fn create_terminal(
             name: Some(terminal_name.clone()),
             // Elevation via the REST/MCP path is out of scope (plan 045).
             elevated: false,
+            ssh_launch_connection_id: None,
         },
     )
     .await;

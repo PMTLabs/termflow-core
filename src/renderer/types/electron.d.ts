@@ -185,7 +185,7 @@ export interface ElectronAPI extends SshAPI {
   getActiveProcesses?: () => Promise<ActiveProcess[]>;
 
   // Terminal management
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => Promise<string>;
   /**
    * Windows: make the calling window the owner of this shell's ConPTY
    * pseudo-console window, so console-app dialogs parented to

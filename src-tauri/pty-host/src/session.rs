@@ -103,6 +103,38 @@ struct PromptClock {
     uncertain: AtomicBool,
 }
 
+#[cfg(test)]
+#[test]
+fn hosted_ssh_create_requires_registration_capable_host_child_env_strip() {
+    use termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV;
+    let nonce = "0123456789abcdef0123456789abcdef";
+    let spec = SpawnSpec {
+        shell: "test-shell".into(), args: vec![], cwd: None, cols: 80, rows: 24,
+        env_remove: vec![], initial_cursor_row: None,
+        env: vec![(HOST_REGISTRATION_ENV.into(), nonce.into()), ("TERM".into(), "xterm".into())],
+    };
+    let mut cmd = CommandBuilder::new(&spec.shell);
+    cmd.env(HOST_REGISTRATION_ENV, "inherited-data");
+    assert_eq!(apply_spawn_environment(&mut cmd, &spec).as_deref(), Some(nonce));
+    assert!(cmd.get_env(HOST_REGISTRATION_ENV).is_none());
+    assert_eq!(cmd.get_env("TERM"), Some(std::ffi::OsStr::new("xterm")));
+}
+
+fn apply_spawn_environment(cmd: &mut CommandBuilder, spec: &SpawnSpec) -> Option<String> {
+    use termflow_pty_protocol::ssh_prompt::{valid_nonce, HOST_REGISTRATION_ENV};
+    for key in &spec.env_remove { cmd.env_remove(key); }
+    let mut nonce = None;
+    for (key, value) in &spec.env {
+        if key == HOST_REGISTRATION_ENV {
+            cmd.env_remove(HOST_REGISTRATION_ENV);
+            if valid_nonce(value) { nonce = Some(value.clone()); }
+        } else {
+            cmd.env(key, value);
+        }
+    }
+    nonce
+}
+
 impl Session {
     /// Spawn a hosted PTY. `attached_initial` is set BEFORE the reader thread
     /// starts, so the spawn path (true) streams output from byte 0.
@@ -124,19 +156,7 @@ impl Session {
 
         let mut cmd = CommandBuilder::new(&spec.shell);
         cmd.args(&spec.args);
-        for k in &spec.env_remove {
-            cmd.env_remove(k);
-        }
-        let mut prompt_nonce = None;
-        for (k, v) in &spec.env {
-            if k == termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV {
-                if termflow_pty_protocol::ssh_prompt::valid_nonce(v) {
-                    prompt_nonce = Some(v.clone());
-                }
-            } else {
-                cmd.env(k, v);
-            }
-        }
+        let prompt_nonce = apply_spawn_environment(&mut cmd, spec);
         let prompt_clock = prompt_nonce.as_ref().map(|_| Arc::new(PromptClock::default()));
         if let Some(dir) = &spec.cwd {
             if !dir.is_empty() {

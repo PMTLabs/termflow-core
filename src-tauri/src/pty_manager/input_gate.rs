@@ -399,8 +399,6 @@ impl crate::state::HostKeys {
         state.invalidate_ready()
     }
 
-    // Registration is wired into the internal SSH create opt-in in CP3D.
-    #[allow(dead_code)]
     pub(crate) fn register_ssh_prompt(&self, process: &str, generation: u64, nonce: &str) -> Result<(), Refusal> {
         let _order = self.input.ownership.read();
         let owner = self.ssh_prompt_stamp(process).ok_or(Refusal::StaleAttempt)?;

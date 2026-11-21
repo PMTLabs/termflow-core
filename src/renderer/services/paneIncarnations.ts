@@ -31,6 +31,7 @@ export type PaneReply = { status: 'Ack'; result: PaneResult } | { status: 'Resyn
 export interface AdmittedCreateRequest {
   pg: Counter; cg: Counter; leaf: string; profile: string; name?: string; cwd?: string;
   cols?: number; rows?: number; owningTabId?: string; sessionKey?: string; elevated?: boolean;
+  sshLaunchConnectionId?: string;
 }
 export interface PaneCommands {
   register_page: { args: undefined; result: PageRegistration };

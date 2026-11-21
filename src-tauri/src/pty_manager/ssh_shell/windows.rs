@@ -1,4 +1,4 @@
-//! Windows-family prompt wrappers; no launcher or create-path integration.
+//! Windows-family prompt-readiness wrappers; no SSH launcher.
 
 use super::*;
 use crate::pty_manager::spawn_spec::PS_CWD_INTEGRATION;
@@ -8,13 +8,23 @@ const CMD_BOOTSTRAP: &str = "__TERMFLOW_SSH_CMD_BOOTSTRAP";
 pub(super) fn instrument(
     ordinary: &SpawnSpec, nonce: &str, root: &HelperRoot, owner: &ProcessIdentity,
 ) -> Option<io::Result<PosixAdapter>> {
-    let base = ordinary.shell.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
-    let ps = match base.as_str() {
+    Some(prepare(ordinary, nonce, root, owner, dialect(&ordinary.shell)?))
+}
+
+pub(super) fn dialect(executable: &str) -> Option<bool> {
+    let base = executable.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    Some(match base.as_str() {
         "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe" => true,
         "cmd" | "cmd.exe" if cfg!(windows) => false,
         _ => return None,
-    };
-    Some(prepare(ordinary, nonce, root, owner, ps))
+    })
+}
+
+pub(super) fn validate_profile(executable: &str, args: &[String], ps: bool) -> io::Result<()> {
+    if !Path::new(executable).is_absolute() {
+        return Err(adapter_error("SSH readiness requires an absolute shell executable path"));
+    }
+    if ps { validate_ps_flags(args) } else { cmd_flags(args).map(|_| ()) }
 }
 
 fn prepare(
@@ -82,6 +92,11 @@ fn ps_flags(ordinary: &[String]) -> io::Result<Vec<String>> {
     let supplied = ordinary.strip_suffix(&[
         "-NoExit".into(), "-Command".into(), PS_CWD_INTEGRATION.into(),
     ]).unwrap_or(ordinary);
+    validate_ps_flags(supplied)?;
+    Ok(supplied.to_vec())
+}
+
+fn validate_ps_flags(supplied: &[String]) -> io::Result<()> {
     let mut iter = supplied.iter();
     while let Some(flag) = iter.next() {
         let lower = flag.to_ascii_lowercase();
@@ -100,7 +115,7 @@ fn ps_flags(ordinary: &[String]) -> io::Result<Vec<String>> {
             _ => return Err(adapter_error("SSH readiness cannot compose with these PowerShell startup flags")),
         }
     }
-    Ok(supplied.to_vec())
+    Ok(())
 }
 
 fn cmd_flags(ordinary: &[String]) -> io::Result<Vec<String>> {

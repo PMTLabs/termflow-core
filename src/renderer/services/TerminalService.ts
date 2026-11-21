@@ -151,6 +151,7 @@ export class TerminalServiceClass {
     elevated?: boolean,
     mode: CreateMode = 'Mount',
     paneId?: string,
+    sshLaunchConnectionId?: string,
   ): Promise<string> {
     // Re-entrant calls for this copy share the pending placement, not another copy's authority.
     const protocol = this.incarnations();
@@ -172,6 +173,7 @@ export class TerminalServiceClass {
       elevated === true, mode, paneId, typeof createKey === 'string' ? undefined : createKey,
       protocol.enabled ? [...this.inFlightCreates.entries()].find(([key, entry]) => key !== createKey && entry.terminalId === terminalId
         && typeof key !== 'string' && (!protocol.capturesForLeaf(terminalId).includes(key) || protocol.isSuppressed(key)))?.[1].promise : undefined,
+      sshLaunchConnectionId,
     );
     this.inFlightCreates.set(createKey, { terminalId, promise: createPromise });
     try {
@@ -223,7 +225,7 @@ export class TerminalServiceClass {
   private async createTerminalWithRetry(
     terminalId: string, shellType: string, name?: string, cwd?: string,
     cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean,
-    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture, predecessor?: Promise<string>,
+    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture, predecessor?: Promise<string>, sshLaunchConnectionId?: string,
   ): Promise<string> {
     if (predecessor) await predecessor.catch(() => {});
     let hostDeadline: number | undefined;
@@ -246,7 +248,7 @@ export class TerminalServiceClass {
       firstAttempt = false;
       try {
         const pid = await this.createTerminalInner(
-          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi,
+          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi, sshLaunchConnectionId,
         );
         if (!this.incarnations().enabled || this.incarnations().isCurrent(terminalId, paneId, pi)) this.setHostWaitState(terminalId, undefined);
         return pid;
@@ -290,7 +292,7 @@ export class TerminalServiceClass {
     owningTabId?: string,
     sessionKey?: string,
     elevated: boolean = false,
-    mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture,
+    mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture, sshLaunchConnectionId?: string,
   ): Promise<string> {
     if (elevated) {
       if (this.elevatedConsentDenied) {
@@ -372,13 +374,17 @@ export class TerminalServiceClass {
         }
       }
       if (admission.status === 'Inert') {
-        processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+        const args = [shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated] as const;
+        processId = await (sshLaunchConnectionId === undefined
+          ? this.api().createTerminal(...args)
+          : this.api().createTerminal(...args, sshLaunchConnectionId));
       } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
         // This leaf's own process: its held early output stays claimable (earlyOutput.ts).
         processId = admission.pc;
       } else if (admission.status === 'Create' || admission.status === 'Join') {
         const work = protocol.create(admission.cg, {
           leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
+          ...(sshLaunchConnectionId === undefined ? {} : { sshLaunchConnectionId }),
         });
         const placement: { pi: PaneCapture; work: Promise<string>; pc?: string } = { pi: attemptPi!, work };
         this.placements.set(terminalId, placement);

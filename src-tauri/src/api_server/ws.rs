@@ -69,6 +69,22 @@ pub(crate) fn parse_subscribe_ids(value: &serde_json::Value) -> Option<Vec<Strin
     })
 }
 
+// The socket only recognizes terminal input. In particular, a create-like
+// command is neither a create request nor terminal input.
+#[test]
+fn websocket_has_no_ssh_opted_create_action() {
+    assert!(terminal_input_action(&json!({
+        "type": "command", "payload": {"action": "terminal:create", "sshLaunchConnectionId": "saved-id"},
+    })).is_none());
+    let payload = json!({"type": "command", "payload": {"action": "terminal:input", "data": "x"}});
+    assert_eq!(terminal_input_action(&payload).unwrap()["data"].as_str(), Some("x"));
+}
+
+fn terminal_input_action(value: &serde_json::Value) -> Option<&serde_json::Value> {
+    let payload = &value["payload"];
+    (payload["action"].as_str() == Some("terminal:input")).then_some(payload)
+}
+
 pub(crate) async fn handle_socket(socket: WebSocket, state: AppState) {
     let (mut sender, mut receiver) = socket.split();
     log::info!("New WebSocket connection established");
@@ -208,16 +224,15 @@ pub(crate) async fn handle_socket(socket: WebSocket, state: AppState) {
                         let _ = tx_internal.send(resp.to_string()).await;
                     }
                     "command" => {
-                        let action = value["payload"]["action"].as_str().unwrap_or("");
-                        match action {
-                            "terminal:input" => {
+                        match terminal_input_action(&value) {
+                            Some(payload) => {
                                 // Normalised for the same reason as the REST handlers:
                                 // a client sends the tm- id it was given, the maps are
                                 // keyed by pc- (design 014 A3).
                                 let terminal_id = &state.resolve_ref(
-                                    value["payload"]["terminalId"].as_str().unwrap_or(""),
+                                    payload["terminalId"].as_str().unwrap_or(""),
                                 );
-                                let data = value["payload"]["data"].as_str().unwrap_or("");
+                                let data = payload["data"].as_str().unwrap_or("");
 
                                 let write_result = crate::pty_manager::input_gate::write_input(
                                     &state, terminal_id, crate::pty_manager::input_gate::InputSource::WebSocket,

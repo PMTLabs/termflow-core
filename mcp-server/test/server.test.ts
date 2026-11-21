@@ -44,6 +44,23 @@ function called(calls: Call[], method: Call["method"], url: string): boolean {
 }
 
 describe("createMcpServer tool wiring", () => {
+    it("public create never forwards sshLaunchConnectionId to REST", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => undefined }));
+        try {
+            const result = await client.callTool({ name: "create_terminal", arguments: {
+                name: "ordinary", sshLaunchConnectionId: "saved-id",
+            } });
+            const call = calls.find((item) => item.method === "post" && item.url === "/terminals");
+            if (result.isError) expect(call).toBeUndefined();
+            else {
+                expect(call?.body).toHaveProperty("name", "ordinary");
+                expect(call?.body).not.toHaveProperty("sshLaunchConnectionId");
+            }
+        } finally {
+            await client.close();
+        }
+    });
     it("round-trips opaque process and session identities through terminal detail", async () => {
         const processId = "pc-0123456789ab4cde8fab0123456789ab";
         const sessionKey = "tm-original~0123456789ab4cde8fab0123456789ac";

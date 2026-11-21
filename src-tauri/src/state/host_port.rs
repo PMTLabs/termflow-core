@@ -222,6 +222,12 @@ impl<R: Runtime> AppState<R> {
         // The same rule for the MCP-hold bit, through the one installer both connection sites use.
         client.set_mcp_hold(connection_mcp_hold(origin, flags.mcp_hold, candidate.pid, client.server_pid(), || crate::pty_host_client::read_advertised_record()));
         client.set_permissions(crate::pty_host_client::connection_capability(origin, flags.permissions, candidate.pid, client.server_pid(), termflow_pty_protocol::CAP_PERMISSIONS, || crate::pty_host_client::read_advertised_record()));
+        let spawned_record;
+        let ssh_record = if origin == HostConnectionOrigin::SpawnedHere {
+            spawned_record = crate::pty_host_client::read_advertised_record();
+            spawned_record.as_ref()
+        } else { candidate.record.as_ref() };
+        client.set_ssh_prompt_registration(ssh_registration_advertised(ssh_record, client.server_pid()));
         client.set_lifecycle(plan.retention_for(origin));
         client.set_advertised_build_id(candidate.record.as_ref().and_then(|r| r.build_id.clone()));
         Ok(Opened { client, epoch: my_gen, build_id: launch.build_id })
@@ -252,6 +258,7 @@ impl<R: Runtime> AppState<R> {
         ));
         client.set_mcp_hold(connection_mcp_hold(HostConnectionOrigin::Adopted, flags.mcp_hold, candidate.pid, client.server_pid(), || None));
         client.set_permissions(crate::pty_host_client::connection_capability(HostConnectionOrigin::Adopted, flags.permissions, candidate.pid, client.server_pid(), termflow_pty_protocol::CAP_PERMISSIONS, || None));
+        client.set_ssh_prompt_registration(ssh_registration_advertised(candidate.record.as_ref(), client.server_pid()));
         client.set_lifecycle(plan.retention_for(HostConnectionOrigin::Adopted));
         let build_id = candidate.record.as_ref().and_then(|r| r.build_id.clone());
         client.set_advertised_build_id(build_id.clone());
@@ -418,6 +425,11 @@ fn host_label(channel: HostChannel) -> String {
     }
 }
 
+// A stale or unverified record may not vouch for an older serving process.
+fn ssh_registration_advertised(record: Option<&termflow_pty_protocol::HostRecord>, server_pid: Option<u32>) -> bool {
+    crate::pty_host_client::host_advertises_served_by(record, server_pid, termflow_pty_protocol::bootstrap::CAP_SSH_PROMPT_REGISTRATION)
+}
+
 #[cfg(test)]
 mod flag_tests {
     use super::host_flags;
@@ -436,6 +448,18 @@ mod flag_tests {
             lifecycle: None,
             build_id: None,
         }
+    }
+
+    #[test]
+    fn ssh_registration_requires_the_serving_hosts_advertisement() {
+        use super::ssh_registration_advertised;
+        use termflow_pty_protocol::bootstrap::CAP_SSH_PROMPT_REGISTRATION;
+        let capable = record(CAP_SSH_PROMPT_REGISTRATION);
+        assert!(ssh_registration_advertised(Some(&capable), Some(capable.pid)));
+        assert!(!ssh_registration_advertised(Some(&capable), Some(capable.pid + 1)));
+        assert!(!ssh_registration_advertised(Some(&capable), None));
+        assert!(!ssh_registration_advertised(Some(&record(CAP_MCP_HOLD)), Some(capable.pid)));
+        assert!(!ssh_registration_advertised(None, Some(capable.pid)));
     }
 
     #[test]

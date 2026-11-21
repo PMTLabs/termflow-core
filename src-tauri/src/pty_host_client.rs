@@ -272,6 +272,7 @@ pub struct PtyHostClient {
     mcp_hold: Arc<std::sync::atomic::AtomicBool>,
     /// Permission controls are unsafe to send unless this connection advertised them.
     permissions: Arc<std::sync::atomic::AtomicBool>,
+    ssh_prompt_registration: Arc<std::sync::atomic::AtomicBool>,
     identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
     peer_token: Arc<Mutex<Option<crate::state::permissions::host_identity::AuditToken>>>,
     /// Lifecycle policy copied from the selected connection plan. This is
@@ -430,6 +431,14 @@ impl PtyHostClient {
     /// Whether this connection may be sent `HoldMcp`/`ReleaseMcp` (see field doc).
     pub fn mcp_hold(&self) -> bool {
         self.mcp_hold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_ssh_prompt_registration(&self, supported: bool) {
+        self.ssh_prompt_registration.store(supported, Ordering::Release);
+    }
+
+    pub(crate) fn ssh_prompt_registration(&self) -> bool {
+        self.ssh_prompt_registration.load(Ordering::Acquire)
     }
 
     pub fn set_permissions(&self, v: bool) {
@@ -789,6 +798,9 @@ impl PtyHostClient {
     }
 
     async fn spawn_session_inner(&self, tab_id: &str, spec: &SpawnSpec, identity: Option<&crate::state::SessionIdentity>) -> Result<u32, String> {
+        if spec.env.iter().any(|(key, _)| key == termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV) {
+            crate::pty_manager::ssh_shell::require_host_registration(true, self.ssh_prompt_registration())?;
+        }
         let tab = tab_id.to_string();
         let spec = spec.clone();
         let binding = self.sessions.lock().unwrap().clone();
@@ -1142,6 +1154,7 @@ where
         inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ssh_prompt_registration: Arc::default(),
         identity_cache,
         peer_token: Arc::default(),
         lifecycle: Arc::new(HostRetention::Unknown),
@@ -1480,11 +1493,14 @@ fn spawn_sidecar_detached(
 pub(crate) fn wire_unix_host_client(conn: tokio::net::UnixStream, deps: PtyHostDeps) -> PtyHostClient {
     #[cfg(target_os = "macos")]
     let (peer_pid, peer_token) = (macos_spawn::peer_pid(&conn), macos_spawn::peer_token(&conn));
+    #[cfg(target_os = "linux")]
+    let peer_pid = conn.peer_cred().ok().and_then(|cred| cred.pid()).and_then(|pid| u32::try_from(pid).ok());
     let (rd, wr) = tokio::io::split(conn);
     let client = wire_client(rd, wr, deps);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    client.exe_origin.set_server_pid(peer_pid);
     #[cfg(target_os = "macos")]
     {
-        client.exe_origin.set_server_pid(peer_pid);
         *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
     }
     client

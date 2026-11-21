@@ -25,6 +25,47 @@ import canvasReducer from '../../store/slices/canvasSlice';
 import sessionExitReducer, { markSessionClosed } from '../../store/slices/sessionExitSlice';
 import { StateManager } from '../StateManager';
 
+it('ssh_launch_field_is_not_persisted', async () => {
+  localStorage.clear();
+  const win = window as any;
+  const oldStore = win.__REDUX_STORE__;
+  const oldPanes = win.__TAB_PANES__;
+  const intent = { sshLaunchConnectionId: 'internal-id-not-workspace-state' };
+  const tab = { id: 'tb-ssh', title: 'SSH', shellType: 'default', ...intent };
+  const pane = { id: 'pn-ssh', type: 'terminal', terminalId: 'tm-ssh', ...intent };
+  const snapshot = {
+    tabs: [tab], activeTabId: tab.id, paneTree: pane, activePaneId: pane.id,
+    tabPanes: { [tab.id]: pane }, treesByTabId: { [tab.id]: pane }, ...intent,
+  };
+  const init = { type: '@@INIT' };
+  win.__REDUX_STORE__ = { getState: () => ({
+    tabs: { ...tabsReducer(undefined, init), tabs: [tab], activeTabId: tab.id },
+    panes: { ...panesReducer(undefined, init), paneTree: pane, activePaneId: pane.id, treesByTabId: snapshot.treesByTabId },
+    settings: settingsReducer(undefined, init), canvas: canvasReducer(undefined, init),
+  }) };
+  win.__TAB_PANES__ = snapshot.tabPanes;
+  try {
+    await StateManager.saveState();
+    await StateManager.saveLayout('SSH snapshot');
+    const blobs = Object.keys(localStorage).map(key => localStorage.getItem(key)!);
+    const session = blobs.map(blob => JSON.parse(blob)).find(value => !Array.isArray(value));
+    const layouts = blobs.map(blob => JSON.parse(blob)).find(Array.isArray);
+    expect(session.tabs[0].id).toBe(tab.id);
+    expect(session.paneTree.terminalId).toBe(pane.terminalId);
+    expect(session.tabPanes[tab.id].terminalId).toBe(pane.terminalId);
+    expect(layouts![0].paneTree.terminalId).toBe(pane.terminalId);
+    const restored = JSON.stringify((StateManager as any).sanitizeLayoutData(snapshot, undefined, true));
+    for (const blob of [...blobs, restored]) {
+      expect(blob).not.toContain('sshLaunchConnectionId');
+      expect(blob).not.toContain(intent.sshLaunchConnectionId);
+    }
+  } finally {
+    win.__REDUX_STORE__ = oldStore;
+    win.__TAB_PANES__ = oldPanes;
+    localStorage.clear();
+  }
+});
+
 describe('saveState never persists sessionExit', () => {
   beforeEach(() => localStorage.clear());
 
