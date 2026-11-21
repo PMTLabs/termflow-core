@@ -27,8 +27,8 @@ test.each([['f-a','f-a'],['f-a','f-child'],['c-one','c-one']])('drag %s onto %s 
 test('folder centre zone nests the row in the final child list',()=>{render();start('f-a');geometry('f-b');const over=dragEvent(row('f-b'),'dragover',undefined,50);expect(over.defaultPrevented).toBe(true);expect(row('f-b').dataset.dropZone).toBe('inside');dragEvent(row('f-b'),'drop',undefined,50);const children:string[]=[];for(const [input] of move.mock.calls){const without=children.filter(id=>id!==input.id);without.splice(input.index,0,input.id);children.splice(0,children.length,...without);}expect(children).toEqual(['f-a']);expect(host.querySelector('.ssh-drop')).toBeNull();});
 test('drag cache is cleared on dragend, even though dragover cannot read dataTransfer',()=>{render();start('c-one');expect(dragEvent(row('f-b'),'dragover').defaultPrevented).toBe(true);dragEvent(row('c-one'),'dragend');expect(host.querySelector('.ssh-drop')).toBeNull();expect(dragEvent(row('f-b'),'dragover').defaultPrevented).toBe(false);});
 test('read-only mutation entry-point census: no API calls, no dialogs, no offered drop',async()=>{
-  const readOnly={...view,loadError:{code:'bad',message:'corrupt'}};
-  const mutations={upsertFolder:jest.fn(),deleteFolder:jest.fn(),upsertConnection:jest.fn(),deleteConnection:jest.fn(),move:jest.fn(),setBookmark:jest.fn()};
+  const readOnly:SshView={...view,connections:[{...view.connections[0],auth:'password',hasSavedSecret:true}],loadError:{code:'bad',message:'corrupt'}};
+  const mutations={upsertFolder:jest.fn(),deleteFolder:jest.fn(),upsertConnection:jest.fn(),deleteConnection:jest.fn(),move:jest.fn(),setBookmark:jest.fn(),forgetSecret:jest.fn()};
   const api={...mutations,get:jest.fn(),reload:jest.fn()} as unknown as SshStoreApi;
   window.electronAPI={ssh:api} as any;
   const store=configureStore({reducer:{ssh:sshReducer}});store.dispatch(applyView({revision:1,view:readOnly}));
@@ -40,6 +40,7 @@ test('read-only mutation entry-point census: no API calls, no dialogs, no offere
     <SshFolderDialog input={{parentId:null,name:'New',icon:'folder',color:'grey'}} readOnly onClose={()=>{}} onSave={async input=>{await api.upsertFolder(input);return true;}}/>
     <SshConnectionEditor connectionId="c-one" initialFolder={null} view={readOnly} api={api} onSaved={()=>{}} onClose={()=>{}}/>
   </Provider>));
+  expect([...host.querySelectorAll<HTMLButtonElement>('.ssh-connection-editor button')].find(b=>b.textContent==='Forget')?.disabled).toBe(true);
   // Toolbar, all three context-menu branches (including icon flyout), editor Save/Delete.
   for(const button of [...document.querySelectorAll<HTMLElement>('.ssh-toolbar button,.context-menu-item,.ssh-connection-editor button')])await act(async()=>button.click());
   for(const id of ['f-a','c-one']){

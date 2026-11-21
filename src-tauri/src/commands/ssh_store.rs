@@ -186,8 +186,7 @@ fn ssh_forget_secret_inner(
     store: &Store,
     id: String,
 ) -> Result<Reply, StoreError> {
-    let revision = store.get()?.revision;
-    let reply = store.forget_secret(&id, revision, |reply| app.changed(CHANGED, reply))?;
+    let reply = mutate(store, app, |s| s.forget_secret(&id))?;
     log::info!("SSH forget saved credential: id={id}");
     Ok(reply)
 }
@@ -244,6 +243,10 @@ mod tests {
             bookmarked: false,
         }
     }
+    fn seed_saved_credential(s: &mut Persisted) {
+        s.connections[0].auth = crate::ssh::store::Auth::Password;
+        s.connections[0].secret = Some("v1:command-test-fixture".into());
+    }
     #[test]
     fn every_mutation_command_emits_exactly_ssh_store_changed_with_post_commit_view_and_revision() {
         for kind in [
@@ -262,7 +265,11 @@ mod tests {
                 .transact(
                     |s| {
                         s.upsert_folder(folder())?;
-                        s.upsert_connection(connection())
+                        s.upsert_connection(connection())?;
+                        if kind == "forget" {
+                            seed_saved_credential(s);
+                        }
+                        Ok(())
                     },
                     |_| {},
                 )
@@ -292,6 +299,10 @@ mod tests {
             }
             .unwrap();
             assert_eq!(reply.revision, setup.revision + 1, "{kind}");
+            if kind == "forget" {
+                assert!(setup.view.connections[0].has_saved_secret);
+                assert!(!reply.view.connections[0].has_saved_secret);
+            }
             if kind == "bookmark" {
                 assert!(
                     reply
@@ -414,11 +425,16 @@ mod tests {
             moved.view.connections[0].folder_id.as_deref(),
             Some(folder_id.as_str())
         );
+        temp.store().transact(|s| {
+            seed_saved_credential(s);
+            Ok(())
+        }, |_| {}).unwrap();
         let bookmarked = invoke(
             "ssh_set_bookmark",
             serde_json::json!({"id":id,"bookmarked":true}),
         );
         assert!(bookmarked.view.connections[0].bookmarked);
+        assert!(bookmarked.view.connections[0].has_saved_secret);
         let forgotten = invoke("ssh_forget_secret", serde_json::json!({"id":id}));
         assert_eq!(forgotten.revision, bookmarked.revision + 1);
         assert!(!forgotten.view.connections[0].has_saved_secret);

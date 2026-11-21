@@ -339,49 +339,16 @@ async fn remember_merge_preserves_concurrent_bookmark_and_mark_used() {
 }
 #[tokio::test]
 async fn forget_preserves_definition_and_next_test_prompts() {
+    use crate::ssh::auth::{CredentialCipher, SecretKind};
+    use zeroize::Zeroizing;
     let s = Setup::new();
-    s.adapter
-        .set_secret_if_binding_matches(&binding(), "v1:fixture".into(), CancellationToken::new())
-        .await
-        .unwrap();
-    let before = s.store.get().unwrap();
-    assert!(before.view.connections[0].has_saved_secret);
-    let mut expected_disk = s.store.snapshot().unwrap();
-    expected_disk.connections[0].secret = None;
-    expected_disk.revision += 1;
-
-    let err = s
-        .store
-        .forget_secret("missing", before.revision, |_| panic!("unexpected event"))
-        .unwrap_err();
-    assert_eq!(err.code, "not-found");
-    let err = s
-        .store
-        .forget_secret("c-a", before.revision - 1, |_| panic!("unexpected event"))
-        .unwrap_err();
-    assert_eq!(err.code, "revision-conflict");
-
-    let after = s
-        .store
-        .forget_secret("c-a", before.revision, |_| {})
-        .unwrap();
-    let mut expected = before;
-    expected.revision += 1;
-    expected.view.revision += 1;
-    expected.view.connections[0].has_saved_secret = false;
-    assert_eq!(after, expected);
-    assert!(s.store.snapshot().unwrap() == expected_disk);
-    assert!(s.adapter.load(&binding()).await.unwrap().is_none());
-
-    let again = s
-        .store
-        .forget_secret("c-a", after.revision, |_| {})
-        .unwrap();
-    expected.revision += 1;
-    expected.view.revision += 1;
-    assert_eq!(again, expected);
-
     let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let cipher = CredentialCipher::default();
+    let b = AuthBinding::for_hop(&hop("c-b", "alice"), None);
+    for (binding, secret) in [(binding(), f.server.password.clone()), (b.clone(), "other-test-credential".into())] {
+        let sealed = cipher.seal(SecretKind::Password, binding.clone(), Zeroizing::new(secret)).await.unwrap();
+        s.adapter.set_secret_if_binding_matches(&binding, sealed, CancellationToken::new()).await.unwrap();
+    }
     f.registry
         .configure(Dependencies {
             targets: Arc::new(s.adapter.clone()),
@@ -396,7 +363,34 @@ async fn forget_preserves_definition_and_next_test_prompts() {
         })
         .unwrap();
     let probe = f.registry.probe("c-a").unwrap();
-    wait_state(&f.registry, &probe, true, SessionState::NeedsSecret).await;
+    wait_state(&f.registry, &probe, true, SessionState::Connected).await;
+    assert!(f.events.0.lock().iter().all(|v| v.state != SessionState::NeedsSecret));
+    f.registry.close(&probe, true, None).unwrap();
+
+    let before = s.store.get().unwrap();
+    assert!(before.view.connections.iter().all(|c| c.has_saved_secret));
+    let mut expected_disk = s.store.snapshot().unwrap();
+    expected_disk.connections[0].secret = None;
+    expected_disk.revision += 1;
+    let err = s.store.transact(|s| s.forget_secret("missing"), |_| panic!("unexpected event")).unwrap_err();
+    assert_eq!(err.code, "not-found");
+    let forget = || s.store.transact(|s| s.forget_secret("c-a"), |_| {}).unwrap();
+    let after = forget();
+    let mut expected = before;
+    expected.revision += 1;
+    expected.view.revision += 1;
+    expected.view.connections[0].has_saved_secret = false;
+    assert_eq!(after, expected);
+    assert!(s.store.snapshot().unwrap() == expected_disk);
+    assert!(s.adapter.load(&binding()).await.unwrap().is_none());
+    assert!(s.adapter.load(&b).await.unwrap().is_some());
+    expected.revision += 1;
+    expected.view.revision += 1;
+    assert_eq!(forget(), expected);
+
+    let probe = f.registry.probe("c-a").unwrap();
+    let prompt = wait_state(&f.registry, &probe, true, SessionState::NeedsSecret).await;
+    assert!(prompt.reason.is_none());
     f.registry.shutdown().await;
 }
 

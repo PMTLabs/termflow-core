@@ -587,6 +587,12 @@ impl Persisted {
             .bookmarked = bookmarked;
         Ok(())
     }
+    pub fn forget_secret(&mut self, id: &str) -> Result<()> {
+        let row = self.connections.iter_mut().find(|c| c.id == id)
+            .ok_or_else(|| StoreError::new("not-found", "Connection not found"))?;
+        row.secret = None;
+        Ok(())
+    }
     pub fn move_row(
         &mut self,
         kind: &str,
@@ -847,39 +853,6 @@ impl Store {
         emit: impl FnOnce(&Reply),
     ) -> Result<Reply> {
         self.transact_checked(mutation, || Ok(()), emit)
-    }
-
-    pub fn forget_secret(
-        &self,
-        connection_id: &str,
-        expected_revision: u64,
-        emit: impl FnOnce(&Reply),
-    ) -> Result<Reply> {
-        self.transact_checked(
-            |candidate| {
-                let served_revision = self
-                    .served
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map_or(0, |r| r.revision);
-                let row = candidate
-                    .connections
-                    .iter_mut()
-                    .find(|c| c.id == connection_id)
-                    .ok_or_else(|| StoreError::new("not-found", "Connection not found"))?;
-                if candidate.revision.max(served_revision) != expected_revision {
-                    return Err(StoreError::new(
-                        "revision-conflict",
-                        "SSH store changed; reload and try again",
-                    ));
-                }
-                row.secret = None;
-                Ok(())
-            },
-            || Ok(()),
-            emit,
-        )
     }
 
     /// Same transaction, with a final cancellation fence after serialization and
