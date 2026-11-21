@@ -185,6 +185,7 @@ impl EditRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn begin_edit(&self, fs: &RemoteFs<'_>, remote_path: &str) -> Result<Arc<EditJob>, FsError> {
         self.begin_edit_tracked(fs, remote_path).await.map(|(job, _)| job)
     }
