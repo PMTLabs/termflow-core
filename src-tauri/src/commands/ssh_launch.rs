@@ -1,6 +1,6 @@
-//! Desktop-only launch registration IPC. Session opening remains in 067.
+//! Desktop-only launch IPC. Session opening and reconnect remain in 067.
 use crate::{
-    ssh::launch::{LaunchAttemptRef, LaunchError, LaunchSnapshot, Operation},
+    ssh::{launch::{LaunchAttemptRef, LaunchError, LaunchSnapshot, Operation}, store::Store},
     state::AppState,
 };
 use tauri::{Runtime, State, WebviewWindow};
@@ -12,8 +12,12 @@ pub(crate) fn ssh_terminal_launch<R: Runtime>(
     terminal_id: String,
     connection_id: String,
     attempt: LaunchAttemptRef,
+    store: State<'_, Store>,
 ) -> Result<LaunchSnapshot, LaunchError> {
-    access(&window, state.inner(), &terminal_id, attempt, Operation::Launch(&connection_id))
+    let state = state.inner();
+    let snapshot = access(&window, state, &terminal_id, attempt, Operation::Launch(&connection_id))?;
+    state.ssh_launches.start_native(state.clone(), store.inner().clone(), &snapshot);
+    Ok(snapshot)
 }
 
 #[tauri::command]

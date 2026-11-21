@@ -743,6 +743,9 @@ pub struct Store {
     // Reload recovery revisions are served immediately but only persisted on a write.
     served: Arc<Mutex<Option<Reply>>>,
     writer: Arc<Writer>,
+    // Raw disk revision -> last definition revision. Metadata-only updates
+    // (Recent, UI preferences and Remember) must not invalidate a launch.
+    launch_revision: Arc<Mutex<Option<(u64, u64)>>>,
 }
 impl Store {
     pub fn new(path: PathBuf) -> Self {
@@ -751,6 +754,7 @@ impl Store {
             cache: Arc::new(Mutex::new(None)),
             served: Arc::new(Mutex::new(None)),
             writer: Arc::new(write_atomic),
+            launch_revision: Arc::default(),
         }
     }
     #[cfg(test)]
@@ -862,6 +866,23 @@ impl Store {
         self.load()
     }
 
+    /// Resolve and fence a launch against the same locked store used by edits.
+    /// The callback may admit a FIFO item, but must not wait on or write to a PTY.
+    pub(super) fn with_launch_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Persisted, u64) -> T,
+    ) -> Result<T> {
+        let _lock = self.lock()?;
+        let data = self.load()?;
+        Ok(read(&data, self.definition_revision(data.revision)))
+    }
+
+    fn definition_revision(&self, raw: u64) -> u64 {
+        self.launch_revision.lock().unwrap()
+            .filter(|(current, _)| *current == raw)
+            .map_or(raw, |(_, definition)| definition)
+    }
+
     /// Preview needs one fresh, consistent snapshot, not a read/merge/write.
     /// Atomic replacement makes a single read sufficient; don't create a lock
     /// file (or even a config directory) for an unsaved preview.
@@ -892,9 +913,12 @@ impl Store {
                 format!("{}: {}", self.path.display(), e.message),
             )
         })?;
+        let raw = candidate.revision;
+        let before = launch_definitions(&candidate);
         mutation(&mut candidate)?;
         candidate.validate()?;
         candidate.normalize();
+        let definition_changed = before != launch_definitions(&candidate);
         let served_revision = self
             .served
             .lock()
@@ -911,12 +935,29 @@ impl Store {
         before_commit()?;
         (self.writer)(&self.path, &contents)
             .map_err(|e| StoreError::new("io", format!("{}: {e}", self.path.display())))?;
+        let definition = if definition_changed { candidate.revision } else { self.definition_revision(raw) };
+        *self.launch_revision.lock().unwrap() = Some((candidate.revision, definition));
         let reply = candidate.view(None);
         self.remember(candidate);
         *self.served.lock().unwrap() = Some(reply.clone());
         emit(&reply);
         Ok(reply)
     }
+}
+
+// Exclude UI metadata and encrypted credentials. Editing any argv-affecting
+// field (including a jump row) creates a new definition revision even on revert.
+fn launch_definitions(data: &Persisted) -> Vec<Connection> {
+    let mut rows = data.connections.clone();
+    for row in &mut rows {
+        row.secret = None;
+        row.last_used_at = None;
+        row.bookmarked = false;
+        row.folder_id = None;
+        row.order = 0;
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows
 }
 
 #[cfg(test)]

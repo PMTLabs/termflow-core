@@ -93,10 +93,15 @@ fn refusal(code: &str) -> StoreError {
 }
 fn resolved(data: &Persisted, id: &str) -> Result<SessionTarget, SessionError> {
     let resolved = target::resolve(data, id).map_err(safe_error)?;
+    session_target(&resolved, id)
+}
+
+fn session_target(resolved: &target::ResolvedTarget, id: &str) -> Result<SessionTarget, SessionError> {
     let mut target = SessionTarget {
         hops: resolved
             .hops
-            .into_iter()
+            .iter()
+            .cloned()
             .map(|h| SessionHop {
                 connection_id: h.connection_id,
                 host: h.host,
@@ -151,6 +156,22 @@ impl StoreAdapter {
     }
 }
 impl TargetSource for StoreAdapter {
+    fn resolve_launch<'a>(
+        &'a self, id: &'a str,
+    ) -> BoxFuture<'a, Result<(SessionTarget, Option<super::session::LaunchDefinition>), SessionError>> {
+        Box::pin(async move {
+            let adapter = self.clone();
+            let id = id.to_owned();
+            tokio::task::spawn_blocking(move || {
+                adapter.store.with_launch_snapshot(|data, revision| {
+                    let target = target::resolve(data, &id).map_err(safe_error)?;
+                    let session = session_target(&target, &id)?;
+                    Ok((session, Some(super::session::LaunchDefinition { revision, target })))
+                }).map_err(safe_error)?
+            }).await.map_err(|_| SessionError::StoreUnavailable)?
+        })
+    }
+
     fn resolve<'a>(&'a self, id: &'a str) -> BoxFuture<'a, Result<SessionTarget, SessionError>> {
         Box::pin(async move {
             let adapter = self.clone();

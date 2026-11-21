@@ -561,7 +561,10 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
     }
     match spawned {
         Ok(pid) => {
-            if let Some(adapter) = adapter { ssh_shell::retain_hosted(adapter, pid); }
+            if let Some(adapter) = adapter {
+                ssh_shell::bind_spawned_shell(state.host_table.keys(), &process_id, &adapter.spec.shell, pid);
+                ssh_shell::retain_hosted(adapter, pid);
+            }
             if let Some(mut t) = state.terminals.get_mut(&process_id) {
                 t.pid = pid;
             }

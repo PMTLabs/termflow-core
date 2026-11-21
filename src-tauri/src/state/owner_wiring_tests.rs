@@ -134,7 +134,9 @@ fn process_ingress_and_each_exit_caller_reach_the_owner_authority() {
     assert!(socket.contains("input_gate::write_input("));
     let gate = production(include_str!("../pty_manager/input_gate.rs"));
     assert!(fn_body(&gate, "fn write_input(").contains(".admit_input("));
-    let admission = fn_body(&gate, "fn input_write<");
+    assert!(fn_body(&gate, "fn input_write<").contains("self.input_write_fenced("));
+    assert!(fn_body(&gate, "fn submit_ssh_input_fenced<").contains("self.input_write_fenced("));
+    let admission = fn_body(&gate, "fn input_write_fenced<");
     assert!(admission.contains("self.input_stamp(process)"));
     assert!(admission.contains("self.input.ownership.read()"));
     let router = production(include_str!("../api_server/mod.rs"));

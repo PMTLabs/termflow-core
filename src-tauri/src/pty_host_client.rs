@@ -350,7 +350,8 @@ impl PtyHostClient {
 
     pub(crate) fn write_registered_admitted(&self, keys: &crate::state::HostKeys, permit: &crate::pty_manager::input_gate::InputPermit<'_>, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
         let binding = self.sessions.lock().unwrap().clone();
-        binding.channel == channel && keys.with_registered_on(permit.process(), channel, key, binding.epoch, || self.enqueue_stdin(permit, key, bytes)).unwrap_or(false)
+        binding.channel == channel && permit.admits_host(channel, key, binding.epoch)
+            && keys.with_registered_on(permit.process(), channel, key, binding.epoch, || self.enqueue_stdin(permit, key, bytes)).unwrap_or(false)
     }
 
     pub(crate) fn resize_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, cols: u16, rows: u16) -> bool {

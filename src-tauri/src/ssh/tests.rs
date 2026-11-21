@@ -38,6 +38,7 @@ pub struct Counters {
 #[derive(Clone)]
 pub struct Server {
     pub host: ssh_key::PrivateKey,
+    pub host_certificate: Option<ssh_key::Certificate>,
     pub client: ssh_key::PublicKey,
     pub password: String,
     pub user: String,
@@ -51,6 +52,7 @@ impl Server {
     pub fn new(seed: u8, user: &str) -> Self {
         Self {
             host: key(seed),
+            host_certificate: None,
             client: key(seed + 10).public_key().clone(),
             password: format!("password-{user}"),
             user: user.into(),
@@ -65,6 +67,7 @@ impl Server {
         self.counters.handshakes.fetch_add(1, Ordering::SeqCst);
         let config = server::Config {
             keys: vec![self.host.clone()],
+            certificates: self.host_certificate.iter().cloned().collect(),
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             ..Default::default()
@@ -717,13 +720,13 @@ async fn unknown_host_cancel_blocks_launch_and_auth() {
     let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);
     let id = f.registry.probe("c-a").unwrap();
     let a = wait_state(&f.registry, &id, true, SessionState::NeedsHostkey).await;
-    assert_eq!(a.gate, Gate::Blocked);
+    assert_eq!(a.gate, Gate::Pending);
     assert_eq!(f.server.counters.auth.load(Ordering::SeqCst), 0);
     f.registry
         .trust_host(&id, true, Some(a.generation), a.prompt_id.as_deref(), false)
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_ne!(f.registry.state(&id, true).unwrap().gate, Gate::Verified);
+    assert_eq!(f.registry.state(&id, true).unwrap().gate, Gate::Blocked);
     assert!(!f.path.exists());
     f.registry.shutdown().await;
 }

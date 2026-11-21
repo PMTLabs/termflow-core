@@ -347,6 +347,20 @@ impl HostKeys {
         Some(row.cg)
     }
 
+    /// Backend worker authority follows a mounted adopted pane, not an IPC
+    /// window reference. Unmounted/parked/transfer-in-flight is not writable.
+    pub(crate) fn mounted_launch_owner(&self, leaf: &str, process: &str) -> Option<(PaneIdentity, u64)> {
+        let inner = self.lock();
+        let row = inner.owners.get(leaf)?;
+        let Owner::Pane(pi) = row.owner else { return None };
+        if !inner.panes.present.get(&pi).is_some_and(|pane| pane.leaf == leaf)
+            || !matches!(&row.state, OwnerState::Registered(shell) if shell.process == process)
+        {
+            return None;
+        }
+        Some((pi, row.cg))
+    }
+
     /// Stable placement generation survives transfers/reload, but not final close.
     pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
         let _input_order = self.input_owner_change();

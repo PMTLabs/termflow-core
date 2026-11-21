@@ -1,5 +1,6 @@
-//! Desktop launch registration. This layer never consumes a readiness epoch or
-//! submits PTY input. The 067 registry remains authoritative for session state.
+//! Desktop launch registration and one-shot PTY launch. The 067 registry
+//! remains authoritative for verification, prompts and session ownership.
+mod drive;
 use super::session::{Gate, KnownHostsPaths, SessionRegistry, SessionState, SessionView};
 use crate::{
     pty_manager::input_gate::{LaunchTicket, Refusal},
@@ -7,7 +8,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,8 +45,17 @@ pub(crate) struct LaunchAttemptRef {
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum LaunchStage {
     Preparing,
+    WaitingReady,
+    WaitingTrust,
+    Typed,
     Cancelled,
     Blocked,
+    Error,
+}
+impl LaunchStage {
+    fn waiting(self) -> bool {
+        matches!(self, Self::Preparing | Self::WaitingReady | Self::WaitingTrust)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -53,8 +63,13 @@ pub(crate) enum LaunchErrorCode {
     StaleAttempt,
     NotFound,
     InputLocked,
+    UnsupportedShell,
     UnsupportedContext,
     TrustBlocked,
+    Timeout,
+    WriteFailed,
+    TransportClosed,
+    StoreUnavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -71,6 +86,11 @@ impl From<LaunchErrorCode> for LaunchError {
             LaunchErrorCode::InputLocked => "Terminal input is locked by an SSH launch.",
             LaunchErrorCode::UnsupportedContext => "This local shell was not prepared for this saved SSH connection.",
             LaunchErrorCode::TrustBlocked => "The SSH session refused the launch.",
+            LaunchErrorCode::UnsupportedShell => "This shell cannot safely run the saved SSH connection.",
+            LaunchErrorCode::Timeout => "Return to the local shell prompt, then retry the SSH connection.",
+            LaunchErrorCode::WriteFailed => "Writing the SSH command failed. It was not retried.",
+            LaunchErrorCode::TransportClosed => "The terminal writer is unavailable.",
+            LaunchErrorCode::StoreUnavailable => "SSH connection definitions could not be read.",
         };
         Self { code, message }
     }
@@ -102,6 +122,21 @@ pub(crate) struct LaunchSnapshot {
 struct RegisteredAttempt {
     snapshot: LaunchSnapshot,
     ticket: Option<LaunchTicket>,
+    driving: bool,
+    waiting_since: Option<std::time::Instant>,
+    // T5 finishes these pins only when this exact attempt is quiescent.
+    payload: Option<Arc<drive::Payload>>,
+}
+
+impl RegisteredAttempt {
+    fn update(&mut self, mut next: LaunchSnapshot) -> Result<(), LaunchError> {
+        if next != self.snapshot {
+            next.launch_seq = next.launch_seq.checked_add(1).ok_or(LaunchErrorCode::StaleAttempt)?;
+            next.revision = next.launch_seq;
+            self.snapshot = next;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -115,11 +150,9 @@ pub(crate) enum Operation<'a> {
 }
 
 impl LaunchRegistry {
-    /// T4 seam: extend this transaction at the registered-attempt boundary.
-    /// Its ticket is process-qualified but is not authorization to send bytes.
-    /// Adopted tickets still need a fresh owner/lease and readiness check in T4.
-    /// Do not call the public input writer while holding this write barrier;
-    /// it acquires the barrier itself.
+    /// Validate desktop placement and reserve/coalesce the exact attempt.
+    /// The worker separately requalifies the ticket at submission; this
+    /// transaction never calls the Lane A writer inside its ownership guard.
     pub(crate) fn access(
         &self,
         keys: &HostKeys,
@@ -133,7 +166,8 @@ impl LaunchRegistry {
         if requested.session_generation != requested.attempt_receipt.generation {
             return Err(StaleAttempt.into());
         }
-        sessions.with_launch_session(terminal, |session| {
+        let mut retired_payload = None;
+        let result = sessions.with_launch_session(terminal, |session| {
             let _order = keys.input_owner_change();
             let placement = keys
                 .launch_placement(window, terminal, requested.owner_incarnation, &requested.process_incarnation)
@@ -170,24 +204,13 @@ impl LaunchRegistry {
                 if cancelling {
                     next.stage = LaunchStage::Cancelled;
                     next.error = None;
-                } else if next.stage == LaunchStage::Preparing && view.gate == Gate::Blocked {
-                    next.stage = LaunchStage::Blocked;
-                    next.error = Some(TrustBlocked.into());
-                }
-                if next != entry.snapshot {
-                    next.launch_seq = next.launch_seq.checked_add(1).ok_or(StaleAttempt)?;
-                    next.revision = next.launch_seq;
-                    if next.stage != LaunchStage::Preparing {
-                        if let Some(ticket) = &entry.ticket {
-                            keys.cancel_registered_launch_ordered(ticket)?;
-                        }
-                        entry.ticket = None;
+                    if let Some(ticket) = entry.ticket.take() {
+                        keys.cancel_registered_launch_ordered(&ticket)?;
                     }
-                    if cancelling {
-                        next.attempt.attempt_receipt = (&cancel_session()).into();
-                    }
-                    entry.snapshot = next;
+                    retired_payload = entry.payload.clone();
+                    next.attempt.attempt_receipt = (&cancel_session()).into();
                 }
+                entry.update(next)?;
                 return Ok(entry.snapshot.clone());
             }
 
@@ -221,9 +244,25 @@ impl LaunchRegistry {
                 stage: if blocked { LaunchStage::Blocked } else { LaunchStage::Preparing },
                 error: blocked.then(|| TrustBlocked.into()),
             };
-            attempts.insert(terminal.into(), RegisteredAttempt { snapshot: snapshot.clone(), ticket });
+            let entry = RegisteredAttempt {
+                snapshot: snapshot.clone(),
+                ticket,
+                driving: false,
+                waiting_since: None,
+                payload: None,
+            };
+            if let Some(old) = attempts.insert(terminal.into(), entry) {
+                if let Some(ticket) = &old.ticket {
+                    keys.cancel_registered_launch_ordered(ticket)?;
+                }
+                retired_payload = old.payload;
+            }
             Ok(snapshot)
-        })
+        });
+        if let Some(payload) = retired_payload {
+            payload.retire();
+        }
+        result
     }
 }
 

@@ -137,6 +137,14 @@ pub(crate) fn retain_until_quiescent(adapter: posix::PosixAdapter, quiescent: im
     });
 }
 
+/// Bind the native pid/start time at spawn completion, never on a later
+/// launch poll (where the pid might already have been reused).
+pub(crate) fn bind_spawned_shell(keys: &HostKeys, process: &str, shell: &str, pid: u32) {
+    if let Ok(identity) = super::ssh_helpers::ProcessIdentity::capture(pid) {
+        keys.bind_ssh_shell(process, shell.to_owned(), identity);
+    }
+}
+
 pub(crate) fn retain_hosted(adapter: posix::PosixAdapter, pid: u32) {
     if pid != 0 {
         retain_until_quiescent(adapter, move || super::ssh_helpers::ProcessIdentity::pid_quiescent(pid));

@@ -171,7 +171,21 @@ impl SessionTarget {
         Ok(())
     }
 }
+/// The saved argv definition read in the same transaction as the engine's hops.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchDefinition {
+    pub(super) revision: u64,
+    pub(super) target: super::target::ResolvedTarget,
+}
+
 pub trait TargetSource: Send + Sync {
+    fn resolve_launch<'a>(
+        &'a self, id: &'a str,
+    ) -> BoxFuture<'a, Result<(SessionTarget, Option<LaunchDefinition>), SessionError>> {
+        Box::pin(async move { Ok((self.resolve(id).await?, None)) })
+    }
+
     fn resolve<'a>(
         &'a self,
         connection_id: &'a str,
@@ -334,6 +348,7 @@ enum Answer {
 }
 struct EntryState {
     view: SessionView,
+    definition: Option<LaunchDefinition>,
     pending: Option<Pending>,
     authenticated: bool,
     unsaved_secret_warning: bool,
@@ -403,7 +418,7 @@ impl Entry {
         let refusal = s.view.state == SessionState::Error;
         let host_key = refusal.then(|| s.view.host_key.clone()).flatten();
         let prompt_target = refusal.then(|| s.view.prompt_target.clone()).flatten();
-        if !refusal {
+        if !refusal && s.view.state != SessionState::Disconnected {
             s.view.state = SessionState::Disconnected;
             set_reason(&mut s.view, reason, None);
             s.view.gate = Gate::Blocked;
@@ -508,7 +523,7 @@ impl Entry {
 }
 /// The runtime that owns session engines: the caller's Tokio context when it
 /// has one, otherwise Tauri's shared runtime (sync commands have none).
-fn engine_runtime() -> tokio::runtime::Handle {
+pub(crate) fn engine_runtime() -> tokio::runtime::Handle {
     tokio::runtime::Handle::try_current()
         .unwrap_or_else(|_| tauri::async_runtime::handle().inner().clone())
 }
@@ -681,6 +696,7 @@ impl SessionRegistry {
         let entry = Arc::new(Entry {
             owner_receipt,
             inner: Mutex::new(EntryState {
+                definition: None,
                 view,
                 pending: None,
                 authenticated: false,
@@ -833,6 +849,19 @@ impl SessionRegistry {
         f(Some((&view, entry.owner_receipt, cancelled, &cancel)))
     }
 
+    /// Hold both membership and the mutable verifier state during final input
+    /// admission or a local FIFO head check, never during PTY I/O.
+    pub(super) fn with_launch_authority<T>(
+        &self,
+        terminal_id: &str,
+        read: impl FnOnce(&SessionView, Option<u64>, bool, Option<&LaunchDefinition>) -> T,
+    ) -> Option<T> {
+        let registry = self.inner.lock();
+        let entry = registry.panes.get(terminal_id)?;
+        let state = entry.inner.lock();
+        Some(read(&state.view, entry.owner_receipt, entry.cancel.is_cancelled(), state.definition.as_ref()))
+    }
+
     pub fn current_launch(&self, terminal_id: &str) -> Option<CurrentLaunch> {
         let e = self.entry(terminal_id, false).ok()?;
         let s = e.inner.lock();
@@ -851,7 +880,8 @@ impl SessionRegistry {
         launch: LaunchState,
         process_id: Option<String>,
     ) -> Result<(), SessionError> {
-        let e = self.entry(terminal_id, false)?;
+        let registry = self.inner.lock();
+        let e = registry.panes.get(terminal_id).ok_or(SessionError::NotFound)?;
         let mut s = e.inner.lock();
         if s.view.generation != generation || launch_seq <= s.launch_seq || e.cancel.is_cancelled()
         {
@@ -1011,7 +1041,8 @@ impl ClientHandler {
             .verify(token.clone(), key.clone())
             .await?;
         if verdict == Verdict::Unknown {
-            self.entry.update(|s| s.view.gate = Gate::Blocked);
+            // An unanswered unknown-key prompt is still pending. A refusal,
+            // unlike a prompt, is a terminal blocked gate.
             let host_key = HostKey {
                 algorithm: key.algorithm().to_string(),
                 fingerprint_sha256: key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
@@ -1051,19 +1082,7 @@ impl ClientHandler {
             return Err(SessionError::Cancelled);
         }
         if self.is_target {
-            let path = self.deps.known_hosts.path.to_string_lossy().into_owned();
-            self.entry.update(|s| {
-                s.view.gate = Gate::Verified;
-                s.view.known_hosts_paths = Some(KnownHostsPaths {
-                    jump: (s
-                        .view
-                        .known_hosts_paths
-                        .as_ref()
-                        .is_some_and(|p| p.jump.is_some()))
-                    .then(|| path.clone()),
-                    target: path.clone(),
-                });
-            });
+            self.entry.update(|s| s.view.gate = Gate::Verified);
         }
         Ok(())
     }
@@ -1107,15 +1126,7 @@ fn apply_failure(s: &mut EntryState, error: SessionError) {
     } else {
         SessionState::Error
     };
-    s.view.gate = if matches!(
-        error,
-        SessionError::TransportClosed | SessionError::TimedOut
-    ) && s.view.gate == Gate::Pending
-    {
-        Gate::NetworkError
-    } else {
-        Gate::Blocked
-    };
+    s.view.gate = Gate::Blocked;
     set_error_reason(&mut s.view, Some(&error));
     s.pending.take();
     clear_prompt(&mut s.view);
@@ -1128,18 +1139,17 @@ async fn run_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) {
 }
 async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<(), SessionError> {
     let connection = entry.view().connection_id;
-    let mut target = entry
-        .wait(Duration::from_secs(15), deps.targets.resolve(&connection))
+    let (mut target, definition) = entry
+        .wait(Duration::from_secs(15), deps.targets.resolve_launch(&connection))
         .await?;
     target.validate(&connection)?;
-    if target.hops.len() == 2 {
-        entry.update(|s| {
-            s.view.known_hosts_paths = Some(KnownHostsPaths {
-                jump: Some(deps.known_hosts.path.to_string_lossy().into_owned()),
-                target: deps.known_hosts.path.to_string_lossy().into_owned(),
-            })
+    entry.update(|s| {
+        s.definition = definition;
+        s.view.known_hosts_paths = deps.known_hosts.path.to_str().map(|path| KnownHostsPaths {
+            jump: (target.hops.len() == 2).then(|| path.into()),
+            target: path.into(),
         });
-    }
+    });
     let mut handles: Vec<client::Handle<ClientHandler>> = Vec::new();
     for (index, hop) in target.hops.iter().enumerate() {
         let stream: BoxStream = if let Some(jump) = handles.last() {
@@ -1152,9 +1162,19 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
                 .await?;
             Box::new(channel.into_stream())
         } else {
-            entry
-                .wait(Duration::from_secs(15), deps.streams.connect(hop))
-                .await?
+            match entry.wait(Duration::from_secs(15), deps.streams.connect(hop)).await {
+                Ok(stream) => stream,
+                Err(error @ (SessionError::TransportClosed | SessionError::TimedOut)) => {
+                    // Only network failure before the SSH handshake qualifies.
+                    // A handshake/verification/auth error is never fallback authority.
+                    entry.update(|s| {
+                        apply_failure(s, error);
+                        s.view.gate = Gate::NetworkError;
+                    });
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
         };
         let mut config = client::Config {
             keepalive_interval: Some(Duration::from_secs(15)),
@@ -1175,6 +1195,10 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
             .cloned()
             .collect::<Vec<_>>()
             .into();
+        // See the certificate when a peer offers both a certificate and its
+        // plain signing key; verify_key rejects it rather than silently
+        // negotiating down to a previously pinned plain key.
+        config.preferred.host_key_certificates = config.preferred.key.clone();
         let handler = ClientHandler {
             entry: entry.clone(),
             deps: deps.clone(),

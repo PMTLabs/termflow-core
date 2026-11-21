@@ -342,7 +342,9 @@ pub fn spawn_terminal(
     let mut unpublished = UnpublishedChild(Some(process.clone()));
     if let Some(prepared) = prepared {
         let shell = process.clone();
-        super::ssh_shell::retain_until_quiescent(prepared.submitted(), move || shell.child_exited());
+        let adapter = prepared.submitted();
+        super::ssh_shell::bind_spawned_shell(app_state.host_table.keys(), &id, &adapter.spec.shell, pid);
+        super::ssh_shell::retain_until_quiescent(adapter, move || shell.child_exited());
     }
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;

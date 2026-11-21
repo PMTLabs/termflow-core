@@ -219,6 +219,20 @@ fn inspect_args(dialect: Dialect, ordinary: &[String]) -> io::Result<Args<'_>> {
     Ok(output)
 }
 
+/// Map only argv[0] for the *outer* shell. Known-hosts and identity arguments
+/// still use the fixed OpenSSH executable's native path spelling.
+#[cfg(windows)]
+pub(crate) fn native_ssh_outer_path(shell: &str, ssh: &str) -> io::Result<String> {
+    if windows::dialect(shell).is_some() {
+        return Ok(ssh.into());
+    }
+    let (_, paths) = classify(shell)?;
+    if matches!(paths, Paths::Cygwin) {
+        return Err(adapter_error("native OpenSSH argv is not qualified under Cygwin"));
+    }
+    shell_path(Path::new(ssh), paths)
+}
+
 fn shell_path(path: &Path, paths: Paths) -> io::Result<String> {
     let path = path.to_str().ok_or_else(|| adapter_error("SSH hook path is not valid Unicode"))?;
     match paths {

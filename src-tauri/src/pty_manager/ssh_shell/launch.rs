@@ -70,6 +70,32 @@ pub(crate) fn encode_launch(
     root: &HelperRoot,
     owner: ProcessIdentity,
 ) -> io::Result<EncodedLaunch> {
+    encode(shell, argv, root, owner, false)
+}
+
+/// Native POSIX OpenSSH selects ProxyCommand's interpreter using SHELL.
+/// Qualify a fixed Bourne interpreter for just this child, not the user's
+/// interactive shell/environment (whose rc can replace SHELL).
+#[cfg(unix)]
+pub(crate) fn encode_launch_with_posix_proxy(
+    shell: &str,
+    argv: Vec<String>,
+    root: &HelperRoot,
+    owner: ProcessIdentity,
+) -> io::Result<EncodedLaunch> {
+    if !Path::new("/usr/bin/env").is_file() || !Path::new("/bin/sh").is_file() {
+        return Err(adapter_error("fixed POSIX proxy interpreter unavailable"));
+    }
+    encode(shell, argv, root, owner, true)
+}
+
+fn encode(
+    shell: &str,
+    argv: Vec<String>,
+    root: &HelperRoot,
+    owner: ProcessIdentity,
+    posix_proxy: bool,
+) -> io::Result<EncodedLaunch> {
     let exe = argv.first().ok_or_else(|| adapter_error("missing SSH executable"))?;
     if argv.iter().any(|arg| arg.chars().any(char::is_control)) {
         return Err(adapter_error("SSH argv contains a terminal control character"));
@@ -113,7 +139,8 @@ pub(crate) fn encode_launch(
                 } else {
                     ""
                 };
-                Ok(format!("{prefix}command {literal}"))
+                let proxy = if posix_proxy { "/usr/bin/env SHELL=/bin/sh " } else { "" };
+                Ok(format!("{prefix}command {proxy}{literal}"))
             }
             _ => unreachable!("classified shell"),
         }

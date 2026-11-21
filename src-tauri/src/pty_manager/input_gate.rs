@@ -192,6 +192,13 @@ pub struct ReadyEpoch {
     owner: OwnerStamp,
     input_generation: u64,
     epoch: u64,
+    host: Option<HostPrompt>,
+}
+#[derive(Clone, Debug)]
+struct HostPrompt {
+    channel: crate::elevated_host::HostChannel,
+    key: String,
+    epoch: u64,
 }
 #[derive(Clone)]
 struct Attempt {
@@ -204,6 +211,18 @@ struct RegisteredPrompt {
     nonce: String,
     prompt_order: termflow_pty_protocol::ssh_prompt::PromptOrder,
     stdin_writes: u64,
+    shell: Option<(String, super::ssh_helpers::ProcessIdentity)>,
+}
+
+/// A foreign authority (SSH registry + store) held only for queue admission
+/// and the local FIFO-head decision. It must be acquired before the input locks.
+pub(crate) trait InputFence<E> {
+    fn qualify<T>(&self, work: impl FnOnce() -> Result<T, E>) -> Result<T, E>;
+}
+
+struct Unfenced;
+impl<E> InputFence<E> for Unfenced {
+    fn qualify<T>(&self, work: impl FnOnce() -> Result<T, E>) -> Result<T, E> { work() }
 }
 
 /// Selection happens under admission. A hosted callback performs only its nonblocking
@@ -335,10 +354,17 @@ impl InputDomain {
 /// hosted routing requires this capability; no locked refusal may fall back to a raw writer.
 pub struct InputPermit<'a> {
     process: &'a str,
+    host: Option<&'a HostPrompt>,
 }
 impl InputPermit<'_> {
     pub fn process(&self) -> &str {
         self.process
+    }
+    pub(crate) fn host_prompt(&self) -> bool {
+        self.host.is_some()
+    }
+    pub(crate) fn admits_host(&self, channel: crate::elevated_host::HostChannel, key: &str, epoch: u64) -> bool {
+        self.host.is_none_or(|host| host.channel == channel && host.key == key && host.epoch == epoch)
     }
 }
 
@@ -424,8 +450,42 @@ impl crate::state::HostKeys {
         if state.ssh_prompt.is_some() || state.input_generation != 0 {
             return Err(Refusal::StaleAttempt);
         }
-        state.ssh_prompt = Some(RegisteredPrompt { connection_id: connection_id.map(str::to_owned), generation, nonce: nonce.into(), prompt_order: Default::default(), stdin_writes: 0 });
+        state.ssh_prompt = Some(RegisteredPrompt { connection_id: connection_id.map(str::to_owned), generation, nonce: nonce.into(), prompt_order: Default::default(), stdin_writes: 0, shell: None });
         Ok(())
+    }
+
+    pub(crate) fn bind_ssh_shell(&self, process: &str, shell: String, identity: super::ssh_helpers::ProcessIdentity) {
+        let entry = self.input.processes.lock().get(process).cloned();
+        if let Some(entry) = entry {
+            if let Some(prompt) = entry.lock().ssh_prompt.as_mut() {
+                prompt.shell = Some((shell, identity));
+            }
+        }
+    }
+
+    pub(crate) fn ssh_shell_identity(&self, process: &str) -> Option<(String, super::ssh_helpers::ProcessIdentity)> {
+        let entry = self.input.processes.lock().get(process)?.clone();
+        let state = entry.lock();
+        state.ssh_prompt.as_ref()?.shell.clone()
+    }
+
+    /// Observe without consuming. An adopted owner can rebind the exact lock,
+    /// not mint a replacement after ordinary input has taken over.
+    pub(crate) fn launch_ready_ordered(&self, ticket: &mut LaunchTicket) -> Result<Option<ReadyEpoch>, Refusal> {
+        let process = &ticket.lease.process;
+        let owner = self.input_stamp(process).ok_or(Refusal::StaleAttempt)?;
+        let entry = self.input.processes.lock().get(process).cloned().ok_or(Refusal::StaleAttempt)?;
+        let mut state = entry.lock();
+        state.owner(&owner)?;
+        if !state.attempt.as_ref().is_some_and(|a| a.id == ticket.id && !a.submitted) {
+            return Err(Refusal::StaleAttempt);
+        }
+        ticket.lease = state.lease(process);
+        Ok(state.ready.clone().filter(|ready| self.ready_transport_current(ready)))
+    }
+
+    fn ready_transport_current(&self, ready: &ReadyEpoch) -> bool {
+        ready.host.as_ref().is_none_or(|host| self.publish_frame(host.channel, &host.key, host.epoch, &ready.process, || {}))
     }
 
     pub(crate) fn ssh_launch_connection(&self, process: &str) -> Option<String> {
@@ -489,7 +549,7 @@ impl crate::state::HostKeys {
                 if !drain.is_drained() || input_generation != state.input_generation {
                     return Err(Refusal::NotReady);
                 }
-                Self::publish_prompt_epoch(process, owner, &mut state)
+                Self::publish_prompt_epoch(process, owner, &mut state, None)
             }
             PromptProof::Hosted { channel, key, epoch, stdin_writes } => {
                 if stdin_writes != registration.stdin_writes {
@@ -497,7 +557,7 @@ impl crate::state::HostKeys {
                 }
                 let mut observed = Err(Refusal::NotReady);
                 self.publish_frame(channel, key, epoch, process, || {
-                    observed = Self::publish_prompt_epoch(process, owner, &mut state);
+                    observed = Self::publish_prompt_epoch(process, owner, &mut state, Some(HostPrompt { channel, key: key.into(), epoch }));
                 });
                 observed
             }
@@ -514,10 +574,10 @@ impl crate::state::HostKeys {
         if !drain.is_drained() {
             return Err(Refusal::NotReady);
         }
-        Self::publish_prompt_epoch(process, owner, &mut state)
+        Self::publish_prompt_epoch(process, owner, &mut state, None)
     }
 
-    fn publish_prompt_epoch(process: &str, owner: OwnerStamp, state: &mut ProcessInput) -> Result<ReadyEpoch, Refusal> {
+    fn publish_prompt_epoch(process: &str, owner: OwnerStamp, state: &mut ProcessInput, host: Option<HostPrompt>) -> Result<ReadyEpoch, Refusal> {
         state.prompt_epoch = state
             .prompt_epoch
             .checked_add(1)
@@ -527,6 +587,7 @@ impl crate::state::HostKeys {
             owner,
             input_generation: state.input_generation,
             epoch: state.prompt_epoch,
+            host,
         };
         state.ready = Some(ready.clone());
         Ok(ready)
@@ -577,72 +638,100 @@ impl crate::state::HostKeys {
         kind: WriteKind<'_>,
         enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
-        let order = self.input.ownership.read();
+        self.input_write_fenced(process, kind, &Unfenced, enqueue)
+    }
+
+    pub(crate) fn submit_ssh_input_fenced<'io, T, E: From<Refusal>>(
+        &self,
+        ticket: &LaunchTicket,
+        ready: &ReadyEpoch,
+        fence: &impl InputFence<E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
+    ) -> Result<T, E> {
+        self.input_write_fenced(&ticket.lease.process, WriteKind::Launch(ticket, ready), fence, enqueue)
+    }
+
+    fn input_write_fenced<'io, T, E: From<Refusal>>(
+        &self,
+        process: &str,
+        kind: WriteKind<'_>,
+        fence: &impl InputFence<E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
+    ) -> Result<T, E> {
         let missing = if matches!(&kind, WriteKind::Launch(..) | WriteKind::Ordinary(Some(_))) {
             Refusal::StaleAttempt
         } else {
             Refusal::NotFound
         };
-        let owner = self.input_stamp(process).ok_or_else(|| missing.clone())?;
-        let entry = self.input.process(process, &owner);
-        let mut state = entry.lock();
-        state.owner(&owner)?;
-        let is_protocol = matches!(&kind, WriteKind::Protocol);
-        match &kind {
-            WriteKind::Ordinary(lease) => {
-                if let Some(lease) = lease {
-                    state.check_lease(process, lease)?;
+        let admitted = fence.qualify(|| {
+            let _order = self.input.ownership.read();
+            let owner = self.input_stamp(process).ok_or_else(|| missing.clone())?;
+            let entry = self.input.process(process, &owner);
+            let mut state = entry.lock();
+            state.owner(&owner)?;
+            let is_protocol = matches!(&kind, WriteKind::Protocol);
+            match &kind {
+                WriteKind::Ordinary(lease) => {
+                    if let Some(lease) = lease {
+                        state.check_lease(process, lease)?;
+                    }
+                    if state.attempt.as_ref().is_some_and(|a| !a.submitted) {
+                        return Err(Refusal::InputLocked.into());
+                    }
                 }
-                if state.attempt.as_ref().is_some_and(|a| !a.submitted) {
-                    return Err(Refusal::InputLocked.into());
+                WriteKind::Protocol => {}
+                WriteKind::Takeover => {
+                    state.lease_epoch = state
+                        .lease_epoch
+                        .checked_add(1)
+                        .ok_or(Refusal::StaleAttempt)?;
+                    state.attempt = None;
+                }
+                WriteKind::Launch(ticket, ready) => {
+                    state.check_lease(process, &ticket.lease)?;
+                    if !state
+                        .attempt
+                        .as_ref()
+                        .is_some_and(|a| a.id == ticket.id && !a.submitted)
+                    {
+                        return Err(Refusal::StaleAttempt.into());
+                    }
+                    if ready.process != process
+                        || ready.owner != owner
+                        || ready.input_generation != state.input_generation
+                        || state.ready.as_ref().map(|r| r.epoch) != Some(ready.epoch)
+                        || !self.ready_transport_current(ready)
+                    {
+                        return Err(Refusal::NotReady.into());
+                    }
+                    // Consume BEFORE enqueue: an I/O error may mean a partial write. Never retry it.
+                    state.attempt.as_mut().unwrap().submitted = true;
                 }
             }
-            WriteKind::Protocol => {}
-            WriteKind::Takeover => {
-                state.lease_epoch = state
-                    .lease_epoch
-                    .checked_add(1)
-                    .ok_or(Refusal::StaleAttempt)?;
-                state.attempt = None;
-            }
-            WriteKind::Launch(ticket, ready) => {
-                state.check_lease(process, &ticket.lease)?;
-                if !state
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|a| a.id == ticket.id && !a.submitted)
-                {
-                    return Err(Refusal::StaleAttempt.into());
+            state.invalidate_ready()?;
+            if !is_protocol {
+                if let Some(prompt) = &mut state.ssh_prompt {
+                    prompt.stdin_writes = prompt.stdin_writes.checked_add(1).ok_or(Refusal::StaleAttempt)?;
                 }
-                if ready.process != process
-                    || ready.owner != owner
-                    || ready.input_generation != state.input_generation
-                    || state.ready.as_ref().map(|r| r.epoch) != Some(ready.epoch)
-                {
-                    return Err(Refusal::NotReady.into());
-                }
-                // Consume BEFORE enqueue: an I/O error may mean a partial write. Never retry it.
-                state.attempt.as_mut().unwrap().submitted = true;
             }
-        }
-        state.invalidate_ready()?;
-        if !is_protocol {
-            if let Some(prompt) = &mut state.ssh_prompt {
-                prompt.stdin_writes = prompt.stdin_writes.checked_add(1).ok_or(Refusal::StaleAttempt)?;
-            }
-        }
-        let write = match enqueue(&InputPermit { process })? {
-            InputDispatch::Complete(result) => return Ok(result),
-            InputDispatch::Local(write) => write,
+            let host = match &kind { WriteKind::Launch(_, ready) => ready.host.as_ref(), _ => None };
+            let write = match enqueue(&InputPermit { process, host })? {
+                InputDispatch::Complete(result) => return Ok(Ok(result)),
+                InputDispatch::Local(write) => write,
+            };
+            let turn = state.next_local_turn;
+            state.next_local_turn = turn.checked_add(1).ok_or(Refusal::StaleAttempt)?;
+            let fifo = state.local_fifo.get_or_insert_with(Default::default).clone();
+            drop(state);
+            Ok(Err((owner, entry, fifo, turn, write)))
+        })?;
+        let (owner, entry, fifo, turn, write) = match admitted {
+            Ok(result) => return Ok(result),
+            Err(local) => local,
         };
-        let turn = state.next_local_turn;
-        state.next_local_turn = turn.checked_add(1).ok_or(Refusal::StaleAttempt)?;
-        let fifo = state.local_fifo.get_or_insert_with(Default::default).clone();
-        drop(state);
-        drop(order);
 
         let _turn = fifo.wait(turn);
-        {
+        fence.qualify(|| {
             let _start = self.input.ownership.read();
             let current = self.input_stamp(process).ok_or(missing)?;
             if current != owner {
@@ -662,7 +751,8 @@ impl crate::state::HostKeys {
             // Linearization point for starting this local write: a later takeover or
             // close cannot retract it. It can revoke queued launches and close may
             // interrupt the in-flight OS write. Keep only the FIFO turn across I/O.
-        }
+            Ok(())
+        })?;
         write()
     }
 }
