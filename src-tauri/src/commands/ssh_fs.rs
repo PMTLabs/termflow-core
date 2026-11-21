@@ -19,8 +19,10 @@ pub struct InsertPath {
 
 /// Success means the input was enqueued to the specific hosted process's writer,
 /// or accepted by the synchronous local PTY writer, not that SSH consumed it.
+/// Async only so it runs on the Tokio pool, never the UI thread; the fence and
+/// write below stay one synchronous section with no `.await`.
 #[tauri::command(rename_all = "camelCase")]
-pub fn ssh_fs_insert_path<R: Runtime>(
+pub async fn ssh_fs_insert_path<R: Runtime>(
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
