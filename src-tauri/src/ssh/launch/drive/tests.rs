@@ -99,7 +99,7 @@ impl LaunchPort for Port {
 
 }
 impl Drop for Port {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.home); }
+    fn drop(&mut self) { let _ = crate::pty_manager::ssh_helpers::remove_test_tree(&self.home); }
 }
 
 struct Unreachable;

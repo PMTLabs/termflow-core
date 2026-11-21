@@ -20,7 +20,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).expect("remove test-owned fixture only");
+        remove_test_tree(&self.0).expect("remove test-owned fixture only");
     }
 }
 fn owner() -> ProcessIdentity {
@@ -282,6 +282,12 @@ fn hostile_temp_cannot_replace_immutable_attempt_helper() {
     // A hardlink replacement is refused too, not just symlinks/reparse directories.
     let outside = f.0.join("user-file");
     fs::write(&outside, b"user bytes must survive").unwrap();
+    // The entry is sealed read-only; a same-user attacker can simply unseal it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(helper.path().parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+    }
     fs::remove_file(helper.path()).unwrap();
     fs::hard_link(&outside, helper.path()).unwrap();
     assert!(helper.verify().is_err());
@@ -485,4 +491,23 @@ fn cancel_reconnect_retains_hooks_retires_only_quiescent_payloads() {
     assert!(ended_hook.retire_after_process_end().unwrap());
     assert!(!ended_hook.path().exists());
     assert!(hook.path().exists());
+}
+
+/// A hook directory doubles as a shell's ZDOTDIR/HOME. Ubuntu's global zshrc runs
+/// compinit there, and its `.zcompdump` used to make the entry untrusted to retire.
+#[cfg(unix)]
+#[test]
+fn published_entries_are_sealed_against_shell_writes_and_still_retire() {
+    let f = Fixture::new();
+    let root = f.root();
+    for name in [".zshrc", ".bash_profile"] {
+        let hook = root.publish(owner(), HelperKind::ShellHook, name, b"hook\n").unwrap();
+        let usage = hook.acquire().unwrap();
+        let dir = hook.path().parent().unwrap().to_path_buf();
+        assert!(fs::write(dir.join(".zcompdump"), b"dump").is_err(), "{name}: entry accepted a foreign file");
+        hook.verify().unwrap();
+        assert!(!usage.finish().unwrap());
+        assert!(hook.retire_quiescent_shell_hook().unwrap());
+        assert!(!dir.exists());
+    }
 }

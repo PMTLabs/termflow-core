@@ -18,7 +18,7 @@ impl Fixture {
     }
 }
 impl Drop for Fixture {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) { let _ = crate::pty_manager::ssh_helpers::remove_test_tree(&self.0); }
 }
 
 fn shell_spec(shell: &str, args: &[String]) -> SpawnSpec {
@@ -164,4 +164,40 @@ fn api_and_fleet_spawn_requests_have_no_ssh_launch_metadata() {
         let request = create.split("SpawnRequest {").nth(1).expect("production spawn request");
         assert!(request.split('}').next().unwrap().contains("ssh_launch_connection_id: None,"));
     }
+}
+
+/// A first-run app-data dir can be deep enough that the helper root's own lock
+/// stage, entry and hook paths pass MAX_PATH. Registration must still work for
+/// every Windows profile kind (the adapter never resolves the shell itself, so
+/// the Store pwsh alias spelling needs no install).
+#[cfg(windows)]
+#[test]
+fn deep_first_run_app_data_registers_every_windows_shell() {
+    let base = std::env::temp_dir().join(format!("tf-deep-{}", uuid::Uuid::new_v4()));
+    let mut app_data = base.clone();
+    for part in ["a".repeat(60), "b".repeat(60), "c".repeat(60), "d".repeat(40), "app.termflow.desktop".into()] {
+        app_data.push(part);
+    }
+    assert!(app_data.as_os_str().len() > 260, "regression needs a path over MAX_PATH");
+    let local = std::env::var("LOCALAPPDATA").unwrap();
+    let shells = [
+        format!(r"{local}\Microsoft\WindowsApps\Microsoft.PowerShell_8wekyb3d8bbwe\pwsh.exe"),
+        system_shell("powershell.exe").unwrap(),
+        system_shell("cmd.exe").unwrap(),
+    ];
+    {
+        let root = HelperRoot::open_app_data(&app_data).expect("fresh nested app-data root over MAX_PATH");
+        for shell in shells {
+            let keys = HostKeys::default();
+            let CreateAdmission::Run(cg) = keys.admit_create(LEAF, CreateMode::Mount).unwrap() else { panic!("create") };
+            keys.stage_shell(LEAF, cg, PROCESS, None).unwrap();
+            let mut spec = shell_spec(&shell, &[]);
+            let prepared = PreparedShell::register_in(&root, &keys, PROCESS, cg, &mut spec, false, CONNECTION, |_| None)
+                .unwrap_or_else(|e| panic!("{shell}: {e}"));
+            assert!(keys.ssh_prompt_nonce(PROCESS).is_some(), "{shell}");
+            drop(prepared); // never submitted: retires the hook entry
+        }
+        assert!(std::fs::read_dir(root.path()).unwrap().all(|e| e.unwrap().file_name() == "root.lock"), "hooks retired");
+    }
+    std::fs::remove_dir_all(&base).unwrap();
 }

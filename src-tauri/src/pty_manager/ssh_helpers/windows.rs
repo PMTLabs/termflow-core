@@ -34,8 +34,15 @@ pub(super) struct Dir {
     parents: Vec<File>,
 }
 
+// Raw Win32 calls get the extended-length spelling: a deep app-data dir plus the
+// generated entry/stage names can pass MAX_PATH (CreateFileW/CreateDirectoryW then
+// fail with ERROR_PATH_NOT_FOUND). Every path here is a drive path built from
+// verified components, so it has no `.`/`..`/`/` that `\\?\` would stop normalizing.
+// std::fs calls already apply this conversion themselves.
 fn wide(path: &Path) -> io::Result<Vec<u16>> {
-    let mut value: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let disk = matches!(path.components().next(), Some(Component::Prefix(p)) if matches!(p.kind(), std::path::Prefix::Disk(_)));
+    let prefix: &[u16] = if disk { &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16] } else { &[] };
+    let mut value: Vec<u16> = prefix.iter().copied().chain(path.as_os_str().encode_wide()).collect();
     if value.contains(&0) {
         return Err(denied());
     }
@@ -277,6 +284,12 @@ impl Dir {
 
     pub(super) fn verify_private(&self) -> io::Result<()> {
         verify_acl(&self.file)
+    }
+
+    /// Unix seals entries read-only. Here the entry keeps its protected single-user
+    /// DACL only: an MSYS zsh ZDOTDIR stage can still write into it (known gap).
+    pub(super) fn set_sealed(&self, _sealed: bool) -> io::Result<()> {
+        self.verify_private()
     }
 
     pub(super) fn child(&self, name: &str, create: bool) -> io::Result<Self> {

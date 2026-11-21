@@ -85,6 +85,24 @@ pub(crate) fn instrument_posix(
     let mut output = PosixAdapter { spec: ordinary.clone(), hooks: Vec::new() };
     let result = (|| -> io::Result<()> {
         match dialect {
+            Dialect::Bash if args.login && cfg!(target_os = "macos") => {
+                // macOS /bin/bash is 3.2, whose --posix startup never reads $ENV, so a
+                // login has no rcfile/ENV ingress. Its only user ingress is the
+                // HOME-relative login file: point HOME at a private, sealed directory
+                // whose .bash_profile restores HOME first (the bash analogue of the zsh
+                // ZDOTDIR chain). bash still reads /etc/profile itself, before this; the
+                // macOS one never consults HOME (TermFlow sets TERM_PROGRAM, so no
+                // Apple_Terminal session script runs).
+                let home = effective_env("HOME").ok_or_else(|| adapter_error("SSH readiness requires HOME for a bash login shell"))?;
+                // bash derives the default HISTFILE from HOME before any startup file.
+                let history = if effective_env("HISTFILE").is_some() { "" } else { "HISTFILE=$HOME/.bash_history\n" };
+                let hook = format!("builtin export HOME={}\n{history}{}{}", sh_quote(&home),
+                    BASH_LOGIN_RC.split_once('\n').expect("login rc lines").1, BASH_HOOK.replace("@NONCE@", nonce));
+                let helper = output.publish(root, &supervisor, paths, ".bash_profile", &hook)?;
+                let dir = helper.rsplit_once('/').ok_or_else(|| adapter_error("invalid bash hook directory"))?.0;
+                output.spec.env.retain(|(key, _)| key != "HOME");
+                output.spec.env.push(("HOME".into(), dir.to_string()));
+            }
             Dialect::Bash => {
                 let source = if args.login {
                     format!("builtin set +o posix\nbuiltin unset POSIXLY_CORRECT\n{}{}{}", restore_export("ENV", effective_env("ENV").as_deref()),

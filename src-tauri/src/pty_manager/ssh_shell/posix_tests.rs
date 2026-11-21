@@ -41,7 +41,7 @@ impl Fixture {
     }
 }
 impl Drop for Fixture {
-    fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) { let _ = crate::pty_manager::ssh_helpers::remove_test_tree(&self.0); }
 }
 
 fn required_shell(dialect: Dialect) -> String {
@@ -350,7 +350,8 @@ fn nonce_is_not_exported_to_child_processes() {
         let mut shell = Running::start(&adapter.spec);
         Prompts::new().until(&shell, |p| p.count == 1);
         let output = f.shell_path(paths, "child.env");
-        let quoted = if dialect == Dialect::Fish { fish_quote(&output) } else { sh_quote(&output) };
+        // Typed into the line editor, so keep it ASCII like the real launch encoder.
+        let quoted = if dialect == Dialect::Fish { fish_quote(&output) } else { launch::sh_typed_quote(&output) };
         shell.send(&format!("command env > {quoted}; exit\r"));
         shell.wait_success();
         let captured = fs::read_to_string(f.0.join("child.env")).unwrap();

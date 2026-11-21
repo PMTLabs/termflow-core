@@ -32,9 +32,11 @@ fn fd_file(fd: libc::c_int) -> io::Result<File> {
 
 fn private(file: &File, directory: bool) -> io::Result<()> {
     let meta = file.metadata()?;
-    let expected = if directory { 0o700 } else { 0o600 };
+    // A published entry is sealed owner-read-only (see `Dir::set_sealed`).
+    let mode = meta.mode() & 0o7777;
+    let expected = if directory { mode == 0o700 || mode == 0o500 } else { mode == 0o600 };
     if meta.uid() != unsafe { libc::geteuid() }
-        || meta.mode() & 0o7777 != expected
+        || !expected
         || (directory && !meta.is_dir())
         || (!directory && (!meta.is_file() || meta.nlink() != 1))
     {
@@ -103,6 +105,18 @@ impl Dir {
 
     pub(super) fn verify_private(&self) -> io::Result<()> {
         private(&self.file, true)
+    }
+
+    /// A sealed directory is owner read/search only. A shell started with a hook
+    /// directory as its HOME/ZDOTDIR then cannot drop files there (e.g. a global
+    /// zshrc's compinit dump), which would make the entry untrusted to retire.
+    pub(super) fn set_sealed(&self, sealed: bool) -> io::Result<()> {
+        self.verify_private()?;
+        let mode = if sealed { 0o500 } else { 0o700 };
+        if unsafe { libc::fchmod(self.file.as_raw_fd(), mode) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub(super) fn child(&self, name: &str, create: bool) -> io::Result<Self> {

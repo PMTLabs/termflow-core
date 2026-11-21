@@ -16,6 +16,29 @@ mod platform;
 #[path = "ssh_helpers/tests.rs"]
 mod tests;
 
+/// Test fixtures only: published entries are sealed read-only on Unix, so a
+/// fixture removing a whole temp tree (including retained entries) unseals first.
+#[cfg(test)]
+pub(crate) fn remove_test_tree(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fn unseal(path: &Path) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.is_dir() {
+            if meta.permissions().mode() & 0o200 == 0 {
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+            }
+            for entry in std::fs::read_dir(path)? {
+                unseal(&entry?.path())?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(unix)]
+    unseal(path)?;
+    std::fs::remove_dir_all(path)
+}
+
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -183,7 +206,7 @@ impl HelperRoot {
         let file = match extension {
             "ps1" | "cmd" | "sh" | "fish" | "json" => format!("helper.{extension}"),
             "txt" if kind == HelperKind::ShellHook => "helper.txt".into(),
-            ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin" if kind == HelperKind::ShellHook => extension.into(),
+            ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin" | ".bash_profile" if kind == HelperKind::ShellHook => extension.into(),
             _ => return Err(denied()),
         };
         if content.len() as u64 > MAX_FILE {
@@ -204,6 +227,7 @@ impl HelperRoot {
         // The manifest is the commit record; an incomplete publication is never executable.
         dir.publish_file(&file, content)?;
         dir.publish_file(MANIFEST, &serde_json::to_vec(&manifest)?)?;
+        dir.set_sealed(true)?;
         let helper = Helper {
             inner: Arc::new(Entry {
                 root: self.dir.clone(),
@@ -264,7 +288,7 @@ fn verified_manifest(dir: &platform::Dir, id: Uuid) -> io::Result<Manifest> {
     component(&manifest.file)?;
     let valid_name = matches!(manifest.file.as_str(), "helper.ps1" | "helper.cmd" | "helper.sh" | "helper.fish" | "helper.json")
         || (manifest.kind == HelperKind::ShellHook
-            && matches!(manifest.file.as_str(), "helper.txt" | ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin"));
+            && matches!(manifest.file.as_str(), "helper.txt" | ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin" | ".bash_profile"));
     if !valid_name || digest(&dir.read_file(&manifest.file)?) != manifest.sha256
     {
         return Err(denied());
@@ -280,6 +304,13 @@ fn quiescent_names(dir: &platform::Dir, manifest: &Manifest) -> io::Result<bool>
     Ok(names == expected)
 }
 
+/// Entries stay sealed except for the root-locked marker update itself.
+fn unsealed(dir: &platform::Dir, change: impl FnOnce(&platform::Dir) -> io::Result<()>) -> io::Result<()> {
+    dir.set_sealed(false)?;
+    let result = change(dir);
+    dir.set_sealed(true).and(result)
+}
+
 fn remove_contents(dir: &platform::Dir, manifest: &Manifest) -> io::Result<()> {
     // Revalidate before unlink. Never follow a link, traverse another directory or delete
     // unknown files, even if someone manually placed them inside a feature-owned entry.
@@ -287,6 +318,7 @@ fn remove_contents(dir: &platform::Dir, manifest: &Manifest) -> io::Result<()> {
     if !quiescent_names(dir, manifest)? {
         return Err(denied());
     }
+    dir.set_sealed(false)?;
     dir.remove_file(&manifest.file)?;
     dir.remove_file(MANIFEST)
 }
@@ -341,7 +373,7 @@ impl Helper {
         let dir = state.dir.as_ref().ok_or_else(denied)?;
         verified_manifest(dir, self.inner.manifest.entry)?;
         if state.users == 0 {
-            dir.publish_file(IN_FLIGHT, b"execution not yet known quiescent\n")?;
+            unsealed(dir, |dir| dir.publish_file(IN_FLIGHT, b"execution not yet known quiescent\n"))?;
         }
         state.users += 1;
         Ok(HelperUse {
@@ -419,11 +451,8 @@ impl HelperUse {
         let mut state = self.helper.inner.state.lock();
         state.users -= 1;
         if state.users == 0 {
-            state
-                .dir
-                .as_ref()
-                .ok_or_else(denied)?
-                .remove_file(IN_FLIGHT)?;
+            let dir = state.dir.as_ref().ok_or_else(denied)?;
+            unsealed(dir, |dir| dir.remove_file(IN_FLIGHT))?;
         }
         self.helper.inner.clean_if_quiescent(&mut state)
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::pty_manager::ssh_shell::posix::launch::encode_launch;
+use crate::pty_manager::ssh_shell::posix::launch::{encode_launch, sh_typed_quote};
 
 fn owner() -> ProcessIdentity {
     ProcessIdentity::capture(std::process::id()).unwrap()
@@ -95,7 +95,12 @@ fn each_shell_receives_exact_argv_not_shell_code() {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     for dialect in matrix() {
         let f = Fixture::new();
-        let spec = spec(&f, dialect, false);
+        let mut spec = spec(&f, dialect, false);
+        if dialect != Dialect::Fish {
+            // A GUI-launched shell can lack a UTF-8 locale (macOS sets no LANG):
+            // readline then reads typed 8-bit bytes as Meta key bindings.
+            spec.env.push(("LC_ALL".into(), "C".into()));
+        }
         let paths = classify(&spec.shell).unwrap().1;
         let mut argv = vec![shell_path(&recorder(&f), paths).unwrap()];
         argv.extend(table(true));
@@ -153,6 +158,21 @@ fn cmd_batch_delayed_expansion_is_scoped() {
         // Verify the launcher echoes the real argv, even in a /Q profile.
         assert!(String::from_utf8_lossy(&visible).contains("%TF_PERCENT% !TF_PERCENT!"));
     }
+}
+
+#[test]
+fn bourne_typed_launch_is_ascii_for_any_argv() {
+    let f = Fixture::new();
+    let bash = if cfg!(windows) { r"C:\Program Files\Git\bin\bash.exe" } else { "/bin/bash" };
+    let exe = if cfg!(windows) { "/c/Program Files/OpenSSH/ssh.exe" } else { "/usr/bin/ssh" };
+    for shell in [bash.to_string(), bash.replace("bash", "zsh")] {
+        let mut argv = vec![exe.to_string()];
+        argv.extend(table(true));
+        argv.push("pr\u{f3}mpt's \u{2603}".into());
+        let launch = encode_launch(&shell, argv, &f.root(), owner()).unwrap();
+        assert!(launch.bytes().is_ascii(), "{shell}: {}", String::from_utf8_lossy(launch.bytes()));
+    }
+    assert_eq!(sh_typed_quote("a\u{f3}'b"), r#"'a'$'\303\263'''"'"'b'"#);
 }
 
 #[test]

@@ -136,7 +136,7 @@ fn encode(
                 Ok(format!("\"{path}\""))
             }
             (None, Some((dialect, paths))) => {
-                let quote = if dialect == Dialect::Fish { fish_quote } else { sh_quote };
+                let quote = if dialect == Dialect::Fish { fish_quote } else { sh_typed_quote };
                 let literal = launch.argv.iter().map(|arg| quote(arg)).collect::<Vec<_>>().join(" ");
                 // MSYS rewrites path-like args when spawning a native Windows exe.
                 // Disable that only in the launched process's environment.
@@ -162,6 +162,39 @@ fn encode(
             Err(error)
         }
     }
+}
+
+/// Typed bytes reach a line editor before the shell parser. bash's readline in a
+/// non-UTF-8 locale (convert-meta, e.g. macOS bash 3.2 with no LANG) turns each
+/// 8-bit byte into a Meta key binding, mangling the line and its quoting. Keep the
+/// typed line ASCII: non-ASCII runs become `$'\ooo'` words joined to the adjacent
+/// single-quoted ASCII words, which bash and zsh decode to the same argv bytes.
+pub(super) fn sh_typed_quote(value: &str) -> String {
+    if value.is_ascii() {
+        return sh_quote(value);
+    }
+    let mut output = String::new();
+    let mut ascii = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii() {
+            ascii.push(ch);
+            continue;
+        }
+        if !ascii.is_empty() {
+            output.push_str(&sh_quote(&ascii));
+            ascii.clear();
+        }
+        output.push_str("$'");
+        let mut bytes = [0; 4];
+        for byte in ch.encode_utf8(&mut bytes).bytes() {
+            output.push_str(&format!("\\{byte:03o}"));
+        }
+        output.push('\'');
+    }
+    if !ascii.is_empty() {
+        output.push_str(&sh_quote(&ascii));
+    }
+    output
 }
 
 fn ps_quote(path: &str) -> io::Result<String> {
