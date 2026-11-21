@@ -91,7 +91,7 @@ test('no renderer source that handles SSH session views matches on reason text',
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) { if (entry.name !== 'node_modules' && entry.name !== '__tests__') walk(full); }
-      else if (/\.tsx?$/.test(entry.name) && !/\.(test|cases)\.tsx?$/.test(entry.name)) files.push(full);
+      else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) files.push(full);
     }
   };
   walk(renderer);
