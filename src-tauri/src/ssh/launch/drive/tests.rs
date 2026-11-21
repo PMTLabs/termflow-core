@@ -74,9 +74,11 @@ impl InputBackend for Port {
     }
     fn hosted(&self, _: &str) -> bool { self.host.is_some() }
     fn enqueue_hosted(&self, permit: &InputPermit<'_>, bytes: &[u8]) -> bool {
-        self.host.as_ref().expect("not hosted").write_registered_admitted(
+        // Like AppState: a process with no host route is not enqueued, so
+        // write_input falls through to its local writer.
+        self.host.as_ref().is_some_and(|host| host.write_registered_admitted(
             &self.keys, permit, crate::elevated_host::HostChannel::Primary, PROCESS, bytes,
-        )
+        ))
     }
 }
 impl LaunchPort for Port {
@@ -541,10 +543,11 @@ async fn local_partial_write_is_not_retried_or_reported_typed() {
     f.ready(2);
     assert!(!f.tick(&a));
     assert_eq!(*f.port.record.calls.lock(), 2, "write_all attempted completion, never replayed the command");
-    let attempts = f.launches.0.lock();
-    let pending = attempts[LEAF].payload.as_ref().expect("uncertain execution retains helper pins");
-    assert_eq!(f.port.record.bytes.lock().as_slice(), &pending.encoded.bytes()[..3]);
-    drop(attempts);
+    {
+        let attempts = f.launches.0.lock();
+        let pending = attempts[LEAF].payload.as_ref().expect("uncertain execution retains helper pins");
+        assert_eq!(f.port.record.bytes.lock().as_slice(), &pending.encoded.bytes()[..3]);
+    }
     assert!(f.port.events.lock().is_empty());
     assert_eq!(f.sessions.current_launch(LEAF).unwrap().state, None);
     f.shutdown().await;
@@ -675,10 +678,8 @@ async fn remembered_secret_never_appears_in_terminal_write_event_or_tag() {
     assert_eq!(f.keys().ssh_launch_connection(PROCESS).as_deref(), Some(CONNECTION));
     let write = String::from_utf8(f.port.record.bytes.lock().clone()).unwrap();
     let output = json!({"launchEvents": *f.port.events.lock(), "sessionEvents": *f.session_events.0.lock(), "snapshot": next, "paneTagId": f.keys().ssh_launch_connection(PROCESS)}).to_string();
-    let attempts = f.launches.0.lock();
-    let argv = serde_json::to_string(attempts[LEAF].payload.as_ref().unwrap().encoded.argv()).unwrap();
+    let argv = serde_json::to_string(f.launches.0.lock()[LEAF].payload.as_ref().unwrap().encoded.argv()).unwrap();
     for redacted in [&write, &output, &argv] { assert!(!redacted.contains(secret) && !redacted.contains(&saved)); }
-    drop(attempts);
     f.shutdown().await;
 }
 

@@ -20,8 +20,12 @@ const DEADLINE: Duration = Duration::from_secs(20);
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let p = fs::canonicalize(std::env::temp_dir()).unwrap()
-            .join(format!("termflow ssh prómpt {}", uuid::Uuid::new_v4()));
+        let temp = fs::canonicalize(std::env::temp_dir()).unwrap();
+        // Windows canonical paths are verbatim (`\\?\C:\…`). A shell started in one
+        // cannot resolve a relative Set-Location; a profile cwd is never verbatim.
+        #[cfg(windows)]
+        let temp = temp.to_str().and_then(|p| p.strip_prefix(r"\\?\")).map(PathBuf::from).unwrap_or(temp);
+        let p = temp.join(format!("termflow ssh prómpt {}", uuid::Uuid::new_v4()));
         fs::create_dir(&p).unwrap();
         Self(p)
     }
