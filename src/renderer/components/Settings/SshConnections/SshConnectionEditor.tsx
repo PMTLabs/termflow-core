@@ -61,6 +61,38 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
   const parsed = parseOptions(options);
   const dirty = JSON.stringify(draft) !== baseline.current || options !== baseOptions;
   const removed = !!connectionId && !existing;
+  const [confirmForget, setConfirmForget] = useState(false);
+  const [forgotten, setForgotten] = useState(false);
+  const [focusAuth, setFocusAuth] = useState(false);
+  const showSavedCredential = !!existing?.hasSavedSecret && existing.auth !== 'agent' && draft.auth !== 'agent';
+  useEffect(() => {
+    if (readOnly || !showSavedCredential) setConfirmForget(false);
+  }, [readOnly, showSavedCredential]);
+  useEffect(() => {
+    if (focusAuth && !busy) {
+      form.current?.querySelector<HTMLButtonElement>('.ssh-auth [aria-pressed="true"]')?.focus();
+      setFocusAuth(false);
+    }
+  }, [focusAuth, busy]);
+  const forget = async () => {
+    if (!existing || !showSavedCredential || readOnly || busy) return;
+    setConfirmForget(false);
+    setBusy(true);
+    setError(null);
+    setForgotten(false);
+    try {
+      const reply = await api.forgetSecret(existing.id);
+      onSaved(reply, inputOf(existing));
+      setForgotten(true);
+    } catch (failure) {
+      setError({ code:'forget', message:sshErrorMessage(failure) });
+      try { await refreshReadOnly(failure, api, reply => onSaved(reply,draft)); }
+      catch (refreshError) { setError({ code:'refresh', message:sshErrorMessage(refreshError) }); }
+    } finally {
+      setFocusAuth(true);
+      setBusy(false);
+    }
+  };
   const [testOpen, setTestOpen] = useState(false);
   const sessionApi = window.electronAPI;
   const canTest = !!existing && !!connectionId && !dirty && !changed && !readOnly && !busy
@@ -133,6 +165,8 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       {field('user','User')}
       <div role="group" aria-label="Authentication" className="au-seg ssh-auth">{(['keyFile','agent','password'] as const).map(auth => <button type="button" key={auth} className={draft.auth === auth ? 'on' : undefined} aria-pressed={draft.auth === auth} onClick={() => { clearField('identityFile'); setDraft({ ...draft, auth, identityFile:auth === 'keyFile' ? draft.identityFile ?? '' : null }); }}>{auth === 'keyFile' ? 'Key file' : auth === 'agent' ? 'SSH agent' : 'Ask for password'}</button>)}</div>
       {draft.auth === 'keyFile' && <>{field('identityFile','Identity file')}<button type="button" className="au-btn sm ssh-browse" onClick={async () => { try { const path = await window.electronAPI?.pickFile?.('Select SSH identity file'); if (path) { clearField('identityFile'); setDraft(value => ({ ...value, identityFile:path })); } } catch (e) { setError({ code:'picker', message:sshErrorMessage(e) }); } }}>Browse…</button></>}
+      {showSavedCredential && <div><small>Saved credential for the app channel</small>{' '}<button type="button" className="au-btn sm" disabled={readOnly || busy} onClick={() => setConfirmForget(true)}>Forget</button></div>}
+      <div role="status">{forgotten && !existing?.hasSavedSecret ? 'Saved credential forgotten.' : ''}</div>
       <div className="ssh-editor-field"><label>Jump host<select name="jumpConnectionId" value={draft.jumpConnectionId ?? ''} {...errorProps('jumpConnectionId')} onChange={event => { clearField('jumpConnectionId'); setDraft({ ...draft, jumpConnectionId:event.target.value || null }); }}><option value="">None</option>{draft.jumpConnectionId && !jumpChoices.some(c => c.id === draft.jumpConnectionId) && <option value={draft.jumpConnectionId} disabled>(unavailable: {draft.jumpConnectionId})</option>}{jumpChoices.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>{fieldError('jumpConnectionId')}</div>
       <div className="ssh-editor-field"><label>Folder<select name="folderId" value={draft.folderId ?? ''} {...errorProps('folderId')} onChange={event => { clearField('folderId'); setDraft({ ...draft, folderId:event.target.value || null }); }}><option value="">Top level</option>{draft.folderId && !view.folders.some(f => f.id === draft.folderId) && <option value={draft.folderId} disabled>(unavailable: {draft.folderId})</option>}{view.folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>{fieldError('folderId')}</div>
       <label className="ssh-check"><input name="bookmarked" type="checkbox" className="setting-checkbox" checked={draft.bookmarked} onChange={event => setDraft({ ...draft, bookmarked:event.target.checked })} />Bookmark</label>
@@ -147,6 +181,7 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
     </div>
     {testOpen && canTest && sessionApi && <SshTestConnectionDialog connectionId={connectionId!} api={sessionApi} onClose={() => setTestOpen(false)} />}
     <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
+    <ConfirmDialog isOpen={confirmForget && showSavedCredential && !readOnly && !busy} title="Forget saved credential" message={`Forget the saved credential for ${existing?.name}? You'll be asked for it next time.`} destructive confirmText="Forget" onCancel={() => setConfirmForget(false)} onConfirm={forget} />
     <ConfirmDialog isOpen={confirmDelete && !readOnly && !removed} title="Delete connection" message={`Delete ${draft.name}?`} destructive confirmText="Delete" onCancel={() => setConfirmDelete(false)} onConfirm={async () => { if (readOnly || removed) { setConfirmDelete(false); return; } try { const reply = await api.deleteConnection({ id:connectionId! }); onSaved(reply,draft); onClose(); } catch (e) { setError({ code:'delete', message:sshErrorMessage(e) }); try { await refreshReadOnly(e,api,reply => onSaved(reply,draft)); } catch (refreshError) { setError({ code:'refresh', message:sshErrorMessage(refreshError) }); } } setConfirmDelete(false); }} />
   </div>;
 }

@@ -338,6 +338,69 @@ async fn remember_merge_preserves_concurrent_bookmark_and_mark_used() {
         .contains("ciphertext"));
 }
 #[tokio::test]
+async fn forget_preserves_definition_and_next_test_prompts() {
+    let s = Setup::new();
+    s.adapter
+        .set_secret_if_binding_matches(&binding(), "v1:fixture".into(), CancellationToken::new())
+        .await
+        .unwrap();
+    let before = s.store.get().unwrap();
+    assert!(before.view.connections[0].has_saved_secret);
+    let mut expected_disk = s.store.snapshot().unwrap();
+    expected_disk.connections[0].secret = None;
+    expected_disk.revision += 1;
+
+    let err = s
+        .store
+        .forget_secret("missing", before.revision, |_| panic!("unexpected event"))
+        .unwrap_err();
+    assert_eq!(err.code, "not-found");
+    let err = s
+        .store
+        .forget_secret("c-a", before.revision - 1, |_| panic!("unexpected event"))
+        .unwrap_err();
+    assert_eq!(err.code, "revision-conflict");
+
+    let after = s
+        .store
+        .forget_secret("c-a", before.revision, |_| {})
+        .unwrap();
+    let mut expected = before;
+    expected.revision += 1;
+    expected.view.revision += 1;
+    expected.view.connections[0].has_saved_secret = false;
+    assert_eq!(after, expected);
+    assert!(s.store.snapshot().unwrap() == expected_disk);
+    assert!(s.adapter.load(&binding()).await.unwrap().is_none());
+
+    let again = s
+        .store
+        .forget_secret("c-a", after.revision, |_| {})
+        .unwrap();
+    expected.revision += 1;
+    expected.view.revision += 1;
+    assert_eq!(again, expected);
+
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    f.registry
+        .configure(Dependencies {
+            targets: Arc::new(s.adapter.clone()),
+            streams: Arc::new(MemoryStreams(f.server.clone())),
+            agents: Arc::new(NativeAgent),
+            secrets: Arc::new(s.adapter.clone()),
+            events: f.events.clone(),
+            known_hosts: crate::ssh::known_hosts::KnownHosts {
+                path: f.path.clone(),
+            },
+            home: s.path.clone(),
+        })
+        .unwrap();
+    let probe = f.registry.probe("c-a").unwrap();
+    wait_state(&f.registry, &probe, true, SessionState::NeedsSecret).await;
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn settings_test_to_launch_uses_same_target_and_trust() {
     let s = Setup::new();
     let original = s.bytes();

@@ -11,6 +11,7 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_folder_upsert, $crate::commands::ssh_folder_delete,
             $crate::commands::ssh_connection_upsert, $crate::commands::ssh_connection_delete,
             $crate::commands::ssh_move, $crate::commands::ssh_set_bookmark,
+            $crate::commands::ssh_forget_secret,
             $crate::commands::ssh_session_open, $crate::commands::ssh_session_state,
             $crate::commands::ssh_session_close, $crate::commands::ssh_session_reconnect,
             $crate::commands::ssh_session_submit_secret, $crate::commands::ssh_session_trust_host,
@@ -172,6 +173,25 @@ fn ssh_set_bookmark_inner(
     Ok(reply)
 }
 
+#[tauri::command]
+pub fn ssh_forget_secret<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, Store>,
+    id: String,
+) -> Result<Reply, StoreError> {
+    ssh_forget_secret_inner(&app, &store, id)
+}
+fn ssh_forget_secret_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    id: String,
+) -> Result<Reply, StoreError> {
+    let revision = store.get()?.revision;
+    let reply = store.forget_secret(&id, revision, |reply| app.changed(CHANGED, reply))?;
+    log::info!("SSH forget saved credential: id={id}");
+    Ok(reply)
+}
+
 #[cfg(test)]
 #[path = "ssh_store_log_tests.rs"]
 mod log_tests;
@@ -226,7 +246,6 @@ mod tests {
     }
     #[test]
     fn every_mutation_command_emits_exactly_ssh_store_changed_with_post_commit_view_and_revision() {
-        // The command table has six mutations (eight commands minus get/reload).
         for kind in [
             "folder_upsert",
             "folder_delete",
@@ -234,6 +253,7 @@ mod tests {
             "connection_delete",
             "move",
             "bookmark",
+            "forget",
         ] {
             let temp = Temp::new();
             let store = temp.store();
@@ -267,6 +287,7 @@ mod tests {
                     0,
                 ),
                 "bookmark" => ssh_set_bookmark_inner(&capture, &store, connection_id.clone(), true),
+                "forget" => ssh_forget_secret_inner(&capture, &store, connection_id.clone()),
                 _ => unreachable!(),
             }
             .unwrap();
@@ -398,6 +419,9 @@ mod tests {
             serde_json::json!({"id":id,"bookmarked":true}),
         );
         assert!(bookmarked.view.connections[0].bookmarked);
+        let forgotten = invoke("ssh_forget_secret", serde_json::json!({"id":id}));
+        assert_eq!(forgotten.revision, bookmarked.revision + 1);
+        assert!(!forgotten.view.connections[0].has_saved_secret);
         let deleted = invoke("ssh_connection_delete", serde_json::json!({"id":id}));
         assert!(deleted.view.connections.is_empty());
         let deleted = invoke(

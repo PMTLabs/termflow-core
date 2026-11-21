@@ -9,6 +9,7 @@ export function createSshBridge(invoke: Invoke, listen: Listen): SshStoreApi {
     upsertConnection: input => invoke('ssh_connection_upsert', { input }),
     deleteConnection: input => invoke('ssh_connection_delete', { ...input }),
     move: input => invoke('ssh_move', { ...input }),
+    forgetSecret: id => invoke('ssh_forget_secret', { id }),
     setBookmark: (id, bookmarked) => invoke('ssh_set_bookmark', { id, bookmarked }),
     onChanged: listener => listen<SshReply>('ssh-store:changed', event => listener(event.payload)),
   };
@@ -17,5 +18,5 @@ const desktopOnly = async (): Promise<never> => { throw { code: 'desktop-only', 
 export const browserSshBridge: SshStoreApi = {
   get: desktopOnly, reload: desktopOnly, upsertFolder: desktopOnly, deleteFolder: desktopOnly,
   upsertConnection: desktopOnly, deleteConnection: desktopOnly, move: desktopOnly,
-  setBookmark: desktopOnly, onChanged: desktopOnly,
+  forgetSecret: desktopOnly, setBookmark: desktopOnly, onChanged: desktopOnly,
 };
