@@ -103,8 +103,10 @@ async fn ineligible_determinate_drain_discards_telemetry_and_restore_rewarms() {
     assert_eq!(wire.count(), 2);
     assert_eq!(wire.closed.closed_channels.load(SeqCst), closed, "admitted exec not cancelled");
     release.notify_one();
+    // The peer initiates CLOSE on success, so its client-close handler is
+    // not a drain signal. The worker clears in_flight after joining the reader.
     timeout(WAIT, async {
-        while wire.closed.closed_channels.load(SeqCst) <= closed {
+        while sampler.status(A).expect("retained worker").2 {
             sleep(Duration::from_millis(2)).await;
         }
     }).await.unwrap();

@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     commands::ssh_session::{open_core, reconnect_core},
-    ssh::{metrics::sampler::MetricsEvent, session::*, tests::{hop, wait_state, Fixture, MemoryStreams, Server}},
+    ssh::{metrics::sampler::{EventSink as MetricsEventSink, MetricsEvent}, session::*, tests::{hop, wait_state, Fixture, MemoryStreams, Server}},
     state::{Completion, PaneReply, PaneResult, ShellStage, StagedShell},
 };
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ const QUIET: Duration = Duration::from_millis(2200);
 
 #[derive(Default)]
 struct Events(Mutex<Vec<(&'static str, Value)>>);
-impl EventSink for Events {
+impl MetricsEventSink for Events {
     fn emit(&self, name: &'static str, payload: MetricsEvent<'_>) {
         self.0.lock().push((name, serde_json::to_value(payload).unwrap()));
     }

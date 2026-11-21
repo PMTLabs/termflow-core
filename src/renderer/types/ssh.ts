@@ -130,7 +130,11 @@ interface MetricPayloads {
   partitions: { mounts: MountUsage[] };
   nfs: { mounts: MountUsage[] };
 }
-export type MetricKey = keyof MetricPayloads;
+type Assert<T extends true> = T;
+// Require both directions so extra wire keys cannot silently escape the display list.
+export type MetricPayloadKeysMatch = Assert<
+  [keyof MetricPayloads] extends [MetricKey] ? [MetricKey] extends [keyof MetricPayloads] ? true : false : false
+>;
 export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> };
 export interface SshMetricsSample { terminalId: string; sampledAt: number; metrics: SshMetrics }
 export interface SshMetricsResumeReceipt { sampleFloor: number; generation: number; pauseSeq: number }

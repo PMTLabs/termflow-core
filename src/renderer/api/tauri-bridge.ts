@@ -1,4 +1,4 @@
-import type { SshAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent, SshMetricsWatchReceipt, SshMetricsResumeReceipt } from '../types/ssh';
+import type { SshAPI, SshMetricsAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent, SshMetricsWatchReceipt, SshMetricsResumeReceipt } from '../types/ssh';
 import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
@@ -92,7 +92,7 @@ export interface NetworkInterfaceInfo {
 }
 
 // Define the interface to match existing usage
-interface ElectronAPI extends SshAPI {
+interface ElectronAPI extends SshAPI, SshMetricsAPI {
   pickFile?: (title?: string) => Promise<string | null>;
   ssh?: import('../types/ssh').SshBridgeApi & import('../types/ssh').SshLaunchApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{

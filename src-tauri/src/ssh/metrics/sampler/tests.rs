@@ -323,11 +323,12 @@ async fn two_consumers_one_terminal_have_one_exec_worker() {
     f.registry.shutdown().await;
 }
 
-#[tokio::test]
+// Pause from runtime creation so the virtual clock starts on the timer wheel's
+// millisecond grid; pausing after authentication keeps a fractional offset.
+#[tokio::test(start_paused = true)]
 async fn slow_exec_skips_ticks_never_bursts_or_overlaps() {
     let (f, _, events, _) = rig([]);
     connect(&f, A).await;
-    tokio::time::pause(); // Only the cadence test substitutes time/exec duration.
     let worker = Arc::new(Terminal::new(A));
     worker.set_eligible(true).unwrap();
     let simulated = Arc::new(Mutex::new(VecDeque::from([
@@ -386,8 +387,12 @@ async fn disconnected_cannot_exec_or_emit_even_when_completion_is_late() {
     assert_eq!(wire.count(), 2);
     assert_eq!(events.events.lock().len(), 1);
     release.notify_one();
+    // A connected, eligible worker can admit its first tick before reconnect()
+    // returns. Reserve the new floor before explicitly re-enabling sampling.
+    sampler.set_eligible(A, false).unwrap();
     reconnect(&f).await;
     let fence = sampler.fence(A).unwrap();
+    sampler.set_eligible(A, true).unwrap();
     let fresh = events.event(SAMPLE, 1).await;
     assert!(fresh["sampledAt"].as_u64().unwrap() > fence.sample_floor);
     assert_warming(&fresh);

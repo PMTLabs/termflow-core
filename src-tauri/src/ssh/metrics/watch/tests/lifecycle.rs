@@ -156,7 +156,8 @@ async fn hide_unwatch_and_page_retirement_drain_before_discarding_telemetry() {
         assert_eq!(rig.closed(A), 0, "{action}: exec cancellation is not an eligibility effect");
         assert!(snapshot(&rig)[A].3, "{action}: local reader is still admitted");
         release.notify_one();
-        until(|| rig.closed(A) == 1 && !snapshot(&rig)[A].3).await;
+        // Peer-initiated CLOSE does not call the peer's client-close handler.
+        until(|| !snapshot(&rig)[A].3).await;
         sleep(QUIET).await;
         assert_eq!(rig.starts(A), 1, "{action}");
         assert!(rig.events.samples(A).is_empty(), "{action}: ineligible result must not emit");

@@ -54,7 +54,13 @@ function setup(override?: SshMetricsAPI, eventsReady = Promise.resolve()) {
   const watch = jest.fn((_id: string, _uuid: string, _pg?: number): ReturnType<SshMetricsAPI['sshMetricsWatch']> =>
     Promise.resolve({ sampleFloor: wall, generation, pauseSeq, pausedReason }));
   const unwatch = jest.fn(async (_id: string, _uuid: string, _pg?: number) => {});
-  const resume = jest.fn(async (_id: string, _uuid: string, _pg?: number) => { pausedReason = null; return { sampleFloor: wall, generation, pauseSeq: ++pauseSeq }; });
+  const resumeReceipt = jest.fn(async () => ({ sampleFloor: wall, generation, pauseSeq: pauseSeq + 1 }));
+  const resume = jest.fn(async (_id: string, _uuid: string, _pg?: number) => {
+    const receipt = await resumeReceipt();
+    pauseSeq = receipt.pauseSeq;
+    pausedReason = null;
+    return receipt;
+  });
   const api: SshMetricsAPI = override ?? {
     sshMetricsWatch: watch, sshMetricsResume: resume, sshMetricsUnwatch: unwatch,
     onSshMetricsSample: async cb => { deliveredSample = cb; await eventsReady; return () => {}; },
@@ -70,7 +76,7 @@ function setup(override?: SshMetricsAPI, eventsReady = Promise.resolve()) {
   session('connected');
   dispose = installSshMetricsWatch(store, api, page);
   const state = () => store.getState().sshSession;
-  return { watch, unwatch, resume, session, page, live: () => selectSshMetricsSample(state(), A), state,
+  return { watch, unwatch, resumeReceipt, session, page, live: () => selectSshMetricsSample(state(), A), state,
     emit: (percent: number | null, stamp = wall, id = A) => deliveredSample(reading(stamp, percent, id)),
     pause: () => selectSshMetricsPause(state(), A),
     control: (seq: number, reason: string | null, gen = generation) => deliveredControl({ terminalId: A, generation: gen, pauseSeq: seq, pausedReason: reason }),
@@ -147,7 +153,7 @@ test('stale_after_five_seconds_and_resume_cannot_render_old_values', async () =>
   await advance(4998); expect(h.live()).toEqual(reading(sample, 92));
   await advance(2); expect(h.live()).toBeUndefined();
   const resumeReply = deferred<{ sampleFloor: number; generation: number; pauseSeq: number }>();
-  h.resume.mockReturnValueOnce(resumeReply.promise);
+  h.resumeReceipt.mockReturnValueOnce(resumeReply.promise);
   elapse(1); h.emit(15); expect(h.live()).toBeDefined();
   const resumed = resumeSshMetrics(A); await flush();
   h.emit(99); expect(h.live()).toBeUndefined();
