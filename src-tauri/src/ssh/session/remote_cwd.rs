@@ -106,6 +106,8 @@ impl SessionRegistry {
         resolve_leaf: impl FnOnce(&str) -> Option<String>,
     ) {
         let registry = self.inner.lock();
+        // Hot path for every terminal's output: skip the leaf lookup when no SSH pane exists.
+        if registry.panes.is_empty() { return; }
         let Some(terminal_id) = resolve_leaf(&payload.id) else { return };
         let Some(entry) = registry.panes.get(&terminal_id) else { return };
         let state = entry.inner.lock();
