@@ -18,6 +18,8 @@ pub struct ResolvedTarget {
     pub extra_options: Vec<(String, String)>,
 }
 pub fn resolve(store: &Persisted, connection_id: &str) -> Result<ResolvedTarget, StoreError> {
+    // Includes missing/self/nested jump checks (all cycles beyond self
+    // necessarily contain a nested jump). Keep store and resolver policy shared.
     store.validate()?;
     let connection = store
         .connections
@@ -29,18 +31,22 @@ pub fn resolve(store: &Persisted, connection_id: &str) -> Result<ResolvedTarget,
             message: "Connection not found".into(),
         })?;
     let mut hops = Vec::new();
-    for c in connection
+    let jump = connection
         .jump_connection_id
         .as_ref()
-        .and_then(|id| store.connections.iter().find(|c| &c.id == id))
-        .into_iter()
-        .chain(std::iter::once(connection))
-    {
+        .map(|id| {
+            store.connections.iter().find(|c| &c.id == id).ok_or_else(|| {
+                StoreError::field("jumpConnectionId", "not-found")
+            })
+        })
+        .transpose()?;
+    for c in jump.into_iter().chain(std::iter::once(connection)) {
         hops.push(Hop {
             connection_id: c.id.clone(),
             host: super::store::bare_host(&c.host).into(),
             port: c.port,
-            user: c.user.clone(),
+            user: super::store_adapter::effective_user(&c.user)
+                .map_err(|_| StoreError::field("user", "effective-user-unavailable"))?,
             auth: c.auth.clone(),
             identity_file: c.identity_file.clone(),
         });

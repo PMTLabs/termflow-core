@@ -97,21 +97,19 @@ fn resolved(data: &Persisted, id: &str) -> Result<SessionTarget, SessionError> {
         hops: resolved
             .hops
             .into_iter()
-            .map(|h| {
-                Ok(SessionHop {
-                    connection_id: h.connection_id,
-                    host: h.host,
-                    port: h.port,
-                    user: effective_user(&h.user)?,
-                    auth: match h.auth {
-                        Auth::KeyFile => AuthMethod::Key,
-                        Auth::Agent => AuthMethod::Agent,
-                        Auth::Password => AuthMethod::Password,
-                    },
-                    identity_file: h.identity_file,
-                })
+            .map(|h| SessionHop {
+                connection_id: h.connection_id,
+                host: h.host,
+                port: h.port,
+                user: h.user,
+                auth: match h.auth {
+                    Auth::KeyFile => AuthMethod::Key,
+                    Auth::Agent => AuthMethod::Agent,
+                    Auth::Password => AuthMethod::Password,
+                },
+                identity_file: h.identity_file,
             })
-            .collect::<Result<_, SessionError>>()?,
+            .collect(),
     };
     // 065 extra_options belong only to the terminal launch, never russh.
     target.validate(id)?;

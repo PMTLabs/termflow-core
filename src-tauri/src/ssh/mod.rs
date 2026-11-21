@@ -10,6 +10,7 @@ mod auth_tests;
 #[cfg(test)]
 mod credential_tests;
 pub mod known_hosts;
+pub mod launch_argv;
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;

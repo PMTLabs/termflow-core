@@ -57,20 +57,23 @@ const ALLOWED_OPTIONS: &[&str] = &[
     "SendEnv",
     "SetEnv",
 ];
-fn option_key_allowed(key: &str) -> Result<()> {
+pub(super) fn canonical_option(key: &str, value: &str) -> Result<&'static str> {
     if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Err(StoreError::field("extraOptions", "invalid-key"));
     }
-    if !ALLOWED_OPTIONS
+    let canonical = ALLOWED_OPTIONS
         .iter()
-        .any(|allowed| key.eq_ignore_ascii_case(allowed))
-    {
-        return Err(StoreError {
+        .copied()
+        .find(|allowed| key.eq_ignore_ascii_case(allowed))
+        .ok_or_else(|| StoreError {
             message: format!("“{key}” isn't allowed here. Allowed options: {}.", ALLOWED_OPTIONS.join(", ")),
             ..StoreError::field("extraOptions", "option-not-allowed")
-        });
+        })?;
+    bounded(value, "extraOptions")?;
+    if value.chars().any(char::is_control) {
+        return Err(StoreError::field("extraOptions", "invalid-value"));
     }
-    Ok(())
+    Ok(canonical)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,7 +91,7 @@ impl StoreError {
             message: message.into(),
         }
     }
-    fn field(field: &str, code: &str) -> Self {
+    pub(super) fn field(field: &str, code: &str) -> Self {
         Self {
             field: Some(field.into()),
             code: code.into(),
@@ -434,11 +437,7 @@ impl Persisted {
                 return Err(StoreError::field("extraOptions", "too-many"));
             }
             for (key, value) in &c.extra_options {
-                option_key_allowed(key)?;
-                bounded(value, "extraOptions")?;
-                if value.chars().any(char::is_control) {
-                    return Err(StoreError::field("extraOptions", "invalid-value"));
-                }
+                canonical_option(key, value)?;
             }
         }
         Ok(())
@@ -650,7 +649,7 @@ fn bracketed_host(host: &str) -> bool {
         .and_then(|s| s.strip_suffix(']'))
         .is_some_and(|s| s.parse::<std::net::Ipv6Addr>().is_ok())
 }
-fn valid_host(host: &str) -> bool {
+pub(super) fn valid_host(host: &str) -> bool {
     bracketed_host(host)
         || host.parse::<std::net::Ipv6Addr>().is_ok()
         || (!host.starts_with(['-', '.'])

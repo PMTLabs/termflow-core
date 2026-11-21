@@ -539,16 +539,18 @@ fn view_never_contains_secret_and_reports_has_saved_secret() {
     assert!(!s.view(None).view.connections[0].has_saved_secret);
 }
 #[test]
-fn resolve_returns_target_and_jump_hops_in_order_with_their_own_auth() {
+fn resolve_saved_jump_uses_its_own_port_user_auth_and_identity() {
     let mut s = fixture();
     s.connections[0].jump_connection_id = Some("c-jump".into());
+    s.connections[0].auth = Auth::Password;
+    s.connections[0].identity_file = None;
     let jump = Connection {
         id: "c-jump".into(),
         host: "bastion".into(),
         port: 2200,
         user: "jump-user".into(),
-        auth: Auth::Agent,
-        identity_file: None,
+        auth: Auth::KeyFile,
+        identity_file: Some("jump-key".into()),
         ..connection("unused")
     };
     s.connections.push(jump);
@@ -562,22 +564,47 @@ fn resolve_returns_target_and_jump_hops_in_order_with_their_own_auth() {
                     host: "bastion".into(),
                     port: 2200,
                     user: "jump-user".into(),
-                    auth: Auth::Agent,
-                    identity_file: None
+                    auth: Auth::KeyFile,
+                    identity_file: Some("jump-key".into())
                 },
                 crate::ssh::target::Hop {
                     connection_id: "c-target".into(),
                     host: "example.test".into(),
                     port: 2222,
                     user: "deploy".into(),
-                    auth: Auth::KeyFile,
-                    identity_file: Some("C:\\k ey".into())
+                    auth: Auth::Password,
+                    identity_file: None
                 }
             ],
             extra_options: vec![("ServerAliveInterval".into(), "30".into())]
         }
     );
 }
+#[test]
+fn resolve_rejects_missing_cycle_and_second_hop() {
+    for (jump, reverse, expected) in [
+        ("c-missing", None, "not-found"),
+        ("c-target", None, "self"),
+        ("c-jump", Some("c-target"), "nested"),
+        ("c-jump", Some("c-third"), "nested"),
+    ] {
+        let mut s = fixture();
+        s.connections[0].jump_connection_id = Some(jump.into());
+        s.connections.push(Connection {
+            id: "c-jump".into(),
+            jump_connection_id: reverse.map(str::to_owned),
+            ..connection("jump")
+        });
+        s.connections.push(Connection {
+            id: "c-third".into(),
+            ..connection("third")
+        });
+        let error = crate::ssh::target::resolve(&s, "c-target").unwrap_err();
+        assert_eq!(error.field.as_deref(), Some("jumpConnectionId"));
+        assert_eq!(error.code, expected);
+    }
+}
+
 #[test]
 fn repaired_equal_or_lower_revision_reload_advances_served_revision_and_next_write_persists_it() {
     for repaired_revision in [18, 4] {

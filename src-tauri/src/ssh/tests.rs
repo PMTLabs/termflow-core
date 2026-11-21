@@ -33,6 +33,8 @@ pub struct Counters {
     pub closed_channels: AtomicUsize,
     pub principals: Mutex<Vec<String>>,
     pub direct_addresses: Mutex<Vec<(String, u32)>>,
+    #[cfg(unix)]
+    pub environment: Mutex<Vec<(String, String)>>,
 }
 #[derive(Clone)]
 pub struct Server {
@@ -60,7 +62,7 @@ impl Server {
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    fn start(self, stream: BoxStream) {
+    pub(super) fn start(self, stream: BoxStream) {
         self.counters.handshakes.fetch_add(1, Ordering::SeqCst);
         let config = server::Config {
             keys: vec![self.host.clone()],
@@ -117,6 +119,30 @@ impl server::Handler for Server {
     async fn channel_close(&mut self, id: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
         self.counters.closed_channels.fetch_add(1, Ordering::SeqCst);
         self.channels.lock().remove(&id);
+        Ok(())
+    }
+    #[cfg(unix)]
+    async fn env_request(
+        &mut self,
+        _: ChannelId,
+        name: &str,
+        value: &str,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.counters.environment.lock().push((name.into(), value.into()));
+        Ok(())
+    }
+    #[cfg(unix)]
+    async fn shell_request(
+        &mut self,
+        ch: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(ch)?;
+        session.data(ch, b"launch-shell-ok".to_vec())?;
+        session.exit_status_request(ch, 0)?;
+        session.eof(ch)?;
+        session.close(ch)?;
         Ok(())
     }
     async fn exec_request(
