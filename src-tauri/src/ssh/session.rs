@@ -996,6 +996,38 @@ impl SessionRegistry {
         }
         s.transport.clone().ok_or(SessionError::NotConnected)
     }
+    /// Fence a synchronous, process-addressed PTY write against the latest launch.
+    /// Lock order is registry -> entry -> writer routing; the writer must not
+    /// call back into this registry. An unobserved SSH exit is not detectable here.
+    pub(crate) fn insert_path(
+        &self,
+        terminal_id: &str,
+        expected_generation: u64,
+        path: &str,
+        identity: &crate::identity_index::IdentityIndex,
+        writer: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<(), super::sftp::FsError> {
+        use super::sftp::{error, insert::OPERATION, FsCode, FsOutcome};
+
+        let refuse = |code, detail| error(OPERATION, path, code, FsOutcome::Unchanged, detail);
+        let not_connected = || refuse(FsCode::NotConnected, "SSH is not connected and running.");
+        let registry = self.inner.lock();
+        let entry = registry.panes.get(terminal_id).ok_or_else(not_connected)?;
+        let state = entry.inner.lock();
+        if state.view.generation != expected_generation {
+            return Err(refuse(FsCode::Stale, "The SSH session generation changed."));
+        }
+        let process_id = state.process_id.as_deref().ok_or_else(not_connected)?;
+        if !remote_cwd::active(entry, &state, process_id) {
+            return Err(not_connected());
+        }
+        if identity.process_for_leaf(terminal_id).as_deref() != Some(process_id) {
+            return Err(refuse(FsCode::Stale, "The terminal process mapping changed."));
+        }
+        writer(process_id)
+            .map_err(|detail| error(OPERATION, path, FsCode::Io, FsOutcome::Unknown, &detail))
+    }
+
     /// Check the generation and acquire its transport under the same registry lock.
     pub fn lease_at(
         &self,

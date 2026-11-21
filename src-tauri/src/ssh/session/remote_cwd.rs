@@ -56,7 +56,7 @@ impl CwdStreams {
     }
 }
 
-fn active(entry: &Entry, state: &EntryState, process_id: &str) -> bool {
+pub(super) fn active(entry: &Entry, state: &EntryState, process_id: &str) -> bool {
     !entry.cancel.is_cancelled()
         && state.view.state == SessionState::Connected
         && state.launch == Some(LaunchState::Running)

@@ -21,6 +21,7 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_test_close, $crate::commands::ssh_test_submit_secret,
             $crate::commands::ssh_test_trust_host,
             $crate::commands::ssh_fs_list, $crate::commands::ssh_fs_stat,
+            $crate::commands::ssh_fs_insert_path,
             $crate::commands::ssh_fs_download,
             $crate::commands::ssh_fs_open,
             $crate::commands::ssh_fs_open_with,

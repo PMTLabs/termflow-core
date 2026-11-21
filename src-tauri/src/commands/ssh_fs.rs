@@ -7,10 +7,42 @@ use crate::{
     },
     state::AppState,
 };
-use std::sync::Arc;
+use std::{io::Write, sync::Arc};
 use tauri::{Manager, Runtime, State, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tokio_util::sync::CancellationToken;
+
+#[derive(serde::Serialize)]
+pub struct InsertPath {
+    written: bool,
+}
+
+/// Success means the input was enqueued to the specific hosted process's writer,
+/// or accepted by the synchronous local PTY writer, not that SSH consumed it.
+#[tauri::command(rename_all = "camelCase")]
+pub fn ssh_fs_insert_path<R: Runtime>(
+    state: State<'_, AppState<R>>,
+    terminal_id: String,
+    path: String,
+    expected_generation: u64,
+) -> Result<InsertPath, FsError> {
+    let quoted = crate::ssh::sftp::insert::RemoteDialect::Posix.quote(&path)?;
+    state.ssh_sessions.insert_path(&terminal_id, expected_generation, &path, &state.identity, |process_id| {
+        if crate::state::ingress::registered_target(state.host_table.keys(), process_id).as_deref() != Some(process_id) {
+            return Err("Terminal is no longer registered.".into());
+        }
+        let bytes = quoted.as_bytes();
+        if state.host_write(process_id, bytes) {
+            return Ok(());
+        }
+        let writer = state.shell_writer_channels.get(process_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| "Terminal writer is unavailable.".to_string())?;
+        let mut writer = writer.lock().map_err(|_| "Terminal writer lock failed.".to_string())?;
+        writer.write_all(bytes).map_err(|err| err.to_string())
+    })?;
+    Ok(InsertPath { written: true })
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_download<R: Runtime>(

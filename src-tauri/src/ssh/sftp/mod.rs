@@ -1,6 +1,7 @@
 //! SFTP primitives scoped to a browser's terminal and expected session generation.
 mod download;
 pub(crate) mod edit;
+pub(crate) mod insert;
 pub(crate) mod launch;
 pub mod local_target;
 mod ops;
@@ -60,7 +61,7 @@ fn budget(operation: &'static str, path: &str) -> FsError {
     error(operation, path, FsCode::Unsupported, FsOutcome::Unchanged, "Remote listing/path exceeds the entry or depth budget.")
 }
 
-fn error(operation: &'static str, path: &str, code: FsCode, outcome: FsOutcome, detail: &str) -> FsError {
+pub(super) fn error(operation: &'static str, path: &str, code: FsCode, outcome: FsOutcome, detail: &str) -> FsError {
     let message = match outcome {
         FsOutcome::Unknown => format!("Could not confirm {operation} on {path}; reconnect and refresh."),
         FsOutcome::Partial => format!("Partially completed {operation} on {path}. {detail} Refresh to reconcile."),
