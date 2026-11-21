@@ -12,6 +12,13 @@ pub(crate) struct SessionIdentity {
 }
 
 impl HostKeys {
+    /// Connection identity, not route ownership: stashing a pane may revoke
+    /// its mounted route without losing the transport that accepted stdin.
+    pub(crate) fn launch_host_epoch_alive(&self, channel: HostChannel, epoch: u64) -> bool {
+        self.lock().channels.get(&channel).and_then(|c| c.connection.as_ref())
+            .is_some_and(|c| c.epoch == epoch && c.alive.load(Ordering::Acquire))
+    }
+
     pub(crate) fn session_identity(&self, channel: HostChannel, key: &str, process: &str) -> Option<SessionIdentity> {
         let inner = self.lock();
         let state = &inner.keys.get(&(channel, key.into()))?.state;

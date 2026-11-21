@@ -285,6 +285,9 @@ impl Session {
         if let Some(clock) = &self.prompt_clock {
             if result.is_err() {
                 clock.uncertain.store(true, Ordering::Release);
+                // No delivery ack or retry. Keep legacy frames unchanged;
+                // the launch observer bounds an accepted write with no child.
+                log::warn!("pty-host: SSH-enabled terminal stdin write failed");
             }
             clock.writes.fetch_add(1, Ordering::Release);
         }

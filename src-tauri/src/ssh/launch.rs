@@ -8,7 +8,7 @@ use crate::{
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::{Arc, atomic::{AtomicU64, Ordering}}};
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +48,8 @@ pub(crate) enum LaunchStage {
     WaitingReady,
     WaitingTrust,
     Typed,
+    Running,
+    Ended,
     Cancelled,
     Blocked,
     Error,
@@ -124,14 +126,16 @@ struct RegisteredAttempt {
     ticket: Option<LaunchTicket>,
     driving: bool,
     waiting_since: Option<std::time::Instant>,
-    // T5 finishes these pins only when this exact attempt is quiescent.
+    placement: u64,
+    // Only a proved command return can finish these pins after acceptance.
     payload: Option<Arc<drive::Payload>>,
+    watcher: Option<drive::Watcher>,
 }
 
 impl RegisteredAttempt {
     fn update(&mut self, mut next: LaunchSnapshot) -> Result<(), LaunchError> {
         if next != self.snapshot {
-            next.launch_seq = next.launch_seq.checked_add(1).ok_or(LaunchErrorCode::StaleAttempt)?;
+            next.launch_seq = next_sequence()?;
             next.revision = next.launch_seq;
             self.snapshot = next;
         }
@@ -141,6 +145,14 @@ impl RegisteredAttempt {
 
 #[derive(Default)]
 pub(crate) struct LaunchRegistry(Mutex<HashMap<String, RegisteredAttempt>>);
+
+fn next_sequence() -> Result<u64, LaunchError> {
+    // A single monotonic source avoids keeping tombstones for closed terminal
+    // ids. Allocation for a terminal always occurs under its registry lock.
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    SEQUENCE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |seq| seq.checked_add(1))
+        .map(|seq| seq + 1).map_err(|_| LaunchErrorCode::StaleAttempt.into())
+}
 
 // 067 uses Blocked both for a live trust wait (including the trust write
 // after the prompt clears) and for refusals. The network exception is an
@@ -158,6 +170,22 @@ pub(crate) enum Operation<'a> {
 }
 
 impl LaunchRegistry {
+    /// Retire only processes that no longer have their original placement.
+    /// Transfers preserve that placement even while there is no mounted pane.
+    pub(crate) fn reconcile_processes(&self, keys: &HostKeys) {
+        let mut retired = Vec::new();
+        {
+            let _order = keys.input_owner_change();
+            self.0.lock().retain(|_, entry| {
+                let keep = keys.input_stamp(&entry.snapshot.attempt.process_incarnation)
+                    .is_some_and(|stamp| stamp.generation == entry.placement);
+                if !keep { retired.extend(entry.payload.take()); }
+                keep
+            });
+        }
+        for payload in retired { payload.retire(); }
+    }
+
     /// Validate desktop placement and reserve/coalesce the exact attempt.
     /// The worker separately requalifies the ticket at submission; this
     /// transaction never calls the Lane A writer inside its ownership guard.
@@ -215,7 +243,8 @@ impl LaunchRegistry {
                     if let Some(ticket) = entry.ticket.take() {
                         keys.cancel_registered_launch_ordered(&ticket)?;
                     }
-                    retired_payload = entry.payload.clone();
+                    entry.watcher = None;
+                    retired_payload = entry.payload.take();
                     next.attempt.attempt_receipt = (&cancel_session()).into();
                 }
                 entry.update(next)?;
@@ -235,8 +264,7 @@ impl LaunchRegistry {
             {
                 return Err(UnsupportedContext.into());
             }
-            let launch_seq = previous.map_or(0, |entry| entry.snapshot.launch_seq)
-                .checked_add(1).ok_or(StaleAttempt)?;
+            let launch_seq = next_sequence()?;
             let blocked = refused(view, cancelled);
             let ticket = if blocked {
                 None
@@ -263,7 +291,9 @@ impl LaunchRegistry {
                 ticket,
                 driving: false,
                 waiting_since: None,
+                placement,
                 payload: None,
+                watcher: None,
             };
             if let Some(old) = attempts.insert(terminal.into(), entry) {
                 if let Some(ticket) = &old.ticket {

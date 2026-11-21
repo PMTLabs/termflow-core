@@ -191,6 +191,7 @@ pub struct ReadyEpoch {
     process: String,
     owner: OwnerStamp,
     input_generation: u64,
+    stdin_writes: u64,
     epoch: u64,
     host: Option<HostPrompt>,
 }
@@ -200,6 +201,12 @@ struct HostPrompt {
     key: String,
     epoch: u64,
 }
+pub(crate) struct LaunchBoundary {
+    pub returned: bool,
+    pub extra_input: bool,
+    pub transport_lost: bool,
+}
+
 #[derive(Clone)]
 struct Attempt {
     id: Uuid,
@@ -211,7 +218,7 @@ struct RegisteredPrompt {
     nonce: String,
     prompt_order: termflow_pty_protocol::ssh_prompt::PromptOrder,
     stdin_writes: u64,
-    shell: Option<(String, super::ssh_helpers::ProcessIdentity)>,
+    shell: Option<(String, super::ssh_helpers::ProcessIdentity, Option<crate::ssh::launch_process::Identity>)>,
 }
 
 /// A foreign authority (SSH registry + store) held only for queue admission
@@ -455,15 +462,16 @@ impl crate::state::HostKeys {
     }
 
     pub(crate) fn bind_ssh_shell(&self, process: &str, shell: String, identity: super::ssh_helpers::ProcessIdentity) {
+        let birth = crate::ssh::launch_process::Identity::shell(&identity);
         let entry = self.input.processes.lock().get(process).cloned();
         if let Some(entry) = entry {
             if let Some(prompt) = entry.lock().ssh_prompt.as_mut() {
-                prompt.shell = Some((shell, identity));
+                prompt.shell = Some((shell, identity, birth));
             }
         }
     }
 
-    pub(crate) fn ssh_shell_identity(&self, process: &str) -> Option<(String, super::ssh_helpers::ProcessIdentity)> {
+    pub(crate) fn ssh_shell_identity(&self, process: &str) -> Option<(String, super::ssh_helpers::ProcessIdentity, Option<crate::ssh::launch_process::Identity>)> {
         let entry = self.input.processes.lock().get(process)?.clone();
         let state = entry.lock();
         state.ssh_prompt.as_ref()?.shell.clone()
@@ -486,6 +494,27 @@ impl crate::state::HostKeys {
 
     fn ready_transport_current(&self, ready: &ReadyEpoch) -> bool {
         ready.host.as_ref().is_none_or(|host| self.publish_frame(host.channel, &host.key, host.epoch, &ready.process, || {}))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn launch_prompt_observed(&self, process: &str) -> bool {
+        let entry = self.input.processes.lock().get(process).cloned();
+        entry.is_some_and(|state| state.lock().ready.is_some())
+    }
+
+    /// Called under the input ordering lock. Adopting a pane changes its
+    /// owner stamp, not the accepted command's stdin count or prompt epoch.
+    pub(crate) fn launch_boundary(&self, ready: &ReadyEpoch, nonce: &str) -> Option<LaunchBoundary> {
+        let entry = self.input.processes.lock().get(&ready.process)?.clone();
+        let state = entry.lock();
+        let prompt = state.ssh_prompt.as_ref().filter(|p| p.nonce == nonce)?;
+        Some(LaunchBoundary {
+            returned: state.prompt_epoch > ready.epoch,
+            extra_input: Some(prompt.stdin_writes) != ready.stdin_writes.checked_add(1),
+            transport_lost: ready.host.as_ref().is_some_and(|host| {
+                !self.launch_host_epoch_alive(host.channel, host.epoch)
+            }),
+        })
     }
 
     pub(crate) fn ssh_launch_connection(&self, process: &str) -> Option<String> {
@@ -586,6 +615,7 @@ impl crate::state::HostKeys {
             process: process.into(),
             owner,
             input_generation: state.input_generation,
+            stdin_writes: state.ssh_prompt.as_ref().map_or(0, |p| p.stdin_writes),
             epoch: state.prompt_epoch,
             host,
         };

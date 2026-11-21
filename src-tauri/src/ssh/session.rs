@@ -910,6 +910,34 @@ impl SessionRegistry {
         e.publish_locked(&mut s);
         Ok(())
     }
+    /// Terminal SSH can outlive its app channel. Keep the observed terminal
+    /// stage for an already-revoked lease without changing its reason, gate,
+    /// or connected state. Typed may arrive while the lease is failing; all
+    /// later observations must match that recorded submission.
+    pub(super) fn observe_revoked_launch(
+        &self, terminal: &str, generation: u64, sequence: u64, launch: LaunchState, process: &str,
+    ) -> bool {
+        let registry = self.inner.lock();
+        let Some(entry) = registry.panes.get(terminal) else { return false };
+        let mut state = entry.inner.lock();
+        let matches_attempt = match launch {
+            LaunchState::Typed => state.launch.is_none(),
+            LaunchState::Running | LaunchState::Ended => {
+                state.process_id.as_deref() == Some(process)
+                    && matches!(state.launch, Some(LaunchState::Typed | LaunchState::Running))
+            }
+        };
+        if !entry.cancel.is_cancelled() || state.view.generation != generation
+            || sequence <= state.launch_seq || !matches_attempt
+        {
+            return false;
+        }
+        state.launch_seq = sequence;
+        state.launch = Some(launch);
+        state.process_id = Some(process.into());
+        true
+    }
+
     pub fn disconnect(&self, id: &str, reason: &str) {
         if let Ok(e) = self.entry(id, false) {
             e.invalidate(Some(reason.into()));

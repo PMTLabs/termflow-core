@@ -1,3 +1,6 @@
+mod identity;
+pub(crate) use identity::native_process_birth;
+
 use std::collections::HashMap;
 use sysinfo::{Pid, System};
 use super::spawn_spec::PS_CWD_INTEGRATION;

@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use termflow_pty_protocol::da1::StartupDrain;
 
 mod certificate_only;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+mod lifecycle;
 
 const LEAF: &str = "tm-launch";
 const PROCESS: &str = "pc-launch";
@@ -57,28 +59,40 @@ struct Port {
     record: Arc<Recorded>,
     events: Mutex<Vec<Value>>,
     bare: AtomicBool,
+    native_bare: bool,
     before_encode: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    host: Option<crate::pty_host_client::PtyHostClient>,
+    at_emit: Option<Arc<SessionRegistry>>,
+    ingressed: Mutex<Vec<Option<LaunchState>>>,
 }
 impl InputBackend for Port {
     fn input_keys(&self) -> &HostKeys { &self.keys }
     fn local_writer(&self, process: &str) -> Option<LocalWriter> {
         (process == PROCESS).then(|| self.writer.clone())
     }
-    fn hosted(&self, _: &str) -> bool { false }
-    fn enqueue_hosted(&self, _: &InputPermit<'_>, _: &[u8]) -> bool { panic!("not hosted") }
+    fn hosted(&self, _: &str) -> bool { self.host.is_some() }
+    fn enqueue_hosted(&self, permit: &InputPermit<'_>, bytes: &[u8]) -> bool {
+        self.host.as_ref().expect("not hosted").write_registered_admitted(
+            &self.keys, permit, crate::elevated_host::HostChannel::Primary, PROCESS, bytes,
+        )
+    }
 }
 impl LaunchPort for Port {
     fn helper_root(&self) -> Result<HelperRoot, LaunchError> {
         HelperRoot::open_app_data(&self.home).map_err(|_| Code::UnsupportedContext.into())
     }
     fn open_ssh(&self) -> Result<String, LaunchError> { native_ssh() }
-    fn bare_shell(&self, _: &str, _: &ProcessIdentity) -> bool {
+    fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool {
         if let Some(hook) = self.before_encode.lock().take() { hook(); }
-        self.bare.load(Ordering::SeqCst)
+        self.bare.load(Ordering::SeqCst) && (!self.native_bare || native_bare_shell(shell, identity))
     }
-    fn typed(&self, terminal: &str) {
-        self.events.lock().push(serde_json::to_value(TypedEvent { terminal_id: terminal, state: "typed" }).unwrap());
+    fn launch_state(&self, terminal: &str, state: &'static str) {
+        if let Some(sessions) = &self.at_emit {
+            self.ingressed.lock().push(sessions.current_launch(terminal).and_then(|v| v.state));
+        }
+        self.events.lock().push(serde_json::to_value(LaunchEvent { terminal_id: terminal, state }).unwrap());
     }
+
 }
 impl Drop for Port {
     fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.home); }
@@ -124,6 +138,12 @@ impl Fixture {
     }
 
     fn with_streams(server: Server, streams: Arc<dyn StreamFactory>) -> Self {
+        let f = Self::unplaced(server, streams);
+        f.place();
+        f
+    }
+
+    fn unplaced(server: Server, streams: Arc<dyn StreamFactory>) -> Self {
         let home = std::env::temp_dir().join(format!("tf-launch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         // macOS temp paths can start at a symlink (e.g. /var -> /private/var).
@@ -147,22 +167,38 @@ impl Fixture {
         let writer: LocalWriter = Arc::new(std::sync::Mutex::new(Box::new(Recorder(record.clone()))));
         let port = Arc::new(Port {
             keys: HostKeys::default(), home, writer, record, events: Mutex::default(),
-            bare: AtomicBool::new(true), before_encode: Mutex::default(),
+            bare: AtomicBool::new(true), native_bare: false, before_encode: Mutex::default(),
+            host: None, at_emit: Some(sessions.clone()), ingressed: Mutex::default(),
         });
         let owner = Self::page(&port.keys, SOURCE);
-        let f = Self { port, sessions, launches: Arc::default(), session_events, store, trust_path, owner, server };
-        assert_eq!(f.op(SOURCE, owner, 1, json!({"kind":"enter","panes":[pane(owner)]})), PaneResult::Ok);
-        let PaneResult::Create { cg } = f.op(SOURCE, owner, 2, json!({"kind":"admit_create","pi":owner,"mode":"Mount"})) else { panic!("fresh process") };
-        f.keys().admitted_work(SOURCE, owner.pg, LEAF, cg).unwrap();
-        f.keys().stage_shell(LEAF, cg, PROCESS, None).unwrap();
-        f.keys().register_tagged_ssh_prompt(PROCESS, cg, NONCE, Some(CONNECTION)).unwrap();
+        Self { port, sessions, launches: Arc::default(), session_events, store, trust_path, owner, server }
+    }
+
+    fn stage(&self) -> (u64, StagedShell) {
+        let owner = self.owner;
+        assert_eq!(self.op(SOURCE, owner, 1, json!({"kind":"enter","panes":[pane(owner)]})), PaneResult::Ok);
+        let PaneResult::Create { cg } = self.op(SOURCE, owner, 2, json!({"kind":"admit_create","pi":owner,"mode":"Mount"})) else { panic!("fresh process") };
+        self.keys().admitted_work(SOURCE, owner.pg, LEAF, cg).unwrap();
+        let route = self.port.host.as_ref().map(|_| (crate::elevated_host::HostChannel::Primary, PROCESS, crate::state::StageMode::Spawn));
+        let (host, _, _) = self.keys().stage_shell(LEAF, cg, PROCESS, route).unwrap();
+        self.keys().register_tagged_ssh_prompt(PROCESS, cg, NONCE, Some(CONNECTION)).unwrap();
+        if let Some(host) = &host { assert!(self.keys().publish(host, PROCESS, 1)); }
+        (cg, StagedShell { process: PROCESS.into(), stage: host.map_or(ShellStage::Local, ShellStage::Hosted) })
+    }
+
+    fn complete(&self, cg: u64, staged: &StagedShell, shell: String, identity: ProcessIdentity) {
+        self.keys().bind_ssh_shell(PROCESS, shell, identity);
+        assert!(matches!(self.keys().complete_shell(LEAF, cg, staged), Completion::Registered));
+    }
+
+    fn place(&self) -> (u64, StagedShell) {
+        let (cg, staged) = self.stage();
         #[cfg(windows)]
         let shell = crate::pty_manager::ssh_shell::system_shell("powershell.exe").unwrap();
         #[cfg(not(windows))]
         let shell = "/bin/bash".to_owned();
-        f.keys().bind_ssh_shell(PROCESS, shell, ProcessIdentity { pid: 10, start_time: 1 });
-        assert!(matches!(f.keys().complete_shell(LEAF, cg, &StagedShell { process: PROCESS.into(), stage: ShellStage::Local }), Completion::Registered));
-        f
+        self.complete(cg, &staged, shell, ProcessIdentity { pid: 10, start_time: 1 });
+        (cg, staged)
     }
     fn direct() -> Self { Self::new(Server::new(1, "alice"), false) }
     fn jump() -> Self {

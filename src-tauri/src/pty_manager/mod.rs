@@ -1,5 +1,6 @@
 mod cwd;
 mod procinfo;
+pub(crate) use procinfo::native_process_birth;
 mod profiles;
 mod spawn;
 mod local_process;

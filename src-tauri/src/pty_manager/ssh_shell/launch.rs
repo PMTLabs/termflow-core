@@ -9,6 +9,7 @@ pub(crate) struct EncodedLaunch {
     bytes: Vec<u8>,
     argv: Vec<String>,
     payload: Option<(Helper, HelperUse)>,
+    intermediary: Option<Vec<String>>,
 }
 
 impl EncodedLaunch {
@@ -20,6 +21,10 @@ impl EncodedLaunch {
     /// Show the actual argv, not the private launcher's invocation.
     pub(crate) fn argv(&self) -> &[String] {
         &self.argv
+    }
+
+    pub(crate) fn intermediary(&self) -> Option<&[String]> {
+        self.intermediary.as_deref()
     }
 
     /// Cancel/reconnect can retire the payload, but must keep its execution pin.
@@ -110,7 +115,7 @@ fn encode(
     if !absolute {
         return Err(adapter_error("SSH executable path must be absolute"));
     }
-    let mut launch = EncodedLaunch { bytes: Vec::new(), argv, payload: None };
+    let mut launch = EncodedLaunch { bytes: Vec::new(), argv, payload: None, intermediary: None };
     let result = (|| -> io::Result<String> {
         match (dialect, posix) {
             (Some(true), _) => {
@@ -123,7 +128,8 @@ fn encode(
             }
             (Some(false), _) => {
                 windows::literal_path(root.path())?;
-                let batch = cmd_batch(&launch.argv)?;
+                let (batch, intermediary) = cmd_batch(&launch.argv)?;
+                launch.intermediary = intermediary;
                 launch.publish(root, owner, "cmd", batch.as_bytes())?;
                 let path = launch.payload.as_ref().unwrap().1.path();
                 let path = windows::literal_path(&path)?;
@@ -215,7 +221,7 @@ pub(crate) fn crt_arg(arg: &str) -> String {
     output
 }
 
-fn cmd_batch(argv: &[String]) -> io::Result<String> {
+fn cmd_batch(argv: &[String]) -> io::Result<(String, Option<Vec<String>>)> {
     #[cfg(windows)]
     use base64::{engine::general_purpose::STANDARD, Engine as _};
 
@@ -223,7 +229,7 @@ fn cmd_batch(argv: &[String]) -> io::Result<String> {
     // UTF-8. Keep the batch ASCII. For Unicode, use the fixed system PS5.1
     // interpreter with inline fixed code and base64 JSON data. No chcp, policy
     // changes, script-file execution, or lossy OEM conversion.
-    let body = if argv.iter().any(|arg| !arg.is_ascii()) {
+    let (body, intermediary) = if argv.iter().any(|arg| !arg.is_ascii()) {
         #[cfg(windows)]
         {
             let ps = super::super::system_shell("powershell.exe")?;
@@ -233,7 +239,9 @@ fn cmd_batch(argv: &[String]) -> io::Result<String> {
             let data = STANDARD.encode(ps_payload(argv)?);
             let source = format!("[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{data}'))");
             let command = ps_launch(&source, true).encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
-            format!("@{} -NoLogo -NoProfile -EncodedCommand {}", cmd_exe(&ps)?, STANDARD.encode(command))
+            let arg = STANDARD.encode(command);
+            let body = format!("@{} -NoLogo -NoProfile -EncodedCommand {arg}", cmd_exe(&ps)?);
+            (body, Some(vec![ps, "-NoLogo".into(), "-NoProfile".into(), "-EncodedCommand".into(), arg]))
         }
         #[cfg(not(windows))]
         {
@@ -244,12 +252,12 @@ fn cmd_batch(argv: &[String]) -> io::Result<String> {
         let crt = crt_args(&argv[1..]);
         let args = cmd_escape(&crt);
         let display = cmd_escape(&format!("{} {crt}", crt_arg(&argv[0])));
-        format!("@echo {display}\r\n@{exe} {args}")
+        (format!("@echo {display}\r\n@{exe} {args}"), None)
     };
     if body.lines().any(|line| line.len() >= 8191) {
         return Err(adapter_error("SSH argv exceeds the cmd batch command line limit"));
     }
-    Ok(format!("@setlocal DisableDelayedExpansion\r\n{body}\r\n"))
+    Ok((format!("@setlocal DisableDelayedExpansion\r\n{body}\r\n"), intermediary))
 }
 
 fn cmd_exe(path: &str) -> io::Result<String> {

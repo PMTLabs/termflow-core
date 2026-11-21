@@ -1,4 +1,4 @@
-//! T4 admission and dispatch. No SSH child or transport-lifecycle watcher here.
+//! Admission, one-shot dispatch and the accepted command's lifecycle.
 use super::{refused, AttemptReceipt, Gate, LaunchError, LaunchErrorCode as Code, LaunchRegistry, LaunchSnapshot, LaunchStage};
 use crate::{
     pty_manager::{
@@ -8,7 +8,9 @@ use crate::{
     },
     ssh::{
         launch_argv::{build_launch_argv, ProxyRuntime, PublishedLaunch},
+        launch_process::{self, Observation, Tracker, NO_START},
         session::{engine_runtime, LaunchDefinition, LaunchState, SessionRegistry},
+        sessions,
         store::Store,
         target,
     },
@@ -22,18 +24,18 @@ const CHECK_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TypedEvent<'a> {
+struct LaunchEvent<'a> {
     terminal_id: &'a str,
     state: &'static str,
 }
 
-/// Production and integration tests share the actual gate, argv encoder and
-/// writer. Only OS process evidence, private root and the sink are injected.
+/// Admission and lifecycle tests use the same gate, argv encoder and native
+/// watcher as the desktop. The port supplies the input and event endpoints.
 pub(super) trait LaunchPort: InputBackend {
     fn helper_root(&self) -> Result<HelperRoot, LaunchError>;
     fn open_ssh(&self) -> Result<String, LaunchError>;
     fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool;
-    fn typed(&self, terminal: &str);
+    fn launch_state(&self, terminal: &str, state: &'static str);
 }
 
 impl<R: Runtime> LaunchPort for AppState<R> {
@@ -48,20 +50,24 @@ impl<R: Runtime> LaunchPort for AppState<R> {
         Ok(path)
     }
     fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool {
-        let mut system = sysinfo::System::new();
-        system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
-        let pid = sysinfo::Pid::from_u32(identity.pid);
-        system.process(pid).is_some_and(|process| {
-            process.start_time() == identity.start_time
-                && Path::new(shell).file_name().is_some_and(|name| {
-                    name.to_string_lossy().eq_ignore_ascii_case(&process.name().to_string_lossy())
-                })
-                && !system.processes().values().any(|p| p.parent() == Some(pid))
-        })
+        native_bare_shell(shell, identity)
     }
-    fn typed(&self, terminal: &str) {
-        let _ = self.app_handle.emit("ssh-launch:state", TypedEvent { terminal_id: terminal, state: "typed" });
+    fn launch_state(&self, terminal: &str, state: &'static str) {
+        let _ = self.app_handle.emit("ssh-launch:state", LaunchEvent { terminal_id: terminal, state });
     }
+}
+
+fn native_bare_shell(shell: &str, identity: &ProcessIdentity) -> bool {
+    let mut system = sysinfo::System::new();
+    system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let pid = sysinfo::Pid::from_u32(identity.pid);
+    system.process(pid).is_some_and(|process| {
+        process.start_time() == identity.start_time
+            && Path::new(shell).file_name().is_some_and(|name| {
+                name.to_string_lossy().eq_ignore_ascii_case(&process.name().to_string_lossy())
+            })
+            && !system.processes().values().any(|p| p.parent() == Some(pid))
+    })
 }
 
 fn native_ssh() -> Result<String, LaunchError> {
@@ -75,29 +81,42 @@ fn native_ssh() -> Result<String, LaunchError> {
 pub(super) struct Payload {
     encoded: EncodedLaunch,
     proxy: PublishedLaunch,
-    // Non-serializable evidence for T5 to associate command-return boundaries
-    // and descendant identity with precisely the accepted input.
-    #[allow(dead_code)]
-    submitted: Submission,
-}
-
-#[allow(dead_code)]
-struct Submission {
-    definition_revision: u64,
+    // Never serialized. These associate the process sample and command
+    // boundary with this exact, immutable submission.
+    _definition_revision: u64,
     ready: ReadyEpoch,
     nonce: String,
-    shell: ProcessIdentity,
+    command: launch_process::Command,
+}
+
+pub(super) struct Watcher {
+    accepted_at: Instant,
+    ended_at: Option<Instant>,
+    child: Tracker,
+}
+
+impl Watcher {
+    fn new(accepted_at: Instant) -> Self {
+        Self { accepted_at, ended_at: None, child: Tracker::default() }
+    }
 }
 impl Payload {
     pub(super) fn retire(&self) {
         let _ = self.encoded.retire_payload();
         let _ = self.proxy.retire_payload();
     }
-    // Exposed to the next lifecycle slice via the registered payload. A PTY
-    // queue send or even a failed write cannot prove helper quiescence.
-    pub(super) fn finish_after_quiescence(self) {
+    // Positive non-submission: even a proxy helper was never reachable.
+    fn finish_unsubmitted(self) {
         let _ = self.encoded.finish_after_quiescence();
         let _ = self.proxy.finish_after_quiescence();
+    }
+
+    fn finish_after_return(self) {
+        let _ = self.encoded.finish_after_quiescence();
+        // The foreground command returned, but an abruptly terminated SSH
+        // could have left an orphaned ProxyCommand about to open its script.
+        // Retire that separate pin without guessing it is quiescent.
+        let _ = self.proxy.retire_payload();
     }
 }
 
@@ -112,6 +131,7 @@ struct Candidate {
     definition: LaunchDefinition,
     shell: String,
     identity: ProcessIdentity,
+    birth: Option<launch_process::Identity>,
 }
 
 impl Candidate {
@@ -129,9 +149,10 @@ impl Candidate {
         let proxy = argv.publish(&root, owner.clone(), runtime, |path| {
             path.to_str().map(str::to_owned).ok_or_else(|| std::io::Error::other("non-Unicode SSH helper path"))
         }).map_err(|_| Code::UnsupportedContext)?;
+        let marker = launch_process::marker();
         let encoded = (|| {
-            #[allow(unused_mut)]
             let mut args = proxy.argv().to_vec();
+            args.splice(1..1, ["-o".into(), marker.clone()]);
             #[cfg(windows)]
             {
                 args[0] = crate::pty_manager::ssh_shell::posix::native_ssh_outer_path(&self.shell, &args[0])?;
@@ -144,14 +165,17 @@ impl Candidate {
         })();
         match encoded {
             Ok(encoded) => Ok(Payload {
+                command: launch_process::Command {
+                    shell: self.birth,
+                    exe: std::fs::canonicalize(&ssh).unwrap_or_else(|_| PathBuf::from(ssh)),
+                    marker,
+                    intermediary: encoded.intermediary().map(<[String]>::to_vec),
+                },
                 encoded,
                 proxy,
-                submitted: Submission {
-                    definition_revision: self.definition.revision,
-                    ready: self.ready.clone(),
-                    nonce: self.nonce.clone(),
-                    shell: self.identity.clone(),
-                },
+                _definition_revision: self.definition.revision,
+                ready: self.ready.clone(),
+                nonce: self.nonce.clone(),
             }),
             Err(_) => {
                 let _ = proxy.finish_after_quiescence();
@@ -206,16 +230,23 @@ impl LaunchRegistry {
         }
         let registry = self.clone();
         engine_runtime().spawn(async move {
+            let mut observing = false;
             loop {
                 let (registry, port, sessions, store, terminal, home) = (
                     registry.clone(), port.clone(), sessions.clone(), store.clone(), terminal.clone(), home.clone(),
                 );
-                let step = tokio::task::spawn_blocking(move || Driver {
-                    registry: &registry, sessions: &sessions, store: &store,
-                    port: &*port, terminal: &terminal, generation, home: &home,
-                }.tick(Instant::now())).await;
-                if !matches!(step, Ok(true)) { break; }
-                tokio::time::sleep(CHECK_INTERVAL).await;
+                let step = tokio::task::spawn_blocking(move || {
+                    let driver = Driver {
+                        registry: &registry, sessions: &sessions, store: &store,
+                        port: &*port, terminal: &terminal, generation, home: &home,
+                    };
+                    if observing { driver.observe(Instant::now()) } else { driver.tick(Instant::now()) }
+                }).await;
+                match step {
+                    Ok(true) => tokio::time::sleep(CHECK_INTERVAL).await,
+                    Ok(false) if !observing => observing = true,
+                    _ => break,
+                }
             }
         });
     }
@@ -289,7 +320,7 @@ impl<P: LaunchPort> Driver<'_, P> {
         let payload = if possibly_written.get() {
             Some(payload)
         } else {
-            payload.finish_after_quiescence();
+            payload.finish_unsubmitted();
             None
         };
         // A live trust wait discovered before admission has not consumed the
@@ -339,7 +370,7 @@ impl<P: LaunchPort> Driver<'_, P> {
                 Ok(None) => return Self::waiting_ready(keys, entry, next, now),
                 Err(_) => return Self::end(keys, entry, next, LaunchStage::Error, Code::StaleAttempt),
             };
-            let Some((shell, identity)) = keys.ssh_shell_identity(&process) else {
+            let Some((shell, identity, birth)) = keys.ssh_shell_identity(&process) else {
                 return Self::end(keys, entry, next, LaunchStage::Error, Code::UnsupportedShell);
             };
             if !eligible(view.gate) {
@@ -357,7 +388,7 @@ impl<P: LaunchPort> Driver<'_, P> {
             let _ = entry.update(next);
             Step::Submit(Box::new(Candidate {
                 process, owner, placement: cg, ticket, ready, nonce, receipt,
-                definition: definition.clone(), shell, identity,
+                definition: definition.clone(), shell, identity, birth,
             }))
         }).unwrap_or_else(|| {
             self.finish(Err(Code::TrustBlocked.into()), None);
@@ -423,12 +454,15 @@ impl<P: LaunchPort> Driver<'_, P> {
             // with a child, a remote login, or even delivery to the PTY.
             next.stage = LaunchStage::Typed;
             entry.update(next).ok()?;
+            entry.watcher = Some(Watcher::new(Instant::now()));
             Some((entry.snapshot.launch_seq, entry.snapshot.attempt.process_incarnation.clone()))
         };
         let typed = match result {
             Err(err) => record(Err(err)),
-            Ok(()) => self.sessions.with_launch_authority(self.terminal, |view, _, cancelled, _| {
-                if view.generation == self.generation && !cancelled {
+            Ok(()) => self.sessions.with_launch_authority(self.terminal, |view, _, _, _| {
+                // The app lease can fail during I/O. It does not undo writer
+                // acceptance; explicit launch Cancel already changes the stage.
+                if view.generation == self.generation {
                     record(Ok(()))
                 } else {
                     record(Err(Code::TrustBlocked.into()))
@@ -438,9 +472,120 @@ impl<P: LaunchPort> Driver<'_, P> {
         if let Some(payload) = retiring { payload.retire(); }
         if let Some(payload) = payload { payload.retire(); }
         if let Some((seq, process)) = typed {
-            if self.sessions.on_launch_lifecycle(self.terminal, self.generation, seq, LaunchState::Typed, Some(process)).is_ok() {
-                self.port.typed(self.terminal);
+            self.emit(seq, process, LaunchState::Typed);
+        }
+    }
+
+    fn observe(&self, now: Instant) -> bool {
+        // Never poll the OS while holding ownership or the session registry.
+        let (payload, running) = {
+            let attempts = self.registry.0.lock();
+            let Some(entry) = attempts.get(self.terminal) else { return false };
+            if entry.snapshot.attempt.session_generation != self.generation { return false; }
+            let Some(watch) = &entry.watcher else { return false };
+            let running = (entry.snapshot.stage == LaunchStage::Running).then(|| watch.child.running()).flatten();
+            (entry.payload.clone().expect("watcher pins an accepted payload"), running)
+        };
+        let sample = match running {
+            Some(child) => payload.command.sample_running(child),
+            None => payload.command.sample(),
+        };
+        let mut event = None;
+        let mut finished = None;
+        let mut retired = None;
+        let keep = self.sessions.with_launch_authority(self.terminal, |view, placement, _, _| {
+            let keys = self.keys();
+            let _order = keys.input_owner_change();
+            let mut attempts = self.registry.0.lock();
+            let Some(entry) = attempts.get_mut(self.terminal) else { return false };
+            if entry.snapshot.attempt.session_generation != self.generation {
+                return false;
             }
+            let process = entry.snapshot.attempt.process_incarnation.clone();
+            let mut watch = match entry.watcher.take() {
+                Some(watch) => watch,
+                None => return false,
+            };
+            let valid = view.generation == self.generation && placement == Some(entry.placement)
+                && keys.input_stamp(&process).is_some_and(|stamp| stamp.generation == entry.placement);
+            let Some(boundary) = valid.then(|| keys.launch_boundary(&payload.ready, &payload.nonce)).flatten() else {
+                retired = entry.payload.take();
+                return false;
+            };
+            let returned = boundary.returned && sample.bare;
+            let stage = entry.snapshot.stage;
+            let transition = match stage {
+                LaunchStage::Typed if boundary.transport_lost => {
+                    Some((LaunchStage::Ended, LaunchState::Ended, Some(Code::TransportClosed.into())))
+                }
+                LaunchStage::Typed if boundary.returned || now.saturating_duration_since(watch.accepted_at) >= NO_START => {
+                    // Works with old hosts and with partial host-side writes:
+                    // the queue has no delivery feedback and must not replay.
+                    Some((LaunchStage::Ended, LaunchState::Ended, Some(LaunchError {
+                        code: Code::WriteFailed, message: "SSH did not start in the terminal. The command was not retried.",
+                    })))
+                }
+                LaunchStage::Running if boundary.returned => Some((LaunchStage::Ended, LaunchState::Ended, None)),
+                LaunchStage::Typed | LaunchStage::Running => match watch.child.sample(&sample, now, !boundary.extra_input) {
+                    Observation::Running => Some((LaunchStage::Running, LaunchState::Running, None)),
+                    Observation::Exited => Some((LaunchStage::Ended, LaunchState::Ended, None)),
+                    Observation::Wait => None,
+                },
+                LaunchStage::Ended => None,
+                _ => return false,
+            };
+            if let Some((stage, state, error)) = transition {
+                let mut next = entry.snapshot.clone();
+                next.stage = stage;
+                next.error = error;
+                if let Some((owner, _)) = keys.mounted_launch_owner(self.terminal, &process) {
+                    next.attempt.owner_incarnation = owner;
+                }
+                if entry.update(next).is_err() { return false; }
+                if stage == LaunchStage::Ended { watch.ended_at = Some(now); }
+                event = Some((entry.snapshot.launch_seq, process, state));
+            }
+            if let Some(ended_at) = watch.ended_at {
+                if returned {
+                    finished = entry.payload.take();
+                    return false;
+                }
+                if boundary.transport_lost || now.saturating_duration_since(ended_at) >= NO_START {
+                    retired = entry.payload.take();
+                    return false;
+                }
+            }
+            entry.watcher = Some(watch);
+            true
+        });
+        drop(payload);
+        if let Some((seq, process, state)) = event { self.emit(seq, process, state); }
+        if let Some(payload) = finished {
+            if let Ok(payload) = Arc::try_unwrap(payload) { payload.finish_after_return(); }
+        }
+        if let Some(payload) = retired { payload.retire(); }
+        if keep.is_none() {
+            // Session closed independently of its pane. Drop this exact
+            // observer without removing the pane or retaining its payload.
+            let retired = {
+                let mut attempts = self.registry.0.lock();
+                attempts.get_mut(self.terminal)
+                    .filter(|entry| entry.snapshot.attempt.session_generation == self.generation)
+                    .and_then(|entry| { entry.watcher = None; entry.payload.take() })
+            };
+            if let Some(payload) = retired { payload.retire(); }
+        }
+        keep.unwrap_or(false)
+    }
+
+    fn emit(&self, seq: u64, process: String, state: LaunchState) {
+        let applied = sessions::on_launch_lifecycle(self.sessions, self.terminal, self.generation, seq, state, Some(process.clone()));
+        if applied.is_ok() || self.sessions.observe_revoked_launch(self.terminal, self.generation, seq, state, &process) {
+            self.port.launch_state(self.terminal, match state {
+                LaunchState::Typed => "typed",
+                LaunchState::Running => "running",
+                LaunchState::Ended => "ended",
+            });
         }
     }
 }
