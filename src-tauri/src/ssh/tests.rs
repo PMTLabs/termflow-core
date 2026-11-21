@@ -33,7 +33,6 @@ pub struct Counters {
     pub closed_channels: AtomicUsize,
     pub principals: Mutex<Vec<String>>,
     pub direct_addresses: Mutex<Vec<(String, u32)>>,
-    #[cfg(unix)]
     pub environment: Mutex<Vec<(String, String)>>,
 }
 #[derive(Clone)]
@@ -121,7 +120,6 @@ impl server::Handler for Server {
         self.channels.lock().remove(&id);
         Ok(())
     }
-    #[cfg(unix)]
     async fn env_request(
         &mut self,
         _: ChannelId,
@@ -132,7 +130,6 @@ impl server::Handler for Server {
         self.counters.environment.lock().push((name.into(), value.into()));
         Ok(())
     }
-    #[cfg(unix)]
     async fn shell_request(
         &mut self,
         ch: ChannelId,

@@ -28,7 +28,7 @@ pub struct LaunchArgv {
 pub enum ProxyRuntime {
     /// Audited Bourne-compatible or fish login shell; fixed /bin/sh exists.
     PosixOrFish,
-    /// Native Win32 OpenSSH is not the same as a POSIX build under MSYS/Cygwin.
+    /// Only the OS's System32/OpenSSH/ssh.exe, never Git/MSYS/Cygwin SSH.
     WindowsNative,
     Unsupported,
 }
@@ -42,6 +42,14 @@ fn literal_path(path: &str, field: &str) -> Result<String, StoreError> {
     if path.is_empty() || path.contains("${") || path.chars().any(char::is_control) {
         return Err(StoreError::field(field, "unsupported-path"));
     }
+    // Win32 accepts forward slashes for normal drive paths. This avoids
+    // relying on backslash unescaping in older inbox OpenSSH option parsers.
+    #[cfg(windows)]
+    let path = if path.starts_with(r"\\?\") || path.starts_with(r"\\.\") {
+        return Err(StoreError::field(field, "unsupported-path"));
+    } else {
+        path.replace('\\', "/")
+    };
     Ok(path.replace('%', "%%"))
 }
 
@@ -153,14 +161,32 @@ fn shell_literal(value: &str) -> String {
     out
 }
 
+#[cfg(any(windows, test))]
+fn native_proxy_command(child: &[String]) -> io::Result<String> {
+    use crate::pty_manager::ssh_shell::posix::launch::crt_arg;
+
+    // Win32-OpenSSH strips its synthetic "exec " prefix and passes the raw
+    // command to posix_spawnp -> CreateProcessW. No cmd.exe and no login shell.
+    // Quote argv[0] too: Win32-OpenSSH preserves an already-quoted command line.
+    // Percent escaping is for the *outer* SSH pass, including any % escapes
+    // already destined for the bastion's known-hosts/identity option parser.
+    let raw = child.iter().map(|arg| crt_arg(arg)).collect::<Vec<_>>().join(" ");
+    let escaped = raw.replace('%', "%%");
+    if escaped.encode_utf16().count() >= 32_767 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "SSH proxy command too long"));
+    }
+    Ok(escaped)
+}
+
+fn posix_proxy_command(path: &str) -> String {
+    format!("/bin/sh {}", shell_literal(&path.replace('%', "%%")))
+}
+
 impl LaunchArgv {
-    fn render(&self, helper: Option<&str>) -> Vec<String> {
+    fn render(&self, proxy_command: Option<&str>) -> Vec<String> {
         let mut argv = self.outer.clone();
-        if let Some(path) = helper {
-            // ProxyCommand is stored as a raw command by OpenSSH; its percent
-            // expansion is separate from login-shell parsing.
-            let invocation = format!("/bin/sh {}", shell_literal(&path.replace('%', "%%")));
-            option(&mut argv, "ProxyCommand", &invocation);
+        if let Some(command) = proxy_command {
+            option(&mut argv, "ProxyCommand", command);
         }
         argv.extend(["--".into(), self.destination.clone()]);
         argv
@@ -168,7 +194,32 @@ impl LaunchArgv {
 
     /// Symbolic argv, only for display. Never execute or use as launch authority.
     pub fn preview_argv(&self) -> Vec<String> {
-        self.render(self.proxy.as_ref().map(|_| "<private-proxy-helper>"))
+        let command = self.proxy.as_ref().map(|_| {
+            if cfg!(windows) {
+                "<native-ssh-proxy>".into()
+            } else {
+                posix_proxy_command("<private-proxy-helper>")
+            }
+        });
+        self.render(command.as_deref())
+    }
+
+    /// Native Win32-OpenSSH has no payload to publish or retain. Select the
+    /// system executable by provenance, not by the basename of a profile tool.
+    #[cfg(windows)]
+    pub fn native_windows_argv(&self) -> io::Result<Vec<String>> {
+        let ssh = crate::pty_manager::ssh_shell::system_shell(r"OpenSSH\ssh.exe")?;
+        if !self.outer[0].replace('/', "\\").eq_ignore_ascii_case(&ssh) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "expected system Win32-OpenSSH"));
+        }
+        let command = self.proxy.as_ref().map(|child| {
+            let mut args = child.clone();
+            args[0] = ssh.clone();
+            native_proxy_command(&args)
+        }).transpose()?;
+        let mut argv = self.render(command.as_deref());
+        argv[0] = ssh;
+        Ok(argv)
     }
 
     /// Publish and pin the fixed-command bastion payload before exposing its argv.
@@ -184,7 +235,11 @@ impl LaunchArgv {
         let Some(child) = &self.proxy else {
             return Ok(PublishedLaunch { argv: self.render(None), payload: None });
         };
-        if runtime != ProxyRuntime::PosixOrFish {
+        #[cfg(windows)]
+        if runtime == ProxyRuntime::WindowsNative {
+            return Ok(PublishedLaunch { argv: self.native_windows_argv()?, payload: None });
+        }
+        if cfg!(windows) || runtime != ProxyRuntime::PosixOrFish {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "unsupported SSH proxy runtime"));
         }
         if !child[0].starts_with('/') {
@@ -199,7 +254,7 @@ impl LaunchArgv {
             if !path.starts_with('/') || path.chars().any(char::is_control) {
                 return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported proxy helper path"));
             }
-            Ok((self.render(Some(&path)), helper.acquire()?))
+            Ok((self.render(Some(&posix_proxy_command(&path))), helper.acquire()?))
         })();
         match prepared {
             Ok((argv, usage)) => Ok(PublishedLaunch { argv, payload: Some((helper, usage)) }),

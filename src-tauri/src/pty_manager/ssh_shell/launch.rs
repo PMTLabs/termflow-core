@@ -171,7 +171,7 @@ fn crt_args(args: &[String]) -> String {
 
 // Always quote, including empty arguments. A literal quote needs 2n+1
 // backslashes and the closing delimiter needs 2n for a run of n backslashes.
-fn crt_arg(arg: &str) -> String {
+pub(crate) fn crt_arg(arg: &str) -> String {
     let mut output = String::from("\"");
     let mut slashes = 0;
     for ch in arg.chars() {

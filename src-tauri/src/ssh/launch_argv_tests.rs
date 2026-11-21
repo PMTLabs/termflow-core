@@ -28,6 +28,11 @@ fn terminal_options_precede_exactly_one_destination() {
     trust.jump = Some("/private/jump keys".into());
     let plan = build_launch_argv(&target, &trust, "/fixed/ssh", Path::new("/home/user")).unwrap();
     let outer = plan.preview_argv();
+    let proxy = if cfg!(windows) {
+        "ProxyCommand=<native-ssh-proxy>"
+    } else {
+        "ProxyCommand=/bin/sh '<private-proxy-helper>'"
+    };
     assert_eq!(
         outer,
         [
@@ -35,7 +40,7 @@ fn terminal_options_precede_exactly_one_destination() {
             "UserKnownHostsFile=\"/private/target keys\"", "-o", "GlobalKnownHostsFile=none",
             "-p", "2202", "-l", "target", "-o", "IdentityFile=none", "-o",
             "PreferredAuthentications=publickey", "-o", "ServerAliveInterval=30", "-o",
-            "ProxyCommand=/bin/sh '<private-proxy-helper>'", "--", "target.test",
+            proxy, "--", "target.test",
         ]
     );
     let child = plan.proxy.unwrap();
@@ -83,39 +88,63 @@ fn real_native_windows_openssh_parses_direct_launch_with_a_spaced_receipt_path()
         .expect("required native Windows OpenSSH executable missing");
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let config = String::from_utf8(output.stdout).unwrap();
-    assert!(config.lines().any(|line| line == format!("userknownhostsfile {}", trust.target)));
+    assert!(config.lines().any(|line| line == "userknownhostsfile C:/private receipt dir/target known hosts"));
     assert!(config.lines().any(|line| line == "hostname target.test"));
 }
 
-#[cfg(unix)]
+#[test]
+fn native_windows_proxy_encoder_quotes_crt_argv_and_doubles_percent() {
+    let child = [
+        r"C:\Program Files\OpenSSH\ssh.exe",
+        "-F",
+        "none",
+        r#"UserKnownHostsFile="C:/private %%h dir/jump known hosts""#,
+        r#"say"hi\"#,
+        "a&mkdir local-canary&rem %h",
+        "",
+    ].map(str::to_owned);
+    assert_eq!(
+        native_proxy_command(&child).unwrap(),
+        r#""C:\Program Files\OpenSSH\ssh.exe" "-F" "none" "UserKnownHostsFile=\"C:/private %%%%h dir/jump known hosts\"" "say\"hi\\" "a&mkdir local-canary&rem %%h" """#,
+    );
+}
+
+#[cfg(any(unix, windows))]
 mod openssh {
     use super::*;
     use crate::ssh::tests::{key, Server};
     use ssh_key::LineEnding;
     use std::{
         fs::{self, DirBuilder},
-        os::unix::fs::{DirBuilderExt, PermissionsExt},
         path::PathBuf,
         process::{Output, Stdio},
         time::Duration,
     };
+    #[cfg(unix)]
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     use tokio::{net::TcpListener, process::Command};
 
     struct Temp(PathBuf);
     impl Temp {
         fn new(label: &str) -> Self {
-            let path = fs::canonicalize(std::env::temp_dir()).unwrap()
-                .join(format!("tf-ssh-{label}-{}", uuid::Uuid::new_v4()));
+            let parent = std::env::temp_dir();
+            #[cfg(unix)]
+            let parent = fs::canonicalize(parent).unwrap();
+            let path = parent.join(format!("tf-ssh-{label}-{}", uuid::Uuid::new_v4()));
+            #[cfg(unix)]
             DirBuilder::new().mode(0o700).create(&path).unwrap();
+            #[cfg(windows)]
+            DirBuilder::new().create(&path).unwrap();
             Self(path)
         }
         fn path(&self, name: &str) -> String {
             self.0.join(name).to_str().unwrap().into()
         }
-        fn write(&self, name: &str, bytes: impl AsRef<[u8]>, mode: u32) -> String {
+        fn write(&self, name: &str, bytes: impl AsRef<[u8]>, _mode: u32) -> String {
             let path = self.path(name);
             fs::write(&path, bytes).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(_mode)).unwrap();
             path
         }
     }
@@ -177,10 +206,24 @@ mod openssh {
             let mut hop = hop(&server.user, host, port);
             hop.auth = Auth::KeyFile;
             let private = key(seed + 10).to_openssh(LineEnding::LF).unwrap();
-            hop.identity_file = Some(temp.write(&format!("{} identity", server.user), private.as_bytes(), 0o600));
+            #[cfg(unix)]
+            let identity = temp.write(&format!("{} identity", server.user), private.as_bytes(), 0o600);
+            #[cfg(windows)]
+            let identity = {
+                // Reuse the private ACL writer, not inherited TEMP permissions,
+                // for the fake server's client key. This fixture file is data.
+                let root = HelperRoot::open_app_data(&temp.0).unwrap();
+                let helper = root.publish(
+                    ProcessIdentity::capture(std::process::id()).unwrap(),
+                    HelperKind::AttemptPayload, "json", private.as_bytes(),
+                ).unwrap();
+                helper.path().into_os_string().into_string().unwrap()
+            };
+            hop.identity_file = Some(identity);
             let known = format!("[{host}]:{port} {}\n", server.host.public_key().to_openssh().unwrap());
             (hop, temp.write(&format!("{} known hosts", server.user), known, 0o600))
         }
+        #[cfg(unix)]
         async fn run(&self, ssh: &str, shell: &str, outer_bash: bool, trust: &KnownHostsPaths) -> Output {
             let root = HelperRoot::open_app_data(&self.temp.0).unwrap();
             let launch = build_launch_argv(&self.target, trust, ssh, &self.temp.0).unwrap()
@@ -207,6 +250,7 @@ mod openssh {
             }
             output
         }
+        #[cfg(unix)]
         fn recording_ssh(&self, real: &str) -> String {
             let script = format!(
                 "#!/bin/sh\nfor arg do\n if [ \"$arg\" = -W ]; then\n  printf '%s\\0' \"$@\" > {}\n  break\n fi\ndone\nexec {} \"$@\"\n",
@@ -214,6 +258,7 @@ mod openssh {
             );
             self.temp.write("recording ssh", script, 0o700)
         }
+        #[cfg(unix)]
         fn inner(&self) -> Vec<String> {
             let bytes = fs::read(self.temp.path("inner argv")).unwrap();
             assert_eq!(bytes.last(), Some(&0));
@@ -224,6 +269,61 @@ mod openssh {
         fn drop(&mut self) { self.listener.abort(); }
     }
 
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn real_native_windows_openssh_jump_reaches_target_through_isolated_proxy() {
+        let ssh = crate::pty_manager::ssh_shell::system_shell(r"OpenSSH\ssh.exe").unwrap();
+        assert!(Path::new(&ssh).is_file(), "required native Windows OpenSSH is missing: {ssh}");
+        // This connection's actual key and receipt paths contain spaces, a
+        // proxy token, and a cmd canary. They must remain literal at both hops.
+        let rig = Rig::new(true, "native %h & mkdir local-canary & rem", "target.test").await;
+        let run = |trust: &KnownHostsPaths| {
+            let plan = build_launch_argv(&rig.target, trust, &ssh, &rig.temp.0).unwrap();
+            let root = HelperRoot::open_app_data(&rig.temp.0).unwrap();
+            let launch = plan.publish(
+                &root,
+                ProcessIdentity::capture(std::process::id()).unwrap(),
+                ProxyRuntime::WindowsNative,
+                |_| panic!("native proxy must not publish a helper"),
+            ).unwrap();
+            assert!(launch.payload.is_none());
+            let argv = launch.argv();
+            let mut cmd = Command::new(&argv[0]);
+            cmd.args(&argv[1..]).current_dir(&rig.temp.0)
+                .env("SHELL", rig.temp.path("no-such-shell.exe")).env_remove("SSH_TEST_ENVIRONMENT")
+                .env_remove("SSH_AUTH_SOCK").stdin(Stdio::null()).kill_on_drop(true);
+            async move {
+                tokio::time::timeout(Duration::from_secs(15), cmd.output()).await
+                    .expect("native SSH timed out").expect("native OpenSSH fixture failed to start")
+            }
+        };
+        assert_login(&run(&rig.trust).await);
+        let target = rig.target.hops.last().unwrap();
+        let bastion = rig.bastion.as_ref().unwrap();
+        assert_eq!(*bastion.counters.direct_addresses.lock(), vec![(target.host.clone(), target.port.into())]);
+        assert!(bastion.counters.principals.lock().iter().any(|name| name == "jump"));
+        assert!(rig.destination.counters.principals.lock().iter().any(|name| name == "target"));
+
+        let wrong_jump = KnownHostsPaths {
+            jump: Some(rig.trust.target.clone()),
+            target: rig.trust.target.clone(),
+        };
+        let wrong_target = KnownHostsPaths {
+            jump: rig.trust.jump.clone(),
+            target: rig.trust.jump.clone().unwrap(),
+        };
+        for trust in [wrong_jump, wrong_target] {
+            let output = run(&trust).await;
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("Host key verification failed"));
+        }
+        assert!(!Path::new(&rig.temp.path("local-canary")).exists());
+
+        let foreign = build_launch_argv(&rig.target, &rig.trust, r"C:\Git\usr\bin\ssh.exe", &rig.temp.0).unwrap();
+        assert_eq!(foreign.native_windows_argv().unwrap_err().kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[cfg(unix)]
     fn real_ssh() -> String {
         std::env::var("TERMFLOW_TEST_SSH").unwrap_or_else(|_| "/usr/bin/ssh".into())
     }
@@ -232,6 +332,7 @@ mod openssh {
         assert_eq!(output.stdout, b"launch-shell-ok");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn jump_refuses_unproven_proxy_runtimes_before_publication() {
         let rig = Rig::new(true, "unsupported", "target.test").await;
@@ -249,6 +350,7 @@ mod openssh {
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1); // root.lock only
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_known_hosts_paths_with_spaces_reach_target_and_jump_verbatim() {
         let rig = Rig::new(true, "paths with spaces", "target.test").await;
@@ -259,6 +361,7 @@ mod openssh {
         assert!(rig.inner().contains(&format!("UserKnownHostsFile=\"{}\"", rig.trust.jump.as_ref().unwrap())));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_proxy_helper_preserves_inner_argv_under_fish_login_shell() {
         let fish = std::env::var("TERMFLOW_TEST_FISH").unwrap_or_else(|_| "/usr/bin/fish".into());
@@ -287,6 +390,7 @@ mod openssh {
         assert!(!Path::new(&rig.temp.path("local-canary")).exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_uses_distinct_receipt_known_hosts_paths_per_hop() {
         let rig = Rig::new(true, "separate", "target.test").await;
@@ -301,6 +405,7 @@ mod openssh {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn real_openssh_accepted_option_combinations_never_run_local_canary() {
         let mut rig = Rig::new(false, "allowed-options", "127.0.0.1").await;
@@ -332,6 +437,7 @@ mod openssh {
         }
     }
 
+    #[cfg(unix)]
     async fn inspect(ssh: &str, args: &[String]) -> String {
         let output = tokio::time::timeout(Duration::from_secs(10),
             Command::new(ssh).arg("-G").args(args).stdin(Stdio::null()).kill_on_drop(true).output())
@@ -340,6 +446,7 @@ mod openssh {
         String::from_utf8(output.stdout).unwrap()
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     #[ignore = "requires externally staged user and system config in an isolated OpenSSH account/container"]
     async fn real_openssh_target_and_bastion_ignore_hostile_user_and_system_config() {

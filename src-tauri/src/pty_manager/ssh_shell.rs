@@ -56,7 +56,7 @@ pub(crate) fn validate_create(
 }
 
 #[cfg(windows)]
-fn system_shell(executable: &str) -> std::io::Result<String> {
+pub(crate) fn system_shell(executable: &str) -> std::io::Result<String> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
     let mut buf = vec![0u16; 32768];
