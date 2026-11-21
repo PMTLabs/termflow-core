@@ -34,6 +34,7 @@ import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
 import { CanvasHiddenForTerminal } from '../Canvas/CanvasHiddenBadge';
 import { titleColorStyle, useTerminalTitleColor } from '../../store/titleColor';
+import { SshPaneSlot } from '../Ssh/SshTerminalComposition';
 import './TerminalPane.css';
 
 // Global map to track terminal initialization state
@@ -956,6 +957,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         {terminalId && processId && incarnation && processBinding?.owner === incarnation && sshConnectionId && !sshUnavailable &&
           <OwnedSshLaunchNotice key={processId} terminalId={terminalId} paneId={paneId}
             processId={processId} owner={incarnation} connectionId={sshConnectionId} />}
+        {/* SSH leaves (plan 070 T2, gap G1) wrap this content in the shared SSH shell; every other
+            leaf renders it unchanged. Resolved by terminalId inside the slot, never by pane id. */}
+        <SshPaneSlot terminalId={terminalId} isTabActive={isTabActive}>
         <div className="terminal-pane-content" onPointerDownCapture={handleBroadcastPointerDown}>
           {terminalId && processId ? (
             <TerminalDisplay
@@ -1063,6 +1067,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           {terminalId && processId && <AgentChip terminalId={terminalId} />}
           <EndedOverlay closedInfo={closedInfo} />
         </div>
+        </SshPaneSlot>
         {/* In-flow below the terminal content (not overlaying it): the content
             area shrinks to make room, so the banner never covers the last rows. */}
         {closedInfo && (

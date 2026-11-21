@@ -25,12 +25,29 @@ type DialogAction = 'rename' | 'delete' | 'properties' | 'permissions';
 interface RowTarget { entry: RemoteEntry; scope?: SshRowScope; trigger: HTMLElement }
 interface FileMenu extends RowTarget { x: number; y: number }
 
+/** The one file controller of a terminal: listing, epoch, Follow-cd subscription and requests. */
+export type SshBrowserController = ReturnType<typeof useSshFileBrowser>;
+
+/** Owns a controller and renders it. The pane composition owns one per SSH terminal. */
 export function SshFileBrowser(props: SshFileBrowserProps) {
+  return <OwnedBrowser key={props.terminalId} {...props} />;
+}
+
+function OwnedBrowser(props: SshFileBrowserProps) {
+  const browser = useSshFileBrowser(props);
+  return <Browser {...props} browser={browser} />;
+}
+
+/**
+ * A second presentation of a controller owned elsewhere (plan 070 §4.1 A). It never lists,
+ * subscribes or follows cd itself; its own menus and dialogs are gated by `surfaceActive`.
+ */
+export function SshFileBrowserView(props: SshFileBrowserProps & { browser: SshBrowserController }) {
   return <Browser key={props.terminalId} {...props} />;
 }
 
-function Browser(props: SshFileBrowserProps) {
-  const browser = useSshFileBrowser(props);
+function Browser(props: SshFileBrowserProps & { browser: SshBrowserController }) {
+  const { browser } = props;
   const connection = useSelector((state: RootState) => state.ssh.view.connections.find(c => c.id === props.sshTag.connectionId)?.name);
   const [menu, setMenu] = useState<FileMenu>();
   const [rowDialog, setRowDialog] = useState<{ id: number; action: DialogAction; entry: RemoteEntry; scope: SshRowScope }>();
