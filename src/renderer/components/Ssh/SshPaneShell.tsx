@@ -4,6 +4,7 @@ import { SshSecretPrompt } from './SshSecretPrompt';
 import { SshHostKeyPrompt } from './SshHostKeyPrompt';
 import { SshDisconnectedBanner } from './SshDisconnectedBanner';
 import './SshPaneShell.css';
+import '../Settings/Automations/AutomationsPanel.css'; // house .au-btn styles for prompt and banner buttons
 export interface SshPaneShellProps {
   view: SshSessionView; terminal: React.ReactNode; browser?: React.ReactNode; status?: React.ReactNode;
   browserCollapsed: boolean; onBrowserCollapsedChange(collapsed: boolean): void;

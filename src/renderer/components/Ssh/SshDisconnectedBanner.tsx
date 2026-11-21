@@ -8,7 +8,7 @@ export function SshDisconnectedBanner({ reason, onReconnect }: { reason?: string
     try { await onReconnect(); } catch { setError(true); } finally { busy.current = false; setPending(false); }
   };
   return <div className="ssh-disconnected" role="status"><span>{reason || 'SSH disconnected'}</span>
-    {onReconnect && <button disabled={pending} onClick={reconnect}>{pending ? 'Reconnecting…' : 'Reconnect'}</button>}
+    {onReconnect && <button className="au-btn" disabled={pending} onClick={reconnect}>{pending ? 'Reconnecting…' : 'Reconnect'}</button>}
     {error && <span>Reconnect did not complete.</span>}
   </div>;
 }

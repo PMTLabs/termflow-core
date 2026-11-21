@@ -119,3 +119,16 @@ test('SshTestConnectionDialog creation racing close still disposes the returned 
   const dispose = startSshProbe(api, 'c-a', jest.fn(), jest.fn()); await flush(); dispose(); dispose(); created({ probeId: 'late-probe' }); await flush();
   expect(close).toHaveBeenCalledTimes(1); expect(close).toHaveBeenCalledWith('late-probe'); expect(stop).toHaveBeenCalledTimes(1);
 });
+test('SSH prompt and banner controls use the house button and checkbox classes', () => {
+  const houseButtons = () => [...container.querySelectorAll('button')].map(b => [b.textContent, b.classList.contains('au-btn')]);
+  act(() => root.render(<SshHostKeyPrompt view={view('needs-hostkey')} onTrust={jest.fn(async () => {})} onCancel={jest.fn()} />));
+  expect(houseButtons()).toEqual([['Trust', true], ['Cancel', true]]);
+  expect(container.querySelector('button')!.classList.contains('primary')).toBe(true);
+  act(() => root.render(<SshSecretPrompt view={view('needs-secret')} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
+  expect(houseButtons()).toEqual([['Continue', true], ['Cancel', true]]);
+  const box = container.querySelector('input[type=checkbox]')!;
+  expect(box.classList.contains('setting-checkbox')).toBe(true);
+  expect(box.closest('label')!.classList.contains('ssh-prompt-check')).toBe(true);
+  act(() => root.render(<SshDisconnectedBanner reason="Connection ended." onReconnect={jest.fn(async () => {})} />));
+  expect([...container.querySelectorAll('button')].every(b => b.classList.contains('au-btn'))).toBe(true);
+});

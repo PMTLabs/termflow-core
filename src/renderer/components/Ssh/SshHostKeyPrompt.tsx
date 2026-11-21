@@ -19,7 +19,7 @@ export function SshHostKeyPrompt({ view, onTrust, onCancel }: { view: SshSession
     <p>{view.hostKey?.algorithm}</p><code>{view.hostKey?.fingerprintSha256}</code>
     <p>{allowed ? 'Verify this fingerprint independently before trusting.' : (view.reason ?? 'Update known_hosts with ssh-keygen. There is no override.')}</p>
     {error && <p role="alert">Host trust could not be saved.</p>}
-    {allowed && <button aria-disabled={pending} onClick={trust}>{pending ? 'Saving…' : 'Trust'}</button>}
-    {allowed && <button data-dialog-cancel data-action="cancel" onClick={onCancel}>Cancel</button>}
+    {allowed && <button className="au-btn primary" aria-disabled={pending} onClick={trust}>{pending ? 'Saving…' : 'Trust'}</button>}
+    {allowed && <button className="au-btn" data-dialog-cancel data-action="cancel" onClick={onCancel}>Cancel</button>}
   </div>;
 }
