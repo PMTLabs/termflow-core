@@ -147,7 +147,7 @@ describe('panel with an unreadable store', () => {
     const store = panel();
     act(() => { store.dispatch(applyView({ revision:2, view:corrupt(2) })); });
     const toolbar = [...host.querySelectorAll('.ssh-toolbar button, .ssh-read-only button')];
-    expect(toolbar.map(b => b.textContent)).toEqual(['Reload','New folder','New SSH connection']);
+    expect(toolbar.map(b => b.textContent)).toEqual(['New folder','New SSH connection','Reload']);
     expect(toolbar.every(b => b.classList.contains('au-btn'))).toBe(true);
   });
 });
