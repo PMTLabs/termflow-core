@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import type { SshAPI, SshConnection, SshSessionView } from '../../types/ssh';
 import { newerSshView } from '../../types/ssh';
 import { useDialogA11y } from '../UI/useDialogA11y';
-import { SshSecretPrompt } from './SshSecretPrompt';
+import { SshSecretPrompt, savedCredentialUnavailable } from './SshSecretPrompt';
 import { SshHostKeyPrompt } from './SshHostKeyPrompt';
 // Not `import { store }`: that module wires tauri-bridge listeners at load and breaks bare-root tests.
 const reduxStore = () => (window as any).__REDUX_STORE__ as { getState(): any; dispatch(action: unknown): unknown } | undefined;
@@ -84,19 +84,6 @@ export const testDialogCopy = new Map([
   ["trust-already-pinned","The host already has a saved key. Run Test connection again to verify it."],
 ]);
 const fallback = 'The SSH test could not finish. Check the saved connection settings and try again.';
-const savedCredentialWarning = 'Saved credential unavailable. Enter it again; Remember may be unavailable.';
-
-export function reasonCode(reason?: string): string | undefined {
-  if (!reason) return undefined;
-  const code = reason.replace(/^SSH operation failed: /, '');
-  if (failureCopy.has(code)) return code;
-  // Probe snapshots carry only the human reason; IPC command errors carry a code.
-  if (reason === 'Authentication rejected. Check the selected method and credential.') return 'auth-rejected';
-  if (/^An entry in known_hosts could not be read at line \d+\./.test(reason)) return 'known-hosts-malformed';
-  for (const [key, message] of failureCopy) if (message === reason) return key;
-  return undefined;
-}
-
 function authCopy(kind?: string, auth?: SshConnection['auth'], final = false) {
   if (kind === 'password' || (!kind && auth === 'password')) return "That password wasn't accepted." +
     (final ? ' Check the account name and password before testing again.' : ' Check it and try again.');
@@ -147,7 +134,8 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
   const changed = view?.state === 'error' && view.hostKey?.changed;
   const secretPrompt = !failure && view?.state === 'needs-secret';
   const finalFailure = !!failure || (view?.state === 'error' && !changed) || view?.state === 'disconnected';
-  const code = failure ? failure.code : reasonCode(view?.reason);
+  // Probe snapshots and IPC errors both carry the backend code; the reason text is never parsed.
+  const code = failure ? failure.code : view?.errorCode;
   const credential = code === 'auth-rejected' ? lastCredential.current : undefined;
   const failedHop = view?.promptTarget ?? credential?.promptTarget;
   const destination = failedHop ? `${failedHop.hop === 'jump' ? 'jump host ' : ''}${endpoint(failedHop)}`
@@ -157,7 +145,9 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
   return createPortal(<div className="ssh-test-backdrop"><div className="ssh-test-dialog" ref={root} role="dialog" aria-modal="true" aria-label="Test SSH connection">
     <h2>Test SSH connection</h2>
     {secretPrompt && view ? <SshSecretPrompt key={view.promptId} view={{
-      ...view, reason: code === 'auth-rejected' ? authCopy(view.secretKind) : view.reason === savedCredentialWarning ? savedCredentialWarning : view.reason ? fallback : undefined,
+      ...view, reason: code === 'auth-rejected' ? authCopy(view.secretKind) : code === savedCredentialUnavailable ? view.reason : view.reason ? fallback : undefined,
+      // Only the warning keeps its code: the prompt would otherwise re-map this dialog's auth copy.
+      errorCode: code === savedCredentialUnavailable ? code : undefined,
     }} onCancel={close} onSubmit={(secret, remember) => api.sshTestSubmitSecret(view.probeId!, secret, remember, receipt)} />
       : !failure && trustPrompt && view ? <SshHostKeyPrompt key={view.promptId} view={view} onCancel={close} onTrust={() => api.sshTestTrustHost(view.probeId!, true, receipt)} />
       : <>
@@ -166,7 +156,7 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
           {finalFailure && <p className="ssh-prompt-error" role="alert">{destination && `Couldn't complete the SSH test for ${destination}. `}{message}</p>}
           {!failure && (!view || view.state === 'connecting') && <p className="ssh-test-progress" role="status"><span className="ssh-spinner" aria-hidden="true" />Connecting…</p>}
           {!failure && changed && view && <SshHostKeyPrompt view={view} onCancel={close} onTrust={async () => {}} />}
-          {!failure && view?.state === 'connected' && <p role="status">Connected. File and metric capabilities have not been tested.{view.reason && ` ${failureCopy.get('remember-unavailable')}`}</p>}
+          {!failure && view?.state === 'connected' && <p role="status">Connected. File and metric capabilities have not been tested.{code === 'remember-unavailable' && ` ${failureCopy.get('remember-unavailable')}`}</p>}
         </div>
         <div className="ssh-test-actions"><button type="button" className="au-btn" onClick={close}>Close</button></div>
       </>}

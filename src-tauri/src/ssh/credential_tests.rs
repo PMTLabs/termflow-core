@@ -52,6 +52,10 @@ async fn keyring_failure_prompts_without_overwriting_ciphertext() {
     let id = f.registry.probe("c-a").unwrap();
     let view = wait_state(&f.registry, &id, true, SessionState::NeedsSecret).await;
     assert!(view.reason.as_deref().unwrap().contains("unavailable"));
+    assert_eq!(
+        view.error_code.as_deref(),
+        Some(super::session::SAVED_CREDENTIAL_UNAVAILABLE)
+    );
     f.registry
         .submit_secret(
             &id,
@@ -98,5 +102,9 @@ async fn remember_write_failure_reports_connected_not_saved() {
         .unwrap();
     let connected = wait_state(&f.registry, &id, true, SessionState::Connected).await;
     assert!(connected.reason.as_deref().unwrap().contains("not saved"));
+    assert_eq!(
+        connected.error_code.as_deref(),
+        Some("remember-unavailable")
+    );
     f.registry.shutdown().await;
 }

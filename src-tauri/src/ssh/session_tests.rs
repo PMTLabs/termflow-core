@@ -253,3 +253,147 @@ fn open_from_a_thread_without_a_tokio_runtime_does_not_panic() {
     f.registry.close(&id, true, None).unwrap();
     tauri::async_runtime::block_on(f.registry.shutdown());
 }
+
+fn every_session_error() -> Vec<SessionError> {
+    use SessionError::*;
+    let all = vec![
+        NotConnected,
+        NotFound,
+        Cancelled,
+        StaleAttempt,
+        OwnerRetired,
+        AdmissionClosed,
+        InvalidTarget,
+        HostKeyChanged,
+        HostKeyRevoked,
+        HostCertificateUnsupported,
+        KnownHostsMalformed { line: 12 },
+        KnownHostsUnreadable,
+        TrustWriteFailed,
+        TrustAlreadyPinned,
+        AuthRejected,
+        AgentUnavailable,
+        CapabilityUnavailable,
+        TimedOut,
+        TransportClosed,
+        OutputTooLarge,
+        MissingExitStatus,
+        IdentityUnreadable,
+        UnsupportedAuthentication,
+        RememberUnavailable,
+        StoreUnavailable,
+    ];
+    // Exhaustive: a new variant fails to compile here until it is added to `all`.
+    for e in &all {
+        match e {
+            NotConnected
+            | NotFound
+            | Cancelled
+            | StaleAttempt
+            | OwnerRetired
+            | AdmissionClosed
+            | InvalidTarget
+            | HostKeyChanged
+            | HostKeyRevoked
+            | HostCertificateUnsupported
+            | KnownHostsMalformed { .. }
+            | KnownHostsUnreadable
+            | TrustWriteFailed
+            | TrustAlreadyPinned
+            | AuthRejected
+            | AgentUnavailable
+            | CapabilityUnavailable
+            | TimedOut
+            | TransportClosed
+            | OutputTooLarge
+            | MissingExitStatus
+            | IdentityUnreadable
+            | UnsupportedAuthentication
+            | RememberUnavailable
+            | StoreUnavailable => {}
+        }
+    }
+    all
+}
+#[test]
+fn error_code_is_the_serde_code_tag_for_every_variant() {
+    let all = every_session_error();
+    let mut codes = std::collections::HashSet::new();
+    for e in &all {
+        let tag = serde_json::to_value(e).unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!((e, e.code()), (e, tag.as_str()));
+        assert!(codes.insert(e.code()), "duplicate code {}", e.code());
+    }
+    assert!(!codes.contains(SAVED_CREDENTIAL_UNAVAILABLE));
+}
+#[tokio::test]
+async fn every_failure_snapshot_carries_its_error_code() {
+    // Backlog 017: readers take the code from the snapshot, never from `reason` text.
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    f.connected().await;
+    let e = f.registry.entry("tm-a", false).unwrap();
+    for error in every_session_error() {
+        let view = {
+            let mut s = e.inner.lock();
+            s.view.state = SessionState::Connecting;
+            set_reason(&mut s.view, Some("free text".into()), None);
+            apply_failure(&mut s, error.clone());
+            s.view.clone()
+        };
+        assert_eq!(
+            (&error, view.reason.clone(), view.error_code.as_deref()),
+            (&error, Some(error.reason()), Some(error.code()))
+        );
+        let wire = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            (&error, wire["errorCode"].as_str()),
+            (&error, Some(error.code()))
+        );
+    }
+    // A free-text reason clears a stale code, and no reason serializes no code.
+    let mut view = e.inner.lock().view.clone();
+    set_reason(&mut view, Some("Local shell ended".into()), None);
+    assert_eq!(view.error_code, None);
+    set_reason(&mut view, None, Some("auth-rejected"));
+    assert_eq!(
+        (view.reason.as_deref(), view.error_code.as_deref()),
+        (None, None)
+    );
+    assert!(serde_json::to_value(&view)
+        .unwrap()
+        .get("errorCode")
+        .is_none());
+    f.registry.shutdown().await;
+}
+#[test]
+fn view_reason_has_one_writer() {
+    // Every reason write goes through set_reason, so the code cannot drift from the text.
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ssh/session.rs"),
+    )
+    .unwrap()
+    .replace(
+        "
+", "
+",
+    );
+    let writes: Vec<&str> = source
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//"))
+        .filter(|l| {
+            let compact: String = l.chars().filter(|c| !c.is_whitespace()).collect();
+            compact.contains(".reason=") || compact.contains(".error_code=")
+        })
+        .collect();
+    assert_eq!(
+        writes,
+        vec![
+            "view.error_code = reason.as_ref().and(code).map(str::to_string);",
+            "view.reason = reason;"
+        ]
+    );
+}

@@ -1,53 +1,76 @@
+import fs from 'fs';
 import path from 'path';
 import { readSource } from '../../utils/readSource';
-import { failureCopy, reasonCode, testDialogCopy } from './SshTestConnectionDialog';
+import { failureCopy, testDialogCopy } from './SshTestConnectionDialog';
+import { savedCredentialUnavailable } from './SshSecretPrompt';
 
-// Probe snapshots carry only the backend's human reason, not its code, so the Test dialog maps
-// that text back to a code (backlog 017: the snapshot should carry the code). This pins both
-// sides: every `SessionError::reason()` string in session.rs must match the renderer copy for its
-// kebab-case code, and every renderer entry must have a backend variant.
+// Snapshots carry the backend code as `errorCode` (backlog 017), so the renderer keys its copy by
+// code and never reads the reason text. This pins the code sets on both sides and keeps text
+// matching from coming back.
 const ROOT = path.resolve(__dirname, '..', '..', '..', '..');
 const session = readSource(path.resolve(ROOT, 'src-tauri', 'src', 'ssh', 'session.rs'));
-const body = session.slice(session.indexOf('pub fn reason(&self) -> String {'));
-const arms = [...body.slice(0, body.indexOf('\n    }\n}')).matchAll(/Self::(\w+)(?: \{[^}]*\})? => (?:"([^"]*)"\.into\(\)|format!\("([^"]*)"\))/g)]
-  .map(([, variant, plain, formatted]) => ({
-    code: variant.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase(),
-    text: plain ?? formatted,
-  }));
+const fnBody = (signature: string) => {
+  const body = session.slice(session.indexOf(signature));
+  return body.slice(0, body.indexOf('\n    }\n'));
+};
+const codes = [...fnBody("pub fn code(&self) -> &'static str {").matchAll(/Self::\w+(?: \{ \.\. \})? => "([a-z-]+)",/g)].map(m => m[1]);
+const reasons = [...fnBody('pub fn reason(&self) -> String {').matchAll(/Self::(\w+)(?: \{[^}]*\})? => (?:"([^"]*)"\.into\(\)|format!\("([^"]*)"\))/g)]
+  .map(([, variant, plain, formatted]) => ({ variant, text: plain ?? formatted }));
 
-test('session.rs reason() is parsed', () => {
-  expect(arms.length).toBeGreaterThanOrEqual(25);
+test('session.rs code() and reason() are parsed', () => {
+  expect(codes.length).toBeGreaterThanOrEqual(25);
+  expect(reasons.length).toBe(codes.length);
 });
 
-test('every backend reason matches the renderer copy for its code', () => {
-  for (const { code, text } of arms) {
-    // The malformed-known_hosts reason names a line; the renderer copy is the line-free base.
-    const backend = code === 'known-hosts-malformed' ? text.replace(' at line {line}', '') : text;
-    expect([code, failureCopy.get(code)]).toEqual([code, backend]);
-  }
+test('every backend code has renderer copy, and nothing else does', () => {
+  expect([...failureCopy.keys()].sort()).toEqual([...codes].sort());
 });
 
-test('every renderer code has a backend variant', () => {
-  expect([...failureCopy.keys()].sort()).toEqual(arms.map(arm => arm.code).sort());
-});
-
-test('backend reason text maps back to its code', () => {
-  for (const { code, text } of arms) {
-    expect([text, reasonCode(text.replace('{line}', '12'))]).toEqual([text, code]);
-  }
+test('the saved-credential warning code matches the backend constant', () => {
+  expect(session).toContain(`pub const SAVED_CREDENTIAL_UNAVAILABLE: &str = "${savedCredentialUnavailable}";`);
+  expect(codes).not.toContain(savedCredentialUnavailable);
 });
 
 // The same reasons reach SSH panes, the file browser and metrics, so the backend text must not
 // point at one surface. Test-dialog actions live in the renderer's testDialogCopy instead.
 test('backend reasons are context-neutral', () => {
-  for (const { code, text } of arms) {
-    expect([code, /Test connection|SSH Connections/.test(text)]).toEqual([code, false]);
+  for (const { variant, text } of reasons) {
+    expect([variant, /Test connection|SSH Connections/.test(text)]).toEqual([variant, false]);
   }
 });
 
 test('Test dialog copy only overrides backend codes and names its next step', () => {
-  const codes = new Set(arms.map(arm => arm.code));
   for (const [code, copy] of testDialogCopy) {
-    expect([code, codes.has(code), /Test connection|SSH Connections/.test(copy)]).toEqual([code, true, true]);
+    expect([code, codes.includes(code), /Test connection|SSH Connections/.test(copy)]).toEqual([code, true, true]);
   }
+});
+
+// A comparison of `reason` against text, or a text probe on it, means a reader is decoding the
+// backend's English again instead of using `errorCode`.
+const textMatch = /\breason\??\.(?:startsWith|endsWith|includes|match|test)\(|\breason\s*[!=]==?\s*['"`]|['"`]\s*[!=]==?\s*(?:\w+\??\.)*reason\b|\bfailureCopy\b[^;\n]*\breason\b|\breasonCode\b/;
+
+test('the text-match detector catches each spelling and passes code checks', () => {
+  for (const bad of [
+    "view.reason === 'Authentication was not accepted.'",
+    'reason?.startsWith("Saved credential")',
+    'view.reason.includes(`known_hosts`)',
+    "'text' === view?.reason",
+    'for (const [key, message] of failureCopy) if (message === view.reason) return key;',
+    'const code = reasonCode(view.reason);',
+  ]) expect([bad, textMatch.test(bad)]).toEqual([bad, true]);
+  for (const ok of [
+    "view.errorCode === 'auth-rejected'",
+    '{view.reason && <span role="status">{view.reason}</span>}',
+    "reason: code === 'auth-rejected' ? authCopy(view.secretKind) : view.reason ? fallback : undefined,",
+  ]) expect([ok, textMatch.test(ok)]).toEqual([ok, false]);
+});
+
+test('no SSH renderer source matches on reason text', () => {
+  const dir = path.resolve(__dirname);
+  const files = fs.readdirSync(dir).filter(f => /\.tsx?$/.test(f) && !/\.test\.tsx?$/.test(f));
+  expect(files).toEqual(expect.arrayContaining(['SshTestConnectionDialog.tsx', 'SshSecretPrompt.tsx', 'SshPaneShell.tsx']));
+  const hits = files.flatMap(f => readSource(path.join(dir, f)).split('\n')
+    .map((line, i) => ({ at: `${f}:${i + 1}`, line: line.trim() }))
+    .filter(({ line }) => !line.startsWith('//') && textMatch.test(line)));
+  expect(hits).toEqual([]);
 });

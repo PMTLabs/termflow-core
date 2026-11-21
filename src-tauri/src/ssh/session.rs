@@ -61,6 +61,37 @@ pub enum SessionError {
     StoreUnavailable,
 }
 impl SessionError {
+    /// The kebab-case code, identical to the serde `code` tag. Snapshots carry it as
+    /// `errorCode` so readers never match `reason()` text.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::NotConnected => "not-connected",
+            Self::NotFound => "not-found",
+            Self::Cancelled => "cancelled",
+            Self::StaleAttempt => "stale-attempt",
+            Self::OwnerRetired => "owner-retired",
+            Self::AdmissionClosed => "admission-closed",
+            Self::InvalidTarget => "invalid-target",
+            Self::HostKeyChanged => "host-key-changed",
+            Self::HostKeyRevoked => "host-key-revoked",
+            Self::HostCertificateUnsupported => "host-certificate-unsupported",
+            Self::KnownHostsMalformed { .. } => "known-hosts-malformed",
+            Self::KnownHostsUnreadable => "known-hosts-unreadable",
+            Self::TrustWriteFailed => "trust-write-failed",
+            Self::TrustAlreadyPinned => "trust-already-pinned",
+            Self::AuthRejected => "auth-rejected",
+            Self::AgentUnavailable => "agent-unavailable",
+            Self::CapabilityUnavailable => "capability-unavailable",
+            Self::TimedOut => "timed-out",
+            Self::TransportClosed => "transport-closed",
+            Self::OutputTooLarge => "output-too-large",
+            Self::MissingExitStatus => "missing-exit-status",
+            Self::IdentityUnreadable => "identity-unreadable",
+            Self::UnsupportedAuthentication => "unsupported-authentication",
+            Self::RememberUnavailable => "remember-unavailable",
+            Self::StoreUnavailable => "store-unavailable",
+        }
+    }
     pub fn reason(&self) -> String {
         match self {
             Self::NotConnected => "The SSH connection is not open. Try again.".into(),
@@ -246,6 +277,10 @@ pub struct SessionView {
     pub gate: Gate,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Code for `reason` when it has one (a `SessionError` code, or
+    /// `saved-credential-unavailable`); `None` for free-text disconnect reasons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_hosts_paths: Option<KnownHostsPaths>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -368,7 +403,7 @@ impl Entry {
         let prompt_target = refusal.then(|| s.view.prompt_target.clone()).flatten();
         if !refusal {
             s.view.state = SessionState::Disconnected;
-            s.view.reason = reason;
+            set_reason(&mut s.view, reason, None);
             s.view.gate = Gate::Blocked;
         }
         clear_prompt(&mut s.view);
@@ -416,7 +451,7 @@ impl Entry {
         target: PromptTarget,
         secret_kind: Option<SecretKind>,
         host_key: Option<HostKey>,
-        reason: Option<String>,
+        reason: Option<(String, &'static str)>,
     ) -> Result<Answer, SessionError> {
         let (send, receive) = oneshot::channel();
         {
@@ -433,7 +468,8 @@ impl Entry {
             s.view.prompt_target = Some(target);
             s.view.secret_kind = secret_kind;
             s.view.host_key = host_key;
-            s.view.reason = reason;
+            let (reason, code) = reason.unzip();
+            set_reason(&mut s.view, reason, code);
             s.pending = Some(Pending { kind, sender: send });
             self.publish_locked(&mut s);
         }
@@ -473,6 +509,21 @@ impl Entry {
 fn engine_runtime() -> tokio::runtime::Handle {
     tokio::runtime::Handle::try_current()
         .unwrap_or_else(|_| tauri::async_runtime::handle().inner().clone())
+}
+/// Prompt warning code: a saved secret could not be read, so the prompt asks again.
+pub const SAVED_CREDENTIAL_UNAVAILABLE: &str = "saved-credential-unavailable";
+/// The only writer of `view.reason`: the code travels with the text it names.
+fn set_reason(view: &mut SessionView, reason: Option<String>, code: Option<&str>) {
+    view.error_code = reason.as_ref().and(code).map(str::to_string);
+    view.reason = reason;
+}
+/// Sets `reason` and `errorCode` from one error.
+fn set_error_reason(view: &mut SessionView, error: Option<&SessionError>) {
+    set_reason(
+        view,
+        error.map(SessionError::reason),
+        error.map(SessionError::code),
+    );
 }
 fn clear_prompt(view: &mut SessionView) {
     view.prompt_id = None;
@@ -609,6 +660,7 @@ impl SessionRegistry {
             revision: 0,
             gate: Gate::Pending,
             reason: None,
+            error_code: None,
             known_hosts_paths: None,
             secret_kind: None,
             host_key: None,
@@ -788,13 +840,15 @@ impl SessionRegistry {
             s.authenticated = false;
             s.view.state = SessionState::Disconnected;
             s.view.gate = Gate::Blocked;
-            s.view.reason = Some("ssh in the terminal ended".into());
+            set_reason(&mut s.view, Some("ssh in the terminal ended".into()), None);
             clear_prompt(&mut s.view);
         } else if s.authenticated && launch == LaunchState::Running {
             s.view.state = SessionState::Connected;
-            s.view.reason = s
-                .unsaved_secret_warning
-                .then(|| SessionError::RememberUnavailable.reason());
+            let warning = s.unsaved_secret_warning;
+            set_error_reason(
+                &mut s.view,
+                warning.then_some(&SessionError::RememberUnavailable),
+            );
         }
         e.publish_locked(&mut s);
         Ok(())
@@ -1035,7 +1089,7 @@ fn apply_failure(s: &mut EntryState, error: SessionError) {
     } else {
         Gate::Blocked
     };
-    s.view.reason = Some(error.reason());
+    set_error_reason(&mut s.view, Some(&error));
     s.pending.take();
     clear_prompt(&mut s.view);
 }
@@ -1131,8 +1185,11 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         } else {
             SessionState::Connecting
         };
-        s.view.reason = (s.view.state == SessionState::Connected && s.unsaved_secret_warning)
-            .then(|| SessionError::RememberUnavailable.reason());
+        let warning = s.view.state == SessionState::Connected && s.unsaved_secret_warning;
+        set_error_reason(
+            &mut s.view,
+            warning.then_some(&SessionError::RememberUnavailable),
+        );
         clear_prompt(&mut s.view);
     });
     // Handler callbacks observe real transport completion. Holding the bastion handle
@@ -1287,7 +1344,11 @@ async fn authenticate(
         None
     };
     let mut reason = remember_unavailable.then(|| {
-        "Saved credential unavailable. Enter it again; Remember may be unavailable.".to_string()
+        (
+            "Saved credential unavailable. Enter it again; Remember may be unavailable."
+                .to_string(),
+            SAVED_CREDENTIAL_UNAVAILABLE,
+        )
     });
     for _ in 0..3 {
         let (secret, remember) = if needs_secret {
@@ -1395,7 +1456,8 @@ async fn authenticate(
         if !needs_secret {
             return Err(SessionError::AuthRejected);
         }
-        reason = Some(SessionError::AuthRejected.reason());
+        let rejected = SessionError::AuthRejected;
+        reason = Some((rejected.reason(), rejected.code()));
     }
     Err(SessionError::AuthRejected)
 }

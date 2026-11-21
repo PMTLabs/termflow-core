@@ -27,6 +27,7 @@ async fn host_key_policy_table_blocks_auth_and_direct_trust() {
         let id = f.registry.probe("c-a").unwrap();
         let v = wait_state(&f.registry, &id, true, SessionState::Error).await;
         assert_eq!(v.reason, Some(SessionError::KnownHostsUnreadable.reason()));
+        assert_eq!(v.error_code.as_deref(), Some("known-hosts-unreadable"));
         assert_eq!(
             f.registry.trust_host(&id, true, None, None, true),
             Err(SessionError::StaleAttempt)
