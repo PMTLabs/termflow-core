@@ -1014,6 +1014,9 @@ struct ClientHandler {
     deps: Arc<Dependencies>,
     hop: SessionHop,
     is_target: bool,
+    /// The verifier's own refusal. russh reports a rejected key as a generic
+    /// handshake error; the engine must finish with this cause instead.
+    refusal: Arc<Mutex<Option<SessionError>>>,
 }
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
@@ -1023,6 +1026,7 @@ impl client::Handler for ClientHandler {
     ) -> Result<bool, Self::Error> {
         let result = self.verify_key(key).await;
         if let Err(error) = &result {
+            *self.refusal.lock() = Some(error.clone());
             if matches!(
                 error,
                 SessionError::HostKeyChanged | SessionError::HostKeyRevoked
@@ -1222,17 +1226,19 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
             .cloned()
             .collect::<Vec<_>>()
             .into();
+        let refusal = Arc::new(Mutex::new(None));
         let handler = ClientHandler {
             entry: entry.clone(),
             deps: deps.clone(),
             hop: hop.clone(),
             is_target: index + 1 == target.hops.len(),
+            refusal: refusal.clone(),
         };
         let mut handle = entry
             .handshake(async {
                 client::connect_stream(Arc::new(config), stream, handler)
                     .await
-                    .map_err(|_| SessionError::TransportClosed)
+                    .map_err(|_| refusal.lock().take().unwrap_or(SessionError::TransportClosed))
             })
             .await?;
         authenticate(
