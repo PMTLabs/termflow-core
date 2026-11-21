@@ -31,7 +31,7 @@ fn input(host: &str) -> ConnectionInput {
 #[test]
 fn preview_saved_and_validated_unsaved_draft_use_rust_builder_without_writes() {
     let temp = Temp::new();
-    let first = temp.preview(PreviewSource::Draft { draft: input("new.test"), editing_id: None }).unwrap();
+    let first = temp.preview(PreviewSource::Draft { draft: Box::new(input("new.test")), editing_id: None }).unwrap();
     assert_eq!(first.store_revision, 0);
     assert!(!temp.0.exists(), "preview must not create config, lock, or helper files");
 
@@ -51,14 +51,14 @@ fn preview_saved_and_validated_unsaved_draft_use_rust_builder_without_writes() {
 
     let mut draft = input("draft.test");
     draft.jump_connection_id = Some(id.clone());
-    let jump = temp.preview(PreviewSource::Draft { draft: draft.clone(), editing_id: None }).unwrap();
+    let jump = temp.preview(PreviewSource::Draft { draft: Box::new(draft.clone()), editing_id: None }).unwrap();
     assert_eq!(jump.store_revision, saved.revision);
     assert_eq!(jump.argv.last().unwrap(), "draft.test");
     let proxy = if cfg!(windows) { "<native-ssh-proxy>" } else { "/bin/sh '<private-proxy-helper>'" };
     assert!(jump.argv.contains(&format!("ProxyCommand={proxy}")));
     assert!(jump.wrapper.contains("shown symbolically"));
 
-    let self_jump = temp.preview(PreviewSource::Draft { draft, editing_id: Some(id) }).unwrap_err();
+    let self_jump = temp.preview(PreviewSource::Draft { draft: Box::new(draft), editing_id: Some(id) }).unwrap_err();
     assert_eq!(self_jump.code, "Validation");
     assert_eq!(self_jump.fields[0].field.as_deref(), Some("jumpConnectionId"));
     assert_eq!(self_jump.fields[0].code, "self");
@@ -72,13 +72,13 @@ fn preview_replies_preserve_field_codes_and_hide_store_errors() {
     let temp = Temp::new();
     let mut draft = input("new.test");
     draft.extra_options = vec![("NotAnAllowedOption".into(), "1".into())];
-    let err = temp.preview(PreviewSource::Draft { draft, editing_id: None }).unwrap_err();
+    let err = temp.preview(PreviewSource::Draft { draft: Box::new(draft), editing_id: None }).unwrap_err();
     let json = serde_json::to_value(err).unwrap();
     assert_eq!(json["code"], "Validation");
     assert_eq!(json["fields"][0]["field"], "extraOptions");
     assert_eq!(json["fields"][0]["code"], "option-not-allowed");
 
-    let source = PreviewSource::Draft { draft: input("new.test"), editing_id: None };
+    let source = PreviewSource::Draft { draft: Box::new(input("new.test")), editing_id: None };
     assert_eq!(preview_in(&temp.store(), source, || Ok(("/usr/bin/ssh".into(), PathBuf::new())))
         .unwrap_err().code, "UnsupportedContext");
     assert_eq!(temp.preview(PreviewSource::Saved { id: "missing".into() }).unwrap_err().code, "NotFound");

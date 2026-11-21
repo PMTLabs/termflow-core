@@ -94,6 +94,8 @@ impl PreparedShell {
         Self::register_in(&root, keys, process, cg, spec, hosted, connection_id, |key| std::env::var(key).ok())
     }
 
+    // `register`'s inputs plus the injected helper root and inherited environment.
+    #[allow(clippy::too_many_arguments)]
     fn register_in(
         root: &super::ssh_helpers::HelperRoot, keys: &HostKeys, process: &str, cg: u64,
         spec: &mut termflow_pty_protocol::SpawnSpec, hosted: bool, connection_id: &str, inherited: impl Fn(&str) -> Option<String>,

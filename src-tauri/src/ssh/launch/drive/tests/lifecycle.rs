@@ -1,5 +1,8 @@
 //! Full launch driver + real 067 engine + real instrumented PTY and native
 //! OpenSSH. Terminal TCP and app-channel transports are deliberately separate.
+// The shared child-process gate is a std mutex (sync tests take it too) and is
+// meant to outlive every awaited real child; each #[tokio::test] owns its runtime.
+#![allow(clippy::await_holding_lock)]
 use super::*;
 use crate::{
     elevated_host::HostChannel,

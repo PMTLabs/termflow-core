@@ -1,6 +1,8 @@
 use super::*;
 
 #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
+// The shared child-process gate intentionally outlives every owned child.
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn pid_reuse_unrelated_manual_ssh_and_proxy_child_do_not_claim_launch() {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();

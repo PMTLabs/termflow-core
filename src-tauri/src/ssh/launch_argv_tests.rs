@@ -271,6 +271,8 @@ mod openssh {
     }
 
     #[cfg(windows)]
+    // The shared child-process gate intentionally outlives every owned child.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn real_native_windows_openssh_jump_reaches_target_through_isolated_proxy() {
         let _gate = crate::pty_host_client::test_dirs::child_process_gate();

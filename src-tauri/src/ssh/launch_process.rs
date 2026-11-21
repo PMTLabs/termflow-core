@@ -120,13 +120,12 @@ fn inspect(system: &mut System, id: Identity, parent: Option<Pid>, matches: impl
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
-    #[cfg(windows)]
-    {
+    if cfg!(windows) {
         let (a, b) = (a.to_string_lossy(), b.to_string_lossy());
-        return a.trim_start_matches(r"\\?\").eq_ignore_ascii_case(b.trim_start_matches(r"\\?\"));
+        a.trim_start_matches(r"\\?\").eq_ignore_ascii_case(b.trim_start_matches(r"\\?\"))
+    } else {
+        a == b
     }
-    #[cfg(not(windows))]
-    return a == b;
 }
 
 #[derive(Default)]

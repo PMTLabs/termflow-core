@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum PreviewSource {
     Saved { id: String },
-    Draft { draft: ConnectionInput, editing_id: Option<String> },
+    // Boxed: an unsaved editor draft is much larger than a saved id.
+    Draft { draft: Box<ConnectionInput>, editing_id: Option<String> },
 }
 
 #[derive(Debug, Serialize)]
@@ -80,7 +81,7 @@ fn preview_in(
                 return Err(PreviewError::validation(StoreError::field("id", "editing-id-mismatch")));
             }
             draft.id = editing_id;
-            snapshot.upsert_connection(draft).map_err(PreviewError::validation)?;
+            snapshot.upsert_connection(*draft).map_err(PreviewError::validation)?;
             snapshot.connections.last().expect("upsert appends the row").id.clone()
         }
     };

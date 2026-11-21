@@ -3,6 +3,9 @@
 //! `ssh` is a recording executable that logs its argv and the trust file as it
 //! was at exec, then hands the same argv to the real OpenSSH. A fake outer
 //! alone cannot pass: the real client must log in with that trust file.
+// The shared child-process gate is a std mutex (sync tests take it too) and is
+// meant to outlive every awaited real child; each #[tokio::test] owns its runtime.
+#![allow(clippy::await_holding_lock)]
 use super::*;
 use crate::pty_manager::ssh_shell::posix::tests::launch_tests::compile_argv_recorder;
 use std::path::Path;
