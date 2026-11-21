@@ -153,21 +153,29 @@ test('ssh_uses_configured_default_not_connection_or_first_profile', async () => 
   const h = harness();
   let tabId = '';
   await act(async () => { render(); tabId = launch().tabId; await flush(); });
-  expect(h.create.mock.calls).toEqual([[expect.objectContaining({ profile: 'default-shell', cwd: '/default-cwd', name: 'Local Shell', owningTabId: tabId })]]);
-  expect(store.getState().tabs.tabs.find(tab => tab.id === tabId)?.title).toBe('Local Shell');
+  // The profile ('saved' id collides with the connection id on purpose) decides shell/cwd; the tab is titled by the connection.
+  expect(h.create.mock.calls).toEqual([[expect.objectContaining({ profile: 'default-shell', cwd: '/default-cwd', name: 'Saved destination', owningTabId: tabId })]]);
+  expect(store.getState().tabs.tabs.find(tab => tab.id === tabId)?.title).toBe('Saved destination');
+});
+
+test('stale_default_falls_back_like_an_ordinary_new_tab', async () => {
+  const h = harness();
+  store.dispatch(setDefaultProfile('missing'));
+  let tabId = '';
+  await act(async () => { render(); tabId = launch().tabId; await flush(); });
+  // resolveDefaultProfile: a stale default id resolves to the first profile, exactly as the "+" button does.
+  expect(h.create.mock.calls).toEqual([[expect.objectContaining({ profile: 'first', cwd: '/first', owningTabId: tabId })]]);
 });
 
 test('missing_default_profiles_creates_nothing', () => {
   const h = harness();
-  for (const shells of [profiles, []]) {
-    store.dispatch(setShellProfiles(shells));
-    store.dispatch(setDefaultProfile('missing'));
-    const before = store.getState();
-    const mirror = { ...getTabPanesGlobal() };
-    expect(launchSshConnection('saved', canvas)).toMatchObject({ ok: false, error: { code: 'MissingDefaultProfile' } });
-    expect(store.getState()).toBe(before);
-    expect(getTabPanesGlobal()).toEqual(mirror);
-  }
+  store.dispatch(setShellProfiles([]));
+  store.dispatch(setDefaultProfile('missing'));
+  const before = store.getState();
+  const mirror = { ...getTabPanesGlobal() };
+  expect(launchSshConnection('saved', canvas)).toMatchObject({ ok: false, error: { code: 'MissingDefaultProfile' } });
+  expect(store.getState()).toBe(before);
+  expect(getTabPanesGlobal()).toEqual(mirror);
   expect(h.create).not.toHaveBeenCalled();
   expect(h.api.ssh.markUsed).not.toHaveBeenCalled();
 });

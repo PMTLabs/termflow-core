@@ -6,7 +6,7 @@ import { addTab } from '../store/slices/tabsSlice';
 import { setNodeGeom } from '../store/slices/canvasSlice';
 import type { Rect } from '../components/Canvas/canvasGeometry';
 import { generateId } from '../utils/id';
-import { buildNewTabFields } from './newTabActions';
+import { buildNewTabFields, resolveDefaultProfile } from './newTabActions';
 import { getTabPanesGlobal } from './tabPanesStore';
 
 export type SshLaunchPlacement = { kind: 'tab' } | { kind: 'canvas'; rect: Rect; sourceTerminalId?: string };
@@ -22,17 +22,20 @@ export function launchSshConnection(connectionId: string, placement: SshLaunchPl
     return { ok: false, error: { code: 'desktop-only', message: 'SSH connections require the desktop app.' } };
   }
   const state = store.getState();
-  if (!state.ssh.view.connections.some(connection => connection.id === connectionId)) {
+  const connection = state.ssh.view.connections.find(c => c.id === connectionId);
+  if (!connection) {
     return { ok: false, error: { code: 'NotFound', message: 'This saved SSH connection is unavailable.' } };
   }
-  // Ordinary tabs may fall back to the first profile. A saved SSH invocation must not.
+  // Plan 066 §4.1: the same default-profile resolution as an ordinary new tab,
+  // never a profile chosen from the connection.
   const { defaultProfile, shellProfiles } = state.settings;
-  const profile = defaultProfile ? shellProfiles.find(p => p.id === defaultProfile) : undefined;
+  const profile = resolveDefaultProfile(shellProfiles, defaultProfile);
   if (!profile) {
-    return { ok: false, error: { code: 'MissingDefaultProfile', message: 'Select a default shell profile before launching SSH.' } };
+    return { ok: false, error: { code: 'MissingDefaultProfile', message: 'Add a shell profile before launching SSH.' } };
   }
 
-  const tab = buildNewTabFields(profile, state.tabs.tabs.map(t => t.title));
+  // Unique connection-name title; the profile still decides shell, cwd and env.
+  const tab = buildNewTabFields({ id: profile.id, name: connection.name }, state.tabs.tabs.map(t => t.title));
   const terminalId = generateId('tm');
   const paneId = generateId('pn');
   const tree = {
