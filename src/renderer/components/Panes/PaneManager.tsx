@@ -57,7 +57,6 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
 
   const paneTree = propsPaneTree !== undefined ? propsPaneTree : reduxPanes.paneTree;
   const activePaneId = propsActivePaneId !== undefined ? propsActivePaneId : reduxPanes.activePaneId;
-  const visibleMaximizedPaneId = maximizedPaneId && findLeaf(paneTree ?? null, maximizedPaneId) ? maximizedPaneId : null;
 
   // Pane pending close confirmation (mirrors the tab-close confirm flow).
   const [pendingClosePaneId, setPendingClosePaneId] = React.useState<string | null>(null);
@@ -180,10 +179,9 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
           paneId={node.id}
           terminalId={node.terminalId}
           isActive={node.id === activePaneId}
-          // A maximized sibling is still mounted but not geometrically active.
-          isTabActive={isTabActive && (!visibleMaximizedPaneId || node.id === visibleMaximizedPaneId)}
+          isTabActive={isTabActive}
           solo={isRoot}
-          maximized={node.id === visibleMaximizedPaneId}
+          maximized={node.id === maximizedPaneId}
           onSplit={(direction) => handleSplit(node.id, direction)}
           onClose={() => handleClose(node.id)}
           onFocus={() => handleFocus(node.id)}
@@ -202,10 +200,10 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
     // Collapse this split toward the maximized leaf: 0 if it lives in child0's
     // subtree, 1 if in child1's, else null (normal split — also the defensive
     // self-heal path when the maximized id isn't in this tree at all).
-    const maximizedChild: 0 | 1 | null = visibleMaximizedPaneId
-      ? (subtreeContainsLeaf(node.children[0], visibleMaximizedPaneId)
+    const maximizedChild: 0 | 1 | null = maximizedPaneId
+      ? (subtreeContainsLeaf(node.children[0], maximizedPaneId)
           ? 0
-          : subtreeContainsLeaf(node.children[1], visibleMaximizedPaneId)
+          : subtreeContainsLeaf(node.children[1], maximizedPaneId)
             ? 1
             : null)
       : null;
@@ -221,7 +219,7 @@ export const PaneManager: React.FC<PaneManagerProps> = ({
         {[renderPane(node.children[0]), renderPane(node.children[1])]}
       </SplitPane>
     );
-  }, [activePaneId, visibleMaximizedPaneId, handleSplit, handleClose, handleFocus, handleResize, handleToggleMaximize, isTabActive]);
+  }, [activePaneId, maximizedPaneId, handleSplit, handleClose, handleFocus, handleResize, handleToggleMaximize, isTabActive]);
 
   // Resolve a friendly name for the pane awaiting close confirmation.
   const findPaneName = (node: PaneNode | null, paneId: string): string | null => {

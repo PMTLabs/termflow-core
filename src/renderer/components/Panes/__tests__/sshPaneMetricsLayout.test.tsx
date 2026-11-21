@@ -117,10 +117,15 @@ test('local_split_never_mounts_metrics_or_watches', async () => {
     expect(bars).toHaveLength(tagged.length);
     const column = bars[0].closest('.terminal-pane')!;
     expect(bars[0].parentElement).toBe(column);
-    expect(column.querySelector('.terminal-pane-body > .terminal-pane-content [data-engine-active="false"]')).not.toBeNull();
+    const body = column.querySelector(':scope > .terminal-pane-body')!;
+    expect(body.previousElementSibling?.matches('.ssh-launch-notice')).toBe(true);
+    expect(body.nextElementSibling).toBe(bars[0]);
+    expect(body.querySelector(':scope > .ssh-pane-shell .terminal-pane-content [data-engine-active="false"]')).not.toBeNull();
     expect(watch.mock.calls.map(([id]) => id).sort()).toEqual(tagged);
     await act(async () => { render(true, maximizedLocalId); await flush(); });
-    expect(column.querySelector('[data-engine-active="false"]')).not.toBeNull();
+    // A maximized sibling is visually hidden by SplitPane, not a tab switch.
+    expect(column.parentElement?.style.visibility).toBe('hidden');
+    expect(column.querySelector('[data-engine-active="true"]')).not.toBeNull();
     expect(container.querySelector(`[data-pane-id="${maximizedLocalId}"] [data-engine-active="true"]`)).not.toBeNull();
     await act(async () => { render(true); await flush(); });
     expect(column.querySelector('[data-engine-active="true"]')).not.toBeNull();
