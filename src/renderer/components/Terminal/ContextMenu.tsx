@@ -1168,7 +1168,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         cancelPendingClose();
         setOpenSubmenu(null);
         parent.focus();
-      } else if (key === 'Escape' && !suppressDismiss) onClose();
+      } else if ((key === 'Escape' || key === 'Tab') && !suppressDismiss) onClose(); // Tab leaves a menu, as in native menus
       else if (index < 0 && target !== menu) return;
       else if (key === 'ArrowDown') buttons[(index + 1) % buttons.length]?.focus();
       else if (key === 'ArrowUp') buttons[(Math.max(index, 0) - 1 + buttons.length) % buttons.length]?.focus();

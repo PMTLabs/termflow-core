@@ -12,3 +12,15 @@
 .ssh-connection-editor .ssh-editor-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 .ssh-connection-editor .ssh-argv.invalid { color:var(--text-secondary); border-style:dashed; }
 .ssh-connection-editor .ssh-editor-field input:not(:focus) { text-overflow:ellipsis; }
+
+.ssh-icon-picker h4 { margin:0 2px 8px; font-size:11px; letter-spacing:.08em; text-transform:uppercase; }
+.ssh-move-status { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+
+.context-menu.ssh-menu { padding:5px; }
+.ssh-menu .context-menu-icon { width:16px; margin-right:10px; }
+.ssh-picker-flyout { position:absolute; top:0; left:100%; margin-left:2px; width:max-content; z-index:1000; }
+.ssh-picker-flyout.flip-left { left:auto; right:100%; margin-left:0; margin-right:2px; }
+.ssh-icon-grid button { box-sizing:border-box; width:36px; height:36px; }
+.ssh-read-only { padding:8px 10px; font-size:0.8rem; flex-wrap:wrap; }
+.ssh-read-only p { flex:1; margin:0; }
+.ssh-read-only details { flex-basis:100%; min-width:0; }

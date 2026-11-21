@@ -741,7 +741,7 @@ impl Store {
         match std::fs::read(&self.path) {
             Ok(bytes) => {
                 let mut data: Persisted = serde_json::from_slice(&bytes).map_err(|_| {
-                    StoreError::new("invalid-json", "Invalid SSH store JSON or UTF-8")
+                    StoreError::new("invalid-json", "The saved SSH connections file is not valid JSON or is not encoded as UTF-8.")
                 })?;
                 data.validate()?;
                 data.normalize();

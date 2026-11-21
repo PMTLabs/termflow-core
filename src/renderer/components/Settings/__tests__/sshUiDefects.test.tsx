@@ -129,11 +129,11 @@ describe('panel with an unreadable store', () => {
     act(() => { store.dispatch(applyView({ revision:2, view:corrupt(2) })); });
     expect(text()).not.toContain('No saved connections yet.');
     expect(text()).not.toContain('Deleted elsewhere');
-    expect(text()).toContain('Nothing has been deleted');
+    expect(text()).toContain('Nothing has been changed');
     expect(host.querySelector('.ssh-read-only')).not.toBeNull();
     expect(host.querySelector('footer')).toBeNull();
     act(() => { store.dispatch(applyView({ revision:3, view:good(3) })); });
-    expect(text()).not.toContain('Nothing has been deleted');
+    expect(text()).not.toContain('Nothing has been changed');
     expect(host.querySelectorAll('[data-row-id]').length).toBe(2);
     expect(text()).not.toContain('elsewhere');
   });
@@ -141,7 +141,7 @@ describe('panel with an unreadable store', () => {
     const store = panel();
     act(() => { store.dispatch(applyView({ revision:2, view:good(2, []) })); });
     expect(text()).toContain('No saved connections yet.');
-    expect(text()).not.toContain('Nothing has been deleted');
+    expect(text()).not.toContain('Nothing has been changed');
   });
   test('toolbar and read-only Reload buttons use house button styles', () => {
     const store = panel();
