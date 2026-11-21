@@ -8,6 +8,11 @@ use termflow_pty_protocol::{ssh_prompt::valid_nonce, SpawnSpec};
 #[path = "windows.rs"]
 pub(crate) mod windows;
 
+// The consumer is wired in Lane B; Lane A exercises this through real PTYs.
+#[allow(dead_code)]
+#[path = "launch.rs"]
+pub(crate) mod launch;
+
 const BASH_BOOTSTRAP: &str = "__TERMFLOW_SSH_BOOTSTRAP";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

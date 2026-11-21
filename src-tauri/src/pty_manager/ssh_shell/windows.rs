@@ -1,4 +1,4 @@
-//! Windows-family prompt-readiness wrappers; no SSH launcher.
+//! Windows-family prompt-readiness wrappers and shared literal path validation.
 
 use super::*;
 use crate::pty_manager::spawn_spec::PS_CWD_INTEGRATION;
@@ -70,7 +70,7 @@ fn prepare(
     Ok(output)
 }
 
-fn literal_path(path: &Path) -> io::Result<&str> {
+pub(super) fn literal_path(path: &Path) -> io::Result<&str> {
     let err = || adapter_error("unsafe SSH readiness helper path");
     let path = path.to_str().ok_or_else(err)?;
     let path = if cfg!(windows) {
