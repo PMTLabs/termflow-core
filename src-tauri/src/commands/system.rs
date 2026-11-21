@@ -609,6 +609,7 @@ mod app_exec_alias_tests {
     #[cfg(windows)]
     #[test]
     fn store_pwsh_alias_extracts_the_packaged_exe_icon() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let Some(local) = std::env::var_os("LOCALAPPDATA") else { return };
         let alias = std::path::Path::new(&local).join(r"Microsoft\WindowsApps\pwsh.exe");
         if std::fs::symlink_metadata(&alias).is_err() {

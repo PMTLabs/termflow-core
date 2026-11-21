@@ -31,6 +31,7 @@ fn staging_and_verifier_share_requirement_text() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn real_process_code_identity_and_dead_instance() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     use crate::helper_identity::{DEBUG_REQUIREMENT, RELEASE_REQUIREMENT};
     use std::process::Command;
     struct Temp(std::path::PathBuf);
@@ -56,7 +57,7 @@ int main(int argc, char **argv) {
     assert!(Command::new("/usr/bin/codesign").args(["--force", "-s", "-", "--identifier", "app.termflow.desktop.pty-host"]).arg(&exe).status().unwrap().success());
     let path = dir.path().join("sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let mut child = Command::new(&exe).arg(&path).spawn().unwrap();
+    let mut child = crate::pty_host_client::real_process::OwnedChild(Command::new(&exe).arg(&path).spawn().unwrap());
     let (socket, _) = listener.accept().await.unwrap();
     let token = crate::pty_host_client::unix_peer_token(&socket).unwrap();
     assert_eq!(token.pid(), child.id());
@@ -88,7 +89,7 @@ int main(int argc, char **argv) {
         assert!(output.status.success());
         let details = String::from_utf8(output.stderr).unwrap();
         hashes.push(details.lines().find_map(|line| line.strip_prefix("CDHash=")).unwrap().to_owned());
-        let child = Command::new(&same_exe).arg(&path).spawn().unwrap();
+        let child = crate::pty_host_client::real_process::OwnedChild(Command::new(&same_exe).arg(&path).spawn().unwrap());
         let (socket, _) = listener.accept().await.unwrap();
         let token = crate::pty_host_client::unix_peer_token(&socket).unwrap();
         assert_eq!(token.pid(), child.id());
@@ -99,7 +100,7 @@ int main(int argc, char **argv) {
     assert!(matches!(&same_verdicts[0], IdentityVerdict::Matches(_)));
     assert_eq!(same_verdicts[0], same_verdicts[1]);
     super::super::tests::assert_same_dr(same_verdicts[0].clone(), same_verdicts[1].clone()).await;
-    for mut child in same_children { let _ = child.wait().unwrap(); }
+    for mut child in same_children { let _ = child.0.wait().unwrap(); }
     // A second permitted same-identifier process with a distinct actual DR.
     let second_exe = dir.path().join("sleeper2");
     std::fs::copy(&exe, &second_exe).unwrap();
@@ -108,7 +109,7 @@ int main(int argc, char **argv) {
     let hash = details.lines().find_map(|l| l.strip_prefix("CDHash=")).unwrap();
     let requirement = format!("=designated => identifier \"app.termflow.desktop.pty-host\" and cdhash H\"{hash}\"");
     assert!(Command::new("/usr/bin/codesign").args(["--force", "-s", "-", "--identifier", "app.termflow.desktop.pty-host", "-r", &requirement]).arg(&second_exe).status().unwrap().success());
-    let mut second = Command::new(&second_exe).arg(&path).spawn().unwrap();
+    let mut second = crate::pty_host_client::real_process::OwnedChild(Command::new(&second_exe).arg(&path).spawn().unwrap());
     let (second_socket, _) = listener.accept().await.unwrap();
     let second_token = crate::pty_host_client::unix_peer_token(&second_socket).unwrap();
     let other = macos::verify(second_token, DEBUG_REQUIREMENT);
@@ -116,7 +117,7 @@ int main(int argc, char **argv) {
     assert_ne!(first, other);
     // Feed real verifier evidence into the subject resolver, not a fabricated Different verdict.
     super::super::tests::assert_different_dr(first, other).await;
-    assert!(second.wait().unwrap().success());
-    assert!(child.wait().unwrap().success());
+    assert!(second.0.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
     assert_eq!(macos::verify(token, DEBUG_REQUIREMENT), IdentityVerdict::Unverifiable);
 }

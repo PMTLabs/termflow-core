@@ -330,8 +330,21 @@ mod tests {
             assert_eq!(fallback.load(Ordering::SeqCst), 1);
         }
     }
+    fn reap_test_child(pid: u32) -> i32 {
+        let mut status = 0;
+        loop {
+            let waited = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
+            if waited == pid as i32 {
+                return status;
+            }
+            let error = io::Error::last_os_error();
+            assert_eq!(error.kind(), io::ErrorKind::Interrupted, "waitpid({pid}): {error}");
+        }
+    }
+
     #[test]
     fn injected_missing_symbol_and_spi_error_really_spawn_setsid() {
+        let _gate = super::super::test_dirs::child_process_gate();
         unsafe extern "C" fn reject(_: *mut libc::posix_spawnattr_t, _: bool) -> libc::c_int {
             libc::EPERM
         }
@@ -355,9 +368,7 @@ mod tests {
             )
             .unwrap();
             let sid = unsafe { libc::getsid(result.pid as i32) };
-            let mut status = 0;
-            let waited = unsafe { libc::waitpid(result.pid as i32, &mut status, 0) };
-            assert_eq!(waited, result.pid as i32);
+            let status = reap_test_child(result.pid);
             assert_eq!(sid, result.pid as i32);
             assert_eq!(result.identity, HostPermissionIdentity::App);
             assert!(libc::WIFEXITED(status));
@@ -394,17 +405,14 @@ mod tests {
     }
     #[test]
     fn disclaimed_spawn_preserves_environment_cwd_and_stdio() {
+        let _gate = super::super::test_dirs::child_process_gate();
         let dir = super::super::test_dirs::tempdir().unwrap();
         let log = File::create(dir.path().join("output")).unwrap();
         let mut command = Command::new("/usr/bin/python3");
         command.arg("-c").arg("import os; print('env=' + os.environ['TF_TEST_SPAWN']); print('removed=' + str('TF_TEST_REMOVE' not in os.environ)); print('cwd=' + os.getcwd()); print('stdin=' + str(os.read(0, 1) == b'')); os.write(2, b'stderr-marker')")
             .env("TF_TEST_SPAWN", "value with spaces").env_remove("TF_TEST_REMOVE").current_dir(dir.path());
         let pid = spawn_disclaimed(&command, Some(&log)).unwrap();
-        let mut status = 0;
-        assert_eq!(
-            unsafe { libc::waitpid(pid as i32, &mut status, 0) },
-            pid as i32
-        );
+        let status = reap_test_child(pid);
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);
         let output = std::fs::read_to_string(dir.path().join("output")).unwrap();
@@ -423,6 +431,7 @@ mod tests {
     }
     #[test]
     fn real_disclaimed_child_is_session_leader_and_reaped() {
+        let _gate = super::super::test_dirs::child_process_gate();
         let dir = super::super::test_dirs::tempdir().unwrap();
         let binary = dir.path().join("sleep");
         std::os::unix::fs::symlink("/bin/sleep", &binary).unwrap();
@@ -430,9 +439,7 @@ mod tests {
         command.arg("2");
         let pid = spawn_disclaimed(&command, None).expect("disclaim SPI and spawn available");
         let sid = unsafe { libc::getsid(pid as i32) };
-        let mut status = 0;
-        let waited = unsafe { libc::waitpid(pid as i32, &mut status, 0) };
-        assert_eq!(waited, pid as i32);
+        let status = reap_test_child(pid);
         assert_eq!(sid, pid as i32);
         assert!(libc::WIFEXITED(status));
         assert_eq!(libc::WEXITSTATUS(status), 0);

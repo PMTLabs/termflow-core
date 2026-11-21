@@ -13,11 +13,9 @@ pub(super) struct Rig {
     pub marker: String,
     pub api_port: u16,
     backend: tokio::task::JoinHandle<()>,
-    _gate: std::sync::MutexGuard<'static, ()>,
 }
 impl Rig {
-    // Deliberately held for the rig's entire lifetime, shared with process-inspection tests.
-    #[allow(clippy::await_holding_lock)]
+    // Caller holds child_process_gate until the rig and all sidecars are dropped.
     pub async fn new(old: bool) -> Option<Self> {
         let bin = real_process::host_binary(if old {
             "TERMFLOW_E2E_OLD_HOST_BIN"
@@ -29,7 +27,6 @@ impl Rig {
             real_process::prerequisite(&why);
             return None;
         }
-        let gate = crate::pty_host_client::test_dirs::child_process_gate();
         let bun = real_process::bun_binary()?;
         let marker = format!("backend-057-{}", uuid::Uuid::new_v4());
         let reply = json!({"terminals":[{"marker": marker}]});
@@ -56,7 +53,6 @@ impl Rig {
             marker,
             api_port,
             backend,
-            _gate: gate,
         })
     }
     pub fn host(&mut self) -> usize {

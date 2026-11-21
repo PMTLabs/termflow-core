@@ -4,6 +4,8 @@ pub mod state;
 pub mod console_window;
 pub mod context_menu;
 pub mod webview_power;
+#[cfg(test)]
+mod child_process_gate_census_tests;
 mod memory_trim;
 mod webview_recovery;
 mod checked_counter;
@@ -237,22 +239,20 @@ mod mcp_shutdown_tests {
 
     #[test]
     fn force_kill_confirmation_deadline_does_not_wait_forever_for_a_live_legacy_child() {
-        // The child only has to OUTLIVE the wait, but it has to exist on the
-        // platform running the test: `cmd` is absent on Linux and macOS, so an
-        // ungated spawn here does not fail the assertion below — it panics at
-        // `spawn().unwrap()` with NotFound, and only on the runners this
-        // developer machine never exercises.
-        let mut child = if cfg!(windows) {
-            std::process::Command::new("cmd").args(["/C", "ping -n 10 127.0.0.1 >NUL"]).spawn()
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+        // Launch one process, not a shell with a surviving grandchild.
+        let mut child = crate::pty_host_client::real_process::OwnedChild(if cfg!(windows) {
+            std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 10"])
+                .spawn()
         } else {
-            std::process::Command::new("sh").args(["-c", "sleep 10"]).spawn()
-        }
-        .unwrap();
+            std::process::Command::new("sleep").arg("10").spawn()
+        }.unwrap());
         let started = std::time::Instant::now();
         assert!(!wait_for_legacy_exit(&mut child, Duration::from_millis(75)));
         assert!(started.elapsed() < Duration::from_secs(1));
         child.kill().unwrap();
-        let _ = child.wait();
+        child.0.wait().expect("reap the legacy test child");
     }
 }
 

@@ -15,6 +15,7 @@ impl log::Log for Logs {
 }
 #[test]
 fn ssh_mutation_logs_are_success_only_and_contain_only_kind_and_ids() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     const CHILD: &str = "TF_SSH_LOG_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         assert!(std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","commands::ssh_store::log_tests::ssh_mutation_logs_are_success_only_and_contain_only_kind_and_ids","--nocapture"]).env(CHILD,"1").status().unwrap().success());

@@ -194,6 +194,7 @@ pub(super) async fn holder_oracles(rig: &Rig, gap: &Gap) {
 
 #[tokio::test]
 async fn smoke_real_host_and_sidecar() {
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let Some(mut rig) = Rig::new(false).await else {
         return;
     };

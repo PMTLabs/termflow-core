@@ -612,6 +612,7 @@ mod respawn_tests {
     /// launch (empty) is not turned into an authenticated one by an inherited fallback.
     #[test]
     fn the_builders_fallback_token_overrides_an_inherited_one() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         use super::mcp_launch_env;
         use crate::profile::Integrity;
         let sentinel = "SENTINEL_7c1e";

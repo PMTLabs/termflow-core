@@ -738,6 +738,7 @@ Connection: close
     /// probe below. The corporate shape: a proxy configured, `localhost` absent from NO_PROXY.
     #[test]
     fn localhost_client_ignores_a_machine_wide_http_proxy() {
+        let _gate = crate::pty_host_client::test_dirs::child_process_gate();
         let exe = std::env::current_exe().expect("test binary path");
         let output = std::process::Command::new(exe)
             .args([
