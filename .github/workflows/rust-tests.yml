@@ -63,7 +63,9 @@ jobs:
             librsvg2-dev \
             libayatana-appindicator3-dev \
             build-essential \
-            pkg-config
+            pkg-config \
+            zsh \
+            fish
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

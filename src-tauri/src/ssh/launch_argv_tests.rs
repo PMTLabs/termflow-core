@@ -386,7 +386,9 @@ mod openssh {
         assert!(rig.inner().contains(&format!("UserKnownHostsFile=\"{}\"", rig.trust.jump.as_ref().unwrap())));
     }
 
-    #[cfg(unix)]
+    // Same platform rule as posix_tests::matrix(): fish is a required real fixture on
+    // Linux (CI installs it); the macOS final pass has no fish.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn real_openssh_proxy_helper_preserves_inner_argv_under_fish_login_shell() {
         let _gate = crate::pty_host_client::test_dirs::child_process_gate();
