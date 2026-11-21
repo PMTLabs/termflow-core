@@ -30,6 +30,6 @@ export function SshMenus({ target, view, api, commit, onClose, onFolder, onConne
     { label:'Delete…', accelerator:'Del', click:requestDelete },
   ] : [ { label:'New folder', click:() => onFolder(null) }, { label:'New SSH connection', click:() => onConnection(null) } ];
   return <>{menuOpen && <ContextMenu x={target.x} y={target.y} items={items.map(item => ({ ...item, enabled:!readOnly, click:item.click ? () => { if (!readOnly) item.click?.(); } : undefined }))} onClose={() => { if (!confirm) setMenuOpen(false); }} />}
-    <ConfirmDialog isOpen={confirm && !readOnly} title={folder ? 'Delete folder' : 'Delete connection'} message={folder ? `Delete ${folder.name}: ${ids.size - 1} subfolders and ${connections} connections?` : `Delete ${row?.name}?`} confirmText="Delete" destructive onConfirm={remove} onCancel={onClose} />
+    <ConfirmDialog isOpen={confirm && !readOnly} title={folder ? 'Delete folder' : 'Delete connection'} message={folder ? `Delete ${folder.name}: ${ids.size - 1} subfolder${ids.size === 2 ? '' : 's'} and ${connections} connection${connections === 1 ? '' : 's'}?` : `Delete ${row?.name}?`} confirmText="Delete" destructive onConfirm={remove} onCancel={onClose} />
   </>;
 }

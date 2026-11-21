@@ -16,7 +16,7 @@ test.each([['Icon flask','flask','amber'],['Color violet','database','violet']])
   expect(api.upsertFolder).toHaveBeenCalledWith({ id:'f-clicked', parentId:null, name:'Clicked', icon, color });
 });
 test('nonempty delete names exact descendant counts; confirm targets clicked id recursively', async () => {
-  mount(); await act(async () => button('Delete folder…').click()); expect(document.body.textContent).toContain('Delete Clicked: 1 subfolders and 1 connections?');
+  mount(); await act(async () => button('Delete folder…').click()); expect(document.body.textContent).toContain('Delete Clicked: 1 subfolder and 1 connection?');
   await act(async () => button('Delete').click()); expect(api.deleteFolder).toHaveBeenCalledWith({ id:'f-clicked', recursive:true });
 });
 test('cancel destructive confirmation makes no call', async () => { mount(); await act(async () => button('Delete folder…').click()); await act(async () => button('Cancel').click()); expect(api.deleteFolder).not.toHaveBeenCalled(); });
