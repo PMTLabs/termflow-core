@@ -25,6 +25,7 @@ import * as path from 'path';
 import React, { act } from 'react';
 import { createRoot, Root } from 'react-dom/client';
 import { readSource } from '../../../utils/readSource';
+import { FolderIconPicker } from '../../Settings/SshConnections/FolderIconPicker';
 
 // jest has no CSS transform (the moduleNameMapper stub covers it too, but the
 // explicit mock keeps this file readable next to the other component suites).
@@ -484,6 +485,36 @@ describe('customFlyout parent item', () => {
         await click(menuItem('Copy'));
         expect(plainClick).toHaveBeenCalledTimes(1);
         expect(onClose).toHaveBeenCalledTimes(1);
+    });
+
+    // Live pass FINAL-P2-1: the menu's native keydown listener stopped every key, so a custom
+    // flyout's own React onKeyDown (the SSH folder icon grid) never ran and arrows did nothing.
+    it('lets keys reach the flyout content, while Escape still returns to the parent item', async () => {
+        const pick = jest.fn();
+        const seen = jest.fn();
+        window.addEventListener('keydown', seen);
+        try {
+            await render(menuWithCustomFlyout({
+                content: <FolderIconPicker icon="server" color="sky" onPick={pick} />,
+                panelClassName: 'ssh-picker-flyout',
+            }));
+            await click(menuItem('Color scheme'));
+            const icons = Array.from(document.querySelectorAll<HTMLButtonElement>('.ssh-icon-grid button'));
+            const selected = icons.findIndex((b) => b.getAttribute('aria-pressed') === 'true');
+            expect(document.activeElement).toBe(icons[selected]);
+            await key(icons[selected], 'ArrowRight');
+            expect(document.activeElement).toBe(icons[selected + 1]);
+            await key(icons[selected + 1], 'ArrowLeft');
+            expect(document.activeElement).toBe(icons[selected]);
+            await key(icons[selected], 'x'); // unhandled by the grid: still contained by the menu
+            expect(seen).not.toHaveBeenCalled();
+            await key(icons[selected], 'Escape');
+            expect(document.activeElement).toBe(menuItem('Color scheme'));
+            expect(onClose).not.toHaveBeenCalled();
+            expect(pick).not.toHaveBeenCalled();
+        } finally {
+            window.removeEventListener('keydown', seen);
+        }
     });
 });
 
