@@ -77,8 +77,10 @@ fn extra_options_allowlist_is_case_insensitive_and_rejects_unlisted_or_malformed
 #[test]
 fn real_native_windows_openssh_parses_direct_launch_with_a_spaced_receipt_path() {
     let _gate = crate::pty_host_client::test_dirs::child_process_gate();
-    let ssh = std::env::var("TERMFLOW_TEST_NATIVE_SSH")
-        .expect("set TERMFLOW_TEST_NATIVE_SSH to the native Windows OpenSSH executable");
+    // An explicit override wins; otherwise the same system OpenSSH the launcher itself resolves.
+    let ssh = std::env::var("TERMFLOW_TEST_NATIVE_SSH").unwrap_or_else(|_| {
+        crate::pty_manager::ssh_shell::system_shell(r"OpenSSH\ssh.exe").expect("required native Windows OpenSSH is missing")
+    });
     let (target, mut trust) = direct();
     trust.target = r"C:\private receipt dir\target known hosts".into();
     let plan = build_launch_argv(&target, &trust, &ssh, Path::new(r"C:\Users\fixture")).unwrap();
