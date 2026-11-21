@@ -30,6 +30,14 @@ pub(super) fn finish_create(keys: &HostKeys, leaf: &str, cg: u64, shell: &Staged
 }
 
 impl<R: Runtime> AppState<R> {
+    /// Called only after ownership locks are released. Stable placement receipts
+    /// prevent delayed cleanup from tearing down a newly admitted successor.
+    pub(crate) fn reconcile_ssh_owners(&self) {
+        self.ssh_sessions.reconcile_owners(|leaf, receipt| {
+            let current = self.host_table.keys().ssh_owner_receipt(leaf);
+            current.is_some() && (receipt.is_none() || current == receipt)
+        });
+    }
     pub(crate) fn metadata_leaf(&self, reference: &str) -> Result<Option<String>, String> {
         super::ingress::metadata_target(self.host_table.keys(), reference)
     }
@@ -60,9 +68,11 @@ impl<R: Runtime> AppState<R> {
     pub fn close_process(&self, reference: &str, policy: CloseStorage) -> bool {
         // Unstaged leaf placements can also be cancelled on arrival.
         let process = super::ingress::close_target(self.host_table.keys(), reference).unwrap_or_else(|| reference.into());
-        super::ingress::close(self.host_table.keys(), &process, policy, |process| {
+        let accepted = super::ingress::close(self.host_table.keys(), &process, policy, |process| {
             self.end_shell(process, EndKind::Close(policy));
-        })
+        });
+        self.reconcile_ssh_owners();
+        accepted
     }
 
     pub fn exit_process(&self, process: &str) -> bool {
@@ -72,9 +82,12 @@ impl<R: Runtime> AppState<R> {
 
     /// Keep storage ahead of removal; a successor cannot admit during this work.
     pub(crate) fn end_shell(&self, process: &str, kind: EndKind) -> bool {
+        let mut ssh_receipt = None;
         let local_process = self.local_processes.get(process).map(|p| p.clone());
         let exit_cwd = crate::pty_manager::exit_cwd_for(&self.terminal_cwds, process);
         let ended = self.host_table.keys().end_process(process, kind, |leaf| {
+            // The authority supplies the stable leaf, not metadata_target's process id.
+            ssh_receipt = self.ssh_sessions.state(leaf, false).ok().map(|view| (leaf.to_owned(), view.generation));
             match kind {
                 EndKind::Exit => {
                     if super::history_key(Some(leaf)).is_some() {
@@ -94,6 +107,10 @@ impl<R: Runtime> AppState<R> {
             self.cleanup_terminal_maps(process);
         });
         let Some(ended) = ended else { return false };
+        if let Some((leaf, generation)) = ssh_receipt {
+            if leaf == ended.leaf { self.ssh_sessions.disconnect_generation(&leaf, generation, "Local shell ended"); }
+        }
+        self.reconcile_ssh_owners();
         self.forget_host_terminal(process);
         if matches!(kind, EndKind::Close(_)) {
             if matches!(ended.shell.stage, ShellStage::Local) {

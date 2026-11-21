@@ -19,7 +19,7 @@ pub(crate) fn commit(build: WindowBuildGuard, window: &tauri::WebviewWindow) -> 
     window.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
             keys.destroy_window(&label, wi);
-            if let Some(state) = app.try_state::<crate::state::AppState>() { state.schedule_host_restore_release(); }
+            if let Some(state) = app.try_state::<crate::state::AppState>() { state.reconcile_ssh_owners(); state.schedule_host_restore_release(); }
         }
     });
     build.commit()

@@ -4,6 +4,7 @@ use aes_gcm::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::sync::{Arc, Mutex};
+use zeroize::Zeroizing;
 
 #[derive(Debug)]
 pub(crate) struct SecretError;
@@ -14,13 +15,16 @@ pub(crate) trait KeySource: Send + Sync {
 }
 
 #[cfg(not(test))]
-struct OsKeySource;
+struct OsKeySource {
+    namespace: &'static str,
+    account: &'static str,
+}
 #[cfg(not(test))]
 impl OsKeySource {
-    fn entry() -> Result<keyring::Entry, SecretError> {
+    fn entry(&self) -> Result<keyring::Entry, SecretError> {
         keyring::Entry::new(
-            &format!("termflow-automation.{}", crate::profile::current().key()),
-            "message-key",
+            &format!("{}.{}", self.namespace, crate::profile::current().key()),
+            self.account,
         )
         .map_err(|_| SecretError)
     }
@@ -28,25 +32,38 @@ impl OsKeySource {
 #[cfg(not(test))]
 impl KeySource for OsKeySource {
     fn get(&self) -> Result<Option<[u8; 32]>, SecretError> {
-        Self::run(|| match Self::entry()?.get_password() {
-            Ok(value) => STANDARD
-                .decode(value)
-                .map_err(|_| SecretError)?
-                .try_into()
-                .map(Some)
-                .map_err(|_| SecretError),
+        let source = Self {
+            namespace: self.namespace,
+            account: self.account,
+        };
+        Self::run(move || match source.entry()?.get_password() {
+            Ok(value) => {
+                let value = Zeroizing::new(value);
+                let bytes =
+                    Zeroizing::new(STANDARD.decode(value.as_bytes()).map_err(|_| SecretError)?);
+                let key = Zeroizing::new(
+                    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| SecretError)?,
+                );
+                Ok(Some(*key))
+            }
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(_) => Err(SecretError),
         })
     }
     fn create(&self) -> Result<[u8; 32], SecretError> {
-        Self::run(|| {
-            let mut key = [0; 32];
-            OsRng.fill_bytes(&mut key);
-            Self::entry()?
-                .set_password(&STANDARD.encode(key))
+        let source = Self {
+            namespace: self.namespace,
+            account: self.account,
+        };
+        Self::run(move || {
+            let mut key = Zeroizing::new([0; 32]);
+            OsRng.fill_bytes(key.as_mut());
+            let encoded = Zeroizing::new(STANDARD.encode(key.as_ref()));
+            source
+                .entry()?
+                .set_password(&encoded)
                 .map_err(|_| SecretError)?;
-            Ok(key)
+            Ok(*key)
         })
     }
 }
@@ -71,14 +88,17 @@ impl OsKeySource {
 
 pub(crate) struct MessageCipher {
     source: Arc<dyn KeySource>,
-    key: Mutex<Option<[u8; 32]>>,
+    key: Arc<Mutex<Option<zeroize::Zeroizing<[u8; 32]>>>>,
 }
 impl Default for MessageCipher {
     fn default() -> Self {
         #[cfg(test)]
         let source = Arc::new(MemoryKeySource::default());
         #[cfg(not(test))]
-        let source = Arc::new(OsKeySource);
+        let source = Arc::new(OsKeySource {
+            namespace: "termflow-automation",
+            account: "message-key",
+        });
         Self::new(source)
     }
 }
@@ -86,24 +106,40 @@ impl MessageCipher {
     pub(crate) fn new(source: Arc<dyn KeySource>) -> Self {
         Self {
             source,
-            key: Mutex::new(None),
+            key: Arc::new(Mutex::new(None)),
         }
     }
-    fn key(&self, create: bool) -> Result<[u8; 32], SecretError> {
+    /// A distinct service, account and shared cache; never reuses automation keys.
+    pub(crate) fn for_ssh() -> Arc<Self> {
+        static SSH: std::sync::OnceLock<Arc<MessageCipher>> = std::sync::OnceLock::new();
+        SSH.get_or_init(|| {
+            #[cfg(test)]
+            let source = Arc::new(MemoryKeySource::default());
+            #[cfg(not(test))]
+            let source = Arc::new(OsKeySource {
+                namespace: "termflow-ssh",
+                account: "secret-key",
+            });
+            Arc::new(Self::new(source))
+        })
+        .clone()
+    }
+    fn key(&self, create: bool) -> Result<zeroize::Zeroizing<[u8; 32]>, SecretError> {
         let mut cache = self.key.lock().map_err(|_| SecretError)?;
-        if let Some(key) = *cache {
-            return Ok(key);
+        if let Some(key) = cache.as_ref() {
+            return Ok(zeroize::Zeroizing::new(**key));
         }
-        let key = match self.source.get()? {
+        let key = Zeroizing::new(match self.source.get()? {
             Some(key) => key,
             None if create => self.source.create()?,
             None => return Err(SecretError),
-        };
-        *cache = Some(key);
+        });
+        *cache = Some(key.clone());
         Ok(key)
     }
     pub(crate) fn encrypt(&self, text: &str) -> Result<String, SecretError> {
-        let cipher = Aes256Gcm::new_from_slice(&self.key(true)?).map_err(|_| SecretError)?;
+        let cipher =
+            Aes256Gcm::new_from_slice(self.key(true)?.as_ref()).map_err(|_| SecretError)?;
         let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
         let encrypted = cipher
             .encrypt(&nonce, text.as_bytes())
@@ -119,11 +155,18 @@ impl MessageCipher {
         if bytes.len() < 28 {
             return Err(SecretError);
         }
-        let cipher = Aes256Gcm::new_from_slice(&self.key(false)?).map_err(|_| SecretError)?;
-        let plain = cipher
-            .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
-            .map_err(|_| SecretError)?;
-        String::from_utf8(plain).map_err(|_| SecretError)
+        let cipher =
+            Aes256Gcm::new_from_slice(self.key(false)?.as_ref()).map_err(|_| SecretError)?;
+        let plain = Zeroizing::new(
+            cipher
+                .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
+                .map_err(|_| SecretError)?,
+        );
+        // The returned String belongs to the caller; all intermediate plaintext
+        // (including invalid UTF-8 on the error path) is erased here.
+        std::str::from_utf8(&plain)
+            .map(str::to_owned)
+            .map_err(|_| SecretError)
     }
 }
 
@@ -188,6 +231,24 @@ mod tests {
         assert_eq!(source.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
+    #[test]
+    fn old_automation_v1_fixture_decrypts_after_generalisation() {
+        struct Fixed;
+        impl KeySource for Fixed {
+            fn get(&self) -> Result<Option<[u8; 32]>, SecretError> {
+                Ok(Some([7; 32]))
+            }
+            fn create(&self) -> Result<[u8; 32], SecretError> {
+                panic!("must not create a key for the old fixture")
+            }
+        }
+        // Independently produced with Node crypto AES-256-GCM, fixed nonce 0x03.
+        let old = "v1:AwMDAwMDAwMDAwMDSZvEYjlRfiMPNCwxiiOWY4MchobM4eECSpd5QdMo4LjMU+DW7US220Q=";
+        assert_eq!(
+            MessageCipher::new(Arc::new(Fixed)).decrypt(old).unwrap(),
+            "legacy automation fixture"
+        );
+    }
     #[test]
     fn round_trip_nonce_tamper_and_foreign_key() {
         let cipher = MessageCipher::default();

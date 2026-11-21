@@ -2,6 +2,7 @@ import { paneIncarnations, acceptsTransferNotice, describePanes, type PaneCaptur
 import { captureWorkspace, isCurrentWorkspace } from './services/workspaceReplacement';
 import React, { useEffect, useRef, useState } from 'react';
 import { hydrateSsh } from './services/sshHydration';
+import { installSshSessionEvents } from './services/sshSessionEvents';
 import { installInputBroadcast } from './services/inputBroadcast';
 import { BroadcastOverlay } from './components/Broadcast/BroadcastOverlay';
 import { listen } from '@tauri-apps/api/event';
@@ -1871,6 +1872,7 @@ const App: React.FC = () => {
   };
 
   useEffect(() => installInputBroadcast(store), []);
+  useEffect(() => installSshSessionEvents(store, window.electronAPI), []);
 
   return (
     <div className="app">

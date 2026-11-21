@@ -2,6 +2,7 @@
 //! reference never falls back to a leaf lookup, even after that leaf restarts.
 
 use super::*;
+use super::panes::{Owner, PaneIdentity};
 use tokio::sync::watch;
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ pub enum OwnerState {
 }
 pub(super) struct Row {
     pub(super) cg: u64,
+    pub(super) ssh_reserved: bool,
     pub(super) state: OwnerState,
     pub(super) owner: super::panes::Owner,
     pub(super) admitted_pg: Option<u64>,
@@ -77,7 +79,7 @@ impl HostKeys {
         let cg = inner.sequence.checked_add(1).ok_or_else(retry)?;
         inner.sequence = cg;
         let (outcome, _) = watch::channel(None);
-        inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Placing {
+        inner.owners.insert(leaf.into(), Row { cg, ssh_reserved: false, state: OwnerState::Placing {
             stage: None, staged_exited: false, cancel: None,
         }, owner: super::panes::Owner::Headless, admitted_pg: None, started: true, outcome });
         Ok(Admission::Run(cg))
@@ -143,8 +145,10 @@ impl HostKeys {
         let OwnerState::Placing { staged_exited, cancel, .. } = row.state else { unreachable!() };
         if staged_exited && cancel.is_none() {
             self.end_staged_exit(&mut inner, shell);
-            let row = inner.owners.remove(leaf).unwrap();
+            let mut row = inner.owners.remove(leaf).unwrap();
             row.outcome.send_replace(Some(Ok(shell.process.clone())));
+            Self::retain_present_receipt(&mut inner, leaf, &mut row);
+            if matches!(row.state, OwnerState::Held) { inner.owners.insert(leaf.into(), row); }
             return Completion::Exited;
         }
         row.state = if cancel.is_some() { OwnerState::Closing(shell.clone()) } else { OwnerState::Registered(shell.clone()) };
@@ -166,10 +170,12 @@ impl HostKeys {
     pub fn abort_create(&self, leaf: &str, cg: u64) -> Option<StagedShell> {
         let mut inner = self.lock();
         if !inner.owners.get(leaf).is_some_and(|r| r.cg == cg && matches!(r.state, OwnerState::Placing { .. })) { return None }
-        let row = inner.owners.remove(leaf).unwrap();
+        let mut row = inner.owners.remove(leaf).unwrap();
         row.outcome.send_replace(Some(Err(retry())));
         let shell = shell_of(&row.state).cloned();
         if let Some(shell) = &shell { self.release_stage(&mut inner, shell, false); }
+        Self::retain_present_receipt(&mut inner, leaf, &mut row);
+        if matches!(row.state, OwnerState::Held) { inner.owners.insert(leaf.into(), row); }
         shell
     }
 
@@ -239,7 +245,40 @@ impl HostKeys {
         true
     }
 
+    fn live_receipt_holder(inner: &Inner, leaf: &str, row: &Row) -> bool {
+        match &row.owner {
+            Owner::Pane(pi) => inner.panes.present.get(pi).is_some_and(|d| d.leaf == leaf),
+            Owner::Parked { pg, .. } => row.ssh_reserved && inner.window_pages.window_of(*pg).is_some(),
+            Owner::Transfer { tx, .. } => row.ssh_reserved && inner.panes.transfers.get(tx)
+                .is_some_and(|transfer| transfer.members.iter().any(|m| m.descriptor.leaf == leaf)),
+            Owner::Orphaned | Owner::Headless | Owner::Offered(_) => false,
+        }
+    }
+
+    fn retain_present_receipt(inner: &mut Inner, leaf: &str, row: &mut Row) {
+        if row.ssh_reserved && row.cg != 0 && !matches!(row.state, OwnerState::Placing { cancel: Some(_), .. })
+            && Self::live_receipt_holder(inner, leaf, row) {
+            row.state = OwnerState::Held;
+            row.started = false;
+            row.admitted_pg = None;
+        }
+    }
+
+    pub(super) fn park_owner(inner: &mut Inner, leaf: &str, pg: u64, by: PaneIdentity) {
+        if !Self::release_idle_owner(inner, leaf) {
+            inner.owners.get_mut(leaf).unwrap().owner = Owner::Parked { pg, by };
+        }
+    }
+
     pub(super) fn release_idle_owner(inner: &mut Inner, leaf: &str) -> bool {
+        if let Some(row) = inner.owners.get_mut(leaf).filter(|r| r.ssh_reserved && !r.started && matches!(r.state, OwnerState::Placing { cancel: None, stage: None, .. })) {
+            row.outcome.send_replace(Some(Err(retry())));
+            row.state = OwnerState::Held;
+            row.admitted_pg = None;
+        }
+        // A processless SSH receipt is still a live capability. Callers park it
+        // on layout transitions; genuine retirement uses remove_held directly.
+        if inner.owners.get(leaf).is_some_and(|r| r.ssh_reserved && r.cg != 0 && matches!(r.state, OwnerState::Held)) { return false; }
         Self::remove_held(inner, leaf) || Self::release_unstarted(inner, leaf)
     }
 
@@ -315,6 +354,13 @@ impl HostKeys {
                 Self::mark_end(&mut inner, stage.channel, &stage.key, close);
             }
             row.outcome.send_replace(Some(Ok(process.into())));
+            // A shell exit is not a pane close. Keep the SSH receipt while
+            // its holder is still live.
+            if kind == EndKind::Exit && row.ssh_reserved && row.cg != 0
+                && Self::live_receipt_holder(&inner, &leaf, &row) {
+                let (outcome, _) = tokio::sync::watch::channel(None);
+                inner.owners.insert(leaf.clone(), Row { cg: row.cg, ssh_reserved: row.ssh_reserved, state: OwnerState::Held, owner: row.owner, admitted_pg: None, started: false, outcome });
+            }
             Some((Ended { leaf: leaf.clone(), shell }, inner))
         })?;
         // Retain ownership until the stripe is released and Close is enqueued:

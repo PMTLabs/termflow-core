@@ -11,6 +11,12 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_folder_upsert, $crate::commands::ssh_folder_delete,
             $crate::commands::ssh_connection_upsert, $crate::commands::ssh_connection_delete,
             $crate::commands::ssh_move, $crate::commands::ssh_set_bookmark,
+            $crate::commands::ssh_session_open, $crate::commands::ssh_session_state,
+            $crate::commands::ssh_session_close, $crate::commands::ssh_session_reconnect,
+            $crate::commands::ssh_session_submit_secret, $crate::commands::ssh_session_trust_host,
+            $crate::commands::ssh_test_connection, $crate::commands::ssh_test_state,
+            $crate::commands::ssh_test_close, $crate::commands::ssh_test_submit_secret,
+            $crate::commands::ssh_test_trust_host,
             $($extra),*
         ]
     };
@@ -352,6 +358,18 @@ mod tests {
             .deserialize::<Reply>()
             .unwrap()
         };
+        for cmd in [
+            "ssh_session_open", "ssh_session_state", "ssh_session_close", "ssh_session_reconnect",
+            "ssh_session_submit_secret", "ssh_session_trust_host", "ssh_test_connection",
+            "ssh_test_state", "ssh_test_close", "ssh_test_submit_secret", "ssh_test_trust_host",
+        ] {
+            let error = get_ipc_response(&window, tauri::webview::InvokeRequest {
+                cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
+                url: "tauri://localhost".parse().unwrap(), body: tauri::ipc::InvokeBody::Json(serde_json::json!({})),
+                headers: Default::default(), invoke_key: tauri::test::INVOKE_KEY.into(),
+            }).unwrap_err();
+            assert!(!error.to_string().contains("not found"), "unregistered {cmd}: {error}");
+        }
         assert_eq!(invoke("ssh_store_get", serde_json::json!({})).revision, 0);
         let reply = invoke(
             "ssh_folder_upsert",

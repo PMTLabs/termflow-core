@@ -21,3 +21,35 @@ export interface SshStoreApi {
   setBookmark(id: string, bookmarked: boolean): Promise<SshReply>;
   onChanged(listener: (reply: SshReply) => void): Promise<() => void>;
 }
+
+export type SshState = 'connecting' | 'needs-secret' | 'needs-hostkey' | 'connected' | 'disconnected' | 'error';
+export interface SshPromptTarget { connectionId: string; host: string; port: number; user: string; hop: 'jump' | 'target' }
+export interface SshSessionView {
+  terminalId?: string; probeId?: string; connectionId: string; state: SshState;
+  generation?: number; revision?: number; gate: 'pending' | 'verified' | 'network-error' | 'blocked';
+  reason?: string; knownHostsPaths?: { jump?: string; target: string };
+  promptId?: string; promptTarget?: SshPromptTarget; secretKind?: 'password' | 'passphrase';
+  hostKey?: { algorithm: string; fingerprintSha256: string; changed: boolean };
+}
+export interface SshPromptReceipt { generation?: number; promptId?: string }
+export type SshUnlisten = () => void;
+export interface SshAPI {
+  sshSessionOpen(terminalId: string, connectionId: string): Promise<SshSessionView>;
+  sshSessionState(terminalId: string): Promise<SshSessionView>;
+  sshSessionClose(terminalId: string, generation?: number): Promise<void>;
+  sshSessionReconnect(terminalId: string): Promise<SshSessionView>;
+  sshSessionSubmitSecret(terminalId: string, secret: string, remember: boolean, receipt?: SshPromptReceipt): Promise<void>;
+  sshSessionTrustHost(terminalId: string, accept: boolean, receipt?: SshPromptReceipt): Promise<void>;
+  sshTestConnection(connectionId: string): Promise<{ probeId: string }>;
+  sshTestState(probeId: string): Promise<SshSessionView>;
+  sshTestClose(probeId: string): Promise<void>;
+  sshTestSubmitSecret(probeId: string, secret: string, remember: boolean, receipt?: SshPromptReceipt): Promise<void>;
+  sshTestTrustHost(probeId: string, accept: boolean, receipt?: SshPromptReceipt): Promise<void>;
+  onSshSessionState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
+  onSshTestState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
+}
+export function newerSshView(current: SshSessionView | undefined, next: SshSessionView): boolean {
+  if (!current) return true;
+  const cg = current.generation ?? 0, ng = next.generation ?? 0;
+  return ng > cg || (ng === cg && (next.revision ?? 0) > (current.revision ?? 0));
+}

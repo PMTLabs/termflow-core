@@ -37,7 +37,7 @@ Also included in this repo as companion tooling:
 | Requirement | Notes |
 | :--- | :--- |
 | **[Bun](https://bun.sh)** | Package manager + JS runtime used throughout (`bun`, not `npm`). |
-| **[Rust](https://rustup.rs) ≥ 1.88** | Tauri 2 backend (`cargo`). |
+| **[Rust](https://rustup.rs) ≥ 1.89** | Tauri 2 backend (`cargo`). |
 | **Tauri 2 system deps** | Platform-specific — follow the [Tauri prerequisites guide](https://tauri.app/start/prerequisites/). Windows: Microsoft C++ Build Tools + WebView2 (preinstalled on Win 11). macOS: Xcode Command Line Tools. Linux: `webkit2gtk`, `libgtk`, etc. |
 
 ### Install & run (development)

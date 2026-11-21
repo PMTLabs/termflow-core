@@ -113,7 +113,7 @@ pub(super) struct Transfer {
 pub(crate) const TRANSFER_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Default, Debug)]
-pub(crate) struct PaneEffects { pub closes: Vec<String>, pub wake_transfers: bool, pub release_restore_sweep: bool }
+pub(crate) struct PaneEffects { pub closes: Vec<String>, pub ssh_retired: Vec<(String, u64)>, pub wake_transfers: bool, pub release_restore_sweep: bool }
 
 fn rejected(message: &str) -> PaneResult { PaneResult::Rejected { message: message.into() } }
 impl HostKeys {
@@ -163,6 +163,7 @@ impl HostKeys {
                 Self::forget_pane_holder(inner, pi, leaf.is_some(), now);
                 inner.panes.present.remove(&pi);
                 let Some(leaf) = leaf else { return PaneResult::Contended; };
+                if let Some(row) = inner.owners.get(&leaf) { effects.ssh_retired.push((leaf.clone(), row.cg)); }
                 Self::close_leaf_locked(inner, &leaf, CloseStorage::Delete, &mut effects.closes);
                 PaneResult::Ok
             }
@@ -176,8 +177,25 @@ impl HostKeys {
                 let restore_complete = matches!(op, PaneOp::Settle);
                 let ended = inner.window_pages.settle(page).expect("validated sender page");
                 Self::end_pages_locked(inner, &ended);
+                if restore_complete { Self::retire_unrestored_parked_rows(inner, page.pg, effects); }
                 effects.release_restore_sweep = restore_complete && inner.window_pages.settle_restore_participant(page);
                 PaneResult::Ok
+            }
+        }
+    }
+
+    fn retire_unrestored_parked_rows(inner: &mut Inner, page_pg: u64, effects: &mut PaneEffects) {
+        // Enter has announced the full restored tree, even if some panes have not mounted.
+        let present: std::collections::HashSet<_> = inner.panes.present.iter()
+            .filter(|(pi, _)| pi.pg == page_pg).map(|(_, pane)| pane.leaf.as_str()).collect();
+        let retired: Vec<_> = inner.owners.iter().filter(|(leaf, row)| {
+            matches!(row.owner, Owner::Parked { pg, by } if pg == page_pg && by.pg != page_pg)
+                && !present.contains(leaf.as_str())
+        }).map(|(leaf, row)| (leaf.clone(), row.cg)).collect();
+        for (leaf, cg) in retired {
+            effects.ssh_retired.push((leaf.clone(), cg));
+            if !(Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf)) {
+                inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned;
             }
         }
     }
@@ -233,15 +251,20 @@ impl HostKeys {
                     OwnerState::Held => {},
                     OwnerState::Closing(_) => unreachable!(),
                 }
+            } else if matches!(row.state, OwnerState::Held) && row.cg != 0 && Self::bindable(inner, &row.owner, page, &BindVia::Named("restore".into())) {
+                inner.owners.get_mut(leaf).unwrap().owner = Owner::Pane(pi);
             } else if matches!(row.state, OwnerState::Registered(_)) && Self::bindable(inner, &row.owner, page, &BindVia::Named("restore".into())) {
                 let row = inner.owners.get_mut(leaf).unwrap();
                 row.owner = Owner::Pane(pi);
                 let pc = shell_of(&row.state).unwrap().process.clone();
                 inner.panes.holders.remove(&pi);
                 return PaneResult::Existing { pc };
-            } else if matches!(row.state, OwnerState::Placing { .. }) && row.started && row.owner == Owner::Orphaned {
-                // An orphaned started placement can be claimed by a successor pane, which
-                // joins the existing work instead of contending or spawning again.
+            } else if matches!(row.state, OwnerState::Placing { .. }) && row.started
+                && (row.owner == Owner::Orphaned
+                    || (row.ssh_reserved && matches!(row.owner, Owner::Parked { .. })
+                        && Self::bindable(inner, &row.owner, page, &BindVia::Named("restore".into()))))
+            {
+                // Join existing work instead of contending or spawning again.
                 let row = inner.owners.get_mut(leaf).unwrap();
                 row.owner = Owner::Pane(pi);
                 let cg = row.cg;
@@ -249,10 +272,16 @@ impl HostKeys {
                 return PaneResult::Join { cg };
             } else { return PaneResult::Contended; }
         }
-        let Some(cg) = inner.sequence.checked_add(1) else { return PaneResult::Retry; };
-        inner.sequence = cg;
+        let cg = if let Some(row) = inner.owners.get(leaf).filter(|r| matches!(r.state, OwnerState::Held) && r.cg != 0) {
+            row.cg
+        } else {
+            let Some(cg) = inner.sequence.checked_add(1) else { return PaneResult::Retry; };
+            inner.sequence = cg;
+            cg
+        };
         let (outcome, _) = tokio::sync::watch::channel(None);
-        inner.owners.insert(leaf.into(), Row { cg, state: OwnerState::Placing { stage: None, staged_exited: false, cancel: None },
+        let ssh_reserved = inner.owners.get(leaf).is_some_and(|r| r.ssh_reserved);
+        inner.owners.insert(leaf.into(), Row { cg, ssh_reserved, state: OwnerState::Placing { stage: None, staged_exited: false, cancel: None },
             owner: Owner::Pane(pi), admitted_pg: Some(page.pg), started: false, outcome });
         PaneResult::Create { cg }
     }
@@ -267,7 +296,7 @@ impl HostKeys {
     fn depart_pane(inner: &mut Inner, pi: PaneIdentity) {
         let leaves: Vec<_> = inner.owners.iter().filter(|(_, r)| r.owner == Owner::Pane(pi)).map(|(l, _)| l.clone()).collect();
         for leaf in leaves {
-            if !Self::release_idle_owner(inner, &leaf) { inner.owners.get_mut(&leaf).unwrap().owner = Owner::Parked { pg: pi.pg, by: pi }; }
+            Self::park_owner(inner, &leaf, pi.pg, pi);
         }
         inner.panes.present.remove(&pi);
         inner.panes.holders.remove(&pi);
@@ -296,6 +325,29 @@ impl HostKeys {
         let mut effects = Vec::new();
         Self::close_leaf_locked(&mut inner, &leaf, CloseStorage::Delete, &mut effects);
         (PaneResult::Ok, effects)
+    }
+    /// Stable placement generation survives transfers/reload, but not final close.
+    pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
+        let mut inner = self.lock();
+        if !inner.owners.contains_key(leaf) {
+            let pi = inner.panes.present.iter().filter(|(_, d)| d.leaf == leaf).map(|(pi, _)| *pi).max_by_key(|pi| (pi.pg, pi.seq))?;
+            let cg = inner.sequence.checked_add(1)?;
+            inner.sequence = cg;
+            let (outcome, _) = tokio::sync::watch::channel(None);
+            inner.owners.insert(leaf.into(), Row { cg, ssh_reserved: true, state: OwnerState::Held, owner: Owner::Pane(pi), admitted_pg: None, started: false, outcome });
+        }
+        let row = inner.owners.get(leaf)?;
+        if matches!(row.owner, Owner::Orphaned | Owner::Headless) || matches!(row.state, OwnerState::Closing(_)) {
+            return None;
+        }
+        if row.cg == 0 {
+            let cg = inner.sequence.checked_add(1)?;
+            inner.sequence = cg;
+            inner.owners.get_mut(leaf)?.cg = cg;
+        }
+        let row = inner.owners.get_mut(leaf)?;
+        row.ssh_reserved = true;
+        Some(row.cg)
     }
     #[cfg(test)]
     pub(crate) fn pane_owner(&self, leaf: &str) -> Option<Owner> { self.lock().owners.get(leaf).map(|r| r.owner.clone()) }

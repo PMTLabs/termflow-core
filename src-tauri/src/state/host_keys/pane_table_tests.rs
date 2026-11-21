@@ -1,6 +1,9 @@
 use super::*;
 use crate::state::host_keys::PageRegistration;
 
+#[path = "ssh_session_tests.rs"]
+mod ssh_session_tests;
+
 #[path = "pane_transfer_tests.rs"]
 mod transfer_tests;
 #[path = "pane_end_tests.rs"]

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 const STRING_BOUNDS: &[(&str, usize)] = &[
@@ -678,21 +678,27 @@ pub fn store_path() -> PathBuf {
 type Writer = dyn Fn(&Path, &str) -> std::result::Result<(), String> + Send + Sync;
 /// Disk is reloaded under the cross-process lock before every transaction. A
 /// failed write never publishes the candidate or advances the committed cache.
+#[derive(Clone)]
 pub struct Store {
     path: PathBuf,
-    cache: Mutex<Option<(std::time::SystemTime, u64, Persisted)>>,
+    cache: Arc<Mutex<Option<(std::time::SystemTime, u64, Persisted)>>>,
     // Reload recovery revisions are served immediately but only persisted on a write.
-    served: Mutex<Option<Reply>>,
-    writer: Box<Writer>,
+    served: Arc<Mutex<Option<Reply>>>,
+    writer: Arc<Writer>,
 }
 impl Store {
     pub fn new(path: PathBuf) -> Self {
         Self {
             path,
-            cache: Mutex::new(None),
-            served: Mutex::new(None),
-            writer: Box::new(write_atomic),
+            cache: Arc::new(Mutex::new(None)),
+            served: Arc::new(Mutex::new(None)),
+            writer: Arc::new(write_atomic),
         }
+    }
+    #[cfg(test)]
+    pub(crate) fn failing_writer(mut self) -> Self {
+        self.writer = Arc::new(|_, _| Err("injected write failure".into()));
+        self
     }
     fn load(&self) -> Result<Persisted> {
         match std::fs::read(&self.path) {
@@ -792,9 +798,26 @@ impl Store {
         }
         Ok(reply)
     }
+    /// Rust-only fresh snapshot; secrets must never cross the IPC view boundary.
+    pub(crate) fn snapshot(&self) -> Result<Persisted> {
+        let _lock = self.lock()?;
+        self.load()
+    }
+
     pub fn transact(
         &self,
         mutation: impl FnOnce(&mut Persisted) -> Result<()>,
+        emit: impl FnOnce(&Reply),
+    ) -> Result<Reply> {
+        self.transact_checked(mutation, || Ok(()), emit)
+    }
+
+    /// Same transaction, with a final cancellation fence after serialization and
+    /// immediately before the atomic writer. No cache/reply/event on failure.
+    pub(crate) fn transact_checked(
+        &self,
+        mutation: impl FnOnce(&mut Persisted) -> Result<()>,
+        before_commit: impl FnOnce() -> Result<()>,
         emit: impl FnOnce(&Reply),
     ) -> Result<Reply> {
         let _lock = self.lock()?;
@@ -820,6 +843,7 @@ impl Store {
             .ok_or_else(|| StoreError::new("revision-overflow", "Revision overflow"))?;
         let contents = serde_json::to_string_pretty(&candidate)
             .map_err(|e| StoreError::new("serialize", e.to_string()))?;
+        before_commit()?;
         (self.writer)(&self.path, &contents)
             .map_err(|e| StoreError::new("io", format!("{}: {e}", self.path.display())))?;
         let reply = candidate.view(None);

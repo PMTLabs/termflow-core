@@ -218,6 +218,7 @@ impl<R: Runtime> AppState<R> {
             .unwrap_or_else(|_| "auto-terminal-default-secret-2025-fix".to_string());
 
         Self {
+            ssh_sessions: crate::commands::ssh_session::native_registry(app_handle.clone()),
             pending_open_path: Arc::new(std::sync::Mutex::new(None)),
             terminals: Arc::new(DashMap::new()),
             root_leaf_claims: Arc::new(RootLeafClaims::default()),

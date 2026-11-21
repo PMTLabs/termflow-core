@@ -77,6 +77,10 @@ impl WindowPages {
 
     pub(super) fn window_of(&self, pg: u64) -> Option<u64> { self.pages.get(&pg).copied() }
 
+    pub(super) fn live_page(&self, wi: u64) -> Option<u64> {
+        self.pages.iter().rev().find(|(_, window)| **window == wi).map(|(pg, _)| *pg)
+    }
+
     pub(super) fn label_of(&self, pg: u64) -> Option<(&str, u64)> {
         let wi = self.window_of(pg)?;
         self.committed.iter().find(|(_, current)| **current == wi).map(|(label, _)| (label.as_str(), wi))

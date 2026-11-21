@@ -2,6 +2,8 @@
 // `services/automationEvents.ts` — a `.d.ts` cannot hold runtime values, and the whole
 // point of those constants is that they are imported rather than spelled inline. The
 // runtime payload is also what `get_automation_runtime` returns, so it is needed here.
+import type { SshAPI } from './ssh';
+// SSH IPC census: ssh_session_open, ssh_session_state, ssh_session_close, ssh_session_reconnect, ssh_session_submit_secret, ssh_session_trust_host, ssh_test_connection, ssh_test_state, ssh_test_close, ssh_test_submit_secret, ssh_test_trust_host
 import type { AutomationStatePayload } from '../services/automationEvents';
 
 // Faithful styled snapshot of a terminal's current visible screen, used for
@@ -145,7 +147,7 @@ export interface PermissionView {
 
 export type ExpectedPermissionSubject = PermissionView['subject'] & { target: PermissionView['target'] };
 
-export interface ElectronAPI {
+export interface ElectronAPI extends SshAPI {
   pickFile?: (title?: string) => Promise<string | null>;
   ssh?: import('./ssh').SshStoreApi;
   // Terminal output history

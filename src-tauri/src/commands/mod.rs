@@ -3,6 +3,8 @@
 //! re-exports below keep every one of those paths resolving unchanged, so this
 //! split needed no edits to `lib.rs`'s `tauri::generate_handler![...]` list.
 
+pub mod ssh_session;
+pub use ssh_session::*;
 mod config_history;
 mod drag;
 mod menu;

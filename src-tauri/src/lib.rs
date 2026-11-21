@@ -1255,6 +1255,7 @@ pub fn run() {
                 // makes §7.5's actual requirement — each entry keeping its own decision timestamp
                 // rather than a flush-time `now` — trivially true. Corrected in the plan.
                 state.automations.stop();
+                tauri::async_runtime::block_on(state.ssh_sessions.shutdown());
                 // Persist every terminal's scrollback before the process dies.
                 flush_all_history(&state);
                 // Gracefully shutdown MCP server on app exit
