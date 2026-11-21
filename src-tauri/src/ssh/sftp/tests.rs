@@ -62,7 +62,8 @@ async fn fs_primitives_confirm_exact_target() {
     assert_sibling();
 
     let stat = client.stat("/etc/a").await.unwrap();
-    assert_eq!(&stat.entry, touched);
+    // The test's own `fs::read` above can advance atime across a second; every other attribute must match.
+    assert_eq!(RemoteEntry { atime: None, ..stat.entry.clone() }, RemoteEntry { atime: None, ..touched.clone() });
     assert_eq!(stat.entry.size, Some(fs::metadata(tree.path("etc/a")).unwrap().len().to_string()));
     assert!(stat.link_target.is_none());
     assert_sibling();
