@@ -166,8 +166,13 @@ describe('handleAPICreateTerminalTab census', () => {
     const direct = HANDLER.match(/dispatch\(addTabTree\(/g) ?? [];
     expect(direct.length).toBe(1); // Mode 3
     const mode3 = HANDLER.slice(HANDLER.indexOf('// Mode 3'));
+    // Mode 3's tree is minted by `buildApiFallbackPane` (so the SSH pane census can prove it
+    // carries no tag). The marker is therefore set in that builder, and the handler must use it.
     expect(mode3.slice(0, mode3.indexOf('dispatch(addTabTree(')))
-      .toContain('apiCreated: true as const');
+      .toMatch(/const\s+paneTree\s*=\s*buildApiFallbackPane\(/);
+    const BUILDER = readSource(path.resolve(__dirname, '../../../services/apiCreatedTab.ts'));
+    const builder = BUILDER.slice(BUILDER.indexOf('export function buildApiFallbackPane'));
+    expect(builder.slice(0, builder.indexOf('\n}\n'))).toContain('apiCreated: true as const');
     expect(HANDLER).toContain('runApiCreateMode0(options, {');
   });
 });

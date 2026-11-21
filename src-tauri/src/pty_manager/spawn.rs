@@ -94,6 +94,132 @@ fn open_pty(size: PtySize, inherit_cursor: bool) -> Result<portable_pty::PtyPair
     NativePtySystem::default().openpty(size).map_err(|e| e.to_string())
 }
 
+/// Build the ordinary local command before opening the PTY. The prompt flag
+/// describes the existing renderer cwd integration, not SSH readiness.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_local_shell_command(
+    id: &str,
+    shell_identity: &str,
+    shell_path: Option<String>,
+    shell_name: &str,
+    shell_args: Option<Vec<String>>,
+    cwd: Option<String>,
+    exempt_loopback_from_proxy: bool,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> (CommandBuilder, bool) {
+    // Detect PowerShell/pwsh so we can inject cwd reporting below: PowerShell does
+    // NOT keep its OS process cwd current on Set-Location, so sysinfo can't see a
+    // `cd` (backlog 004). We make it emit OSC 9;9 each prompt instead.
+    let is_powershell = shell_path
+        .as_deref()
+        .map(|p| {
+            let p = p.to_ascii_lowercase();
+            p.contains("powershell") || p.contains("pwsh")
+        })
+        .unwrap_or(false)
+        || {
+            let n = shell_name.to_ascii_lowercase();
+            n.contains("powershell") || n.contains("pwsh")
+        };
+
+    let mut cmd_builder = if let Some(path) = shell_path {
+        CommandBuilder::new(path)
+    } else if cfg!(target_os = "windows") {
+        CommandBuilder::new("cmd.exe")
+    } else {
+        // Last-resort fallback: the user's login shell ($SHELL), not the old
+        // /bin/bash (which on macOS prints the "default interactive shell is now
+        // zsh" notice).
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+        CommandBuilder::new(shell)
+    };
+    
+    // Set standard terminal environment (ALL platforms). portable_pty inherits the
+    // parent process env (no env_clear), so a spawned PTY only sees these if the APP
+    // process already had them. `tauri dev` inherits COLORTERM from the launching dev
+    // terminal, but the standalone build is launched with none — so codex/ratatui saw
+    // no truecolor and collapsed its input-box background to the default bg (invisible,
+    // in BOTH xterm renderers). Setting them explicitly makes the built app behave
+    // identically regardless of how it's launched. xterm-256color is correct here: a
+    // VT-capable ConPTY backend feeding a full VT xterm.js frontend.
+    // Stable per-terminal id, generated before the command is built so it can be
+    // injected into the child env (TERMFLOW_TERMINAL_ID) — an in-terminal agent
+    // reads it to identify its own terminal to the MCP server ("me" / get_my_terminal).
+
+    cmd_builder.env("TERM", "xterm-256color");
+    cmd_builder.env("COLORTERM", "truecolor");
+    cmd_builder.env("TERMFLOW_TERMINAL_ID", shell_identity);
+
+    // Identify ourselves — and stop leaking the identity of whatever terminal the
+    // APP was launched from. Same inheritance mechanism as COLORTERM above, but
+    // worse than cosmetic: `tauri dev` launched from Warp handed every PTY
+    // TERM_PROGRAM=WarpTerminal, which made Claude Code enable the Kitty keyboard
+    // protocol in dev builds only — Shift+Enter then behaved differently in dev vs
+    // release (see docs/review 046-052 follow-up). CLIs also detect terminals via
+    // the per-terminal session vars below, so overriding TERM_PROGRAM alone isn't
+    // enough; scrub the known identity markers too.
+    cmd_builder.env("TERM_PROGRAM", "TermFlow");
+    cmd_builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+    // Scrub foreign-terminal identity markers AND the PTY-host control secrets
+    // (module consts shared with build_spawn_spec so the two paths never drift).
+    for key in FOREIGN_TERMINAL_ENV.iter().chain(HOST_CONTROL_ENV.iter()) {
+        cmd_builder.env_remove(key);
+    }
+    // Plan 047: loopback exemption from a configured proxy — the same derivation
+    // the sidecar path applies in build_spawn_spec, gated by the same toggle.
+    if exempt_loopback_from_proxy {
+        let no_proxy = loopback_no_proxy_env(lookup);
+        if !no_proxy.is_empty() {
+            log::debug!("[SPAWN] {id}: exempting loopback from the configured proxy: {no_proxy:?}");
+        }
+        for (key, value) in no_proxy {
+            cmd_builder.env(key, value);
+        }
+    }
+
+    let mut has_command_flag = false;
+    if let Some(args) = shell_args {
+        has_command_flag = args.iter().any(|a| {
+            let a = a.to_ascii_lowercase();
+            a == "-command" || a == "-c" || a == "-encodedcommand" || a == "-file"
+        });
+        cmd_builder.args(args);
+    }
+
+    // Backlog 004: make PowerShell report its cwd via OSC 9;9 each prompt (the
+    // backend parses it in parse_osc_cwd). We wrap any existing prompt so the user's
+    // profile prompt is preserved. Skipped when the profile already drives a
+    // -Command/-File (don't fight a custom non-interactive setup).
+    if is_powershell && !has_command_flag {
+        // Inject the cwd-sync + OSC 9;9 prompt integration (see PS_CWD_INTEGRATION).
+        cmd_builder.arg("-NoExit");
+        cmd_builder.arg("-Command");
+        cmd_builder.arg(PS_CWD_INTEGRATION);
+    }
+
+    if let Some(dir) = cwd {
+        if !dir.is_empty() {
+            let expanded_dir = if dir.starts_with("~/") || dir == "~" {
+                let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
+                if dir == "~" {
+                    home
+                } else {
+                    dir.replacen("~", &home, 1)
+                }
+            } else {
+                dir
+            };
+            // Only honor a cwd that actually exists: an inherited/stale cwd that was
+            // removed must not fail the whole spawn — fall back to the default.
+            if std::path::Path::new(&expanded_dir).is_dir() {
+                cmd_builder.cwd(expanded_dir);
+            }
+        }
+    }
+
+    (cmd_builder, is_powershell && !has_command_flag)
+}
+
 /// Prepare both local identities before any PTY or child can be created. The
 /// shell reads the durable leaf when present, not the per-run process handle.
 fn local_identity(ids: &crate::state::IdAllocator, leaf: Option<&str>) -> Result<(String, String), String> {
@@ -157,6 +283,7 @@ pub fn spawn_terminal(
     // caller decided `history_seed` on the same fact, so it asks only when it will be.
     initial_cursor_row: Option<u16>,
     admission: Option<u64>,
+    ssh_launch_connection_id: Option<&str>,
 ) -> Result<String, String> {
     let (id, shell_identity) = local_identity(&app_state.ids, renderer_terminal_id.as_deref())?;
     let leaf = renderer_terminal_id.as_deref().unwrap_or(&id);
@@ -185,125 +312,40 @@ pub fn spawn_terminal(
         pixel_height: 0,
     };
 
-    // Detect PowerShell/pwsh so we can inject cwd reporting below: PowerShell does
-    // NOT keep its OS process cwd current on Set-Location, so sysinfo can't see a
-    // `cd` (backlog 004). We make it emit OSC 9;9 each prompt instead.
-    let is_powershell = shell_path
-        .as_deref()
-        .map(|p| {
-            let p = p.to_ascii_lowercase();
-            p.contains("powershell") || p.contains("pwsh")
-        })
-        .unwrap_or(false)
-        || {
-            let n = shell_name.to_ascii_lowercase();
-            n.contains("powershell") || n.contains("pwsh")
-        };
-
-    let mut cmd_builder = if let Some(path) = shell_path {
-        CommandBuilder::new(path)
-    } else if cfg!(target_os = "windows") {
-        CommandBuilder::new("cmd.exe")
+    let proxy_exemption = app_state.exempt_loopback_from_proxy.load(std::sync::atomic::Ordering::Relaxed);
+    let (cmd_builder, prompt_hook, prepared) = if let Some(connection_id) = ssh_launch_connection_id {
+        let mut spec = super::build_spawn_spec(
+            &id, Some(&shell_identity), shell_path.as_deref(), &shell_name,
+            shell_args.as_deref(), cwd.as_deref(), cols, rows, proxy_exemption,
+        );
+        spec.args = shell_args.unwrap_or_default();
+        let prepared = super::ssh_shell::PreparedShell::register(&app_state.app_handle, keys, &id, cg, &mut spec, false, connection_id)?;
+        let mut builder = CommandBuilder::new(&spec.shell);
+        builder.args(&spec.args);
+        for key in &spec.env_remove { builder.env_remove(key); }
+        for (key, value) in &spec.env { builder.env(key, value); }
+        if let Some(dir) = &spec.cwd { builder.cwd(dir); }
+        (builder, super::ssh_shell::has_cwd_hook(&spec.shell), Some(prepared))
     } else {
-        // Last-resort fallback: the user's login shell ($SHELL), not the old
-        // /bin/bash (which on macOS prints the "default interactive shell is now
-        // zsh" notice).
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        CommandBuilder::new(shell)
+        let (builder, prompt_hook) = build_local_shell_command(
+            &id, &shell_identity, shell_path, &shell_name, shell_args, cwd,
+            proxy_exemption, |k| std::env::var(k).ok(),
+        );
+        (builder, prompt_hook, None)
     };
-    
-    // Set standard terminal environment (ALL platforms). portable_pty inherits the
-    // parent process env (no env_clear), so a spawned PTY only sees these if the APP
-    // process already had them. `tauri dev` inherits COLORTERM from the launching dev
-    // terminal, but the standalone build is launched with none — so codex/ratatui saw
-    // no truecolor and collapsed its input-box background to the default bg (invisible,
-    // in BOTH xterm renderers). Setting them explicitly makes the built app behave
-    // identically regardless of how it's launched. xterm-256color is correct here: a
-    // VT-capable ConPTY backend feeding a full VT xterm.js frontend.
-    // Stable per-terminal id, generated before the command is built so it can be
-    // injected into the child env (TERMFLOW_TERMINAL_ID) — an in-terminal agent
-    // reads it to identify its own terminal to the MCP server ("me" / get_my_terminal).
-
-    cmd_builder.env("TERM", "xterm-256color");
-    cmd_builder.env("COLORTERM", "truecolor");
-    cmd_builder.env("TERMFLOW_TERMINAL_ID", shell_identity);
-
-    // Identify ourselves — and stop leaking the identity of whatever terminal the
-    // APP was launched from. Same inheritance mechanism as COLORTERM above, but
-    // worse than cosmetic: `tauri dev` launched from Warp handed every PTY
-    // TERM_PROGRAM=WarpTerminal, which made Claude Code enable the Kitty keyboard
-    // protocol in dev builds only — Shift+Enter then behaved differently in dev vs
-    // release (see docs/review 046-052 follow-up). CLIs also detect terminals via
-    // the per-terminal session vars below, so overriding TERM_PROGRAM alone isn't
-    // enough; scrub the known identity markers too.
-    cmd_builder.env("TERM_PROGRAM", "TermFlow");
-    cmd_builder.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-    // Scrub foreign-terminal identity markers AND the PTY-host control secrets
-    // (module consts shared with build_spawn_spec so the two paths never drift).
-    for key in FOREIGN_TERMINAL_ENV.iter().chain(HOST_CONTROL_ENV.iter()) {
-        cmd_builder.env_remove(key);
-    }
-    // Plan 047: loopback exemption from a configured proxy — the same derivation
-    // the sidecar path applies in build_spawn_spec, gated by the same toggle.
-    if app_state
-        .exempt_loopback_from_proxy
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        let no_proxy = loopback_no_proxy_env(|k| std::env::var(k).ok());
-        if !no_proxy.is_empty() {
-            log::debug!("[SPAWN] {id}: exempting loopback from the configured proxy: {no_proxy:?}");
-        }
-        for (key, value) in no_proxy {
-            cmd_builder.env(key, value);
-        }
-    }
-
-    let mut has_command_flag = false;
-    if let Some(args) = shell_args {
-        has_command_flag = args.iter().any(|a| {
-            let a = a.to_ascii_lowercase();
-            a == "-command" || a == "-c" || a == "-encodedcommand" || a == "-file"
-        });
-        cmd_builder.args(args);
-    }
-
-    // Backlog 004: make PowerShell report its cwd via OSC 9;9 each prompt (the
-    // backend parses it in parse_osc_cwd). We wrap any existing prompt so the user's
-    // profile prompt is preserved. Skipped when the profile already drives a
-    // -Command/-File (don't fight a custom non-interactive setup).
-    if is_powershell && !has_command_flag {
-        // Inject the cwd-sync + OSC 9;9 prompt integration (see PS_CWD_INTEGRATION).
-        cmd_builder.arg("-NoExit");
-        cmd_builder.arg("-Command");
-        cmd_builder.arg(PS_CWD_INTEGRATION);
-    }
-
-    if let Some(dir) = cwd {
-        if !dir.is_empty() {
-            let expanded_dir = if dir.starts_with("~/") || dir == "~" {
-                let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".to_string());
-                if dir == "~" {
-                    home
-                } else {
-                    dir.replacen("~", &home, 1)
-                }
-            } else {
-                dir
-            };
-            // Only honor a cwd that actually exists: an inherited/stale cwd that was
-            // removed must not fail the whole spawn — fall back to the default.
-            if std::path::Path::new(&expanded_dir).is_dir() {
-                cmd_builder.cwd(expanded_dir);
-            }
-        }
-    }
 
     let pair = open_pty(size, cursor_row.is_some())?;
     
     let child = pair.slave.spawn_command(cmd_builder).map_err(|e| e.to_string())?;
     let pid = child.process_id().unwrap_or(0);
-    let process = LocalProcess::new(child);
+    let process = if prepared.is_some() { LocalProcess::with_exit_probe(child) } else { LocalProcess::new(child) };
     let mut unpublished = UnpublishedChild(Some(process.clone()));
+    if let Some(prepared) = prepared {
+        let shell = process.clone();
+        let adapter = prepared.submitted();
+        super::ssh_shell::bind_spawned_shell(app_state.host_table.keys(), &id, &adapter.spec.shell, pid);
+        super::ssh_shell::retain_until_quiescent(adapter, move || shell.child_exited());
+    }
 
     let reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     // Note: taking the writer might make the master unusable for writing if not cloned? 
@@ -355,7 +397,7 @@ pub fn spawn_terminal(
             last_input_at: None,
             // Mirrors the injected-hook decision above, so reattach can re-arm the
             // command-suggest prompt gate (see shell_emits_prompt_osc).
-            prompt_hook: is_powershell && !has_command_flag,
+            prompt_hook,
             display_label: None,
             title_color: None,
         });
@@ -364,6 +406,8 @@ pub fn spawn_terminal(
     });
     if published.is_none() { return Err("host-ownership-pending: local placement changed before publication; retry".into()); }
     unpublished.0 = None;
+    let mut ssh_prompt = app_state.host_table.keys().ssh_prompt_nonce(&id)
+        .map(termflow_pty_protocol::ssh_prompt::PromptParser::new);
     app_state.complete_create(&owner_leaf, cg, &crate::state::StagedShell {
         process: id.clone(), stage: crate::state::ShellStage::Local,
     });
@@ -378,24 +422,41 @@ pub fn spawn_terminal(
         // the ConPTY startup-handshake filter, the 4KB-read UTF-8 carry (an incomplete
         // trailing scalar waits for the next read) and the ordered EOF/error tail.
         let mut da1 = termflow_pty_protocol::da1::StartupDa1::for_spawn(cursor_row);
-        let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone());
+        let reply_keys = app_state.host_table.keys().clone();
+        let reply_process = thread_id.clone();
+        let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone())
+            .with_admission(move |writer, bytes| {
+                reply_keys.admit_protocol_input(&reply_process, |_permit| {
+                    Ok(super::input_gate::InputDispatch::local(move || {
+                        termflow_pty_protocol::da1::write_reply(writer, bytes)
+                    }))
+                })
+            });
+        let drain = ssh_prompt.as_ref().map(|_| replies.drain());
+        let emit = |data| {
+            app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = output_tx.send(ChannelPayload { id: thread_id.clone(), data });
+        };
         termflow_pty_protocol::pump::pump_output(
             &mut reader,
             find_utf8_boundary,
             &mut da1,
             |reply| replies.send(reply),
             |data| {
-                // Producer heartbeat for the pipeline watchdog (lib.rs):
-                // "produced advances while consumed doesn't" = stalled consumer.
-                app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Send to channel (broadcast::Sender::send returns Result<usize, SendError>)
-                // We ignore error if no receivers
-                let _ = output_tx.send(ChannelPayload {
-                    id: thread_id.clone(),
-                    data,
-                });
+                let data = super::ssh_shell::filter_local_output(
+                    &mut ssh_prompt, app_state.host_table.keys(), &thread_id, drain.as_ref(), data, |_| {},
+                );
+                if !data.is_empty() {
+                    emit(data);
+                }
             },
         );
+        if let Some(parser) = &mut ssh_prompt {
+            let tail = parser.finish();
+            if !tail.is_empty() {
+                emit(tail);
+            }
+        }
         // Spec 045 §3.3: capture the cwd BEFORE cleanup — cleanup_terminal_state
         // removes `terminal_cwds` and `terminals`, so this is the last moment the
         // shell's final directory is knowable. The renderer needs it to restart

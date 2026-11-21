@@ -35,6 +35,7 @@ const fieldCopy: Record<string,string> = {
   'extraOptions/invalid-key':"Option names must contain only letters A–Z.",
   'extraOptions/invalid-value':"Option values can't contain control characters.",
   'extraOptions/length':"Each option value must be at most 1024 characters.",
+  'extraOptions/local-expansion':"Option values can't use “${…}” or “%” tokens, which ssh would fill in from this computer.",
   'extraOptions/one-line':"Options must be on one line.",
   'extraOptions/invalid-pair':"Use Key=Value pairs.",
   'extraOptions/unclosed-quote':"Close the unclosed quote in Extra options.",

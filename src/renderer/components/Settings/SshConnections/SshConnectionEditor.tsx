@@ -1,8 +1,7 @@
-import React, { useEffect, useId, useRef, useState } from 'react';
-import type { SshConnection, SshConnectionInput, SshError, SshReply, SshStoreApi, SshView } from '../../../types/ssh';
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react';
+import type { SshConnection, SshConnectionInput, SshError, SshPreview, SshPreviewError, SshPreviewSource, SshReply, SshStoreApi, SshView } from '../../../types/ssh';
 import { registerSshEditorGuard } from '../../../services/sshEditorGuard';
 import { parseArgs } from '../../../services/argParse';
-import { buildSshArgv } from '../../../services/buildSshArgv';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
 import { SshTestConnectionDialog } from '../../Ssh/SshTestConnectionDialog';
 import { isAllowedSshOption, refreshReadOnly, sshErrorMessage, sshFieldMessage } from './sshErrors';
@@ -42,7 +41,15 @@ function parseOptions(options:string): { pairs:[string,string][]; code?:string; 
   }
   return { pairs };
 }
-export function SshConnectionEditor({ connectionId, initialFolder, view, api, onSaved, onClose, focusName = 0 }: { connectionId?:string; initialFolder:string | null; view:SshView; api:SshStoreApi; onSaved(reply:SshReply, input:SshConnectionInput):void; onClose():void; focusName?:number }) {
+// Draft sent to the Rust preview: the same normalisation save() applies, or the first local field error.
+function connectionInput(draft:SshConnectionInput, options:string):SshConnectionInput {
+  if (!Number.isInteger(draft.port) || draft.port < 1 || draft.port > 65535) throw { field:'port', code:'range' };
+  const parsed = parseOptions(options);
+  if (parsed.code) throw { field:'extraOptions', code:parsed.code, key:parsed.key };
+  return { ...draft, name:draft.name.trim(), identityFile:draft.auth === 'keyFile' ? draft.identityFile : null, extraOptions:parsed.pairs };
+}
+
+export function SshConnectionEditor({ connectionId, initialFolder, view, api, onSaved, onClose, focusName = 0, onConnect }: { connectionId?:string; initialFolder:string | null; view:SshView; api:SshStoreApi; onSaved(reply:SshReply, input:SshConnectionInput):void; onClose():void; focusName?:number; onConnect?(id:string):void }) {
   const nameInput = useRef<HTMLInputElement>(null);
   useEffect(() => { if (!connectionId || focusName) nameInput.current?.focus(); }, [connectionId, focusName]);
   const form = useRef<HTMLFormElement>(null); const errorPrefix = useId();
@@ -98,6 +105,41 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
     } finally {
       setBusy(false);
     }
+  };
+  const previewRequest = useMemo((): { source?: SshPreviewSource; error?: SshError } => {
+    if (removed || readOnly) return {};
+    if (connectionId && !dirty && !changed && existing && JSON.stringify(inputOf(existing)) === baseline.current) {
+      return { source:{ kind:'saved', id:connectionId } };
+    }
+    try {
+      return { source:{ kind:'draft', draft:connectionInput(draft, options), editingId:connectionId } };
+    } catch (failure) {
+      return { error:failure as SshError };
+    }
+  }, [removed, readOnly, connectionId, dirty, changed, existing, draft, options, view.revision]);
+  const [previewResult, setPreviewResult] = useState<{ request:typeof previewRequest; value?:SshPreview; errors?:SshError[] }>();
+  useEffect(() => {
+    if (!previewRequest.source || !api.previewConnection) return;
+    let current = true;
+    void api.previewConnection({ source:previewRequest.source }).then(
+      value => { if (current) setPreviewResult({ request:previewRequest, value }); },
+      (failure:unknown) => {
+        if (!current) return;
+        const e = failure as SshPreviewError | null;
+        setPreviewResult({ request:previewRequest, errors:e?.fields?.length ? e.fields : [{ code:e?.code ?? 'preview-failed', message:sshErrorMessage(failure) }] });
+      },
+    );
+    return () => { current = false; };
+  }, [api, previewRequest]);
+  const currentPreview = previewResult?.request === previewRequest ? previewResult : undefined;
+  const previewErrors = previewRequest.error ? [previewRequest.error] : currentPreview?.errors ?? [];
+  // Save-time errors win; otherwise the live preview's field error, worded by code like save() or as the backend sent it.
+  const fieldMessage = (name:string):string | undefined => {
+    if (fieldErrors[name]) return fieldErrors[name];
+    const issue = previewErrors.find(e => e.field === name) as (SshError & { key?:string }) | undefined;
+    if (!issue) return undefined;
+    const mapped = sshFieldMessage(name, issue.code, issue.key);
+    return mapped !== sshFieldMessage(name, '') ? mapped : issue.message || issue.code;
   };
   const [testOpen, setTestOpen] = useState(false);
   const sessionApi = window.electronAPI;
@@ -158,13 +200,15 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       return false; }
     finally { setBusy(false); }
   };
+  // Always the SAVED id: the panel decides what a dirty draft means (Save / Discard / Cancel) before launching.
+  const connect = () => { if (existing && onConnect && !readOnly && !removed && !busy) onConnect(existing.id); };
   const current = useRef({ dirty, save, reset }); current.current = { dirty, save, reset };
   useEffect(() => registerSshEditorGuard({ isDirty:() => current.current.dirty, save:() => current.current.save(), discard:() => current.current.reset() }), []);
-  const errorProps = (name:string) => ({ 'aria-invalid':!!fieldErrors[name], 'aria-describedby':fieldErrors[name] ? `${errorPrefix}-${name}` : undefined });
-  const fieldError = (name:string) => fieldErrors[name] && <span id={`${errorPrefix}-${name}`} role="alert" className="ssh-field-error">{fieldErrors[name]}</span>;
+  const errorProps = (name:string) => { const message = fieldMessage(name); return { 'aria-invalid':!!message, 'aria-describedby':message ? `${errorPrefix}-${name}` : undefined }; };
+  const fieldError = (name:string) => { const message = fieldMessage(name); return message && <span id={`${errorPrefix}-${name}`} role="alert" className="ssh-field-error">{message}</span>; };
   const field = (name: 'name' | 'host' | 'user' | 'identityFile', label:string) => <div className="ssh-editor-field"><label>{label}<input ref={name === 'name' ? nameInput : undefined} name={name} value={draft[name] ?? ''} title={draft[name] || undefined} onChange={event => { clearField(name); setDraft({ ...draft, [name]:event.target.value }); }} {...errorProps(name)} /></label>{fieldError(name)}</div>;
+  const inlineFields = ['name','host','port','user','extraOptions','jumpConnectionId','folderId', ...(draft.auth === 'keyFile' ? ['identityFile'] : [])];
   const invalidOptions = !!parsed.code || !!fieldErrors.extraOptions;
-  let argv:string[] = []; if (!invalidOptions) try { const jump = view.connections.find(c => c.id === draft.jumpConnectionId); argv = buildSshArgv({ hops:jump ? [jump,draft] : [draft], extraOptions:parsed.pairs }); } catch {}
   return <div className="ssh-connection-editor"><h3 ref={heading} tabIndex={-1}>{connectionId ? 'Edit SSH connection' : 'New SSH connection'}</h3>
     {changed && !view.loadError && <div role="alert" className="ssh-conflict">{removed ? 'Deleted elsewhere' : 'Changed elsewhere'} — <button type="button" className="au-btn sm" onClick={() => removed ? onClose() : reset()}>{removed ? 'Close' : 'Reload'}</button>{!removed && <button type="button" className="au-btn sm" onClick={() => { if (existing) { baseline.current = JSON.stringify(inputOf(existing)); setBaseOptions(optionsText(existing)); setDraft(value => ({ ...value, extraOptions:existing.extraOptions })); } setChanged(false); }}>Keep mine</button>}</div>}
     <form ref={form} noValidate onSubmit={event => { event.preventDefault(); void save(); }}>
@@ -179,7 +223,10 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       <div className="ssh-editor-field"><label>Folder<select name="folderId" value={draft.folderId ?? ''} {...errorProps('folderId')} onChange={event => { clearField('folderId'); setDraft({ ...draft, folderId:event.target.value || null }); }}><option value="">Top level</option>{draft.folderId && !view.folders.some(f => f.id === draft.folderId) && <option value={draft.folderId} disabled>(unavailable: {draft.folderId})</option>}{view.folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>{fieldError('folderId')}</div>
       <label className="ssh-check"><input name="bookmarked" type="checkbox" className="setting-checkbox" checked={draft.bookmarked} onChange={event => setDraft({ ...draft, bookmarked:event.target.checked })} />Bookmark</label>
       <div className="ssh-editor-field"><label>Extra options<input name="extraOptions" value={options} {...errorProps('extraOptions')} onChange={event => { clearField('extraOptions'); setOptions(event.target.value); }} onPaste={event => { if (/[\r\n\u2028\u2029]/.test(event.clipboardData.getData('text'))) { event.preventDefault(); setFieldErrors(errors => ({ ...errors, extraOptions:sshFieldMessage('extraOptions','one-line') })); } }} /><small>Applies to the terminal ssh only</small></label>{fieldError('extraOptions')}</div>
-      <div className={invalidOptions ? 'ssh-argv invalid' : 'ssh-argv'} aria-label="Arguments"><strong>Arguments</strong>{invalidOptions ? <small>Fix Extra options to preview the arguments.</small> : argv.map((arg,index) => <code key={index}>{arg}</code>)}</div>
+      <div className={invalidOptions ? 'ssh-argv invalid' : 'ssh-argv'} aria-label="Command preview"><strong>Command preview</strong>
+        {invalidOptions ? <small>Fix Extra options to preview the command.</small> : currentPreview?.value && <><code>{currentPreview.value.display}</code><small>{currentPreview.value.wrapper} — {currentPreview.value.configNotice}</small></>}
+        {previewErrors.filter(e => !inlineFields.includes(e.field ?? '')).map(e => <small role="alert" key={e.field ?? e.code}>{e.message || e.code}</small>)}
+      </div>
       {error && <p role="alert">{error.message}</p>}
       <div className="ssh-editor-actions"><button type="submit" className="au-btn primary">Save connection</button>{connectionId && <button type="button" className="au-btn danger" onClick={() => setConfirmDelete(true)}>Delete connection…</button>}</div>
     </fieldset>
@@ -188,6 +235,9 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       <small id="ssh-test-help">{!existing || dirty || changed ? 'Save changes before testing the saved connection.' : 'Tests the native app channel only; no terminal is opened.'}</small>
     </div>
       <div role="status">{forgotten && !existing?.hasSavedSecret ? 'Saved credential forgotten.' : ''}</div>
+    {existing && onConnect && <div className="ssh-editor-actions"><button type="button" className="au-btn primary" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>
+      <small id="ssh-connect-help">{dirty || changed ? 'Opens the last saved version; you will be asked about unsaved changes.' : 'Opens a new tab and starts this saved connection.'}</small>
+    </div>}
     {testOpen && canTest && sessionApi && <SshTestConnectionDialog connectionId={connectionId!} api={sessionApi} onClose={() => setTestOpen(false)} />}
     <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
     <ConfirmDialog isOpen={confirmForget && showSavedCredential && !readOnly && !busy} title="Forget saved credential" message={`Forget the saved credential for ${existing?.name}? You'll be asked for it next time.`} destructive confirmText="Forget" onCancel={() => setConfirmForget(false)} onConfirm={forget} />

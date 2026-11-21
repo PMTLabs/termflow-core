@@ -27,7 +27,7 @@ export type InitialFocus =
   | 'cancel'
   | 'confirm'
   | 'first'
-  | React.RefObject<HTMLElement>;
+  | React.RefObject<HTMLElement | null>;
 
 export interface DialogA11yOptions {
   isOpen: boolean;
@@ -39,6 +39,8 @@ export interface DialogA11yOptions {
   mnemonics?: Mnemonic[];
   /** Where focus lands when the dialog opens. Defaults to 'first'. */
   initialFocus?: InitialFocus;
+  /** Stable invoker when the menu item that opened the modal will unmount. */
+  returnFocus?: HTMLElement | null;
   /**
    * Keep Tab inside the dialog. Defaults to `true`, which is every modal dialog in the app.
    *
@@ -101,7 +103,8 @@ const FOCUSABLE_SELECTOR = [
 /** Ordered list of keyboard-focusable elements inside `container`. */
 export function getFocusable(container: HTMLElement | null): HTMLElement[] {
   if (!container) return [];
-  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter(el => el.getAttribute('tabindex') !== '-1');
 }
 
 /** Return the handler for a single-character key matching a mnemonic, else null. */
@@ -157,7 +160,7 @@ export function useDialogA11y(
   useEffect(() => {
     if (!isOpen) return;
     const container = containerRef.current;
-    triggerRef.current = (document.activeElement as HTMLElement) ?? null;
+    triggerRef.current = optsRef.current.returnFocus ?? (document.activeElement as HTMLElement) ?? null;
 
     if (container) {
       const target = resolveInitialFocus(container, optsRef.current.initialFocus ?? 'first');

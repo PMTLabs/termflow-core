@@ -919,6 +919,9 @@ pub fn run() {
     })
     .manage(crate::ssh::store::Store::new(crate::ssh::store::store_path()))
     .invoke_handler(crate::ssh_handlers![
+        commands::ssh_terminal_launch,
+        commands::ssh_terminal_cancel_launch,
+        commands::ssh_terminal_launch_state,
         commands::create_terminal,
         commands::adopt_console_window,
         commands::set_terminal_owning_tab,

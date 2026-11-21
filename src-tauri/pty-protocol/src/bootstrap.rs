@@ -71,6 +71,8 @@ pub const CAP_INHERIT_CURSOR: u32 = 1 << 4;
 pub const CAP_MCP_HOLD: u32 = 1 << 5;
 /// Host supports permission controls; never send them without this bit.
 pub const CAP_PERMISSIONS: u32 = 1 << 6;
+/// Spawn consumes SSH prompt registration metadata without exporting it.
+pub const CAP_SSH_PROMPT_REGISTRATION: u32 = 1 << 7;
 
 /// Who is speaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

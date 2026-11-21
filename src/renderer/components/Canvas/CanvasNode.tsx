@@ -337,10 +337,10 @@ export const CanvasNode: React.FC<{
         </div>
       </div>
       <div className="canvas-node-body">{children}</div>
-      <span className="canvas-port n" data-port="n" />
-      <span className="canvas-port e" data-port="e" />
-      <span className="canvas-port s" data-port="s" />
-      <span className="canvas-port w" data-port="w" />
+      <span className="canvas-port n" data-port="n" tabIndex={-1} />
+      <span className="canvas-port e" data-port="e" tabIndex={-1} />
+      <span className="canvas-port s" data-port="s" tabIndex={-1} />
+      <span className="canvas-port w" data-port="w" tabIndex={-1} />
     </div>
   );
 };

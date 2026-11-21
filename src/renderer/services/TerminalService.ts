@@ -1,7 +1,10 @@
 import { paneIncarnations, accepted, describePanes, type PaneCapture, type CreateMode, type PaneIncarnations } from './paneIncarnations';
 import { termDiag } from '../utils/diag';
 import { earlyOutput } from './earlyOutput';
-import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import { findLeafByTerminalId, findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import { isWaitingForSshLaunch, observeOwnedSshLaunch, sshLaunchFailure, staleSshLaunch, type ReconnectSshResult, type SshLaunchObservation } from './sshLaunchAttempt';
+import type { LaunchSnapshot } from '../types/ssh';
+import { reattachPromptGate } from './reattachGate';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
 import { isAdminUacCancelled } from './adminUacCancelled';
@@ -39,6 +42,8 @@ export class TerminalServiceClass {
   // Cleared in finally so a failed create never poisons the next attempt.
   private inFlightCreates = new Map<string | PaneCapture, { terminalId: string; promise: Promise<string> }>();
   private hostWaitStates = new Map<string, HostWaitState>();
+  private sshReconnects = new WeakMap<PaneCapture, { pc: string; work: Promise<ReconnectSshResult> }>();
+  private sshLaunches = new WeakMap<PaneCapture, { pc: string; work: Promise<SshLaunchObservation | undefined> }>();
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
   private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
@@ -151,6 +156,7 @@ export class TerminalServiceClass {
     elevated?: boolean,
     mode: CreateMode = 'Mount',
     paneId?: string,
+    sshLaunchConnectionId?: string,
   ): Promise<string> {
     // Re-entrant calls for this copy share the pending placement, not another copy's authority.
     const protocol = this.incarnations();
@@ -172,6 +178,7 @@ export class TerminalServiceClass {
       elevated === true, mode, paneId, typeof createKey === 'string' ? undefined : createKey,
       protocol.enabled ? [...this.inFlightCreates.entries()].find(([key, entry]) => key !== createKey && entry.terminalId === terminalId
         && typeof key !== 'string' && (!protocol.capturesForLeaf(terminalId).includes(key) || protocol.isSuppressed(key)))?.[1].promise : undefined,
+      sshLaunchConnectionId,
     );
     this.inFlightCreates.set(createKey, { terminalId, promise: createPromise });
     try {
@@ -223,7 +230,7 @@ export class TerminalServiceClass {
   private async createTerminalWithRetry(
     terminalId: string, shellType: string, name?: string, cwd?: string,
     cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean,
-    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture, predecessor?: Promise<string>,
+    mode: CreateMode = 'Mount', paneId?: string, pi?: PaneCapture, predecessor?: Promise<string>, sshLaunchConnectionId?: string,
   ): Promise<string> {
     if (predecessor) await predecessor.catch(() => {});
     let hostDeadline: number | undefined;
@@ -246,7 +253,7 @@ export class TerminalServiceClass {
       firstAttempt = false;
       try {
         const pid = await this.createTerminalInner(
-          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi,
+          terminalId, shellType, name, cwd, cols, rows, attemptOwner, sessionKey, elevated, mode, paneId, pi, sshLaunchConnectionId,
         );
         if (!this.incarnations().enabled || this.incarnations().isCurrent(terminalId, paneId, pi)) this.setHostWaitState(terminalId, undefined);
         return pid;
@@ -290,7 +297,7 @@ export class TerminalServiceClass {
     owningTabId?: string,
     sessionKey?: string,
     elevated: boolean = false,
-    mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture,
+    mode: CreateMode = 'Mount', paneId?: string, attemptPi?: PaneCapture, sshLaunchConnectionId?: string,
   ): Promise<string> {
     if (elevated) {
       if (this.elevatedConsentDenied) {
@@ -372,13 +379,17 @@ export class TerminalServiceClass {
         }
       }
       if (admission.status === 'Inert') {
-        processId = await this.api().createTerminal(shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated);
+        const args = [shellType, name, cwd, terminalId, cols, rows, owningTabId, sessionKey, elevated] as const;
+        processId = await (sshLaunchConnectionId === undefined
+          ? this.api().createTerminal(...args)
+          : this.api().createTerminal(...args, sshLaunchConnectionId));
       } else if (admission.status === 'Existing' || admission.status === 'AlreadyBound') {
         // This leaf's own process: its held early output stays claimable (earlyOutput.ts).
         processId = admission.pc;
       } else if (admission.status === 'Create' || admission.status === 'Join') {
         const work = protocol.create(admission.cg, {
           leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
+          ...(admission.status === 'Create' && sshLaunchConnectionId !== undefined ? { sshLaunchConnectionId } : {}),
         });
         const placement: { pi: PaneCapture; work: Promise<string>; pc?: string } = { pi: attemptPi!, work };
         this.placements.set(terminalId, placement);
@@ -402,8 +413,34 @@ export class TerminalServiceClass {
         return ''; // Backend ownership follows the pane even after placement finishes.
       }
 
+      // An admitted Create can still attach to a surviving host shell. The native
+      // reattach seed is present even for a hookless shell and is staged before
+      // create resolves. Claim it here before publishing the process to any mount.
+      let freshSsh = false;
+      if (sshLaunchConnectionId && attemptPi && admission.status === 'Create') {
+        try {
+          const seed = await this.api().takeReattachPromptHook?.(processId);
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          if (seed) {
+            this.stashPromptGate(terminalId, reattachPromptGate(seed.promptHook, seed.atPrompt));
+            this.markReattachedSession(terminalId);
+          }
+          freshSsh = seed === null;
+        } catch {
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          // An ambiguous attach result is not a fresh launch authorization.
+        }
+      }
       if (attemptPi) protocol.setRestoreResolved(attemptPi);
       this.bindCreated(terminalId, processId, owningTabId);
+
+      if (freshSsh && sshLaunchConnectionId && attemptPi) {
+        const placement = this.sshPlacement(terminalId, paneId, attemptPi, processId, sshLaunchConnectionId);
+        const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
+        this.sshLaunches.set(attemptPi, { pc: processId, work });
+        // Launch failure does not discard the successfully created local shell.
+        void work.catch(() => {});
+      }
 
       if (isElevatedFlightOwner) flightResolve?.(processId);
 
@@ -431,6 +468,76 @@ export class TerminalServiceClass {
         if (this.reconnectElevatedPromise === flight) this.reconnectElevatedPromise = null;
       }
     }
+  }
+
+  private sshPlacement(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted = () => true) {
+    const protocol = this.incarnations();
+    return { terminalId, connectionId, processIncarnation: pc, owner, current: () =>
+      mounted() && protocol === this.incarnations() && protocol.isCurrent(terminalId, paneId, owner)
+      && this.getProcessId(terminalId) === pc
+      && findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId === connectionId };
+  }
+
+  /** A mounted copy re-reads the owned session and launch with its own acknowledged identity. */
+  async querySshLaunch(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted: () => boolean) {
+    const placement = this.sshPlacement(terminalId, paneId, owner, pc, connectionId, mounted);
+    if (!placement.current()) return;
+    const started = this.sshLaunches.get(owner);
+    const startFailure = started?.pc === pc
+      ? await started.work.then(() => undefined, sshLaunchFailure) : undefined;
+    if (!placement.current()) return;
+    const result = await observeOwnedSshLaunch(this.api(), placement, 'query');
+    if (placement.current() && !result?.snapshot && startFailure) throw startFailure;
+    return result;
+  }
+
+  reconnectSshTerminal(terminalId: string, registered: (snapshot: LaunchSnapshot) => void): Promise<ReconnectSshResult> {
+    const owner = this.incarnations().capture(terminalId);
+    const pc = this.getProcessId(terminalId);
+    const connectionId = findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId;
+    if (!owner || !pc || !connectionId) return Promise.resolve({ ok: false, error: staleSshLaunch });
+    const active = this.sshReconnects.get(owner);
+    if (active?.pc === pc) return active.work;
+    const placement = this.sshPlacement(terminalId, undefined, owner, pc, connectionId);
+    const notAtPrompt = { ok: false, error: { code: 'NotAtPrompt', message: 'Return to the local prompt to reconnect' } } as const;
+    const reconnect = async (): Promise<ReconnectSshResult> => {
+      try {
+        const old = await observeOwnedSshLaunch(this.api(), placement, 'query');
+        if (!placement.current()) return { ok: false, error: staleSshLaunch };
+        // Do not retire the app channel for a positively known live login, or
+        // supersede an acceptance that T5 hasn't identified/retired yet.
+        if (old?.snapshot?.stage === 'running' || old?.snapshot?.stage === 'typed') return notAtPrompt;
+        if (old?.snapshot && isWaitingForSshLaunch(old.snapshot.stage)) {
+          return { ok: false, error: { code: 'InputLocked', message: 'Cancel the current SSH launch before reconnecting.' } };
+        }
+        const result = await observeOwnedSshLaunch(this.api(), placement, 'reconnect');
+        if (!placement.current() || !result?.snapshot) return { ok: false, error: staleSshLaunch };
+        let snapshot = result.snapshot;
+        registered(snapshot);
+        const generation = snapshot.attempt.sessionGeneration;
+        // The native worker, not renderer output or a guessed prompt, decides
+        // whether we have returned to a genuine, bare local shell prompt.
+        while (isWaitingForSshLaunch(snapshot.stage)) {
+          await new Promise<void>(resolve => setTimeout(resolve, 250));
+          if (!placement.current()) return { ok: false, error: staleSshLaunch };
+          const next = await observeOwnedSshLaunch(this.api(), placement, 'query');
+          if (!placement.current() || next?.snapshot?.attempt.sessionGeneration !== generation) {
+            return { ok: false, error: staleSshLaunch };
+          }
+          snapshot = next.snapshot;
+        }
+        if (snapshot.error?.code === 'Timeout') return notAtPrompt;
+        return { ok: true, snapshot };
+      } catch (error) {
+        const failure = sshLaunchFailure(error);
+        return failure.code === 'Timeout' || failure.code === 'NotAtPrompt' ? notAtPrompt : { ok: false, error: failure };
+      }
+    };
+    const work = reconnect().finally(() => {
+      if (this.sshReconnects.get(owner)?.work === work) this.sshReconnects.delete(owner);
+    });
+    this.sshReconnects.set(owner, { pc, work });
+    return work;
   }
 
   /** Everything a window does once a create has produced the process for `terminalId`. */

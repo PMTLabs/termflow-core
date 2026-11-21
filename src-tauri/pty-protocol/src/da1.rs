@@ -368,8 +368,37 @@ impl Drop for EndTurn<'_> {
 /// first makes ConPTY settle for row 1. At most two threads per session, because the
 /// filter retires on the first DA1 and answers the cursor query once. A reply that cannot get
 /// a thread is dropped and logged, never written on the caller's thread (see `send_with`).
+type ReplyWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+type ReplyAdmission = Arc<dyn Fn(&ReplyWriter, &[u8]) -> std::io::Result<()> + Send + Sync>;
+
+/// Cloneable pending-reply evidence. Queueing increments before a worker can run; finishing
+/// decrements only AFTER writer flush (also on panic/spawn failure). Readers never wait on it.
+#[derive(Clone, Default)]
+pub struct StartupDrain(Arc<(Mutex<u64>, Condvar)>);
+impl StartupDrain {
+    pub fn is_drained(&self) -> bool { *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) == 0 }
+    /// For an off-reader readiness worker, not the PTY output reader itself.
+    pub fn wait(&self) {
+        let mut pending = self.0.0.lock().unwrap_or_else(|e| e.into_inner());
+        while *pending != 0 { pending = self.0.1.wait(pending).unwrap_or_else(|e| e.into_inner()); }
+    }
+    fn issue(&self) -> PendingReply {
+        *self.0.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        PendingReply(self.clone())
+    }
+}
+struct PendingReply(StartupDrain);
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        *self.0.0.0.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.0.1.notify_all();
+    }
+}
+
 pub struct StartupReplies {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: ReplyWriter,
+    admission: Option<ReplyAdmission>,
+    drain: StartupDrain,
     label: String,
     turns: Arc<Turns>,
     issued: u64,
@@ -377,8 +406,15 @@ pub struct StartupReplies {
 
 impl StartupReplies {
     pub fn new(writer: Arc<Mutex<Box<dyn Write + Send>>>, label: String) -> Self {
-        Self { writer, label, turns: Arc::new(Turns::default()), issued: 0 }
+        Self { writer, label, turns: Arc::new(Turns::default()), issued: 0, admission: None, drain: StartupDrain::default() }
     }
+
+    pub fn with_admission(mut self, admission: impl Fn(&ReplyWriter, &[u8]) -> std::io::Result<()> + Send + Sync + 'static) -> Self {
+        self.admission = Some(Arc::new(admission));
+        self
+    }
+
+    pub fn drain(&self) -> StartupDrain { self.drain.clone() }
 
     /// Queue `reply` behind everything sent before it. Never blocks on the writer.
     pub fn send(&mut self, reply: StartupReply<'_>) {
@@ -402,12 +438,15 @@ impl StartupReplies {
         self.issued += 1;
         let (what, consumed) = (reply.what(), reply.consumed);
         let bytes = reply.bytes.to_vec();
+        let pending = self.drain.issue();
+        let admission = self.admission.clone();
         let run = {
             let (writer, label, turns) = (self.writer.clone(), self.label.clone(), self.turns.clone());
             move || {
+                let _pending = pending;
                 turns.wait(turn);
                 let _end = EndTurn(&turns);
-                match write_reply(&writer, &bytes) {
+                match admission.as_ref().map_or_else(|| write_reply(&writer, &bytes), |admit| admit(&writer, &bytes)) {
                     Ok(()) => log::info!("[CONPTY] answered startup {what} for {label} ({consumed} bytes in)"),
                     Err(e) => log::warn!(
                         "[CONPTY] could not answer startup {what} for {label}: {e}; the shell will start \

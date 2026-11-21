@@ -1,6 +1,7 @@
 import { Rect, NODE_W, NODE_H } from './canvasGeometry';
 import { fanPlacement } from './agentPlacement';
-import { buildNewTabFields, NewTabFields, ShellProfileLike } from '../../services/newTabActions';
+import { buildNewTabFields, ShellProfileLike } from '../../services/newTabActions';
+import type { Tab } from '../../store/slices/tabsSlice';
 import type { PaneNode } from '../../store/slices/panesSlice';
 import { generateId } from '../../utils/id';
 
@@ -12,7 +13,7 @@ import { generateId } from '../../utils/id';
 
 export interface CanvasSpawn {
   /** Ready for `addTab`. `isActive: false` is not a detail — see below. */
-  tab: NewTabFields & { isActive: false };
+  tab: Omit<Tab, 'isActive'> & { isActive: false };
   /**
    * The `tm-` leaf the new tab's root pane carries — and therefore the CANVAS NODE's id,
    * since `buildCanvasModel` keys a node by `leaf.terminalId`. Everything that addresses the

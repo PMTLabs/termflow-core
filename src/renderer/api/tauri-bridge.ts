@@ -1,4 +1,4 @@
-import type { SshAPI, SshSessionView, SshPromptReceipt } from '../types/ssh';
+import type { SshAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent } from '../types/ssh';
 import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
@@ -94,7 +94,7 @@ export interface NetworkInterfaceInfo {
 // Define the interface to match existing usage
 interface ElectronAPI extends SshAPI {
   pickFile?: (title?: string) => Promise<string | null>;
-  ssh?: import('../types/ssh').SshStoreApi;
+  ssh?: import('../types/ssh').SshStoreApi & import('../types/ssh').SshLaunchApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
     offset: number;
@@ -108,7 +108,7 @@ interface ElectronAPI extends SshAPI {
   /// directly. `screen` is the whole viewport in one string, not a row array.
   getTerminalScreenText: (terminalId: string) => Promise<{ screen: string; rows: number; cols: number }>;
   getActiveProcesses: () => Promise<ActiveProcess[]>;
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => Promise<string>;
   /// Windows: make THIS window the owner of the shell's ConPTY pseudo-console
   /// window, so dialogs a console program parents to `GetConsoleWindow()` (the
   /// `az login` WAM prompt) open in front instead of behind the app. Fired on
@@ -364,9 +364,9 @@ const buildAuthHeaders = (): Record<string, string> => {
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
-async function listenSsh(event: string, listener: (view: SshSessionView) => void): Promise<UnlistenFn> {
+async function listenSsh<T>(event: string, listener: (view: T) => void): Promise<UnlistenFn> {
   let active = true;
-  const unlisten = await listen<SshSessionView>(event, e => { if (active) listener(e.payload); });
+  const unlisten = await listen<T>(event, e => { if (active) listener(e.payload); });
   const dispose = () => { if (!active) return; active = false; unlisten(); };
   trackUnlisten(Promise.resolve(dispose));
   return dispose;
@@ -384,6 +384,7 @@ const tauriBridge: ElectronAPI = {
   sshTestClose: async (probeId: string) => invoke<void>('ssh_test_close', { probeId }),
   sshTestSubmitSecret: async (probeId: string, secret: string, remember: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_submit_secret', { probeId, secret, remember, ...receipt }),
   sshTestTrustHost: async (probeId: string, accept: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_trust_host', { probeId, accept, ...receipt }),
+  onSshLaunchState: (listener) => listenSsh<SshLaunchEvent>('ssh-launch:state', listener),
   onSshSessionState: (listener) => listenSsh('ssh-session:state', listener),
   onSshTestState: (listener) => listenSsh('ssh-test:state', listener),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
@@ -470,7 +471,7 @@ const tauriBridge: ElectronAPI = {
   },
 
   // Terminal Operations
-  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean) => {
+  createTerminal: async (profile?: string, _name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => {
     // We pass profile (id) to Rust, it resolves to path/args
     // We also pass cwd if provided; use fitted size when known, else fall back to 80×24
     return invoke('create_terminal', {
@@ -487,6 +488,7 @@ const tauriBridge: ElectronAPI = {
       sessionKey,
       // Plan 045: spawn against the elevated sidecar instead of the primary one.
       elevated,
+      ...(sshLaunchConnectionId === undefined ? {} : { sshLaunchConnectionId }),
     });
   },
 

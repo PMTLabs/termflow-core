@@ -122,6 +122,7 @@ impl HostKeys {
     }
 
     pub(crate) fn pane_op_at(&self, label: &str, request: PaneRequest, now: Instant) -> Result<(PaneReply, PaneEffects), String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let page = inner.window_pages.sender(label, request.pg)?;
         let stream = inner.panes.streams.get(&page.pg).ok_or("page stream ended")?;
@@ -302,6 +303,7 @@ impl HostKeys {
         inner.panes.holders.remove(&pi);
     }
     pub(crate) fn admitted_work(&self, label: &str, pg: u64, leaf: &str, cg: u64) -> Result<CreateAdmission, String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         inner.window_pages.sender(label, pg)?;
         let row = inner.owners.get_mut(leaf).filter(|r| r.cg == cg && (r.admitted_pg == Some(pg) || matches!(r.owner, Owner::Pane(pi) if pi.pg == pg)))
@@ -318,6 +320,7 @@ impl HostKeys {
         }
     }
     pub(crate) fn close_process_reap(&self, pc: &str, reap: bool) -> (PaneResult, Vec<String>) {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let leaf = inner.owners.iter().find(|(_, r)| shell_of(&r.state).is_some_and(|s| s.process == pc)).map(|(l, _)| l.clone());
         let Some(leaf) = leaf else { return (PaneResult::Ok, Vec::new()); };
@@ -326,8 +329,41 @@ impl HostKeys {
         Self::close_leaf_locked(&mut inner, &leaf, CloseStorage::Delete, &mut effects);
         (PaneResult::Ok, effects)
     }
+    /// Read under the input owner barrier. The pane incarnation (unlike cg)
+    /// changes on transfer. Neither a parked copy nor a headless process grants
+    /// launch authority to a window.
+    pub(crate) fn launch_placement(
+        &self, label: &str, leaf: &str, pi: PaneIdentity, process: &str,
+    ) -> Option<u64> {
+        let inner = self.lock();
+        inner.window_pages.sender(label, pi.pg).ok()?;
+        let row = inner.owners.get(leaf)?;
+        if row.owner != Owner::Pane(pi)
+            || !inner.panes.present.get(&pi).is_some_and(|pane| pane.leaf == leaf)
+            || !matches!(&row.state, OwnerState::Registered(shell) if shell.process == process)
+        {
+            return None;
+        }
+        Some(row.cg)
+    }
+
+    /// Backend worker authority follows a mounted adopted pane, not an IPC
+    /// window reference. Unmounted/parked/transfer-in-flight is not writable.
+    pub(crate) fn mounted_launch_owner(&self, leaf: &str, process: &str) -> Option<(PaneIdentity, u64)> {
+        let inner = self.lock();
+        let row = inner.owners.get(leaf)?;
+        let Owner::Pane(pi) = row.owner else { return None };
+        if !inner.panes.present.get(&pi).is_some_and(|pane| pane.leaf == leaf)
+            || !matches!(&row.state, OwnerState::Registered(shell) if shell.process == process)
+        {
+            return None;
+        }
+        Some((pi, row.cg))
+    }
+
     /// Stable placement generation survives transfers/reload, but not final close.
     pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         if !inner.owners.contains_key(leaf) {
             let pi = inner.panes.present.iter().filter(|(_, d)| d.leaf == leaf).map(|(pi, _)| *pi).max_by_key(|pi| (pi.pg, pi.seq))?;

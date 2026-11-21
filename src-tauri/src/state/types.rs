@@ -543,6 +543,7 @@ impl<T> GenerationSlot<T> {
 // `PathBuf`/`AppHandle<R>`, all cheaply cloneable independent of `R: Clone`.
 pub struct AppState<R: Runtime = Wry> {
     pub ssh_sessions: Arc<crate::ssh::session::SessionRegistry>,
+    pub(crate) ssh_launches: Arc<crate::ssh::launch::LaunchRegistry>,
     // Folder passed to the first GUI instance. The boot window already exists, so
     // the renderer consumes this once instead of the backend creating a second one.
     // Arc-shared like every sibling field so `Clone` shares (not snapshots) it — the
@@ -811,6 +812,7 @@ impl<R: Runtime> Clone for AppState<R> {
     fn clone(&self) -> Self {
         Self {
             ssh_sessions: self.ssh_sessions.clone(),
+            ssh_launches: self.ssh_launches.clone(),
             pending_open_path: self.pending_open_path.clone(),
             terminals: self.terminals.clone(),
             root_leaf_claims: self.root_leaf_claims.clone(),

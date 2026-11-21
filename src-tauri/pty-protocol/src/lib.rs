@@ -13,6 +13,7 @@ pub mod frame;
 pub mod pump;
 pub mod rendezvous;
 pub mod spec;
+pub mod ssh_prompt;
 
 pub use bootstrap::{
     negotiate, read_hello, write_hello, Hello, HelloKind, CAP_ATTACH_ACK, CAP_DRAIN,

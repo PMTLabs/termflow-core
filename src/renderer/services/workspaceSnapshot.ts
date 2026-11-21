@@ -20,7 +20,7 @@ export interface WorkspaceSnapshot {
   treesByTabId: Record<string, PaneNode | null>;
   activePaneByTabId: Record<string, string>;
   maximizedPaneByTabId: Record<string, string>;
-  tabPanes: Record<string, PaneNode>;
+  tabPanes: Record<string, PaneNode | null>;
   terminalCwds: Record<string, string>;
   canvas?: CanvasPersisted;
   capturedAt: number;

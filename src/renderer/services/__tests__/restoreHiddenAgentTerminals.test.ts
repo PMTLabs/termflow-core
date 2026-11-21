@@ -127,6 +127,21 @@ beforeEach(() => {
   });
 });
 
+import { expectPaneTags, taggedTree, tags } from '../../__testFixtures__/sshPaneCensus';
+
+test('agent_and_host_orphan_recovery_do_not_invent_ssh_tag', async () => {
+  const survivors = taggedTree();
+  (window as any).__REDUX_STORE__ = { getState: () => ({ panes: { treesByTabId: { 'tb-existing': survivors } } }) };
+  const candidate = {
+    ...hidden('tm-alive', { name: 'ssh saved', shellType: 'ssh' } as Partial<HiddenAgentTerminal>),
+    ssh: tags['tm-ssh'],
+  };
+  const result = await restoreHiddenAgentTerminals([candidate], dispatch);
+  expect(result.restored.map(r => r.terminalId)).toEqual(['tm-alive']);
+  const [installed] = payloadsOf(addTabTree.type);
+  expectPaneTags([survivors, installed.tree], tags, ['tm-local', 'tm-alive']);
+});
+
 describe('restoreHiddenAgentTerminals — attach, never spawn', () => {
   it('carries the running terminal id into the pane unchanged', async () => {
     const result = await restoreHiddenAgentTerminals([hidden('tm-alive')], dispatch);

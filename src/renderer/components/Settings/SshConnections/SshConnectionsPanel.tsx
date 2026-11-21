@@ -6,6 +6,7 @@ import { addToast } from '../../../store/slices/uiSlice';
 import type { SshConnection, SshFolder, SshReply, SshFolderInput } from '../../../types/ssh';
 import { isSshEditorDirty, saveSshEditorDraft, discardSshEditorDraft } from '../../../services/sshEditorGuard';
 import { UnsavedChangesDialog } from '../../UI/UnsavedChangesDialog';
+import type { ConnectAllSummary, ConnectOutcome } from '../../../services/sshConnectAll';
 import { SshTree } from './SshTree';
 import { SshMenus, SshMenuTarget } from './SshMenus';
 import { SshFolderDialog } from './SshFolderDialog';
@@ -42,6 +43,26 @@ export function SshConnectionsPanel() {
       try { await refreshReadOnly(error,api!,reply => dispatch(applyView(reply))); } catch (refreshError) { dispatch(addToast({ type:'error', message:sshErrorMessage(refreshError) })); }
       return false; }
   };
+  // Connect (plan 066 T8). The launch services load lazily so Settings itself stays light.
+  const [connectAsk, setConnectAsk] = useState<string | null>(null);
+  const report = (outcome: ConnectOutcome) => {
+    if (outcome.error) dispatch(addToast({ type:'error', message:outcome.error }));
+    else if (outcome.recentFailed) dispatch(addToast({ type:'warning', message:'Recent could not be updated.' }));
+  };
+  const showSummary = (summary: ConnectAllSummary | null) => {
+    if (summary) dispatch(addToast({ type:summary.failures.length || !summary.attempted ? 'warning' : 'info', message:summary.message }));
+  };
+  const launchSaved = (id: string) => { void import('../../../services/sshConnectAll').then(m => m.connectSavedInTab(id)).then(report); };
+  const connectAll = (folderId: string) => { setMenu(null); void import('../../../services/sshConnectAll').then(m => m.connectAllInTabs(folderId)).then(showSummary); };
+  // A dirty editor for THIS connection must be resolved first; the launch always uses the saved id.
+  const requestConnect = (id: string) => {
+    if (readOnly) return;
+    setMenu(null);
+    if (selection?.kind === 'connection' && selection.id === id && isSshEditorDirty()) setConnectAsk(id); else launchSaved(id);
+  };
+  const cancelConnect = () => setConnectAsk(null);
+  const discardThenConnect = () => { const id = connectAsk; setConnectAsk(null); discardSshEditorDraft(); if (id) launchSaved(id); };
+  const saveThenConnect = () => { const id = connectAsk; setConnectAsk(null); void saveSshEditorDraft().then(saved => { if (saved && id) launchSaved(id); }); };
   if (!api || state.status === 'desktop-only') return <section className="settings-section" data-testid="ssh-connections-panel"><h2>SSH Connections</h2><p>SSH connections are available in the desktop app.</p></section>;
   if (state.status === 'loading') return <section className="settings-section" data-testid="ssh-connections-panel">Loading SSH connections…</section>;
   if (state.status === 'error') return <section className="settings-section" data-testid="ssh-connections-panel"><p role="alert">{state.error}</p><button className="au-btn" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button></section>;
@@ -55,12 +76,13 @@ export function SshConnectionsPanel() {
       onMenu={(event,row,kind) => { if (!readOnly) setMenu({ x:event.clientX, y:event.clientY, row,kind,key:Date.now() }); }} onRename={rename} onDelete={(row,kind) => { if (!readOnly) setMenu({ x:0,y:0,row,kind,key:Date.now(),deleteRequested:true }); }}
       onBookmark={(id,bookmarked) => void commit(() => api.setBookmark(id,bookmarked))} onMove={input => void commit(() => api.move(input))} /></div>
       <footer>{state.view.folders.length} folders · {state.view.connections.length} connections</footer></>}</div>
-      <div className="ssh-editor-pane">{draftFolder !== undefined || selection?.kind === 'connection' ? <SshConnectionEditor focusName={renameFocus} key={selection?.kind === 'connection' ? selection.id : `new-${draftFolder}`} connectionId={selection?.kind === 'connection' ? selection.id : undefined} initialFolder={draftFolder ?? null} view={state.view} api={api} onClose={closeEditor} onSaved={(reply,input) => {
+      <div className="ssh-editor-pane">{draftFolder !== undefined || selection?.kind === 'connection' ? <SshConnectionEditor focusName={renameFocus} key={selection?.kind === 'connection' ? selection.id : `new-${draftFolder}`} connectionId={selection?.kind === 'connection' ? selection.id : undefined} initialFolder={draftFolder ?? null} view={state.view} api={api} onClose={closeEditor} onConnect={requestConnect} onSaved={(reply,input) => {
         dispatch(applyView(reply)); const row = input.id ? reply.view.connections.find(c => c.id === input.id) : reply.view.connections.find(c => !state.view.connections.some(old => old.id === c.id));
         if (row) { setSelected({ row,kind:'connection' }); setDraftFolder(undefined); }
       }} /> : selected ? selected.row.name : 'Select a connection to edit its details.'}</div></div>
-    {menu && !readOnly && <SshMenus key={menu.key} target={menu} view={state.view} api={api} commit={commit} onClose={() => setMenu(null)} onFolder={newFolder} onConnection={newConnection} onRename={rename} />}
+    {menu && !readOnly && <SshMenus key={menu.key} target={menu} view={state.view} api={api} commit={commit} onClose={() => setMenu(null)} onFolder={newFolder} onConnection={newConnection} onRename={rename} onConnect={requestConnect} onConnectAll={connectAll} />}
     {folderDraft && !readOnly && <SshFolderDialog input={folderDraft} onSave={input => commit(() => api.upsertFolder(input))} onClose={() => setFolderDraft(null)} />}
+    <UnsavedChangesDialog isOpen={connectAsk !== null && !readOnly} saveLabel="Save and connect" body={<p>You have unsaved changes to <strong>{state.view.connections.find(c => c.id === connectAsk)?.name ?? 'this connection'}</strong>. Connect opens the last saved version. Save first, discard the changes, or cancel?</p>} onCancel={cancelConnect} onDiscard={discardThenConnect} onSave={saveThenConnect} />
     <UnsavedChangesDialog isOpen={!!pending} stayLabel="Keep editing" body={<p>You have unsaved changes {selected?.kind === 'connection' ? <>to <strong>{selected.row.name}</strong></> : 'to this SSH connection'}. Save them, discard them, or keep editing?</p>} onCancel={() => setPending(null)} onDiscard={() => { discardSshEditorDraft(); const go = pending; setPending(null); go?.(); }} onSave={() => { void saveSshEditorDraft().then(saved => { if (saved) { const go = pending; setPending(null); go?.(); } }); }} />
   </section>;
 }

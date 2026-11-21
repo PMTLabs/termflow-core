@@ -10,12 +10,16 @@ mod auth_tests;
 #[cfg(test)]
 mod credential_tests;
 pub mod known_hosts;
+pub mod launch_argv;
+pub(crate) mod preview;
 #[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;
 #[cfg(test)]
 mod prompt_tests;
 pub mod session;
+pub(crate) mod launch;
+pub(crate) mod launch_process;
 pub mod sessions;
 #[cfg(test)]
 pub(crate) mod tests;

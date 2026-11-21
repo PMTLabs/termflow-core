@@ -10,6 +10,8 @@ import { resolveDefaultProfile, buildNewTabFields } from '../services/newTabActi
 // Shared with Canvas Mode's profile menu — see `services/shellProfileIcon`.
 import { profileEmoji } from '../services/shellProfileIcon';
 import { AdminProfileList } from './UI/AdminProfileList';
+import { SshConnectionsMenuSection } from './Ssh/SshConnectionsMenuSection';
+import { launchSshInTab } from '../services/sshPicker';
 
 interface NewTabDropdownProps {
   onNewTab?: () => void;
@@ -26,6 +28,7 @@ export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {
   const [, setIconTick] = useState(0);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const dropdownButton = useRef<HTMLButtonElement>(null);
 
   // Edge-aware: the menu is right-aligned to the button (so it never spills past
   // the right screen edge), but when the button sits near the LEFT edge the menu
@@ -105,6 +108,8 @@ export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {
     setIsOpen(!isOpen);
   };
 
+  const captureSsh = () => ({ launch: launchSshInTab, invoker: dropdownButton.current });
+
   return (
     <div className="new-tab-dropdown" ref={dropdownRef}>
       <div className="new-tab-buttons">
@@ -119,10 +124,11 @@ export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {
         </button>
         <button
           className="dropdown-button"
+          ref={dropdownButton}
           onClick={handleDropdownClick}
-          disabled={!shellProfiles || shellProfiles.length === 0}
           aria-label="New tab options"
-          title={shellProfiles?.length > 0 ? "Choose shell profile" : "Loading shell profiles..."}
+          aria-expanded={isOpen}
+          title="Choose a shell profile or SSH connection"
         >
           ▼
         </button>
@@ -156,6 +162,10 @@ export const NewTabDropdown: React.FC<NewTabDropdownProps> = () => {
               ))
             )}
           </div>
+
+          <SshConnectionsMenuSection variant="dropdown"
+            capture={captureSsh}
+            onClose={() => setIsOpen(false)} />
 
           <div className="dropdown-divider" />
 

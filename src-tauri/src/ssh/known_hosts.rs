@@ -378,14 +378,47 @@ fn trust_transaction(
     };
     file.write_all(format!("{newline}{token} {public}\n").as_bytes())
         .map_err(|_| SessionError::TrustWriteFailed)?;
+    #[cfg(test)]
+    sync_probe::notify(path, false);
     file.sync_all()
         .map_err(|_| SessionError::TrustWriteFailed)?;
+    #[cfg(test)]
+    sync_probe::notify(path, true);
     drop(file);
     // Final verification detects external replacement; advisory locking cannot exclude it.
     if classify(&snapshot(path)?.0, token, key)? != Verdict::Verified {
         return Err(SessionError::TrustWriteFailed);
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) mod sync_probe {
+    use super::*;
+    use std::sync::{Arc, OnceLock};
+
+    type Observer = Arc<dyn Fn(bool) + Send + Sync>;
+    type Probes = parking_lot::Mutex<std::collections::HashMap<PathBuf, Observer>>;
+
+    fn probes() -> &'static Probes {
+        static PROBES: OnceLock<Probes> = OnceLock::new();
+        PROBES.get_or_init(Default::default)
+    }
+
+    pub(crate) struct Guard(PathBuf);
+    impl Drop for Guard {
+        fn drop(&mut self) { probes().lock().remove(&self.0); }
+    }
+
+    pub(crate) fn at(path: &Path, callback: impl Fn(bool) + Send + Sync + 'static) -> Guard {
+        assert!(probes().lock().insert(path.into(), Arc::new(callback)).is_none());
+        Guard(path.into())
+    }
+
+    pub(super) fn notify(path: &Path, synced: bool) {
+        let callback = probes().lock().get(path).cloned();
+        if let Some(callback) = callback { callback(synced); }
+    }
 }
 
 #[cfg(test)]

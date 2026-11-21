@@ -343,6 +343,7 @@ fn host_capabilities(inherit_cursor: bool) -> u32 {
         | termflow_pty_protocol::CAP_LIFECYCLE_CONTRACT
         | termflow_pty_protocol::CAP_SHUTDOWN_CONTROL
         | termflow_pty_protocol::CAP_MCP_HOLD
+        | termflow_pty_protocol::bootstrap::CAP_SSH_PROMPT_REGISTRATION
         | if cfg!(target_os = "macos") { termflow_pty_protocol::CAP_PERMISSIONS } else { 0 }
         | if inherit_cursor { termflow_pty_protocol::CAP_INHERIT_CURSOR } else { 0 }
 }
@@ -387,6 +388,7 @@ mod tests {
     #[test]
     fn host_capabilities_include_mcp_hold() {
         let base = CAP_ATTACH_ACK | CAP_LIFECYCLE_CONTRACT | CAP_SHUTDOWN_CONTROL | CAP_MCP_HOLD
+            | termflow_pty_protocol::bootstrap::CAP_SSH_PROMPT_REGISTRATION
             | if cfg!(target_os = "macos") { termflow_pty_protocol::CAP_PERMISSIONS } else { 0 };
         assert_eq!(host_capabilities(false), base);
         assert_eq!(host_capabilities(true), base | CAP_INHERIT_CURSOR);

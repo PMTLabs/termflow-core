@@ -1,6 +1,10 @@
+mod identity;
+pub(crate) use identity::native_process_birth;
+
 use std::collections::HashMap;
 use sysinfo::{Pid, System};
 use super::spawn_spec::PS_CWD_INTEGRATION;
+use super::ssh_shell::posix::windows::is_powershell_hook_command;
 
 /// How deep the foreground descent may go before it gives up.
 ///
@@ -221,12 +225,13 @@ pub fn foreground_command_lines(parent_pid: u32, sys: &System) -> Vec<String> {
 /// see it. Matching on it is matching on an implementation detail of OSC 9;9 cwd reporting.
 ///
 /// **Only the exact injected sequence is removed, never a user's own flags.** The script is compared
-/// against the constant itself, and `-Command` / `-NoExit` are dropped only as the tokens
+/// against the constant or the exact SSH wrapper with its quoted helper path, and `-Command` / `-NoExit` are dropped only as the tokens
 /// immediately preceding that exact match — so a profile that legitimately passes `-NoExit` keeps it.
 pub fn command_line_for(argv: &[String], name: &str) -> String {
     let mut dropped = vec![false; argv.len()];
     for (i, arg) in argv.iter().enumerate() {
-        if arg != PS_CWD_INTEGRATION {
+        let ssh_hook = i >= 1 && argv[i - 1] == "-Command" && is_powershell_hook_command(arg);
+        if arg != PS_CWD_INTEGRATION && !ssh_hook {
             continue;
         }
         dropped[i] = true;
@@ -250,6 +255,22 @@ pub fn command_line_for(argv: &[String], name: &str) -> String {
         return name.to_string();
     }
     kept.join(" ")
+}
+
+#[test]
+fn procinfo_hides_ssh_powershell_hook_argument() {
+    use super::ssh_shell::posix::windows::powershell_hook_command;
+    let path = if cfg!(windows) { r"C:\O'Brien Lab\helper.txt" } else { "/O'Brien Lab/helper.txt" };
+    let hook = powershell_hook_command(path).unwrap();
+    let mut argv = ["powershell.exe", "-NoProfile", "-NoExit", "-Command"]
+        .map(str::to_owned).to_vec();
+    argv.push(hook.clone());
+    assert_eq!(command_line_for(&argv, "powershell.exe"), "powershell.exe -NoProfile");
+
+    for near_match in [format!("{hook}; Get-Date"), hook.replace("O''Brien", "O'Brien")] {
+        *argv.last_mut().unwrap() = near_match;
+        assert_eq!(command_line_for(&argv, "powershell.exe"), argv.join(" "));
+    }
 }
 
 /// Derive a friendly label for the foreground program in a pane, from a

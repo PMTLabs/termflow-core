@@ -179,7 +179,10 @@ class BrowserBridge implements ElectronAPI {
         return await response.json();
     }
 
-    async createTerminal(profile?: string, name?: string, cwd?: string): Promise<string> {
+    async createTerminal(profile?: string, name?: string, cwd?: string, _tabId?: string,
+        _cols?: number, _rows?: number, _owningTabId?: string, _sessionKey?: string,
+        _elevated?: boolean, sshLaunchConnectionId?: string): Promise<string> {
+        if (sshLaunchConnectionId !== undefined) throw new Error('SSH shell creation is desktop-only');
         try {
             const response = await fetch(`${API_BASE_URL}/terminals`, {
                 method: 'POST',

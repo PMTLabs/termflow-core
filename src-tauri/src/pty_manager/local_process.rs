@@ -7,11 +7,29 @@ use std::sync::Arc;
 pub struct LocalProcess {
     pid: u32,
     retained: Arc<dyn Send + Sync>,
+    child_exited: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl LocalProcess {
     pub fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
-        Self { pid: child.process_id().unwrap_or(0), retained: Arc::new(child) }
+        Self { pid: child.process_id().unwrap_or(0), retained: Arc::new(child), child_exited: None }
+    }
+
+    pub(super) fn with_exit_probe(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        let pid = child.process_id().unwrap_or(0);
+        let child = Arc::new(std::sync::Mutex::new(child));
+        let wait_child = child.clone();
+        Self {
+            pid,
+            retained: child,
+            child_exited: Some(Arc::new(move || {
+                wait_child.lock().ok().is_some_and(|mut child| matches!(child.try_wait(), Ok(Some(_))))
+            })),
+        }
+    }
+
+    pub(super) fn child_exited(&self) -> bool {
+        self.child_exited.as_ref().is_some_and(|check| check())
     }
 }
 
@@ -62,7 +80,7 @@ mod tests {
         // Simulate the OS rule: a retained process object reserves its PID.
         // This seam replaces only the blocking OS command, not the worker.
         let reserved = Arc::new(Mutex::new(Some("P")));
-        let process = LocalProcess { pid: 42, retained: Arc::new(Reservation(reserved.clone())) };
+        let process = LocalProcess { pid: 42, retained: Arc::new(Reservation(reserved.clone())), child_exited: None };
         let (reached_tx, reached) = mpsc::channel();
         let (release, released) = mpsc::channel();
         let (killed_tx, killed) = mpsc::channel();

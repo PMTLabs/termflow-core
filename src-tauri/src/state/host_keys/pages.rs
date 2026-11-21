@@ -167,6 +167,7 @@ impl HostKeys {
     }
 
     pub(crate) fn register_page(&self, label: &str) -> Result<PageRegistration, String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let result = inner.window_pages.register(label)?;
         if let PageRegistration::Registered { pg, .. } = result {
@@ -176,6 +177,7 @@ impl HostKeys {
     }
 
     pub(crate) fn destroy_window(&self, label: &str, wi: u64) -> Vec<PageIdentity> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let ended = inner.window_pages.destroy(label, wi);
         Self::end_pages_locked(&mut inner, &ended);
@@ -185,6 +187,7 @@ impl HostKeys {
     /// Called by the ordered page stream after the new page has settled.
     #[cfg(test)]
     pub(crate) fn settle_page(&self, page: crate::state::PageIdentity) -> Result<Vec<PageIdentity>, String> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         let ended = inner.window_pages.settle(page)?;
         Self::end_pages_locked(&mut inner, &ended);

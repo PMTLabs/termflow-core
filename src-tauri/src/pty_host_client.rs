@@ -272,6 +272,7 @@ pub struct PtyHostClient {
     mcp_hold: Arc<std::sync::atomic::AtomicBool>,
     /// Permission controls are unsafe to send unless this connection advertised them.
     permissions: Arc<std::sync::atomic::AtomicBool>,
+    ssh_prompt_registration: Arc<std::sync::atomic::AtomicBool>,
     identity_cache: Arc<crate::state::permissions::host_identity::IdentityCache>,
     peer_token: Arc<Mutex<Option<crate::state::permissions::host_identity::AuditToken>>>,
     /// Lifecycle policy copied from the selected connection plan. This is
@@ -340,8 +341,17 @@ impl PtyHostClient {
     }
 
     pub(crate) fn write_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
+        keys.admit_input(process, None, |permit| {
+            Ok::<_, String>(crate::pty_manager::input_gate::InputDispatch::Complete(
+                self.write_registered_admitted(keys, permit, channel, key, bytes),
+            ))
+        }).unwrap_or(false)
+    }
+
+    pub(crate) fn write_registered_admitted(&self, keys: &crate::state::HostKeys, permit: &crate::pty_manager::input_gate::InputPermit<'_>, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
         let binding = self.sessions.lock().unwrap().clone();
-        binding.channel == channel && keys.with_registered_on(process, channel, key, binding.epoch, || self.write_stdin(key, bytes)).unwrap_or(false)
+        binding.channel == channel && permit.admits_host(channel, key, binding.epoch)
+            && keys.with_registered_on(permit.process(), channel, key, binding.epoch, || self.enqueue_stdin(permit, key, bytes)).unwrap_or(false)
     }
 
     pub(crate) fn resize_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, cols: u16, rows: u16) -> bool {
@@ -422,6 +432,14 @@ impl PtyHostClient {
     /// Whether this connection may be sent `HoldMcp`/`ReleaseMcp` (see field doc).
     pub fn mcp_hold(&self) -> bool {
         self.mcp_hold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn set_ssh_prompt_registration(&self, supported: bool) {
+        self.ssh_prompt_registration.store(supported, Ordering::Release);
+    }
+
+    pub(crate) fn ssh_prompt_registration(&self) -> bool {
+        self.ssh_prompt_registration.load(Ordering::Acquire)
     }
 
     pub fn set_permissions(&self, v: bool) {
@@ -560,6 +578,16 @@ impl PtyHostClient {
 
     // --- fire-and-forget (sync-callable from command/API sites) ---
 
+    fn enqueue_stdin(&self, _permit: &crate::pty_manager::input_gate::InputPermit<'_>, tab_id: &str, bytes: &[u8]) -> bool {
+        self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
+            tab_id: tab_id.to_string(),
+            bytes: bytes.to_vec(),
+        })).is_ok()
+    }
+
+    // Wire-level fixtures deliberately exercise disconnect/FIFO without a GUI owner. No
+    // production raw-stdin compatibility entry point: production needs an admission permit.
+    #[cfg(test)]
     pub fn write_stdin(&self, tab_id: &str, bytes: &[u8]) -> bool {
         self.is_alive() && self.outbound.send(Frame::Data(Data::Stdin {
             tab_id: tab_id.to_string(),
@@ -771,6 +799,9 @@ impl PtyHostClient {
     }
 
     async fn spawn_session_inner(&self, tab_id: &str, spec: &SpawnSpec, identity: Option<&crate::state::SessionIdentity>) -> Result<u32, String> {
+        if spec.env.iter().any(|(key, _)| key == termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV) {
+            crate::pty_manager::ssh_shell::require_host_registration(true, self.ssh_prompt_registration())?;
+        }
         let tab = tab_id.to_string();
         let spec = spec.clone();
         let binding = self.sessions.lock().unwrap().clone();
@@ -1056,6 +1087,15 @@ where
                         ),
                     }
                 }
+                Ok(Some(Frame::Data(Data::SshPrompt { tab_id, nonce, sequence, stdin_writes }))) => {
+                    if let Some(id) = route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                        let binding = sessions_r.lock().unwrap().clone();
+                        let proof = crate::pty_manager::ssh_shell::PromptProof::Hosted {
+                            channel: binding.channel, key: &tab_id, epoch: binding.epoch, stdin_writes,
+                        };
+                        let _ = binding.keys.observe_shell_prompt(&id, &nonce, sequence, proof);
+                    }
+                }
                 Ok(Some(Frame::Data(Data::Gap { tab_id, .. }))) => {
                     match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
                         Some(id) => (deps.on_gap)(id),
@@ -1115,6 +1155,7 @@ where
         inherit_cursor: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_hold: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permissions: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        ssh_prompt_registration: Arc::default(),
         identity_cache,
         peer_token: Arc::default(),
         lifecycle: Arc::new(HostRetention::Unknown),
@@ -1453,11 +1494,14 @@ fn spawn_sidecar_detached(
 pub(crate) fn wire_unix_host_client(conn: tokio::net::UnixStream, deps: PtyHostDeps) -> PtyHostClient {
     #[cfg(target_os = "macos")]
     let (peer_pid, peer_token) = (macos_spawn::peer_pid(&conn), macos_spawn::peer_token(&conn));
+    #[cfg(target_os = "linux")]
+    let peer_pid = conn.peer_cred().ok().and_then(|cred| cred.pid()).and_then(|pid| u32::try_from(pid).ok());
     let (rd, wr) = tokio::io::split(conn);
     let client = wire_client(rd, wr, deps);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    client.exe_origin.set_server_pid(peer_pid);
     #[cfg(target_os = "macos")]
     {
-        client.exe_origin.set_server_pid(peer_pid);
         *client.peer_token.lock().unwrap_or_else(|e| e.into_inner()) = peer_token;
     }
     client

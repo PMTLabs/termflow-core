@@ -37,6 +37,7 @@ impl<R: Runtime> AppState<R> {
             let current = self.host_table.keys().ssh_owner_receipt(leaf);
             current.is_some() && (receipt.is_none() || current == receipt)
         });
+        self.ssh_launches.reconcile_processes(self.host_table.keys());
     }
     pub(crate) fn metadata_leaf(&self, reference: &str) -> Result<Option<String>, String> {
         super::ingress::metadata_target(self.host_table.keys(), reference)

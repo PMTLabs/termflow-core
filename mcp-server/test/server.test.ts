@@ -44,6 +44,49 @@ function called(calls: Call[], method: Call["method"], url: string): boolean {
 }
 
 describe("createMcpServer tool wiring", () => {
+    it("public create never forwards sshLaunchConnectionId to REST", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => undefined }));
+        try {
+            const result = await client.callTool({ name: "create_terminal", arguments: {
+                name: "ordinary", sshLaunchConnectionId: "saved-id",
+            } });
+            const call = calls.find((item) => item.method === "post" && item.url === "/terminals");
+            if (result.isError) expect(call).toBeUndefined();
+            else {
+                expect(call?.body).toHaveProperty("name", "ordinary");
+                expect(call?.body).not.toHaveProperty("sshLaunchConnectionId");
+            }
+        } finally {
+            await client.close();
+        }
+    });
+    it("all_api_create_modes_and_mcp_commands_leave_new_leaf_local (MCP transport)", async () => {
+        const { api, calls } = makeFakeApi();
+        const client = await connectClient(createMcpServer({ api, getCallerId: () => "tm-parent" }));
+        const command = "ssh user@example.invalid";
+        try {
+            expect((await client.callTool({ name: "create_terminal", arguments: {
+                name: command, profile: "default", owningTabId: "tb-parent", paneId: "pn-parent",
+            } })).isError).not.toBe(true);
+            expect((await client.callTool({ name: "execute_command", arguments: {
+                terminalId: "tm-new", command, cliType: "default",
+            } })).isError).not.toBe(true);
+            expect((await client.callTool({ name: "execute_command", arguments: {
+                terminalId: "tm-new", command, targetOS: "linux",
+            } })).isError).not.toBe(true);
+            expect(calls.map(call => call.url)).toEqual(["/terminals", "/terminals/tm-new/execute", "/fleet/execute"]);
+            const [create, local, fleet] = calls;
+            expect(create.body).toMatchObject({ name: command, profile_id: "default", parentTerminalId: "tm-parent" });
+            expect(local.body).toEqual({ prompt: command, cliType: "default" });
+            expect(fleet.body).toEqual({ command, targetOS: "linux", terminalId: "tm-new" });
+            for (const key of ["ssh", "sshLaunchConnectionId", "connectionId", "hiddenMetrics"]) {
+                expect(create.body).not.toHaveProperty(key);
+            }
+        } finally {
+            await client.close();
+        }
+    });
     it("round-trips opaque process and session identities through terminal detail", async () => {
         const processId = "pc-0123456789ab4cde8fab0123456789ab";
         const sessionKey = "tm-original~0123456789ab4cde8fab0123456789ac";

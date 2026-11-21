@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn transfer_ui_ssh_tag_survives_take_adopt_and_cancel() {
+    use serde_json::json;
+
+    for cancel in [false, true] {
+        let keys = HostKeys::default();
+        let mut source = Page::new(&keys, "source");
+        let mut destination = Page::new(&keys, "destination");
+        let ssh = register_shell(&keys, &mut source, "tm-ssh", "pc-ssh");
+        let local = register_shell(&keys, &mut source, "tm-local", "pc-local");
+        let other = register_shell(&keys, &mut source, "tm-other", "pc-other");
+        let ui = json!({
+            "paneTree": {
+                "id": "pn-split", "type": "split", "children": [
+                    {"id": "pn-ssh", "type": "terminal", "terminalId": "tm-ssh", "ssh": {
+                        "connectionId": "saved", "browserCollapsed": true, "browserPath": "/srv/a b",
+                        "followCd": true, "hiddenMetrics": ["nfs", "cpu"]
+                    }},
+                    {"id": "pn-local", "type": "terminal", "terminalId": "tm-local"},
+                    {"id": "pn-other", "type": "terminal", "terminalId": "tm-other", "ssh": {
+                        "connectionId": "other", "browserCollapsed": false, "browserPath": "/home/other",
+                        "followCd": false, "hiddenMetrics": ["uptime"]
+                    }}
+                ]
+            }
+        });
+        let tx = "tagged";
+        assert_eq!(source.op(&keys, PaneOp::Stash { tx: tx.into(), pairs: vec![ssh.clone(), local.clone(), other.clone()], ui: Some(ui.clone()) }), PaneResult::Ok);
+        // A stale member is closed between stash and take. UI stays opaque but
+        // the member list, not the UI, authorizes which leaves may be installed.
+        assert_eq!(source.op(&keys, PaneOp::Close { pi: local.pi }), PaneResult::Ok);
+        let PaneResult::Taken { payload } = destination.op(&keys, PaneOp::Take { tx: tx.into() }) else { panic!("take"); };
+        assert_eq!(payload.ui, Some(ui));
+        assert_eq!(payload.panes, vec![ssh.descriptor.clone(), other.descriptor.clone()]);
+
+        let next_ssh = destination.entry("tm-ssh", false);
+        let next_other = destination.entry("tm-other", false);
+        let adopt = |pairs| PaneOp::Adopt { tx: tx.into(), pairs };
+        let stale = destination.entry("tm-local", false);
+        assert!(matches!(destination.op(&keys, adopt(vec![stale])), PaneResult::Rejected { .. }));
+        if cancel {
+            assert_eq!(source.op(&keys, PaneOp::Cancel { tx: tx.into() }), PaneResult::Ok);
+            assert!(matches!(destination.op(&keys, adopt(vec![next_ssh, next_other])), PaneResult::Rejected { .. }));
+            assert_eq!(keys.pane_owner("tm-ssh"), Some(Owner::Parked { pg: source.pg, by: ssh.pi }));
+            assert_eq!(keys.pane_owner("tm-other"), Some(Owner::Parked { pg: source.pg, by: other.pi }));
+        } else {
+            assert_eq!(destination.op(&keys, adopt(vec![next_ssh.clone(), next_other.clone()])), PaneResult::Ok);
+            assert_eq!(keys.pane_owner("tm-ssh"), Some(Owner::Pane(next_ssh.pi)));
+            assert_eq!(keys.pane_owner("tm-other"), Some(Owner::Pane(next_other.pi)));
+            assert_eq!(source.op(&keys, PaneOp::Close { pi: ssh.pi }), PaneResult::Contended);
+        }
+        assert!(matches!(destination.op(&keys, PaneOp::Take { tx: tx.into() }), PaneResult::Rejected { .. }));
+        assert!(!matches!(keys.pane_owner("tm-local"), Some(Owner::Pane(_))));
+    }
+}
+
+#[test]
 fn stash_departed_source_keeps_authority_for_only_its_own_transfer_member() {
     let keys = HostKeys::default();
     let mut source = Page::new(&keys, "source");

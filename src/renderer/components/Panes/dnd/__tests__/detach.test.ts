@@ -17,7 +17,7 @@ jest.mock('../../../../store', () => ({
 
 jest.mock('../../../../services/TerminalService', () => ({
   terminalService: {
-    getProcessId: (terminalId: string) => `proc-${terminalId}`,
+    getProcessId: (terminalId: string) => terminalId === 'tm-other' ? undefined : `proc-${terminalId}`,
     attachExistingTerminal: jest.fn(),
     detachTerminal: jest.fn(),
     markReattachedSession: jest.fn(),
@@ -36,6 +36,59 @@ import {
   removeSourceTab, removeSourcePane,
 } from '../detach';
 import { addTab } from '../../../../store/slices/tabsSlice';
+import { addTabTree } from '../../../../store/slices/panesSlice';
+import { terminalService } from '../../../../services/TerminalService';
+import { leafForDrag } from '../PaneDragController';
+import { expectPaneTags, pane, sentinel, taggedTree, tags } from '../../../../__testFixtures__/sshPaneCensus';
+
+test('drag_identity_keeps_tag_and_stale_source_cannot_demote_ssh', () => {
+  const tree = taggedTree();
+  const source = { sourceTabId: 'tb-drag', sourcePaneId: 'pn-ssh', terminalId: 'tm-ssh' };
+  try {
+    mockState.panes.treesByTabId = { 'tb-drag': tree };
+    const leaf = leafForDrag(source)!;
+    expectPaneTags([leaf, tree.children![1]], tags, ['tm-local']);
+    expectPaneTags([JSON.parse(JSON.stringify(buildPaneDetachPayload(leaf).paneTree)), tree.children![1]], tags, ['tm-local']);
+    mockState.panes.treesByTabId = { 'tb-drag': { ...pane('local'), id: 'pn-ssh' } };
+    expect(leafForDrag(source)).toBeNull();
+    mockState.panes.treesByTabId = {};
+    expect(leafForDrag(source)).toBeNull();
+  } finally { mockState.panes.treesByTabId = {}; }
+});
+
+test('pane_and_tab_detach_json_preserve_all_ssh_preferences', () => {
+  const tree = taggedTree();
+  mockState.panes.treesByTabId = { 'tb-drag': tree };
+  try {
+    const single = JSON.parse(JSON.stringify(buildPaneDetachPayload(pane('ssh', sentinel))));
+    expectPaneTags([single.paneTree, tree.children![1]], tags, ['tm-local']);
+    const tab = JSON.parse(JSON.stringify(buildTabDetachPayload('tb-drag', 'Drag')));
+    expectPaneTags([tab.paneTree], tags, ['tm-local']);
+    expect(tab.terminals.map((t: { terminalId: string }) => t.terminalId)).toEqual(['tm-ssh', 'tm-local']);
+    expect(single.terminals[0]).not.toHaveProperty('ssh');
+    for (const descriptor of tab.terminals) {
+      for (const key of ['ssh', 'connectionId', 'hiddenMetrics', 'password', 'identityFile']) {
+        expect(descriptor).not.toHaveProperty(key);
+      }
+    }
+  } finally { mockState.panes.treesByTabId = {}; }
+});
+
+test.each(['direct new tab', 'cross-window new tab'] as const)(
+  'all_reattach_destinations_preserve_tag_without_retyping (%s)', destination => {
+    dispatch.mockClear();
+    jest.mocked(terminalService.attachExistingTerminal).mockClear();
+    const payload = JSON.parse(JSON.stringify(buildPaneDetachPayload(taggedTree())));
+    payload.paneTree.children[0].ssh.hiddenMetrics = ['nfs', 'unknown', 'cpu', 'nfs'];
+    if (destination === 'direct new tab') applyDetachPayload(payload);
+    else applyCrossWindowPayload(payload);
+    const install = dispatch.mock.calls.find(([action]) => action.type === addTabTree.type)?.[0];
+    expectPaneTags([install.payload.tree], tags, ['tm-local']);
+    expect(jest.mocked(terminalService.attachExistingTerminal).mock.calls.map(call => call.slice(0, 2))).toEqual([
+      ['tm-ssh', 'proc-tm-ssh'], ['tm-local', 'proc-tm-local'],
+    ]);
+  },
+);
 
 describe('whole-tab detach (buildTabDetachPayload / applyDetachPayload)', () => {
   beforeEach(() => {

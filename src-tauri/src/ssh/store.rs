@@ -57,20 +57,36 @@ const ALLOWED_OPTIONS: &[&str] = &[
     "SendEnv",
     "SetEnv",
 ];
-fn option_key_allowed(key: &str) -> Result<()> {
+pub(super) fn canonical_option(key: &str, value: &str) -> Result<&'static str> {
     if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Err(StoreError::field("extraOptions", "invalid-key"));
     }
-    if !ALLOWED_OPTIONS
+    let canonical = ALLOWED_OPTIONS
         .iter()
-        .any(|allowed| key.eq_ignore_ascii_case(allowed))
-    {
-        return Err(StoreError {
+        .copied()
+        .find(|allowed| key.eq_ignore_ascii_case(allowed))
+        .ok_or_else(|| StoreError {
             message: format!("“{key}” isn't allowed here. Allowed options: {}.", ALLOWED_OPTIONS.join(", ")),
             ..StoreError::field("extraOptions", "option-not-allowed")
-        });
+        })?;
+    bounded(value, "extraOptions")?;
+    if value.chars().any(char::is_control) {
+        return Err(StoreError::field("extraOptions", "invalid-value"));
     }
-    Ok(())
+    // ssh would fill these in from THIS computer (its environment, local user or
+    // host), or fail the whole launch when a variable is unset. `${…}` expands in
+    // SetEnv (OpenSSH ≥ 10), DynamicForward and forward socket paths; `%` tokens
+    // expand in SetEnv (≥ 10) and socket paths (a forward part containing `/`).
+    // `%%` is no portable escape: 9.x passes it through, 10.x reduces it to `%`.
+    let percent = match canonical {
+        "SetEnv" => value.contains('%'),
+        "LocalForward" | "RemoteForward" => value.contains('%') && value.contains('/'),
+        _ => false,
+    };
+    if value.contains("${") || percent {
+        return Err(StoreError::field("extraOptions", "local-expansion"));
+    }
+    Ok(canonical)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -88,7 +104,7 @@ impl StoreError {
             message: message.into(),
         }
     }
-    fn field(field: &str, code: &str) -> Self {
+    pub(super) fn field(field: &str, code: &str) -> Self {
         Self {
             field: Some(field.into()),
             code: code.into(),
@@ -125,6 +141,7 @@ impl StoreError {
                 ("extraOptions", "invalid-key") => "Option names must contain only letters A–Z.",
                 ("extraOptions", "invalid-value") => "Option values can't contain control characters.",
                 ("extraOptions", "length") => "Each option value must be at most 1024 characters.",
+                ("extraOptions", "local-expansion") => "Option values can't use “${…}” or “%” tokens, which ssh would fill in from this computer.",
                 _ => "Check this field.",
             }.into(),
         }
@@ -224,7 +241,7 @@ pub struct ConnectionView {
     pub extra_options: Vec<(String, String)>,
     pub bookmarked: bool,
     pub order: usize,
-    pub last_used_at: Option<String>,
+    pub last_used_at: Option<i64>,
     pub has_saved_secret: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -265,7 +282,14 @@ impl Persisted {
                         extra_options: c.extra_options.clone(),
                         bookmarked: c.bookmarked,
                         order: c.order,
-                        last_used_at: c.last_used_at.clone(),
+                        // Keep the v1 on-disk string readable by older builds.
+                        last_used_at: c.last_used_at.as_deref().and_then(|value| {
+                            value.parse().ok().or_else(|| {
+                                chrono::DateTime::parse_from_rfc3339(value)
+                                    .ok()
+                                    .map(|date| date.timestamp_millis())
+                            })
+                        }),
                         has_saved_secret: c.secret.is_some(),
                     })
                     .collect(),
@@ -434,11 +458,7 @@ impl Persisted {
                 return Err(StoreError::field("extraOptions", "too-many"));
             }
             for (key, value) in &c.extra_options {
-                option_key_allowed(key)?;
-                bounded(value, "extraOptions")?;
-                if value.chars().any(char::is_control) {
-                    return Err(StoreError::field("extraOptions", "invalid-value"));
-                }
+                canonical_option(key, value)?;
             }
         }
         Ok(())
@@ -579,6 +599,12 @@ impl Persisted {
         self.connections.retain(|c| !connections.contains(&c.id));
         Ok(())
     }
+    pub(crate) fn mark_used(&mut self, id: &str) -> Result<()> {
+        let row = self.connections.iter_mut().find(|c| c.id == id)
+            .ok_or_else(|| StoreError::new("not-found", "Connection not found"))?;
+        row.last_used_at = Some(chrono::Utc::now().timestamp_millis().to_string());
+        Ok(())
+    }
     pub fn set_bookmark(&mut self, id: &str, bookmarked: bool) -> Result<()> {
         self.connections
             .iter_mut()
@@ -650,7 +676,7 @@ fn bracketed_host(host: &str) -> bool {
         .and_then(|s| s.strip_suffix(']'))
         .is_some_and(|s| s.parse::<std::net::Ipv6Addr>().is_ok())
 }
-fn valid_host(host: &str) -> bool {
+pub(super) fn valid_host(host: &str) -> bool {
     bracketed_host(host)
         || host.parse::<std::net::Ipv6Addr>().is_ok()
         || (!host.starts_with(['-', '.'])
@@ -731,6 +757,9 @@ pub struct Store {
     // Reload recovery revisions are served immediately but only persisted on a write.
     served: Arc<Mutex<Option<Reply>>>,
     writer: Arc<Writer>,
+    // Raw disk revision -> last definition revision. Metadata-only updates
+    // (Recent, UI preferences and Remember) must not invalidate a launch.
+    launch_revision: Arc<Mutex<Option<(u64, u64)>>>,
 }
 impl Store {
     pub fn new(path: PathBuf) -> Self {
@@ -739,6 +768,7 @@ impl Store {
             cache: Arc::new(Mutex::new(None)),
             served: Arc::new(Mutex::new(None)),
             writer: Arc::new(write_atomic),
+            launch_revision: Arc::default(),
         }
     }
     #[cfg(test)]
@@ -850,6 +880,30 @@ impl Store {
         self.load()
     }
 
+    /// Resolve and fence a launch against the same locked store used by edits.
+    /// The callback may admit a FIFO item, but must not wait on or write to a PTY.
+    pub(super) fn with_launch_snapshot<T>(
+        &self,
+        read: impl FnOnce(&Persisted, u64) -> T,
+    ) -> Result<T> {
+        let _lock = self.lock()?;
+        let data = self.load()?;
+        Ok(read(&data, self.definition_revision(data.revision)))
+    }
+
+    fn definition_revision(&self, raw: u64) -> u64 {
+        self.launch_revision.lock().unwrap()
+            .filter(|(current, _)| *current == raw)
+            .map_or(raw, |(_, definition)| definition)
+    }
+
+    /// Preview needs one fresh, consistent snapshot, not a read/merge/write.
+    /// Atomic replacement makes a single read sufficient; don't create a lock
+    /// file (or even a config directory) for an unsaved preview.
+    pub(super) fn preview_snapshot(&self) -> Result<Persisted> {
+        self.load()
+    }
+
     pub fn transact(
         &self,
         mutation: impl FnOnce(&mut Persisted) -> Result<()>,
@@ -873,9 +927,12 @@ impl Store {
                 format!("{}: {}", self.path.display(), e.message),
             )
         })?;
+        let raw = candidate.revision;
+        let before = launch_definitions(&candidate);
         mutation(&mut candidate)?;
         candidate.validate()?;
         candidate.normalize();
+        let definition_changed = before != launch_definitions(&candidate);
         let served_revision = self
             .served
             .lock()
@@ -892,12 +949,29 @@ impl Store {
         before_commit()?;
         (self.writer)(&self.path, &contents)
             .map_err(|e| StoreError::new("io", format!("{}: {e}", self.path.display())))?;
+        let definition = if definition_changed { candidate.revision } else { self.definition_revision(raw) };
+        *self.launch_revision.lock().unwrap() = Some((candidate.revision, definition));
         let reply = candidate.view(None);
         self.remember(candidate);
         *self.served.lock().unwrap() = Some(reply.clone());
         emit(&reply);
         Ok(reply)
     }
+}
+
+// Exclude UI metadata and encrypted credentials. Editing any argv-affecting
+// field (including a jump row) creates a new definition revision even on revert.
+fn launch_definitions(data: &Persisted) -> Vec<Connection> {
+    let mut rows = data.connections.clone();
+    for row in &mut rows {
+        row.secret = None;
+        row.last_used_at = None;
+        row.bookmarked = false;
+        row.folder_id = None;
+        row.order = 0;
+    }
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+    rows
 }
 
 #[cfg(test)]

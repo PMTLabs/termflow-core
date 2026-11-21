@@ -33,10 +33,14 @@ pub struct Counters {
     pub closed_channels: AtomicUsize,
     pub principals: Mutex<Vec<String>>,
     pub direct_addresses: Mutex<Vec<(String, u32)>>,
+    pub environment: Mutex<Vec<(String, String)>>,
+    /// Terminal (pty-req) channels: only a real OpenSSH client in a PTY asks.
+    pub ptys: AtomicUsize,
 }
 #[derive(Clone)]
 pub struct Server {
     pub host: ssh_key::PrivateKey,
+    pub host_certificate: Option<ssh_key::Certificate>,
     pub client: ssh_key::PublicKey,
     pub password: String,
     pub user: String,
@@ -50,6 +54,7 @@ impl Server {
     pub fn new(seed: u8, user: &str) -> Self {
         Self {
             host: key(seed),
+            host_certificate: None,
             client: key(seed + 10).public_key().clone(),
             password: format!("password-{user}"),
             user: user.into(),
@@ -60,10 +65,11 @@ impl Server {
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    fn start(self, stream: BoxStream) {
+    pub(super) fn start(self, stream: BoxStream) {
         self.counters.handshakes.fetch_add(1, Ordering::SeqCst);
         let config = server::Config {
             keys: vec![self.host.clone()],
+            certificates: self.host_certificate.iter().cloned().collect(),
             auth_rejection_time: Duration::ZERO,
             auth_rejection_time_initial: Some(Duration::ZERO),
             ..Default::default()
@@ -117,6 +123,44 @@ impl server::Handler for Server {
     async fn channel_close(&mut self, id: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
         self.counters.closed_channels.fetch_add(1, Ordering::SeqCst);
         self.channels.lock().remove(&id);
+        Ok(())
+    }
+    async fn env_request(
+        &mut self,
+        _: ChannelId,
+        name: &str,
+        value: &str,
+        _: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.counters.environment.lock().push((name.into(), value.into()));
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn pty_request(
+        &mut self,
+        ch: ChannelId,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: u32,
+        _: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.counters.ptys.fetch_add(1, Ordering::SeqCst);
+        session.channel_success(ch)?;
+        Ok(())
+    }
+    async fn shell_request(
+        &mut self,
+        ch: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(ch)?;
+        session.data(ch, b"launch-shell-ok".to_vec())?;
+        session.exit_status_request(ch, 0)?;
+        session.eof(ch)?;
+        session.close(ch)?;
         Ok(())
     }
     async fn exec_request(

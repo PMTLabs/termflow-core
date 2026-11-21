@@ -1,6 +1,25 @@
 import { planSeeds, pruneDuplicateLeaves, terminalsHomedElsewhere } from '../tabTreeSeed';
 import { getAllTerminalIds } from '../../store/slices/paneTreeOps';
 import type { PaneNode } from '../../store/slices/panesSlice';
+import { expectPaneTags, pane, taggedTree, tags } from '../../__testFixtures__/sshPaneCensus';
+
+test('plan_seeds_preserves_tag_prunes_duplicate_and_keeps_null', () => {
+  const tree = taggedTree();
+  tree.children![0].seededForTabId = 'tb-owner';
+  const tabs = [
+    { id: 'tb-copy', shellType: 'default' }, { id: 'tb-empty' },
+    { id: 'tb-owner', shellType: 'custom' }, { id: 'tb-new' },
+  ];
+  const output = Object.fromEntries(planSeeds(tabs, {}, {
+    'tb-copy': pane('ssh'), 'tb-empty': null, 'tb-owner': tree,
+  }).map(plan => [plan.tabId, plan.tree]));
+  expect(output['tb-owner']).toEqual(tree);
+  expect(output['tb-copy']).toBeNull();
+  expect(output['tb-empty']).toBeNull();
+  expect(output['tb-new']?.terminalId).toMatch(/^tm-/);
+  expectPaneTags(Object.values(output), tags, ['tm-local', output['tb-new']!.terminalId!]);
+  expect(planSeeds(tabs, output, { 'tb-owner': pane('local') })).toEqual([]);
+});
 
 const leaf = (paneId: string, terminalId: string): PaneNode => ({
   id: paneId, type: 'terminal', terminalId,

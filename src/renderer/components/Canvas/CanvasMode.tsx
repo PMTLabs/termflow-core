@@ -1,7 +1,7 @@
 import { captureWorkspace, isCurrentWorkspace } from '../../services/workspaceReplacement';
 import { capturePaneEffect } from '../../services/paneEffect';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useDispatch, useSelector } from 'react-redux';
+import { useDispatch, useSelector, useStore } from 'react-redux';
 import { terminalCache } from '@termflow/terminal-core';
 import { runningActivityTracker } from '../../services/RunningActivityTracker';
 import { terminalService } from '../../services/TerminalService';
@@ -37,7 +37,8 @@ import { CanvasNodeMenu } from './CanvasNodeMenu';
 import { CanvasGroupMenu } from './CanvasGroupMenu';
 import { CanvasProfileMenu } from './CanvasProfileMenu';
 import { closeEventFor, closeEndedRequests, decideCanvasClose } from './canvasClose';
-import { planCanvasSpawn, spawnRectAt, spawnRectNear } from './canvasSpawn';
+import { planCanvasSpawn, spawnRectAt, spawnRectNear, type CanvasSpawn } from './canvasSpawn';
+import { launchSshConnection } from '../../services/sshLaunch';
 import { connectWhenReady } from './canvasConnect';
 import { chipOffsets } from './groupChips';
 import { worldPoint } from './canvasMutations';
@@ -356,6 +357,9 @@ export const CanvasMode: React.FC = () => {
    * would have a fourth, meaningless combination, and the day both were set the menu would
    * open twice.
    */
+  const canvasRoot = useRef<HTMLDivElement>(null);
+  const portInvoker = useRef<HTMLElement | null>(null);
+  const canvasStore = useStore<RootState>();
   const [spawnMenu, setSpawnMenu] = useState<
     { x: number; y: number; at: { x: number; y: number }; fromId?: undefined }
     | { x: number; y: number; at?: undefined; fromId: string }
@@ -642,6 +646,9 @@ export const CanvasMode: React.FC = () => {
     // A port press that never moved: offer the profile list, and remember which node the new
     // terminal is being wired to. `useWireDrag` has already decided this was a click rather
     // than a drag — see `exceedsDragSlop`.
+    const sourceNode = Array.from(canvasRoot.current?.querySelectorAll<HTMLElement>('[data-terminal-id]') ?? [])
+      .find(node => node.dataset.terminalId === click.fromId);
+    portInvoker.current = sourceNode?.querySelector<HTMLElement>(`[data-port="${click.side}"]`) ?? null;
     setSpawnMenu({ x: click.x, y: click.y, fromId: click.fromId });
   }, []));
 
@@ -961,6 +968,7 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (focusedId) return;
+      if ((e.target as HTMLElement | null)?.closest?.('.ssh-picker')) return;
       const action = canvasKeyAction(
         e as unknown as CanvasKey,
         { node: !!selectedId, edge: !!selectedEdgeId },
@@ -1118,24 +1126,50 @@ export const CanvasMode: React.FC = () => {
    * has been built, and ships the tree that carries it (installed with `addTabTree` below, so
    * `planSeeds` does not manufacture a second root under a leaf we never saw).
    */
-  const spawn = useCallback((profile: ShellProfileLike) => {
-    const menu = spawnMenu;
+  const spawn = useCallback((profile: ShellProfileLike | null, ssh?: {
+    id: string; menu: NonNullable<typeof spawnMenu>; current: () => boolean;
+  }) => {
+    const menu = ssh?.menu ?? spawnMenu;
     if (!menu) return;
+    if (ssh && (!mounted.current || !ssh.current())) return 'The Canvas spawn location is no longer available.';
+    const spawnModel = ssh ? selectCanvasModel(canvasStore.getState()) : model;
     const source = menu.fromId
-      ? model.nodes.find((n) => n.terminalId === menu.fromId)
+      ? spawnModel.nodes.find((n) => n.terminalId === menu.fromId)
       : undefined;
+    if (ssh && menu.fromId && !source) return 'The source terminal is no longer on Canvas.';
     // A port click on a node that vanished between press and release — its tab closed, its
     // pane was re-homed — has nowhere to fan from and nothing to connect to. Dropping the
     // spawn is right: half of what was asked for is a terminal wired to nothing.
     if (menu.fromId && !source) return;
 
+    // `model` is deliberately the RAW (un-spaced) model: a spawn must avoid the terminals' true
+    // stored positions. For an SSH launch the render-time closure may be stale, so it is re-read.
+    const placeNear = (m: typeof model, fanned: number) => spawnRectNear(
+      source!.rect, m.nodes.map((n) => n.rect), fanned);
     const rect = source
-      ? spawnRectNear(source.rect, model.nodes.map((n) => n.rect),
-          edges.filter((e) => e.from === source.terminalId).length)
+      ? (ssh
+        ? placeNear(spawnModel, canvasStore.getState().canvas.edges.filter(e => e.from === source.terminalId).length)
+        : spawnRectNear(source.rect, model.nodes.map((n) => n.rect),
+          edges.filter((e) => e.from === source.terminalId).length))
       : spawnRectAt(menu.at!);
 
-    const plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
-    // The selector has not re-rendered the three insert dispatches below yet. Camera targeting
+    let plan: CanvasSpawn;
+    if (ssh) {
+      const result = launchSshConnection(ssh.id, { kind: 'canvas', rect, sourceTerminalId: source?.terminalId });
+      if (!result.ok) return result.error.message;
+      const state = canvasStore.getState();
+      const tab = state.tabs.tabs.find(t => t.id === result.tabId);
+      const tree = state.panes.treesByTabId[result.tabId];
+      if (!tab || !tree) return 'The new SSH terminal could not be placed on Canvas.';
+      plan = { tab: { ...tab, isActive: false }, leafId: result.terminalId, rect, tree };
+    } else {
+      if (!profile) return;
+      plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
+      dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
+      dispatch(addTab(plan.tab));
+      dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));
+    }
+    // The selector has not re-rendered after the insert dispatches yet. Camera targeting
     // therefore builds that post-insert shown model explicitly; placement above remains RAW.
     const spawnedNode: CanvasNodeModel = {
       terminalId: plan.leafId, tabId: plan.tab.id, paneId: plan.tree.id,
@@ -1153,10 +1187,6 @@ export const CanvasMode: React.FC = () => {
         },
       ],
     };
-    dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
-    dispatch(addTab(plan.tab));
-    dispatch(addTabTree({ tabId: plan.tab.id, tree: plan.tree }));
-
     // Select it, and bring it into view if it is not already framed — Tam's requested flow is
     // click port → create → connect → LOOK AT IT → type. A port spawn fans a full node-width
     // away from its parent, so at any working zoom it lands off screen about as often as not.
@@ -1208,7 +1238,21 @@ export const CanvasMode: React.FC = () => {
         if (edge && current()) dispatch(addEdge(edge));
       });
     }
-  }, [spawnMenu, model.nodes, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt]);
+    return undefined;
+  }, [spawnMenu, model, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt, canvasStore]);
+
+  // The popup retains the gesture, not the camera/model snapshot. Use the latest spawn handler.
+  const spawnCurrent = useRef(spawn);
+  spawnCurrent.current = spawn;
+  const captureSsh = () => {
+    const menu = spawnMenu!;
+    const workspace = captureWorkspace();
+    const current = menu.fromId ? capturePaneEffect(menu.fromId) : () => isCurrentWorkspace(workspace);
+    return {
+      invoker: (menu.fromId && portInvoker.current) || canvasRoot.current,
+      launch: (id: string) => spawnCurrent.current(null, { id, menu, current }) ?? null,
+    };
+  };
 
   /**
    * Keys that get you OUT of a terminal — the mirror of the listener above, and gated on the
@@ -1232,6 +1276,7 @@ export const CanvasMode: React.FC = () => {
   useEffect(() => {
     if (!focusedId) return;
     const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement | null)?.closest?.('.ssh-picker')) return;
       const action = terminalKeyAction(e as unknown as CanvasKey, !!overlayIdRef.current, combos);
       // Completely untouched — no preventDefault, no stopPropagation — so it reaches the PTY.
       // This is the arm a bare `T` lands on, which is Tam's requirement from the inside: while a
@@ -1280,6 +1325,9 @@ export const CanvasMode: React.FC = () => {
     <div
       className={`canvas-mode${wire.linking ? ' linking' : ''}`}
       data-testid="canvas-mode"
+      ref={canvasRoot}
+      aria-label="Canvas workspace"
+      tabIndex={-1}
       style={geometryVars(metrics, vp.z)}
       // Capture, so a press on a port becomes a link drag before the node's own pointerdown
       // selects it or the viewport starts a pan.
@@ -1629,6 +1677,7 @@ export const CanvasMode: React.FC = () => {
           // it to the node whose port you clicked.
           header={spawnMenu.fromId ? 'Connect a new terminal' : 'New terminal here'}
           onPick={spawn}
+          captureSsh={captureSsh}
           onClose={() => setSpawnMenu(null)}
         />
       )}

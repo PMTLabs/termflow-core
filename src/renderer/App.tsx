@@ -13,6 +13,7 @@ import { PaneDragProvider } from './components/Panes/dnd/PaneDragController';
 import { isDetachWindow, reconstructDetachedWindow, applyReattachByToken } from './components/Panes/dnd/detach';
 import { LayoutManager } from './components/LayoutManager';
 import { GlobalDialog } from './components/UI/GlobalDialog';
+import { SshConnectionsDialogHost } from './components/Ssh/AllSshConnectionsDialog';
 import { ConfirmDialog } from './components/UI/ConfirmDialog';
 import { ToastContainer } from './components/UI/ToastContainer';
 import { GlobalPeerRequests } from './components/GlobalPeerRequests';
@@ -72,7 +73,7 @@ import { terminalTitleColor } from './store/titleColor';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
-import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
+import { buildApiCreatedTab, buildApiFallbackPane, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
 import { notificationService } from './services/NotificationService';
 import { resolveActivation } from './services/notificationRouting';
@@ -1751,14 +1752,7 @@ const App: React.FC = () => {
         }
 
         const newPaneId = generateId('pn');
-        const paneTree = {
-          id: newPaneId,
-          type: 'terminal' as const,
-          terminalId: newTabId,
-          name: name || 'API Terminal', // Add name to the pane
-          shellType: profile || defaultProfile || 'cmd', // Include shell type
-          apiCreated: true as const, // plan 048
-        };
+        const paneTree = buildApiFallbackPane(newPaneId, newTabId, name, profile || defaultProfile || 'cmd');
 
         // Seed the authoritative per-tab tree and add the tab. Default: do NOT
         // steal focus (same rule as Mode 0). Activate only when the user opted in
@@ -1876,16 +1870,18 @@ const App: React.FC = () => {
 
   return (
     <div className="app">
-      <PaneDragProvider>
-        <TitleBar />
-        <BroadcastOverlay />
-        <div className="app-body">
-          {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
-              by TerminalContainer alongside every other tab — see services/openCanvas.ts
-              and backlog/007 §4. */}
-          <TerminalContainer />
-        </div>
-      </PaneDragProvider>
+      <SshConnectionsDialogHost>
+        <PaneDragProvider>
+          <TitleBar />
+          <BroadcastOverlay />
+          <div className="app-body">
+            {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
+                by TerminalContainer alongside every other tab — see services/openCanvas.ts
+                and backlog/007 §4. */}
+            <TerminalContainer />
+          </div>
+        </PaneDragProvider>
+      </SshConnectionsDialogHost>
       <LayoutManager />
       <GlobalDialog />
       <ToastContainer />

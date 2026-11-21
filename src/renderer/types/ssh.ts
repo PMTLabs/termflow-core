@@ -7,11 +7,67 @@ export interface SshConnectionInput {
   auth: SshAuth; identityFile: string | null; jumpConnectionId: string | null;
   extraOptions: [string, string][]; bookmarked: boolean;
 }
-export interface SshConnection extends Omit<SshConnectionInput, 'id'> { id: string; order: number; lastUsedAt: string | null; hasSavedSecret: boolean }
+export interface SshConnection extends Omit<SshConnectionInput, 'id'> { id: string; order: number; lastUsedAt: number | null; hasSavedSecret: boolean }
 export interface SshView { revision: number; folders: SshFolder[]; connections: SshConnection[]; loadError: SshError | null }
 export interface SshReply { revision: number; view: SshView }
 export interface SshMove { kind: 'folder' | 'connection'; id: string; parentId: string | null; index: number }
+export type SshPreviewSource =
+  | { kind: 'saved'; id: string }
+  | { kind: 'draft'; draft: SshConnectionInput; editingId?: string };
+export interface SshPreview { argv: string[]; display: string; storeRevision: number; configNotice: string; wrapper: string }
+export interface SshPreviewError {
+  code: 'Validation' | 'NotFound' | 'UnsupportedContext' | 'StoreUnavailable' | 'desktop-only';
+  message: string;
+  fields?: SshError[];
+}
+/** Display order. Persisted preferences preserve their encoded order. */
+export const METRIC_KEYS = ['host', 'cpu', 'ram', 'netUp', 'netDown', 'uptime', 'users', 'partitions', 'nfs'] as const;
+export type MetricKey = (typeof METRIC_KEYS)[number];
+const knownMetrics: ReadonlySet<unknown> = new Set(METRIC_KEYS);
+
+export function normalizeHiddenMetrics(value: unknown): MetricKey[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((key): key is MetricKey => knownMetrics.has(key)))];
+}
+export interface SshPaneTag {
+  connectionId: string;
+  browserCollapsed: boolean;
+  browserPath?: string;
+  followCd: boolean;
+  hiddenMetrics: MetricKey[];
+}
+
+export type LaunchAttemptReceipt = Pick<SshSessionView, 'gate' | 'reason' | 'errorCode' | 'knownHostsPaths'> & { generation: number };
+export interface LaunchAttemptRef {
+  sessionGeneration: number;
+  attemptReceipt: LaunchAttemptReceipt;
+  processIncarnation: string;
+  ownerIncarnation: import('../services/paneIncarnations').PaneIncarnation;
+}
+export interface LaunchError {
+  code: 'StaleAttempt' | 'NotFound' | 'InputLocked' | 'UnsupportedShell' | 'UnsupportedContext'
+    | 'TrustBlocked' | 'Timeout' | 'WriteFailed' | 'TransportClosed' | 'StoreUnavailable' | 'desktop-only';
+  message: string;
+}
+export interface LaunchSnapshot {
+  terminalId: string;
+  connectionId: string;
+  attempt: LaunchAttemptRef;
+  revision: number;
+  launchSeq: number;
+  stage: 'preparing' | 'waiting-ready' | 'waiting-trust' | 'typed' | 'running' | 'ended' | 'blocked' | 'cancelled' | 'error';
+  error?: LaunchError;
+}
+export interface SshLaunchEvent { terminalId: string; state: 'typed' | 'running' | 'ended' }
+export interface SshLaunchApi {
+  launchTerminal(terminalId: string, connectionId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
+  cancelTerminalLaunch(terminalId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
+  terminalLaunchState(terminalId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
+}
+
 export interface SshStoreApi {
+  previewConnection(input: { source: SshPreviewSource }): Promise<SshPreview>;
+  markUsed(id: string): Promise<SshReply>;
   get(): Promise<SshReply>; reload(): Promise<SshReply>;
   upsertFolder(input: SshFolderInput): Promise<SshReply>;
   deleteFolder(input: { id: string; recursive: boolean }): Promise<SshReply>;
@@ -49,6 +105,7 @@ export interface SshAPI {
   sshTestClose(probeId: string): Promise<void>;
   sshTestSubmitSecret(probeId: string, secret: string, remember: boolean, receipt?: SshPromptReceipt): Promise<void>;
   sshTestTrustHost(probeId: string, accept: boolean, receipt?: SshPromptReceipt): Promise<void>;
+  onSshLaunchState?(listener: (event: SshLaunchEvent) => void): Promise<SshUnlisten>;
   onSshSessionState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
   onSshTestState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
 }

@@ -14,6 +14,8 @@ test('sshStoreRoundTrip: folder → subfolder → connection → bookmark → mo
   const snapshot = ():SshReply => JSON.parse(JSON.stringify({ revision:view.revision,view }));
   const mutate = (operation:() => void) => { operation(); view = { ...view,revision:view.revision + 1 }; const reply = snapshot(); listener?.(reply); return Promise.resolve(reply); };
   const api:SshStoreApi = {
+    previewConnection:async () => ({ argv:[],display:'',storeRevision:view.revision,configNotice:'',wrapper:'' }),
+    markUsed:async () => snapshot(),
     get:async () => snapshot(), reload:async () => snapshot(), onChanged:async next => { listener = next; return () => { listener = undefined; }; },
     upsertFolder:jest.fn(input => mutate(() => { const id = input.id ?? `f-${++folderSeq}`; view.folders = [...view.folders.filter(f => f.id !== id), { ...input,id,order:view.folders.filter(f => f.parentId === input.parentId).length }]; })),
     deleteFolder:jest.fn(({id}) => mutate(() => { view.folders = view.folders.filter(f => f.id !== id); })),

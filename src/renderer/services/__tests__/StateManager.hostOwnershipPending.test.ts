@@ -383,6 +383,7 @@ test('persisted tree installer census requires registration before every install
     'services/apiCreatedTab.ts': 1, // fresh API leaf, already-bound process, or reserved recovery
     'services/restoreHiddenAgentTerminals.ts': 1, // already-bound live process
     'services/folderTab.ts': 1, // fresh "Open in TermFlow" leaf, cwd keyed by its own terminalId
+    'services/sshLaunch.ts': 1, // fresh saved SSH leaf committed before tab publication
     'components/Canvas/CanvasMode.tsx': 1, // fresh canvas-port spawn
     'components/TerminalContainer.tsx': 2, // mirror adoption / fresh tree seeding
     'components/Panes/dnd/detach.ts': 1, // cross-window handoff, not a close or a layout load

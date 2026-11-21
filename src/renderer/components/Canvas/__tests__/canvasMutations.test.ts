@@ -9,6 +9,26 @@ import panesReducer, {
 import { NODE_W, NODE_H, Rect } from '../canvasGeometry';
 import { readSource } from '../../../utils/readSource';
 
+import { expectPaneTags, taggedTree, tags } from '../../../__testFixtures__/sshPaneCensus';
+
+test('canvas_regroup_breakout_and_close_preserve_exact_ssh_owner_map', () => {
+  let state = panesReducer(undefined, { type: 'init' });
+  for (const [tabId, tree] of Object.entries({ 'tb-a': taggedTree(), 'tb-empty': null })) {
+    state = panesReducer(state, { type: 'panes/addTabTree', payload: { tabId, tree } });
+  }
+  for (const [from, to] of [['tb-a', 'tb-empty'], ['tb-empty', 'tb-a']]) {
+    const move = planRegroup(state.treesByTabId, 'tm-ssh', from, to)!;
+    expectPaneTags([move.fromTree, move.toTree], tags, ['tm-local']);
+    expectPaneTags([move.movedPane], { 'tm-ssh': tags['tm-ssh'] });
+    state = panesReducer(state, removePaneFromTab({ tabId: from, paneId: move.paneId }));
+    state = panesReducer(state, insertPaneIntoTab({ tabId: to, targetPaneId: move.anchorPaneId, zone: 'right', node: move.movedPane }));
+    expectPaneTags(Object.values(state.treesByTabId), tags, ['tm-local']);
+  }
+  state = panesReducer(state, removePaneFromTab({ tabId: 'tb-a', paneId: 'pn-ssh' }));
+  expect(state.treesByTabId['tb-empty']).toBeNull();
+  expectPaneTags(Object.values(state.treesByTabId), { 'tm-other': tags['tm-other'] }, ['tm-local']);
+});
+
 const trees = (): Record<string, PaneNode> => ({
   'tb-a': {
     id: 'pn-1', type: 'split', direction: 'horizontal', size: 50, children: [

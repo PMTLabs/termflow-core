@@ -100,7 +100,7 @@ pub(super) fn strip_comments(code: &str) -> String {
 
 /// Production text with comments dropped, for a test that looks for calls: prose
 /// that describes a call must neither satisfy nor trip it.
-pub(super) fn production(source: &str) -> String {
+pub(crate) fn production(source: &str) -> String {
     strip_comments(&without_test_modules(&source.replace("\r\n", "\n")))
 }
 

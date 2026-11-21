@@ -173,6 +173,14 @@ export interface ApiCreateMode0Deps {
   titleColorForTerminal: (terminalId?: string) => string | undefined;
 }
 
+/** The renderer-only Mode 3 fallback: a fresh local leaf, not the caller's pane. */
+export function buildApiFallbackPane(paneId: string, tabId: string, name: string | undefined, shellType: string) {
+  return {
+    id: paneId, type: 'terminal' as const, terminalId: tabId,
+    name: name || 'API Terminal', shellType, apiCreated: true as const,
+  };
+}
+
 export interface ApiCreateMode0Result {
   targetTabId: string;
   /** The leaf the pane tree's root node ends up carrying — always a `tm-*`,

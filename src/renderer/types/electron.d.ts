@@ -149,7 +149,7 @@ export type ExpectedPermissionSubject = PermissionView['subject'] & { target: Pe
 
 export interface ElectronAPI extends SshAPI {
   pickFile?: (title?: string) => Promise<string | null>;
-  ssh?: import('./ssh').SshStoreApi;
+  ssh?: import('./ssh').SshStoreApi & import('./ssh').SshLaunchApi;
   // Terminal output history
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
@@ -185,7 +185,7 @@ export interface ElectronAPI extends SshAPI {
   getActiveProcesses?: () => Promise<ActiveProcess[]>;
 
   // Terminal management
-  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean) => Promise<string>;
+  createTerminal: (profile?: string, name?: string, cwd?: string, tabId?: string, cols?: number, rows?: number, owningTabId?: string, sessionKey?: string, elevated?: boolean, sshLaunchConnectionId?: string) => Promise<string>;
   /**
    * Windows: make the calling window the owner of this shell's ConPTY
    * pseudo-console window, so console-app dialogs parented to

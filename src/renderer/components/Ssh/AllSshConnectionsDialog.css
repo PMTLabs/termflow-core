@@ -1,0 +1,32 @@
+.global-dialog-content.ssh-picker {
+  display: grid;
+  box-sizing: border-box;
+  gap: 0.65rem;
+  width: min(36rem, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+}
+
+.ssh-picker :is(h3, p) { margin: 0; }
+.ssh-picker input {
+  width: 100%;
+  padding: 0.45rem;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+}
+.ssh-picker .au-seg { justify-self: start; }
+.ssh-picker-results { max-height: min(35vh, 18rem); overflow: auto; }
+.ssh-picker-results [role='option'] {
+  display: grid;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.ssh-picker-results [aria-selected='true'] { background: var(--bg-hover); }
+.ssh-picker-results [role='option'] span { color: var(--text-secondary); }
+
+.ssh-menu-label { display: grid; text-align: left; overflow-wrap: anywhere; }
+.ssh-menu-label small { color: var(--text-secondary); }
+.ssh-menu-reason { text-transform: none; white-space: normal; }

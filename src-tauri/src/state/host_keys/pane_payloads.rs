@@ -28,6 +28,8 @@ impl HostKeys {
     }
 
     pub(crate) fn verify_transfer_source(&self, label: &str, pg: u64, tx: &str) -> Result<(), String> {
+        // Expiry can orphan or park owners: input barrier before HostKeys.
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         Self::expire_transfers_locked(&mut inner, Instant::now());
         Self::transfer_source(&inner, label, pg, tx).map(|_| ())
@@ -35,6 +37,7 @@ impl HostKeys {
 
     pub(crate) fn begin_pane_drag(&self, label: &str, pg: u64, tx: &str, deliver: impl FnOnce(serde_json::Value) + Send + 'static, ended: impl FnOnce(String) + Send + 'static) -> Result<(), String> {
         let delivery = self.delivery_sender();
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         Self::expire_transfers_locked(&mut inner, Instant::now());
         let page = Self::transfer_source(&inner, label, pg, tx)?;
@@ -47,6 +50,7 @@ impl HostKeys {
 
     pub(crate) fn claim_pane_drag(&self, label: &str, pg: u64, tx: &str, deliver: impl FnOnce(Option<serde_json::Value>, String) + Send + 'static) -> Result<Option<serde_json::Value>, String> {
         let delivery = self.delivery_sender();
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         Self::expire_transfers_locked(&mut inner, Instant::now());
         let page = inner.window_pages.sender(label, pg)?;
@@ -77,6 +81,7 @@ impl HostKeys {
 
     pub(crate) fn route_pane_transfer(&self, label: &str, pg: u64, tx: &str, target: &str, deliver: impl FnOnce(serde_json::Value) + Send + 'static) -> Result<bool, String> {
         let delivery = self.delivery_sender();
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         Self::expire_transfers_locked(&mut inner, Instant::now());
         let source = Self::transfer_source(&inner, label, pg, tx)?;

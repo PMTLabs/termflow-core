@@ -31,6 +31,7 @@ export type PaneReply = { status: 'Ack'; result: PaneResult } | { status: 'Resyn
 export interface AdmittedCreateRequest {
   pg: Counter; cg: Counter; leaf: string; profile: string; name?: string; cwd?: string;
   cols?: number; rows?: number; owningTabId?: string; sessionKey?: string; elevated?: boolean;
+  sshLaunchConnectionId?: string;
 }
 export interface PaneCommands {
   register_page: { args: undefined; result: PageRegistration };
@@ -67,6 +68,10 @@ export class PaneIncarnations {
   private slots = new Map<string, Slot>();
   private observed = new Set<string>();
   private staged = new Map<string, PaneDescriptor[]>();
+  private adopted = new WeakSet<PaneCapture>();
+
+  /** Even a transfer member with no process is an adoption, not a launch request. */
+  isAdopted(pi: PaneCapture): boolean { return this.adopted.has(pi); }
   private timer?: ReturnType<typeof setTimeout>;
   private registrationTimer?: ReturnType<typeof setTimeout>;
   private registrationWatchdog?: ReturnType<typeof setInterval>;
@@ -448,6 +453,7 @@ export class PaneIncarnations {
       descriptors.forEach((descriptor, i) => {
         const old = this.slots.get(descriptor.paneId);
         if (old) retireTerminalInitGuards(old.pi);
+        this.adopted.add(pis[i]);
         this.slots.set(descriptor.paneId, { descriptor, pi: pis[i], suppressed: false, installed: false });
       });
       this.changed();

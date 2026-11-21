@@ -364,6 +364,26 @@ test('unknown op errors retain the head sequence and never enable hold-free crea
   expect(api.closeTerminal).not.toHaveBeenCalled();
 });
 
+test('ssh_opt_in_reaches_both_create_paths in the renderer', async () => {
+  const h = harness();
+  const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };
+  const api = { createTerminal: jest.fn().mockResolvedValue('pc-legacy') };
+  const admitted = new TerminalServiceClass(() => trees, () => api as any, () => h.client);
+  const creating = admitted.createTerminal(a.leaf, 'default', undefined, undefined, 80, 24, 'tb-a', undefined, false, 'Mount', a.paneId, 'saved-id');
+  await flush(); h.ack(0);
+  await flush(); h.ack(1, { status: 'Create', cg: 8 });
+  await flush();
+  expect(h.gates.calls('create_admitted_terminal')).toEqual([[{ request: expect.objectContaining({ pg: 41, cg: 8, leaf: a.leaf, sshLaunchConnectionId: 'saved-id' }) }]]);
+  expect(api.createTerminal).not.toHaveBeenCalled();
+  h.gates.release('create_admitted_terminal', 0, 'pc-admitted');
+  expect(await creating).toBe('pc-admitted');
+
+  const inert = new PaneIncarnations(); clients.push(inert);
+  const legacy = new TerminalServiceClass(() => trees, () => api as any, () => inert);
+  await expect(legacy.createTerminal(a.leaf, 'default', undefined, undefined, 80, 24, 'tb-a', undefined, false, 'Mount', a.paneId, 'saved-id')).resolves.toBe('pc-legacy');
+  expect(api.createTerminal).toHaveBeenCalledWith('default', undefined, undefined, a.leaf, 80, 24, 'tb-a', undefined, false, 'saved-id');
+});
+
 test('bridge-free browser clients can create and close through their single-window API', async () => {
   const client = new PaneIncarnations(); clients.push(client);
   const trees = { 'tb-a': { id: a.paneId, type: 'terminal' as const, terminalId: a.leaf } };

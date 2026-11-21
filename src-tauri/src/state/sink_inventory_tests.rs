@@ -53,11 +53,14 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("native_notify.rs", &["emit_activation"], "out of scope durable tab notification"),
     ("network_commands.rs", &["rotate_auth_token", "set_network_config", "start_servers", "stop_servers"], "network-operation mutex and owned listeners; out of scope network config"),
     ("output_pipeline.rs", &["spawn_output_consumer", "spawn_pipeline_watchdog"], "retained parser/history and immutable full pc events; advisory diagnostics"),
-    ("pty_host_client.rs", &["arm_detach", "attach", "disarm", "resize", "shutdown", "write_stdin"], "exact client-owned FIFO/alive flag; raw compatibility adapters, production shell callers retain ownership qualification"),
+    ("pty_host_client.rs", &["arm_detach", "attach", "disarm", "resize", "shutdown", "enqueue_stdin"], "exact client-owned FIFO/alive flag; stdin requires an unforgeable InputPermit retained through complete enqueue, ownership/client epoch rechecked by write_registered_admitted; input_gate controlled-race/real FIFO tests"),
     ("pty_host_client.rs", &["attach_confirmed_inner", "spawn_session_inner", "request_authorized"], "original session cg/pc/key plus bound client epoch under ownership mutex through enqueue"),
     ("pty_host_client.rs", &["list_sessions_numbered_within"], "source-client epoch under ownership mutex through numbered FIFO enqueue"),
     ("pty_host_client.rs", &["bind_sessions", "lost", "close_transport"], "exact retained ConnState; authority connect/disconnect compares binding epoch"),
     ("pty_host_client.rs", &["wire_client"], "original reader channel/key/epoch/pc under ownership mutex at offset/output publication"),
+    ("pty_manager/ssh_helpers.rs", &["retire"], "out of scope private helper-file retirement, not terminal/owner retirement; retained immutable entry identity, cross-process root lock and per-entry execution leases; cancel_reconnect_retains_hooks_retires_only_quiescent_payloads and helper_exclusive_publish_and_safe_sweep behavioral gates"),
+    ("pty_manager/input_gate.rs", &["observe_shell_prompt", "ready_transport_current"], "hosted prompt epoch published, or a held ready epoch rechecked with a no-op publish, only inside HostKeys::publish_frame (current channel epoch, route and session cg for the exact pc); owner stamp, nonce and prompt order checked under the per-process input lock; prompt_observed_under_lock_contention_is_not_lost, hosted_queue_acceptance_is_typed_not_running and host_connection_loss_after_enqueue_is_not_replayed behavioral gates"),
+    ("ssh/launch/drive.rs", &["finish", "observe", "launch_state"], "ssh-launch:state event for one attempt: snapshot moved under the input barrier and attempt registry for the current session generation, then emitted only after 067 on_launch_lifecycle (generation + monotonic launch_seq) or the revoked-lease observation accepts it; no argv/secrets; real_emitter_calls_ingress_before_renderer_event and queued_old_generation_or_launch_seq_cannot_disconnect_new_session behavioral gates"),
     ("pty_manager/spawn.rs", &["spawn_terminal"], "Placing original pc under ownership mutex through projection/index inserts; retained unpublished child"),
     ("session_notify.rs", &["subclass_proc"], "out of scope OS resume notification"),
     ("state/engine_host.rs", &["emit_activity", "emit_changed", "emit_state"], "out of scope rule UI state notifications"),
@@ -101,7 +104,7 @@ const INVENTORY: &[(&str, &[&str], &str)] = &[
     ("tray.rs", &["build_tray"], "out of scope window intent; global exit owns retained clients/children"),
 ];
 
-fn production(source: &str) -> String {
+pub(super) fn production(source: &str) -> String {
     let mut text = without_test_modules(&source.replace("\r\n", "\n"));
     let test_fn = Regex::new(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+\w+").unwrap();
     // Standalone test-only fixture functions must not inflate production sinks.

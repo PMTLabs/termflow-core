@@ -10,6 +10,7 @@ import { findTabIdByTerminalId, getAllTerminalIds, findLeaf } from '../store/sli
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
+import { sanitizePaneSshFields, sanitizePaneTreeMapSshFields, sanitizePaneTreeSshFields } from './sshPanePersistence';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
@@ -41,6 +42,12 @@ import { setLayoutBaseline, clearLayoutBaseline } from './layoutBaseline';
 const WORLD_LIMIT = 1e6;
 
 class RestoreRegistrationError extends Error {}
+
+// Create IPC metadata is not workspace intent, even if a caller accidentally
+// includes it in a tab, pane, or imported snapshot.
+function omitInternalCreateFields(key: string, value: unknown): unknown {
+  return key === 'sshLaunchConnectionId' ? undefined : value;
+}
 
 const isRect = (r: any): boolean =>
   !!r
@@ -185,6 +192,8 @@ export interface SavedLayout {
    *  falls back to the old single-tree behavior per tab when it is missing
    *  (an old-format layout, or one saved before this field was introduced). */
   treesByTabId?: Record<string, any>;
+  /** Legacy window mirror, accepted on import but not written by named-layout save. */
+  tabPanes?: Record<string, any>;
   /** plan/025 §2.4. Absent means 'workspace' — every layout saved before this
    *  field existed, and every ordinary (whole-workspace) save going forward,
    *  loads exactly as it always has. */
@@ -352,7 +361,7 @@ class StateManagerClass {
         },
       };
 
-      localStorage.setItem(this.STATE_KEY, JSON.stringify(appState));
+      localStorage.setItem(this.STATE_KEY, JSON.stringify(appState, omitInternalCreateFields));
       console.log('State saved successfully:', {
         tabCount: appState.tabs.length,
         tabs: appState.tabs.map(t => ({ id: t.id, title: t.title })),
@@ -801,7 +810,7 @@ class StateManagerClass {
         updatedAt: Date.now(),
       };
 
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts, omitInternalCreateFields));
 
       // plan/025 §2.5: a WORKSPACE-scope update re-captures the whole workspace
       // under this layout's name, so it becomes the new "clean" reference
@@ -941,7 +950,7 @@ class StateManagerClass {
       const existingLayouts = this.getSavedLayouts();
       existingLayouts.push(layout);
 
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(existingLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(existingLayouts, omitInternalCreateFields));
 
       // plan/025 §2.5: a WORKSPACE-scope save becomes the new "clean" reference.
       // A tab-scope save does NOT claim it — it never captured the whole
@@ -1076,7 +1085,7 @@ class StateManagerClass {
       // Update the layout's last used timestamp
       sanitizedLayout.updatedAt = Date.now();
       const updatedLayouts = layouts.map(l => l.id === layoutId ? sanitizedLayout : l);
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(updatedLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(updatedLayouts, omitInternalCreateFields));
 
       console.log(`Layout "${sanitizedLayout.name}" loaded successfully`);
       return true;
@@ -1629,7 +1638,7 @@ class StateManagerClass {
       const layouts = this.getSavedLayouts();
       const filteredLayouts = layouts.filter(l => l.id !== layoutId);
       
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(filteredLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(filteredLayouts, omitInternalCreateFields));
       console.log(`Layout deleted successfully`);
       return true;
     } catch (error) {
@@ -1656,7 +1665,7 @@ class StateManagerClass {
       }
       layouts[layoutIndex].updatedAt = Date.now();
       
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(layouts, omitInternalCreateFields));
       console.log(`Layout renamed successfully`);
       return true;
     } catch (error) {
@@ -1743,7 +1752,7 @@ class StateManagerClass {
    */
   exportLayouts(): string {
     const layouts = this.getSavedLayouts();
-    return JSON.stringify(layouts, null, 2);
+    return JSON.stringify(layouts, omitInternalCreateFields, 2);
   }
 
   /**
@@ -1761,10 +1770,17 @@ class StateManagerClass {
 
       // Merge with existing layouts (avoid duplicates by ID)
       const existingIds = new Set(existingLayouts.map(l => l.id));
-      const newLayouts = validLayouts.filter(l => !existingIds.has(l.id));
+      // Clean SSH data at import, not only when the user later loads the layout.
+      // Leave legacy ID migration to load so all tree maps share its remapping.
+      const newLayouts = validLayouts.filter(l => !existingIds.has(l.id)).map(layout => ({
+        ...layout,
+        paneTree: sanitizePaneTreeSshFields(layout.paneTree),
+        tabPanes: layout.tabPanes && sanitizePaneTreeMapSshFields(layout.tabPanes),
+        treesByTabId: layout.treesByTabId && sanitizePaneTreeMapSshFields(layout.treesByTabId),
+      }));
       
       const allLayouts = [...existingLayouts, ...newLayouts];
-      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(allLayouts));
+      localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(allLayouts, omitInternalCreateFields));
       
       return newLayouts.length;
     } catch (error) {
@@ -1822,6 +1838,7 @@ class StateManagerClass {
       }
       return {
         ...tab,
+        sshLaunchConnectionId: undefined,
         id: newId,
         processId: undefined, // Clear processId anyway as it's a new session
         // A restored/loaded session always spawns a fresh process (or reattaches
@@ -1853,7 +1870,7 @@ class StateManagerClass {
     // Helper to recursively sanitize pane tree
     const sanitizeNode = (node: any, tabId: string): any => {
       if (!node) return null;
-      const newNode = { ...node };
+      const newNode = sanitizePaneSshFields(node);
       // The pane leaf, not the tab, is what decides whether a shell spawns elevated
       // (`findElevatedByTerminalId`), so the same session-restore-only rule applies here.
       if (!keepElevated) delete newNode.elevated;
@@ -1970,6 +1987,7 @@ class StateManagerClass {
       terminalCwds: remapCwds(data.terminalCwds || {}, terminalIdMap),
     };
 
+    Reflect.deleteProperty(result, 'sshLaunchConnectionId');
     if (data.tabPanes) {
       (result as any).tabPanes = sanitizedTabPanes;
     }

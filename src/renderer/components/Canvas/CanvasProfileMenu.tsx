@@ -1,4 +1,6 @@
 import React from 'react';
+import { SshConnectionsMenuSection } from '../Ssh/SshConnectionsMenuSection';
+import type { SshPickerInvocation } from '../Ssh/AllSshConnectionsDialog';
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { CanvasMenu, CanvasMenuItem } from './CanvasMenu';
@@ -25,7 +27,8 @@ export const CanvasProfileMenu: React.FC<{
   header: string;
   onPick: (profile: ShellProfileLike) => void;
   onClose: () => void;
-}> = ({ x, y, header, onPick, onClose }) => {
+  captureSsh: () => SshPickerInvocation;
+}> = ({ x, y, header, onPick, onClose, captureSsh }) => {
   const shellProfiles = useSelector((s: RootState) => s.settings.shellProfiles);
   const defaultProfile = useSelector((s: RootState) => s.settings.defaultProfile);
 
@@ -59,6 +62,7 @@ export const CanvasProfileMenu: React.FC<{
           );
         })
       )}
+      <SshConnectionsMenuSection variant="canvas" capture={captureSsh} onClose={onClose} />
     </CanvasMenu>
   );
 };

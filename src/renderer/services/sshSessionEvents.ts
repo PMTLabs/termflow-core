@@ -2,14 +2,12 @@ import type { SshAPI } from '../types/ssh';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { sshOwnersChanged, sshSessionObserved } from '../store/slices/sshSessionSlice';
 
-// Structural adapter seam: 066 adds/persists the actual PaneNode tag. No launch,
-// reconnect or close is inferred from React mount/unmount or active tab selection.
+// Ownership follows the authoritative tagged leaves, not the active tab.
 export function sshOwnersFromTrees(trees: Record<string, PaneNode | null>): Record<string, string> {
   const owners: Record<string, string> = {};
   const visit = (node: PaneNode | null) => {
     if (!node) return;
-    const tagged = node as PaneNode & { ssh?: { connectionId: string } };
-    if (node.type === 'terminal' && node.terminalId && tagged.ssh?.connectionId) owners[node.terminalId] = tagged.ssh.connectionId;
+    if (node.type === 'terminal' && node.terminalId && node.ssh?.connectionId) owners[node.terminalId] = node.ssh.connectionId;
     node.children?.forEach(visit);
   };
   Object.values(trees).forEach(visit); return owners;
