@@ -12,25 +12,28 @@ their exact independent oracles are recorded in `../protocol/tests.rs`.
 | `non-linux.txt` | `tf-metrics-darwin` | PENDING CAPTURE (orchestrator, final pass) |
 
 From the core worktree root, in a POSIX terminal on the capture controller,
-define the following helper (Python 3 is controller-side only). Use existing
-disposable host access; no dependencies are installed on a remote host.
-The helper mirrors the Rust production encoder with a **fixed fixture nonce**
-instead of a random nonce. LF-only `collect.sh` is passed byte-for-byte inside
-the same single-quoted `sh -c` body. Each invocation issues exactly one SSH
-exec; redirect stdout only, and keep stderr out of the fixtures.
+define the following helper (Python 3 and Cargo are controller-side only).
+Use existing disposable host access with POSIX `awk` already installed
+(the BusyBox applet is sufficient); do not install anything on the remote
+host for the capture. The ignored emitter prints the exact production
+`collector_command()` with a fresh nonce. The helper passes it unchanged to
+one SSH exec per invocation; redirect stdout only. Keep the session nonce
+unchanged when sanitizing.
 
 ```sh
 capture_tfm() {
     python3 - "$1" <<'PY'
-from pathlib import Path
 import subprocess
 import sys
 
-script = Path("src-tauri/src/ssh/metrics/collect.sh").read_bytes().decode("utf-8")
-assert "\r" not in script
-nonce = "06900000000000000000000000000001"
-command = "sh -c '" + script.replace("'", "'\\''") + "' termflow-metrics '" + nonce + "'"
-subprocess.run(["ssh", "-T", sys.argv[1], command], check=True)
+emitted = subprocess.check_output(
+    ["cargo", "test", "--lib", "ssh::metrics::tests::print_collector_command_for_capture",
+     "--", "--exact", "--ignored", "--nocapture"],
+    cwd="src-tauri",
+)
+prefix = b"TERMFLOW_COLLECTOR_COMMAND="
+[command] = [line.partition(prefix)[2] for line in emitted.splitlines() if prefix in line]
+subprocess.run(["ssh", "-T", sys.argv[1], command.decode("ascii")], check=True)
 PY
 }
 capture_tfm tf-metrics-ubuntu  > src-tauri/src/ssh/metrics/fixtures/ubuntu.txt

@@ -1,10 +1,25 @@
 use super::*;
-use crate::ssh::metrics::{collector_command, encode};
+use crate::ssh::metrics::{check_collector_exit, collector_command, encode, CollectorError, COLLECT};
 use std::fs::{self, DirBuilder};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path).find_map(|dir| {
+        let candidate = dir.join(name);
+        let metadata = fs::metadata(&candidate).ok()?;
+        if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 {
+            // Make relative PATH entries absolute without resolving symlinks:
+            // multicall shells/utilities can use argv[0] to choose the applet.
+            Some(std::env::current_dir().unwrap().join(candidate))
+        } else {
+            None
+        }
+    })
+}
 
 struct Host(PathBuf);
 
@@ -13,6 +28,7 @@ impl Host {
         let root = std::env::temp_dir().join(format!("tf-metrics-{}", uuid::Uuid::new_v4()));
         DirBuilder::new().mode(0o700).create(&root).unwrap();
         let host = Self(root);
+        host.utility("awk", "exec \"$REAL_AWK\" \"$@\"");
         host.utility("uname", r#"case "$1" in -s) printf '%s\n' "$PLATFORM" ;; -n) printf 'test-host\n' ;; -m) printf 'test-arch\n' ;; esac"#);
         host.utility("cat", r#"
 if [ "$PLATFORM" != Linux ]; then
@@ -81,8 +97,12 @@ esac"#);
     }
 
     fn utility(&self, name: &str, body: &str) {
+        self.script(name, &format!("printf '%s\\n' \"$0 $*\" >> \"$TRACE\"\n{body}"));
+    }
+
+    fn script(&self, name: &str, body: &str) {
         let path = self.0.join(name);
-        fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' \"$0 $*\" >> \"$TRACE\"\n{body}\n")).unwrap();
+        fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
 
@@ -99,9 +119,15 @@ esac"#);
     }
 
     fn invoke(&self, command: &str, env: &[(&str, &str)]) -> String {
-        let mut cmd = Command::new("/bin/sh");
-        cmd.arg("-c").arg(command).current_dir(&self.0).env_clear()
-            .env("PATH", &self.0).env("TRACE", self.0.join("trace"))
+        String::from_utf8(self.invoke_success(Path::new("/bin/sh"), &[], command, env)).unwrap()
+    }
+
+    fn invoke_raw(&self, shell: &Path, flags: &[&str], command: &str, env: &[(&str, &str)]) -> Output {
+        let real_awk = find_executable("awk").expect("POSIX awk is required for collector controls");
+        let mut cmd = Command::new(shell);
+        cmd.args(flags).arg("-c").arg(command).current_dir(&self.0).env_clear()
+            .env("PATH", &self.0).env("HOME", &self.0).env("XDG_CONFIG_HOME", &self.0)
+            .env("REAL_AWK", real_awk).env("TRACE", self.0.join("trace"))
             .envs([
                 ("PLATFORM", "Linux"), ("OS_RELEASE", "NAME='Test Linux'\nVERSION_ID=11"),
                 ("FALLBACK", "no"), ("MOUNTS", MOUNTS), ("LOCAL", LOCAL), ("NFS", NFS),
@@ -110,17 +136,21 @@ esac"#);
         for &(key, value) in env {
             cmd.env(key, value);
         }
-        self.utility("sh", "printf 'collector-entry\\n' >> \"$TRACE\"\nexec /bin/sh -x \"$@\"");
+        self.script("sh", "printf 'collector-entry\\n' >> \"$TRACE\"\n[ \"$1\" = -c ] || exit 90\nprintf '%s' \"$2\" > collector-input || exit 91\nexec /bin/sh -x \"$@\"");
         // Don't put general host utilities (including ssh) on the fake PATH.
         self.utility("nap", "exec /bin/sleep \"$@\"");
         fs::write(self.0.join("trace"), "").unwrap();
-        let out = cmd.output().expect("POSIX /bin/sh is required for collector controls");
+        cmd.output().unwrap_or_else(|e| panic!("could not execute {}: {e}", shell.display()))
+    }
+
+    fn invoke_success(&self, shell: &Path, flags: &[&str], command: &str, env: &[(&str, &str)]) -> Vec<u8> {
+        let out = self.invoke_raw(shell, flags, command, env);
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(out.status.success(), "shell failed: {stderr}");
         // An absolute '. /etc/os-release' would bypass PATH (and the fake cat).
         assert!(!stderr.lines().any(|line| line.starts_with("+ . ") || line.starts_with("+ source ")),
             "collector attempted to source data");
-        String::from_utf8(out.stdout).unwrap()
+        out.stdout
     }
 }
 
@@ -141,7 +171,7 @@ pub(super) fn darwin_has_no_proc_trace() {
     let host = Host::new();
     let (stdout, nonce, trace) = host.run(&[("PLATFORM", "Darwin")]);
     assert_darwin(&parse(stdout.as_bytes(), &nonce).unwrap());
-    let utilities: Vec<_> = trace.iter().filter(|line| !line.starts_with("sh ") && *line != "collector-entry").map(String::as_str).collect();
+    let utilities: Vec<_> = trace.iter().filter(|line| !line.starts_with("awk ") && !line.starts_with("sh ") && *line != "collector-entry").map(String::as_str).collect();
     assert_eq!(utilities, ["uname -s", "uname -n", "uname -m"]);
 }
 
@@ -164,11 +194,76 @@ fn os_release_is_data_never_executed() {
 #[test]
 fn production_encoder_quotes_literal_shell_syntax() {
     let host = Host::new();
-    let literal = "It's $literal $(sentinel) `sentinel`\nsecond line";
-    let body = "printf '%s\\n%s\\n' 'It'\"'\"'s $literal $(sentinel) `sentinel`\nsecond line' \"$1\"";
+    let body = r#"printf '%s\n%s\n' 'It'"'"'s ! $literal $(sentinel) `sentinel` \\ % café
+second line' "$1"
+
+"#;
+    let literal = "It's ! $literal $(sentinel) `sentinel` \\\\ % café\nsecond line";
     assert!(encode("'; sentinel #", body).is_none());
     assert_eq!(host.invoke(&encode(NONCE, body).unwrap(), &[]), format!("{literal}\n{NONCE}\n"));
+    assert_eq!(fs::read(host.0.join("collector-input")).unwrap().as_slice(), body.as_bytes());
     assert!(!host.0.join("sentinel-ran").exists());
+}
+
+#[test]
+fn collector_runs_identically_under_each_login_shell() {
+    let host = Host::new();
+    host.install_timeout();
+    let (command, nonce) = collector_command();
+    let hostile = [("OS_RELEASE", "NAME='Test Linux'\nVERSION_ID=11\nBAD=$(sentinel)\nsentinel")];
+    let mut baseline = None;
+    let mut missing_optional = Vec::new();
+    for (name, flags) in [
+        ("sh", &[][..]), ("bash", &[][..]), ("dash", &[][..]), ("zsh", &["-f"][..]),
+        ("fish", &["--no-config"][..]), ("tcsh", &["-f"][..]),
+    ] {
+        let shell = if name == "sh" {
+            PathBuf::from("/bin/sh")
+        } else if let Some(path) = find_executable(name) {
+            path
+        } else {
+            assert_ne!(name, "bash", "bash is required for the login-shell matrix");
+            missing_optional.push(name);
+            continue;
+        };
+        eprintln!("running {name}: {}", shell.display());
+        let actual = host.invoke_success(&shell, flags, &command, &hostile);
+        let sample = parse(&actual, &nonce).expect("login shell mangled the complete sample");
+        assert_eq!(sample.os.as_deref(), Ok("Test Linux 11"));
+        assert_eq!(fs::read(host.0.join("collector-input")).unwrap().as_slice(), COLLECT.as_bytes(), "{name}");
+        assert!(!host.0.join("sentinel-ran").exists(), "{name}");
+        if let Some(expected) = &baseline {
+            assert_eq!(&actual, expected, "stdout differed under {name}");
+        } else {
+            baseline = Some(actual);
+        }
+    }
+    if !missing_optional.is_empty() {
+        eprintln!("missing optional shells: {}", missing_optional.join(", "));
+        assert_eq!(std::env::var("TERMFLOW_TEST_OPTIONAL_SHELLS").as_deref(), Ok("skip"),
+            "install the missing shells or explicitly opt out with TERMFLOW_TEST_OPTIONAL_SHELLS=skip");
+    }
+}
+
+#[test]
+fn missing_or_failed_decoder_is_typed_collector_unavailable() {
+    let host = Host::new();
+    let (command, _) = collector_command();
+    fs::remove_file(host.0.join("awk")).unwrap();
+    for simulated_failure in [false, true] {
+        if simulated_failure {
+            host.utility("awk", "exit 2");
+        }
+        let out = host.invoke_raw(Path::new("/bin/sh"), &[], &command, &[]);
+        let code = out.status.code().expect("expected normal nonzero exit") as u32;
+        assert_eq!(check_collector_exit(code), Err(CollectorError::Unavailable));
+        assert!(out.stdout.is_empty());
+        assert!(!host.0.join("collector-input").exists());
+    }
+    let success = encode(NONCE, "printf 'available\\n'\n").unwrap();
+    host.utility("awk", "exec \"$REAL_AWK\" \"$@\"");
+    assert_eq!(host.invoke(&success, &[]), "available\n");
+    assert_eq!(check_collector_exit(0), Ok(()));
 }
 
 #[test]

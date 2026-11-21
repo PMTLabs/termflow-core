@@ -45,7 +45,11 @@ fn parsed(text: &str) -> RawSample<'_> {
 
 fn capture(label: &str, bytes: &'static str) -> RawSample<'static> {
     assert!(!bytes.starts_with("PENDING CAPTURE"), "{label}: real capture required; see fixtures/README.md");
-    parsed(bytes)
+    let nonce = bytes.lines().find_map(|line| {
+        let candidate = line.strip_prefix("__TFM_")?.strip_suffix("_V1_BEGIN__")?;
+        valid_nonce(candidate).then_some(candidate)
+    }).expect("real capture must contain a production nonce");
+    parse(bytes.as_bytes(), nonce).expect("complete capture envelope")
 }
 
 // Orchestrator: fill these literal oracles from independently inspected captures,
