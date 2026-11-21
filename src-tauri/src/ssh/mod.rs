@@ -14,6 +14,8 @@ pub mod launch_argv;
 pub mod metrics;
 pub(crate) mod preview;
 #[cfg(test)]
+mod contract_tests;
+#[cfg(test)]
 #[path = "lifecycle_tests.rs"]
 mod lifecycle;
 #[cfg(test)]
