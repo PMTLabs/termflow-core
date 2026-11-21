@@ -1936,7 +1936,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({ isActive = true }) =
         <>
                 <div className="settings-section">
                     <div className="connections-heading">
-                        <h2>Connections</h2>
+                        <h2>{categories.find(category => category.id === 'connections')?.label}</h2>
                         <span className={`instance-badge ${IS_DEV ? 'dev' : 'prod'}`}>
                             ● {IS_DEV ? 'Dev' : 'Production'}
                         </span>

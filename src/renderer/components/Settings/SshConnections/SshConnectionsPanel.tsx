@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../../store';
 import { applyView, selectTree } from '../../../store/slices/sshSlice';
@@ -16,6 +16,7 @@ import './SshConnections.css';
 export function SshConnectionsPanel() {
   const dispatch = useDispatch(); const state = useSelector((s: RootState) => s.ssh); const tree = useSelector(selectTree);
   const [filter, setFilter] = useState(''); const [selection, setSelection] = useState<{ id:string; kind:'folder' | 'connection' } | null>(null);
+  const treePaneRef = useRef<HTMLDivElement>(null);
   const selectedRow = selection?.kind === 'folder' ? state.view.folders.find(f => f.id === selection.id) : state.view.connections.find(c => c.id === selection?.id);
   const selected = selection && selectedRow ? { row:selectedRow, kind:selection.kind } : null;
   const setSelected = (value:{ row:SshConnection | SshFolder; kind:'folder' | 'connection' } | null) => setSelection(value ? { id:value.row.id, kind:value.kind } : null);
@@ -47,12 +48,12 @@ export function SshConnectionsPanel() {
   return <section className="ssh-connections" data-testid="ssh-connections-panel"><h2>SSH Connections</h2>
     {state.view.loadError && <div role="alert" className="ssh-read-only">Read-only: {state.view.loadError.message} <button className="au-btn sm" onClick={() => void api.reload().then(reply => dispatch(applyView(reply))).catch(error => dispatch(addToast({ type:'error', message:sshErrorMessage(error) })))}>Reload</button></div>}
     <div className="ssh-toolbar"><button className="au-btn" disabled={readOnly} onClick={() => newFolder(null)}>New folder</button><button className="au-btn primary" disabled={readOnly} onClick={() => newConnection(null)}>New SSH connection</button></div>
-    <label className="ssh-search">Filter connections<input type="search" value={filter} onChange={event => setFilter(event.target.value)} /></label>
-    <div className="ssh-columns"><div className="ssh-tree-pane">{state.view.loadError ? <p className="ssh-tree-note">Your saved connections can't be shown while the file is unreadable. Nothing has been deleted: fix the file, then press Reload.</p> : <><SshTree tree={tree} view={state.view} filter={filter} selectedId={selected?.row.id}
+    <label className="ssh-search">Filter connections<input type="search" value={filter} onChange={event => setFilter(event.target.value)} onKeyDown={event => { if (event.key !== 'ArrowDown') return; const first = treePaneRef.current?.querySelector<HTMLElement>('.ssh-tree-row'); if (first) { event.preventDefault(); first.focus(); } }} /></label>
+    <div className="ssh-columns"><div className="ssh-tree-pane" ref={treePaneRef}>{state.view.loadError ? <p className="ssh-tree-note">Your saved connections can't be shown while the file is unreadable. Nothing has been deleted: fix the file, then press Reload.</p> : <><SshTree tree={tree} view={state.view} filter={filter} selectedId={selected?.row.id}
       onSelect={(row,kind) => { if (selected?.row.id !== row.id) navigate(() => { setSelected({ row,kind }); setDraftFolder(undefined); }); }}
       onMenu={(event,row,kind) => { if (!readOnly) setMenu({ x:event.clientX, y:event.clientY, row,kind,key:Date.now() }); }} onRename={rename} onDelete={(row,kind) => { if (!readOnly) setMenu({ x:0,y:0,row,kind,key:Date.now(),deleteRequested:true }); }}
       onBookmark={(id,bookmarked) => void commit(() => api.setBookmark(id,bookmarked))} onMove={input => void commit(() => api.move(input))} />
-      {!tree.length && <p className="ssh-tree-note">No saved connections yet.</p>}<footer>{state.view.folders.length} folders · {state.view.connections.length} connections</footer></>}</div>
+      <footer>{state.view.folders.length} folders · {state.view.connections.length} connections</footer></>}</div>
       <div className="ssh-editor-pane">{draftFolder !== undefined || selection?.kind === 'connection' ? <SshConnectionEditor focusName={renameFocus} key={selection?.kind === 'connection' ? selection.id : `new-${draftFolder}`} connectionId={selection?.kind === 'connection' ? selection.id : undefined} initialFolder={draftFolder ?? null} view={state.view} api={api} onClose={closeEditor} onSaved={(reply,input) => {
         dispatch(applyView(reply)); const row = input.id ? reply.view.connections.find(c => c.id === input.id) : reply.view.connections.find(c => !state.view.connections.some(old => old.id === c.id));
         if (row) { setSelected({ row,kind:'connection' }); setDraftFolder(undefined); }

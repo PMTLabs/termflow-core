@@ -21,6 +21,8 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
   const toggle = (id: string, close?: boolean) => setCollapsed(previous => { const next = (close ?? !previous.includes(id)) ? [...new Set([...previous, id])] : previous.filter(v => v !== id); try { localStorage.setItem('ssh-collapsed', JSON.stringify(next)); } catch {} return next; });
   const query = filter.trim().toLocaleLowerCase();
   const matches = (node: SshTreeNode): boolean => node.kind === 'folder' ? node.row.name.toLocaleLowerCase().includes(query) || node.children.some(matches) : [node.row.name, node.row.host, node.row.user].some(s => s.toLocaleLowerCase().includes(query));
+  const countResults = (nodes: SshTreeNode[], inherited = false): number => nodes.reduce((count, node) => count + (node.kind === 'folder' ? countResults(node.children, inherited || node.row.name.toLocaleLowerCase().includes(query)) : Number(inherited || matches(node))), 0);
+  const resultCount = query ? countResults(tree) : 0;
   const clearDrop = () => treeRef.current?.querySelectorAll('.ssh-drop').forEach(element => { element.classList.remove('ssh-drop'); element.removeAttribute('data-drop-zone'); });
   useEffect(() => { if (readOnly) { dragged.current = null; clearDrop(); } }, [readOnly]);
   const allowed = (drag: Drag | null, parentId: string | null, targetId?: string): drag is Drag => {
@@ -81,11 +83,12 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
           else if (event.key === 'Delete') { event.preventDefault(); if (!readOnly) onDelete?.(row, kind); }
         }}>
         {kind === 'folder' ? <><button aria-label={`Toggle ${row.name}`} aria-expanded={expanded} onClick={event => { event.stopPropagation(); toggle(row.id); }}>{expanded ? '▾' : '▸'}</button><span className={`ssh-folder-icon ssh-color-${(row as SshFolder).color}`} data-icon={(row as SshFolder).icon}><SshFolderIcon icon={(row as SshFolder).icon} /></span></> : <span aria-hidden>⌁</span>}
-        <span className="ssh-row-label">{row.name}</span>
+        <span className="ssh-row-label" title={row.name}>{row.name}</span>
+        {node.kind === 'connection' && <span className="ssh-row-endpoint" title={`${node.row.user}@${node.row.host}:${node.row.port}`}>{node.row.user}@{node.row.host}{node.row.port !== 22 && `:${node.row.port}`}</span>}
         {kind === 'connection' && <button disabled={readOnly} aria-label={`Bookmark ${row.name}`} aria-pressed={(row as SshConnection).bookmarked} onClick={event => { event.stopPropagation(); if (!readOnly) onBookmark(row.id, !(row as SshConnection).bookmarked); }}>{(row as SshConnection).bookmarked ? '★' : '☆'}</button>}
       </div>
       {kind === 'folder' && expanded && <div role="group" className="ssh-tree-children">{render(node.children, inherited || (!!query && row.name.toLocaleLowerCase().includes(query)))}</div>}
     </div>;
   });
-  return <div ref={treeRef} role="tree" aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); if (!readOnly) onMenu?.(event); }} onDragOver={event => over(event,{zone:'root'})} onDrop={event => drop(event,{zone:'root'})}>{render(tree)}</div>;
+  return <><div className="ssh-filter-summary" aria-live="polite" aria-atomic="true">{query ? `${resultCount} of ${view.connections.length} connections` : null}</div><div ref={treeRef} role="tree" aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); if (!readOnly) onMenu?.(event); }} onDragOver={event => over(event,{zone:'root'})} onDrop={event => drop(event,{zone:'root'})}>{!tree.length && <p className="ssh-tree-note ssh-tree-message">No saved connections yet.</p>}{query && !resultCount && <p className="ssh-tree-note ssh-tree-message">No connections match “{filter.trim()}”.</p>}{render(tree)}</div></>;
 }
