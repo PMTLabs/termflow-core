@@ -6,7 +6,26 @@ import tauriBridge from '../tauri-bridge';
 import browserBridge from '../browser-bridge';
 import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge, browserSshBridge } from '../sshBridge';
-import type { SshStoreApi } from '../../types/ssh';
+import type { LaunchAttemptRef, SshLaunchApi, SshStoreApi } from '../../types/ssh';
+
+const attempt: LaunchAttemptRef = {
+  sessionGeneration: 9, attemptReceipt: { generation: 9, gate: 'pending' },
+  processIncarnation: 'pc-1', ownerIncarnation: { pg: 4, seq: 2 },
+};
+test('desktop_only_ssh_bridge_never_posts_to_rest', async () => {
+  const previousFetch = global.fetch;
+  const fetchSpy = jest.fn();
+  global.fetch = fetchSpy;
+  const invokeSpy = jest.mocked(invoke);
+  invokeSpy.mockClear();
+  try {
+    await expect(browserBridge.ssh!.launchTerminal('tm-1', 'c-1', attempt)).rejects.toMatchObject({ code: 'desktop-only' });
+    await expect(browserBridge.ssh!.cancelTerminalLaunch('tm-1', attempt)).rejects.toMatchObject({ code: 'desktop-only' });
+    await expect(browserBridge.ssh!.terminalLaunchState('tm-1', attempt)).rejects.toMatchObject({ code: 'desktop-only' });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(invokeSpy).not.toHaveBeenCalled();
+  } finally { global.fetch = previousFetch; }
+});
 test('both actual bridges wire the SSH surface',async()=>{
   expect(browserBridge.ssh).toBe(browserSshBridge);
   await expect(browserBridge.ssh!.get()).rejects.toMatchObject({code:'desktop-only'});
@@ -23,9 +42,12 @@ describe('SSH bridge contract', () => {
   const connection = { folderId: null, name: 'C', host: 'h', port: 22, user: 'u', auth: 'agent' as const, identityFile: null, jumpConnectionId: null, extraOptions: [], bookmarked: true };
   const move = { kind: 'connection' as const, id: 'c-dragged', parentId: 'f-target', index: 2 };
   const draftPreview = { source:{ kind:'draft', draft:{ ...connection,id:'c-edit' },editingId:'c-edit' } };
-  const cases: [keyof SshStoreApi, any[], string, object | undefined][] = [
+  const cases: [keyof (SshStoreApi & SshLaunchApi), any[], string, object | undefined][] = [
     ['previewConnection', [draftPreview], 'ssh_connection_preview', draftPreview],
     ['markUsed', ['c-used'], 'ssh_connection_mark_used', { id:'c-used' }],
+    ['launchTerminal', ['tm-1', 'c-1', attempt], 'ssh_terminal_launch', { terminalId: 'tm-1', connectionId: 'c-1', attempt }],
+    ['cancelTerminalLaunch', ['tm-1', attempt], 'ssh_terminal_cancel_launch', { terminalId: 'tm-1', attempt }],
+    ['terminalLaunchState', ['tm-1', attempt], 'ssh_terminal_launch_state', { terminalId: 'tm-1', attempt }],
     ['get', [], 'ssh_store_get', undefined], ['reload', [], 'ssh_store_reload', undefined],
     ['upsertFolder', [folder], 'ssh_folder_upsert', { input: folder }],
     ['deleteFolder', [{ id: 'f-clicked', recursive: true }], 'ssh_folder_delete', { id: 'f-clicked', recursive: true }],

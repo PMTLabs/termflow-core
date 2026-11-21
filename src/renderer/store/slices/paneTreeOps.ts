@@ -41,6 +41,7 @@ export const TERMINAL_BOUND_FIELDS = [
   'elevated',
   'apiCreated',
   'titleColor',
+  'ssh',
 ] as const;
 
 /** The terminal-bound half of a pane node — everything that must follow the terminal. */

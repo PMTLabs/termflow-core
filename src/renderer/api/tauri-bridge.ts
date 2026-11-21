@@ -94,7 +94,7 @@ export interface NetworkInterfaceInfo {
 // Define the interface to match existing usage
 interface ElectronAPI extends SshAPI {
   pickFile?: (title?: string) => Promise<string | null>;
-  ssh?: import('../types/ssh').SshStoreApi;
+  ssh?: import('../types/ssh').SshStoreApi & import('../types/ssh').SshLaunchApi;
   getTerminalOutput: (terminalId: string, lines?: number, offset?: number) => Promise<{
     totalLines: number;
     offset: number;

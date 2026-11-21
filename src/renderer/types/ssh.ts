@@ -20,6 +20,42 @@ export interface SshPreviewError {
   message: string;
   fields?: SshError[];
 }
+export type MetricKey = 'host' | 'cpu' | 'ram' | 'netUp' | 'netDown' | 'uptime' | 'users' | 'partitions' | 'nfs';
+export interface SshPaneTag {
+  connectionId: string;
+  browserCollapsed: boolean;
+  browserPath?: string;
+  followCd: boolean;
+  hiddenMetrics: MetricKey[];
+}
+
+export type LaunchAttemptReceipt = Pick<SshSessionView, 'gate' | 'reason' | 'knownHostsPaths'> & { generation: number };
+export interface LaunchAttemptRef {
+  sessionGeneration: number;
+  attemptReceipt: LaunchAttemptReceipt;
+  processIncarnation: string;
+  ownerIncarnation: import('../services/paneIncarnations').PaneIncarnation;
+}
+export interface LaunchError {
+  code: 'StaleAttempt' | 'NotFound' | 'InputLocked' | 'UnsupportedShell' | 'UnsupportedContext'
+    | 'TrustBlocked' | 'Timeout' | 'WriteFailed' | 'TransportClosed' | 'StoreUnavailable' | 'desktop-only';
+  message: string;
+}
+export interface LaunchSnapshot {
+  terminalId: string;
+  connectionId: string;
+  attempt: LaunchAttemptRef;
+  revision: number;
+  launchSeq: number;
+  stage: 'preparing' | 'waiting-ready' | 'waiting-trust' | 'typed' | 'running' | 'ended' | 'blocked' | 'cancelled' | 'error';
+  error?: LaunchError;
+}
+export interface SshLaunchApi {
+  launchTerminal(terminalId: string, connectionId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
+  cancelTerminalLaunch(terminalId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
+  terminalLaunchState(terminalId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
+}
+
 export interface SshStoreApi {
   previewConnection(input: { source: SshPreviewSource }): Promise<SshPreview>;
   markUsed(id: string): Promise<SshReply>;

@@ -3,7 +3,11 @@ import { generateId } from '../../utils/id';
 import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, EdgeZone } from './paneTreeOps';
 import { setInitialCwd } from '../../services/initialCwd';
 
+import type { SshPaneTag } from '../../types/ssh';
+
 export interface PaneNode {
+  /** Saved connection preferences on terminal leaves only; never a live launch receipt. */
+  ssh?: SshPaneTag;
   id: string;
   type: 'terminal' | 'split';
   direction?: 'horizontal' | 'vertical';
@@ -219,6 +223,7 @@ function splitLeafInTree(
       delete node.notifyMuted;
       delete node.apiCreated;
       delete node.titleColor;
+      delete node.ssh;
       return newPaneId;
     }
     if (node.type === 'split' && node.children) {
@@ -866,6 +871,7 @@ const panesSlice = createSlice({
           delete node.notifyMuted; // node is a split container now, not a leaf
           delete node.apiCreated;
           delete node.titleColor;
+          delete node.ssh;
 
           // Set the new pane as active
           state.activePaneId = newPaneId;

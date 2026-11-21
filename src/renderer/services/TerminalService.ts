@@ -1,7 +1,9 @@
 import { paneIncarnations, accepted, describePanes, type PaneCapture, type CreateMode, type PaneIncarnations } from './paneIncarnations';
 import { termDiag } from '../utils/diag';
 import { earlyOutput } from './earlyOutput';
-import { findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import { findLeafByTerminalId, findTabIdByTerminalId } from '../store/slices/paneTreeOps';
+import { observeOwnedSshLaunch, type SshLaunchObservation } from './sshLaunchAttempt';
+import { reattachPromptGate } from './reattachGate';
 import type { PaneNode } from '../store/slices/panesSlice';
 import { isHostOwnershipPending, isLifecycleBusy } from './hostOwnershipPending';
 import { isAdminUacCancelled } from './adminUacCancelled';
@@ -39,6 +41,7 @@ export class TerminalServiceClass {
   // Cleared in finally so a failed create never poisons the next attempt.
   private inFlightCreates = new Map<string | PaneCapture, { terminalId: string; promise: Promise<string> }>();
   private hostWaitStates = new Map<string, HostWaitState>();
+  private sshLaunches = new WeakMap<PaneCapture, { pc: string; work: Promise<SshLaunchObservation | undefined> }>();
   // Keep the raw placement outcome even when its original copy leaves. A replacement
   // must wait for that work and bind its exact process, not race a Parked placement.
   private placements = new Map<string, { pi: PaneCapture; work: Promise<string>; pc?: string }>();
@@ -384,7 +387,7 @@ export class TerminalServiceClass {
       } else if (admission.status === 'Create' || admission.status === 'Join') {
         const work = protocol.create(admission.cg, {
           leaf: terminalId, profile: shellType, name, cwd, cols, rows, owningTabId, sessionKey, elevated,
-          ...(sshLaunchConnectionId === undefined ? {} : { sshLaunchConnectionId }),
+          ...(admission.status === 'Create' && sshLaunchConnectionId !== undefined ? { sshLaunchConnectionId } : {}),
         });
         const placement: { pi: PaneCapture; work: Promise<string>; pc?: string } = { pi: attemptPi!, work };
         this.placements.set(terminalId, placement);
@@ -408,8 +411,34 @@ export class TerminalServiceClass {
         return ''; // Backend ownership follows the pane even after placement finishes.
       }
 
+      // An admitted Create can still attach to a surviving host shell. The native
+      // reattach seed is present even for a hookless shell and is staged before
+      // create resolves. Claim it here before publishing the process to any mount.
+      let freshSsh = false;
+      if (sshLaunchConnectionId && attemptPi && admission.status === 'Create') {
+        try {
+          const seed = await this.api().takeReattachPromptHook?.(processId);
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          if (seed) {
+            this.stashPromptGate(terminalId, reattachPromptGate(seed.promptHook, seed.atPrompt));
+            this.markReattachedSession(terminalId);
+          }
+          freshSsh = seed === null;
+        } catch {
+          if (!protocol.isCurrent(terminalId, paneId, attemptPi)) return '';
+          // An ambiguous attach result is not a fresh launch authorization.
+        }
+      }
       if (attemptPi) protocol.setRestoreResolved(attemptPi);
       this.bindCreated(terminalId, processId, owningTabId);
+
+      if (freshSsh && sshLaunchConnectionId && attemptPi) {
+        const placement = this.sshPlacement(terminalId, paneId, attemptPi, processId, sshLaunchConnectionId);
+        const work = observeOwnedSshLaunch(this.api(), placement, mode === 'Restart' ? 'restart' : 'open');
+        this.sshLaunches.set(attemptPi, { pc: processId, work });
+        // Launch failure does not discard the successfully created local shell.
+        void work.catch(() => {});
+      }
 
       if (isElevatedFlightOwner) flightResolve?.(processId);
 
@@ -437,6 +466,24 @@ export class TerminalServiceClass {
         if (this.reconnectElevatedPromise === flight) this.reconnectElevatedPromise = null;
       }
     }
+  }
+
+  private sshPlacement(terminalId: string, paneId: string | undefined, owner: PaneCapture, pc: string, connectionId: string, mounted = () => true) {
+    const protocol = this.incarnations();
+    return { terminalId, connectionId, processIncarnation: pc, owner, current: () =>
+      mounted() && protocol === this.incarnations() && protocol.isCurrent(terminalId, paneId, owner)
+      && this.getProcessId(terminalId) === pc
+      && findLeafByTerminalId(this.paneTrees(), terminalId)?.ssh?.connectionId === connectionId };
+  }
+
+  /** A mounted copy re-reads the owned session and launch with its own acknowledged identity. */
+  async querySshLaunch(terminalId: string, paneId: string, owner: PaneCapture, pc: string, connectionId: string, mounted: () => boolean) {
+    const placement = this.sshPlacement(terminalId, paneId, owner, pc, connectionId, mounted);
+    if (!placement.current()) return;
+    const started = this.sshLaunches.get(owner);
+    if (started?.pc === pc) await started.work.catch(() => {});
+    if (!placement.current()) return;
+    return observeOwnedSshLaunch(this.api(), placement, 'query');
   }
 
   /** Everything a window does once a create has produced the process for `terminalId`. */

@@ -7,7 +7,7 @@ import { AgentChip } from '../Terminal/AgentChip';
 import { terminalService } from '../../services/TerminalService';
 import { RootState, store } from '../../store';
 import { removeTabTree, renamePanes } from '../../store/slices/panesSlice';
-import { findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId, findElevatedByTerminalId } from '../../store/slices/paneTreeOps';
+import { findLeafByTerminalId, findTabIdByTerminalId, getSelectedPaneId, findSessionKeyByTerminalId, findElevatedByTerminalId } from '../../store/slices/paneTreeOps';
 import { usePaneMuteState } from './usePaneMuteState';
 import { useDismissOnTabDeactivate } from '../../hooks/useDismissOnTabDeactivate';
 import { clearTabExited, removeTab, setAutoTabTitle } from '../../store/slices/tabsSlice';
@@ -28,6 +28,7 @@ import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
+import { sshSessionObserved } from '../../store/slices/sshSessionSlice';
 import { isAdminUacCancelled, takeOptimisticAdminTab } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
@@ -88,7 +89,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 }) => {
   const dispatch = useDispatch();
   const paneRef = useRef<HTMLDivElement>(null);
-  const [processId, setProcessId] = useState<string | undefined>();
+  const [processBinding, setProcessBinding] = useState<{ pc: string; owner?: PaneCapture }>();
+  const processId = processBinding?.pc;
   const incarnation = useSyncExternalStore(paneIncarnations.subscribe,
     () => paneIncarnations.enabled && terminalId ? paneIncarnations.capture(terminalId, paneId) : undefined);
   const currentCopy = () => !paneIncarnations.enabled
@@ -221,7 +223,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       terminalInitLock.delete(initKey);
       terminalInitPromises.delete(initKey);
     };
-    setProcessId(undefined);
+    setProcessBinding(undefined);
 
     // Clear any stale "Failed to start shell" status before (re)resolving this
     // terminalId, so an early-return path (reuse / locked / tab-gone) can never
@@ -256,11 +258,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             } catch (e) {
               console.warn('TerminalPane: pre-mount arm probe skipped (baseline stays disarmed):', e);
             } finally {
-              if (current()) setProcessId(existingProcessId);
+              if (current()) setProcessBinding({ pc: existingProcessId, owner: pi });
             }
           })();
         } else {
-          setProcessId(existingProcessId);
+          setProcessBinding({ pc: existingProcessId, owner: pi });
         }
       };
       if (paneIncarnations.enabled) {
@@ -294,7 +296,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
             if (!pid || !current()) return;
             const allowed = !protocol.enabled || await terminalService.authorizeExisting(terminalId, pid, paneId);
             if (!current()) return;
-            if (allowed) setProcessId(pid);
+            if (allowed) setProcessBinding({ pc: pid, owner: pi });
             else setStartupFailed(true);
           }).catch(error => {
             if (!current()) return;
@@ -353,9 +355,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // R8: read off the tree, not a prop, so this and the restart-in-place call
     // site below can never disagree about whether this pane is elevated.
     const elevated = findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId);
+    const launchId = findLeafByTerminalId(store.getState().panes.treesByTabId, terminalId)?.ssh?.connectionId;
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
-      sessionKey, elevated, 'Mount', paneId,
+      sessionKey, elevated, 'Mount', paneId, ...(launchId ? [launchId] as const : [] as const),
     );
     terminalInitPromises.set(initKey, initPromise);
     terminalInitMap.set(initKey, true);
@@ -379,7 +382,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // Backlog 011: if the backend REATTACHED this terminal after a core-restart
         // hot-swap, reconcile could not seed the command-suggest prompt gate (the
         // terminal list was empty then), so the backend stashed the shell's
-        // prompt-hook. Drain it and re-seed the gate BEFORE setProcessId mounts the
+        // prompt-hook. Drain it and re-seed the gate BEFORE publishing the process mounts the
         // engine (TerminalDisplay renders only once processId is set, and reads the
         // handoff on mount) — otherwise the popup leaks keystrokes into an agent CLI
         // that survived the update. Best-effort; never block terminal init.
@@ -412,7 +415,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         }
 
         if (!current()) { releaseGuards(); return; }
-        setProcessId(pid);
+        setProcessBinding({ pc: pid, owner: pi });
 
         // Creation is done: release the in-flight lock/promise. The reuse path
         // resolves via terminalService.getProcessId() from here on, and a stale
@@ -628,6 +631,20 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     };
   }, [elevationRequired]);
 
+  const sshConnectionId = useSelector((state: RootState) => terminalId
+    ? findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.connectionId : undefined);
+  useEffect(() => {
+    // A render may still carry the old copy's process while the new copy is binding.
+    if (!terminalId || !processId || !incarnation || processBinding?.owner !== incarnation || !sshConnectionId) return;
+    let mounted = true;
+    void terminalService.querySshLaunch(terminalId, paneId, incarnation, processId, sshConnectionId, () => mounted)
+      .then(result => {
+        if (mounted && result && paneIncarnations.isCurrent(terminalId, paneId, incarnation)
+            && terminalService.getProcessId(terminalId) === processId) dispatch(sshSessionObserved(result.session));
+      }).catch(() => { /* T4 surfaces launch notices; no synthetic session state. */ });
+    return () => { mounted = false; };
+  }, [terminalId, paneId, incarnation, processId, processBinding?.owner, sshConnectionId, dispatch]);
+
   // Restart the session IN PLACE: spawn a fresh shell for the same pane id,
   // reusing the original profile + working directory. The process map and init
   // guards were already cleared when the old process exited, so createTerminal
@@ -665,6 +682,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const ownerTabId =
       findTabIdByTerminalId(store.getState().panes.treesByTabId, terminalId) ?? undefined;
 
+    const launchId = findLeafByTerminalId(store.getState().panes.treesByTabId, terminalId)?.ssh?.connectionId;
     try {
       const newPid = await terminalService.createTerminal(
         terminalId,
@@ -681,11 +699,11 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // Administrator-badged tab to a medium shell — the plan's flagged
         // "single most likely silent defect".
         findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId),
-        'Restart', paneId,
+        'Restart', paneId, ...(launchId ? [launchId] as const : [] as const),
       );
       if (!newPid || !current()) return;
       // The engine re-attaches to the new process when processId changes below.
-      setProcessId(newPid);
+      setProcessBinding({ pc: newPid, owner: pi });
       dispatch(clearSessionClosed({ terminalId }));
       // The snapshot has been consumed. Clearing it stops a LATER exit that
       // carries no cwd from silently reusing this directory (spec 045 §3.3).
