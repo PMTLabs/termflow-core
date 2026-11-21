@@ -2,12 +2,17 @@ import React, { useEffect, useState } from 'react';
 import { ContextMenu, ContextMenuItem } from '../../Terminal/ContextMenu';
 import { ConfirmDialog } from '../../UI/ConfirmDialog';
 import { sshMoveIndex } from '../../../services/sshMoveIndex';
+import { selectFolderConnectionIds } from '../../../store/slices/sshSlice';
 import { FolderIconPicker } from './FolderIconPicker';
 import type { SshFolder, SshConnection, SshStoreApi, SshView, SshReply } from '../../../types/ssh';
 export interface SshMenuTarget { deleteRequested?:boolean; x:number; y:number; row?: SshFolder | SshConnection; kind?: 'folder' | 'connection' }
-export function SshMenus({ target, view, api, commit, onClose, onFolder, onConnection, onRename }: {
+export function SshMenus({ target, view, api, commit, onClose, onFolder, onConnection, onRename, onConnect, onConnectAll }: {
   target:SshMenuTarget; view:SshView; api:SshStoreApi; commit(operation: () => Promise<SshReply>): Promise<unknown>;
   onClose():void; onFolder(parentId:string | null):void; onConnection(folderId:string | null):void; onRename(row:SshFolder | SshConnection, kind:'folder' | 'connection'):void;
+  /** Saved-id launch (row menu). Omitted by callers that do not offer launching. */
+  onConnect?(id:string):void;
+  /** Connect all in tabs for the right-clicked folder id only. */
+  onConnectAll?(folderId:string):void;
 }) {
   const [confirm, setConfirm] = useState(false); const [menuOpen, setMenuOpen] = useState(true);
   const readOnly = !!view.loadError;
@@ -16,6 +21,7 @@ export function SshMenus({ target, view, api, commit, onClose, onFolder, onConne
   for (let i = 0; i < view.folders.length; i++) for (const f of view.folders) if (f.parentId && ids.has(f.parentId)) ids.add(f.id);
   const connections = view.connections.filter(c => c.folderId && ids.has(c.folderId)).length;
   const nonempty = ids.size > 1 || connections > 0;
+  const connectIds = folder ? selectFolderConnectionIds(view, folder.id) : [];
   const treeRow = () => Array.from(document.querySelectorAll<HTMLElement>('.ssh-tree [data-row-id]')).find(element => element.dataset.rowId === row?.id);
   const restoreDeleteFocus = (ids: (string | undefined)[]) => requestAnimationFrame(() => {
     const tree = document.querySelector<HTMLElement>('.ssh-tree');
@@ -55,6 +61,7 @@ export function SshMenus({ target, view, api, commit, onClose, onFolder, onConne
     } };
   }) : [];
   const items: ContextMenuItem[] = folder ? [
+    ...(onConnectAll ? [{ label:'Connect all in tabs', icon:'▶', enabled:connectIds.length > 0, title:connectIds.length ? `Open ${connectIds.length} connection${connectIds.length === 1 ? '' : 's'} in new tabs` : 'This folder has no connections', click:() => onConnectAll(folder.id) }] : []),
     { label:'Add subfolder', icon:'📁', click:() => onFolder(folder.id) },
     { label:'New SSH connection here', icon:'⌁', click:() => onConnection(folder.id) },
     { label:'Folder icon', icon:'⚗', customFlyout:{ panelClassName:'ssh-picker-flyout', content:<FolderIconPicker icon={folder.icon} color={folder.color} onPick={(icon,color) => { if (readOnly) return; void commit(() => api.upsertFolder({ id:folder.id, parentId:folder.parentId, name:folder.name, icon, color })); onClose(); }} /> } },
@@ -63,6 +70,7 @@ export function SshMenus({ target, view, api, commit, onClose, onFolder, onConne
     { type:'separator' },
     { label:'Delete folder…', icon:'🗑', accelerator:'Del', danger:true, click:requestDelete },
   ] : row ? [
+    ...(onConnect ? [{ label:'Connect', icon:'▶', click:() => onConnect(row.id) }] : []),
     { icon:'★', label:(row as SshConnection).bookmarked ? 'Unbookmark' : 'Bookmark', click:() => { void commit(() => api.setBookmark(row.id, !(row as SshConnection).bookmarked)); } },
     { label:'Rename', icon:'✎', accelerator:'F2', click:() => onRename(row, 'connection') },
     ...moves,

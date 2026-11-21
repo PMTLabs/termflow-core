@@ -49,7 +49,7 @@ function connectionInput(draft:SshConnectionInput, options:string):SshConnection
   return { ...draft, name:draft.name.trim(), identityFile:draft.auth === 'keyFile' ? draft.identityFile : null, extraOptions:parsed.pairs };
 }
 
-export function SshConnectionEditor({ connectionId, initialFolder, view, api, onSaved, onClose, focusName = 0 }: { connectionId?:string; initialFolder:string | null; view:SshView; api:SshStoreApi; onSaved(reply:SshReply, input:SshConnectionInput):void; onClose():void; focusName?:number }) {
+export function SshConnectionEditor({ connectionId, initialFolder, view, api, onSaved, onClose, focusName = 0, onConnect }: { connectionId?:string; initialFolder:string | null; view:SshView; api:SshStoreApi; onSaved(reply:SshReply, input:SshConnectionInput):void; onClose():void; focusName?:number; onConnect?(id:string):void }) {
   const nameInput = useRef<HTMLInputElement>(null);
   useEffect(() => { if (!connectionId || focusName) nameInput.current?.focus(); }, [connectionId, focusName]);
   const form = useRef<HTMLFormElement>(null); const errorPrefix = useId();
@@ -200,6 +200,8 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       return false; }
     finally { setBusy(false); }
   };
+  // Always the SAVED id: the panel decides what a dirty draft means (Save / Discard / Cancel) before launching.
+  const connect = () => { if (existing && onConnect && !readOnly && !removed && !busy) onConnect(existing.id); };
   const current = useRef({ dirty, save, reset }); current.current = { dirty, save, reset };
   useEffect(() => registerSshEditorGuard({ isDirty:() => current.current.dirty, save:() => current.current.save(), discard:() => current.current.reset() }), []);
   const errorProps = (name:string) => { const message = fieldMessage(name); return { 'aria-invalid':!!message, 'aria-describedby':message ? `${errorPrefix}-${name}` : undefined }; };
@@ -233,6 +235,9 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
       <small id="ssh-test-help">{!existing || dirty || changed ? 'Save changes before testing the saved connection.' : 'Tests the native app channel only; no terminal is opened.'}</small>
     </div>
       <div role="status">{forgotten && !existing?.hasSavedSecret ? 'Saved credential forgotten.' : ''}</div>
+    {existing && onConnect && <div className="ssh-editor-actions"><button type="button" className="au-btn primary" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>
+      <small id="ssh-connect-help">{dirty || changed ? 'Opens the last saved version; you will be asked about unsaved changes.' : 'Opens a new tab and starts this saved connection.'}</small>
+    </div>}
     {testOpen && canTest && sessionApi && <SshTestConnectionDialog connectionId={connectionId!} api={sessionApi} onClose={() => setTestOpen(false)} />}
     <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
     <ConfirmDialog isOpen={confirmForget && showSavedCredential && !readOnly && !busy} title="Forget saved credential" message={`Forget the saved credential for ${existing?.name}? You'll be asked for it next time.`} destructive confirmText="Forget" onCancel={() => setConfirmForget(false)} onConfirm={forget} />
