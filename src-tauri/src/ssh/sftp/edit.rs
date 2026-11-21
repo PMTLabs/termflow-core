@@ -8,7 +8,7 @@ use super::{
     Admission, FileTarget, FsCode, FsError, FsOutcome, RemoteFs,
 };
 use crate::ssh::session::SshSession;
-use russh_sftp::protocol::FileType;
+use russh_sftp::protocol::{FileAttributes, FileType};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -63,6 +63,7 @@ pub(crate) struct EditJob {
     pub(super) data: Arc<tokio::sync::Mutex<JobData>>,
     pub(super) fence: CancellationToken,
     pub(super) session: Arc<SshSession>,
+    pub(super) original_attrs: FileAttributes,
 }
 
 impl EditJob {
@@ -70,7 +71,7 @@ impl EditJob {
         self.data.lock().await.record.clone()
     }
 
-    /// D6 must check this fence and its pinned session again before remote commit.
+    /// Checked alongside the pinned session before remote writes and commit.
     pub(crate) fn cancellation(&self) -> &CancellationToken {
         &self.fence
     }
@@ -128,7 +129,7 @@ impl EditRegistry {
 
         let a = fs.admit(OP, remote_path).await?;
         check_remote_parents(&a, remote_path, &self.shutdown).await?;
-        let mut before = baseline(&a, remote_path).await?;
+        let (mut before, _) = baseline(&a, remote_path).await?;
         let root = private_root(&self.root).map_err(|_| local_error(remote_path))?;
         let edit_id = Uuid::new_v4();
         let mut dir = PendingDir::new(root.join(edit_id.to_string())).map_err(|_| local_error(remote_path))?;
@@ -136,21 +137,21 @@ impl EditRegistry {
         for attempt in 0..2 {
             if attempt != 0 {
                 check_remote_parents(&a, remote_path, &self.shutdown).await?;
-                before = baseline(&a, remote_path).await.map_err(|err| {
+                (before, _) = baseline(&a, remote_path).await.map_err(|err| {
                     if snapshot_changed(&err) { torn(remote_path) } else { err }
                 })?;
             }
             let download = transfer_file(&a, remote_path, FileTarget::no_replace(local_path.clone()), &self.shutdown, || {}).await;
             let stable = match download {
                 Ok(download) => match baseline(&a, remote_path).await {
-                    Ok(after) => before == after && download.bytes_written == before.size,
-                    Err(err) if snapshot_changed(&err) => false,
+                    Ok((after, attrs)) => (before == after && download.bytes_written == before.size).then_some(attrs),
+                    Err(err) if snapshot_changed(&err) => None,
                     Err(err) => return Err(err),
                 },
-                Err(err) if err.code == FsCode::NotFound => false,
+                Err(err) if err.code == FsCode::NotFound => None,
                 Err(err) => return Err(err),
             };
-            if !stable {
+            let Some(original_attrs) = stable else {
                 if attempt == 0 {
                     match fs::remove_file(&local_path) {
                         Ok(()) => {},
@@ -160,7 +161,7 @@ impl EditRegistry {
                     continue;
                 }
                 return Err(torn(remote_path));
-            }
+            };
             let path = local_path.clone();
             let digest = tokio::task::spawn_blocking(move || hash_sample(&path)).await
                 .ok().and_then(Result::ok).flatten().ok_or_else(|| local_error(remote_path))?.digest;
@@ -174,6 +175,7 @@ impl EditRegistry {
                 data: Arc::new(tokio::sync::Mutex::new(JobData { record, candidate: None, in_flight: false, stopped: None })),
                 fence: CancellationToken::new(),
                 session: a.session.clone(),
+                original_attrs,
             });
             let mut jobs = self.jobs.lock().unwrap();
             self.check_open(remote_path)?;
@@ -210,13 +212,13 @@ impl EditRegistry {
     }
 }
 
-async fn baseline(a: &Admission<'_>, path: &str) -> Result<Baseline, FsError> {
+async fn baseline(a: &Admission<'_>, path: &str) -> Result<(Baseline, FileAttributes), FsError> {
     let attrs = a.read(path, |c| Box::pin(c.lstat(path))).await?.attrs;
     if attrs.file_type() != FileType::File {
         return Err(error(OP, path, FsCode::Unsupported, FsOutcome::Unchanged, "Only regular remote files can be edited."));
     }
     match (attrs.mtime, attrs.size) {
-        (Some(mtime), Some(size)) => Ok(Baseline { mtime, size }),
+        (Some(mtime), Some(size)) => Ok((Baseline { mtime, size }, attrs)),
         _ => Err(error(OP, path, FsCode::Unsupported, FsOutcome::Unchanged,
             "editing needs modified time and size; Download still works")),
     }

@@ -659,6 +659,14 @@ pub fn run() {
 
         // Manage state in Tauri
         app.manage(state.clone());
+        let edit_root = ssh::sftp::edit::edit_root(app.handle())?;
+        let ssh_edits = std::sync::Arc::new(ssh::sftp::edit::EditRegistry::new(
+            edit_root, std::sync::Arc::new(ssh::sftp::watch::TokioClock),
+        ));
+        app.manage(ssh_edits.clone());
+        let app_handle = app.handle().clone();
+        let sessions = state.ssh_sessions.clone();
+        tauri::async_runtime::spawn(async move { ssh_edits.start(sessions, app_handle) });
         // Tauri has already built the configured window before calling setup.
         if let Some(main) = app.get_webview_window("main") {
             let build = window_lifetime::reserve(app.handle(), "main")?;
@@ -1258,6 +1266,9 @@ pub fn run() {
                 // makes §7.5's actual requirement — each entry keeping its own decision timestamp
                 // rather than a flush-time `now` — trivially true. Corrected in the plan.
                 state.automations.stop();
+                if let Some(edits) = app_handle.try_state::<std::sync::Arc<ssh::sftp::edit::EditRegistry>>() {
+                    tauri::async_runtime::block_on(edits.shutdown());
+                }
                 tauri::async_runtime::block_on(state.ssh_sessions.shutdown());
                 // Persist every terminal's scrollback before the process dies.
                 flush_all_history(&state);

@@ -94,7 +94,7 @@ impl Harness {
         let job = edits.begin_edit(&browser(&fixture), "/a.txt").await.unwrap();
         let path = job.record().await.local_path;
         let recorder = Arc::new(Recorder { calls: Mutex::new(Vec::new()), release_first: block_first.then(|| Semaphore::new(0)) });
-        edits.start(fixture.registry.clone(), recorder.clone());
+        edits.start_with(fixture.registry.clone(), recorder.clone(), None);
         Self { fixture, _remote: remote, _local: local, root, edits, job, path, clock: ClockDriver { requests, next: None }, recorder }
     }
 

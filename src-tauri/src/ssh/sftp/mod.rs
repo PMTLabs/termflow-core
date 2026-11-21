@@ -4,6 +4,7 @@ pub(crate) mod edit;
 pub mod local_target;
 mod ops;
 mod types;
+mod upload;
 pub(crate) mod watch;
 #[cfg(test)]
 mod tests;

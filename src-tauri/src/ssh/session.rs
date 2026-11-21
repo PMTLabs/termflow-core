@@ -1563,7 +1563,7 @@ async fn authenticate(
 pub struct SshSession {
     handle: tokio::sync::Mutex<client::Handle<ClientHandler>>,
     cancel: CancellationToken,
-    sftp: tokio::sync::Mutex<Option<Arc<russh_sftp::client::RawSftpSession>>>,
+    sftp: tokio::sync::Mutex<Option<Arc<SftpClient>>>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecOutput {
@@ -1716,7 +1716,10 @@ impl SshSession {
                     return Err(SessionError::CapabilityUnavailable);
                 }
                 sftp.set_timeout(30);
-                *cached = Some(Arc::new(sftp));
+                *cached = Some(Arc::new(SftpClient {
+                    raw: sftp,
+                    posix_rename: version.extensions.get("posix-rename@openssh.com").is_some_and(|v| v == "1"),
+                }));
             }
             Ok(SftpLease {
                 client: cached
@@ -1741,11 +1744,20 @@ impl SshSession {
         }
     }
 }
+struct SftpClient {
+    raw: russh_sftp::client::RawSftpSession,
+    posix_rename: bool,
+}
+
 pub struct SftpLease {
-    client: Arc<russh_sftp::client::RawSftpSession>,
+    client: Arc<SftpClient>,
     cancel: CancellationToken,
 }
 impl SftpLease {
+    pub(crate) fn supports_posix_rename(&self) -> bool {
+        self.client.posix_rename
+    }
+
     /// All operations are scoped through this fence; the owned result cannot borrow the client.
     pub async fn request<'a, T: 'static>(
         &'a self,
@@ -1753,7 +1765,7 @@ impl SftpLease {
             &'a russh_sftp::client::RawSftpSession,
         ) -> BoxFuture<'a, Result<T, SessionError>>,
     ) -> Result<T, SessionError> {
-        let result = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(SessionError::Cancelled), result = tokio::time::timeout(Duration::from_secs(30), operation(&self.client)) => result.map_err(|_| SessionError::TimedOut)? };
+        let result = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(SessionError::Cancelled), result = tokio::time::timeout(Duration::from_secs(30), operation(&self.client.raw)) => result.map_err(|_| SessionError::TimedOut)? };
         if self.cancel.is_cancelled() {
             Err(SessionError::Cancelled)
         } else {

@@ -18,6 +18,9 @@ pub struct SftpFaults {
     pub requests: Vec<(String, String)>,
     pub deny: Vec<(&'static str, String)>,
     pub omit_attrs: bool,
+    pub omit_posix_rename: bool,
+    pub reject_posix_rename: bool,
+    pub hold_temp_close_ack: Option<Arc<tokio::sync::Semaphore>>,
     // One-shot wire names, including names the host filesystem cannot store.
     pub readdir_names: Option<Vec<String>>,
     pub delay_before_ack: Option<(&'static str, String, Duration)>,
@@ -131,7 +134,7 @@ impl TestSftp {
         path: &str,
         apply: impl FnOnce(&mut Self) -> Result<T> + Send,
     ) -> Result<T> {
-        let (denied, delay, disconnect) = {
+        let (denied, delay, disconnect, hold) = {
             let mut f = self.faults.lock();
             f.requests.push((op.to_owned(), path.to_owned()));
             if let Some(before) = &f.before {
@@ -139,9 +142,10 @@ impl TestSftp {
             }
             let matches = |o: &str, p: &str| o == op && p == path;
             (
-                f.deny.iter().any(|(o, p)| matches(o, p)),
+                f.deny.iter().any(|(o, p)| matches(o, p) || (*o == op && p == "*.tmp" && path.ends_with(".tmp"))),
                 f.delay_before_ack.as_ref().filter(|(o, p, _)| matches(o, p)).map(|(_, _, d)| *d),
                 f.drop_connection_on.as_ref().is_some_and(|(o, p)| matches(o, p)),
+                f.hold_temp_close_ack.as_ref().filter(|_| op == "close" && path.ends_with(".tmp")).cloned(),
             )
         };
         let result = if denied {
@@ -153,6 +157,9 @@ impl TestSftp {
             let _filesystem = storage.filesystem.lock();
             apply(self)
         };
+        if let Some(hold) = hold {
+            hold.acquire().await.unwrap().forget();
+        }
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
@@ -312,10 +319,12 @@ impl Handler for TestSftp {
     fn unimplemented(&self) -> Self::Error { StatusCode::OpUnsupported.into() }
 
     async fn init(&mut self, version: u32, _: HashMap<String, String>) -> Result<Version> {
-        self.request("init", "", |_| {
+        self.request("init", "", |s| {
             assert_eq!(version, VERSION);
             let mut reply = Version::new();
-            reply.extensions.insert("posix-rename@openssh.com".into(), "1".into());
+            if !s.faults.lock().omit_posix_rename {
+                reply.extensions.insert("posix-rename@openssh.com".into(), "1".into());
+            }
             Ok(reply)
         }).await
     }
@@ -422,10 +431,13 @@ impl Handler for TestSftp {
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status> {
         let path = self.handle_path(&handle)?;
-        self.request("close", &path, |s| {
+        let reply = self.request("close", &path, |s| {
             s.handles.remove(&handle);
             Ok(ok(id))
-        }).await
+        }).await;
+        // Failing the CLOSE acknowledgement does not have to leak the handle.
+        self.handles.remove(&handle);
+        reply
     }
 
     async fn remove(&mut self, id: u32, path: String) -> Result<Status> {
@@ -472,6 +484,9 @@ impl Handler for TestSftp {
         let new = string(&mut data).ok_or(StatusCode::BadMessage)?;
         if !data.is_empty() { return Err(StatusCode::BadMessage.into()); }
         self.request(&request, old, |s| {
+            if s.faults.lock().reject_posix_rename {
+                return Err(StatusCode::OpUnsupported.into());
+            }
             s.rename_local(old, new, true)?;
             Ok(ok(id).into())
         }).await

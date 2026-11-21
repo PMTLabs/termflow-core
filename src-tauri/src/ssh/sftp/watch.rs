@@ -2,6 +2,7 @@
 use super::{
     edit::{remove_record, write_record, Baseline, EditJob, EditRecord, EditRegistry, EditState, JobData},
     local_target::{ensure_real_dir, is_link},
+    upload::SftpUploader,
     BoxFuture, SessionError, SessionRegistry,
 };
 use sha2::{Digest, Sha256};
@@ -13,6 +14,7 @@ use std::{
     sync::{atomic::Ordering, Arc, Weak},
     time::{Duration, SystemTime},
 };
+use tauri::{AppHandle, Emitter};
 use tokio::time::{timeout_at, Instant};
 use uuid::Uuid;
 
@@ -30,15 +32,17 @@ impl PollClock for TokioClock {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum UploadResult {
     Uploaded(Baseline),
     Paused,
     Conflict,
-    Error,
+    Unsupported,
+    Error(&'static str),
 }
 
 /// Implement as `async fn upload(&self, job: &EditJob, snapshot: EditSnapshot)
-/// -> UploadResult`. D6 owns remote staging and must recheck the job fence and
+/// -> UploadResult`. The uploader owns remote staging and must recheck the job fence and
 /// pinned session before commit. Uploaded means acknowledged with a new baseline.
 pub(crate) trait Uploader: Send + Sync + 'static {
     fn upload(&self, job: &EditJob, snapshot: EditSnapshot) -> impl Future<Output = UploadResult> + Send;
@@ -69,7 +73,12 @@ impl Drop for EditSnapshot {
 
 impl EditRegistry {
     /// Call once from the app runtime. The task does not keep the registry alive.
-    pub(crate) fn start(self: &Arc<Self>, sessions: Arc<SessionRegistry>, uploader: Arc<impl Uploader>) {
+    pub(crate) fn start(self: &Arc<Self>, sessions: Arc<SessionRegistry>, app: AppHandle) {
+        let uploader = Arc::new(SftpUploader::new(sessions.clone()));
+        self.start_with(sessions, uploader, Some(app));
+    }
+
+    pub(super) fn start_with(self: &Arc<Self>, sessions: Arc<SessionRegistry>, uploader: Arc<impl Uploader>, app: Option<AppHandle>) {
         if self.poller_started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -88,7 +97,7 @@ impl EditRegistry {
                     if shutdown.is_cancelled() {
                         return;
                     }
-                    poll_job(job, &sessions, &uploader, &weak).await;
+                    poll_job(job, &sessions, &uploader, &weak, app.as_ref()).await;
                 }
             }
         });
@@ -194,8 +203,9 @@ fn connected(job: &EditJob, record: &EditRecord, sessions: &SessionRegistry) -> 
     }
 }
 
-async fn poll_job(
-    job: Arc<EditJob>, sessions: &Arc<SessionRegistry>, uploader: &Arc<impl Uploader>, registry: &Weak<EditRegistry>,
+pub(super) async fn poll_job(
+    job: Arc<EditJob>, sessions: &Arc<SessionRegistry>, uploader: &Arc<impl Uploader>,
+    registry: &Weak<EditRegistry>, app: Option<&AppHandle>,
 ) {
     let can_sample = |data: &JobData| {
         !job.fence.is_cancelled() && !data.in_flight
@@ -207,7 +217,11 @@ async fn poll_job(
             return;
         }
         if let Err(state) = connected(&job, &data.record, sessions) {
+            let changed = data.record.state != state;
             set_state(&mut data, state);
+            if changed {
+                emit_state(app, &data.record, state_name(state), state_detail(state));
+            }
             return;
         }
         set_state(&mut data, EditState::Watching);
@@ -266,6 +280,7 @@ async fn poll_job(
     let sessions = sessions.clone();
     let registry = registry.clone();
     let hash = snapshot.digest.clone();
+    let app = app.cloned();
     tokio::spawn(async move {
         let record = job.record().await;
         let result = if job.fence.is_cancelled() {
@@ -275,7 +290,7 @@ async fn poll_job(
                 Ok(()) => uploader.upload(&job, snapshot).await,
                 Err(EditState::Paused) => UploadResult::Paused,
                 Err(EditState::Conflict) => UploadResult::Conflict,
-                Err(_) => UploadResult::Error,
+                Err(_) => UploadResult::Error("Could not reacquire the SSH session."),
             }
         };
         let mut data = job.data.lock().await;
@@ -287,14 +302,19 @@ async fn poll_job(
                 data.record.state = EditState::Watching;
             }
             persist(&mut data);
+            if data.stopped.is_none() {
+                emit_state(app.as_ref(), &data.record, "uploaded", None);
+            }
         } else if data.stopped.is_none() {
-            let state = match result {
-                UploadResult::Paused => EditState::Paused,
-                UploadResult::Conflict => EditState::Conflict,
-                UploadResult::Error => EditState::Error,
+            let (state, name, detail) = match result {
+                UploadResult::Paused => (EditState::Paused, "paused", None),
+                UploadResult::Conflict => (EditState::Conflict, "conflict", state_detail(EditState::Conflict)),
+                UploadResult::Unsupported => (EditState::Error, "unsupported", Some("The server does not support atomic replacement.")),
+                UploadResult::Error(detail) => (EditState::Error, "error", Some(detail)),
                 UploadResult::Uploaded(_) => unreachable!(),
             };
             set_state(&mut data, state);
+            emit_state(app.as_ref(), &data.record, name, detail);
         }
         if data.stopped.is_some() {
             if let Some(registry) = registry.upgrade() {
@@ -302,6 +322,38 @@ async fn poll_job(
             }
         }
     });
+}
+
+fn state_name(state: EditState) -> &'static str {
+    match state {
+        EditState::Watching => "watching",
+        EditState::Uploading => "uploading",
+        EditState::Paused => "paused",
+        EditState::Conflict => "conflict",
+        EditState::Error => "error",
+    }
+}
+
+fn state_detail(state: EditState) -> Option<&'static str> {
+    match state {
+        EditState::Conflict => Some("Reopen to establish a new baseline; changes made on the server are detected by modified time and size."),
+        EditState::Error => Some("Could not reacquire the SSH session."),
+        _ => None,
+    }
+}
+
+fn emit_state(app: Option<&AppHandle>, record: &EditRecord, state: &str, detail: Option<&str>) {
+    if let Some(app) = app {
+        let _ = app.emit("ssh-fs:edit-state", serde_json::json!({
+            "terminalId": record.terminal_id,
+            "editId": record.edit_id,
+            "path": record.remote_path,
+            "state": state,
+            "sessionGeneration": record.session_generation,
+            "localPath": record.local_path,
+            "error": detail,
+        }));
+    }
 }
 
 fn set_state(data: &mut JobData, state: EditState) {
@@ -426,7 +478,7 @@ fn read_sample(path: &Path, mut destination: impl Write) -> io::Result<Option<Sa
     }
 }
 
-fn spool(path: &Path, digest: String) -> io::Result<Option<EditSnapshot>> {
+pub(super) fn spool(path: &Path, digest: String) -> io::Result<Option<EditSnapshot>> {
     let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
     ensure_real_dir(dir).map_err(|_| io::Error::from(io::ErrorKind::PermissionDenied))?;
     let temp = dir.join(format!(".snapshot-{}.tmp", Uuid::new_v4()));
