@@ -64,6 +64,12 @@ test('pane_and_tab_detach_json_preserve_all_ssh_preferences', () => {
     expectPaneTags([single.paneTree, tree.children![1]], tags, ['tm-local']);
     const tab = JSON.parse(JSON.stringify(buildTabDetachPayload('tb-drag', 'Drag')));
     expectPaneTags([tab.paneTree], tags, ['tm-local']);
+    const terminalId = single.terminals[0].terminalId;
+    expect(terminalId).toBe('tm-ssh');
+    const tagFor = (node: typeof tree): typeof node.ssh => node.terminalId === terminalId
+      ? node.ssh : node.children?.map(tagFor).find(Boolean);
+    expect(tagFor(single.paneTree)).toStrictEqual(tagFor(tree));
+    expect(tagFor(tab.paneTree)).toStrictEqual(tagFor(tree));
     expect(tab.terminals.map((t: { terminalId: string }) => t.terminalId)).toEqual(['tm-ssh', 'tm-local']);
     expect(single.terminals[0]).not.toHaveProperty('ssh');
     for (const descriptor of tab.terminals) {

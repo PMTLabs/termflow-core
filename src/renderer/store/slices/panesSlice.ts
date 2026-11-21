@@ -3,7 +3,7 @@ import { generateId } from '../../utils/id';
 import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, findLeafByTerminalId, EdgeZone } from './paneTreeOps';
 import { setInitialCwd } from '../../services/initialCwd';
 
-import type { SshPaneTag } from '../../types/ssh';
+import { normalizeHiddenMetrics, type MetricKey, type SshPaneTag } from '../../types/ssh';
 
 export interface PaneNode {
   /** Saved connection preferences on terminal leaves only; never a live launch receipt. */
@@ -642,6 +642,19 @@ const panesSlice = createSlice({
       }
     },
 
+    /** An empty list resets the terminal to showing every metric. */
+    setSshHiddenMetrics: (state, action: PayloadAction<{ terminalId: string; hiddenMetrics: readonly MetricKey[] }>) => {
+      const { terminalId, hiddenMetrics } = action.payload;
+      for (const [tabId, tree] of Object.entries(state.treesByTabId)) {
+        const leaf = findLeafByTerminalId({ [tabId]: tree }, terminalId);
+        if (!leaf) continue;
+        if (!leaf.ssh) return;
+        leaf.ssh.hiddenMetrics = normalizeHiddenMetrics(hiddenMetrics);
+        if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+        return;
+      }
+    },
+
     setPaneTree: (state, action: PayloadAction<PaneNode | null>) => {
       state.paneTree = action.payload;
       syncActive(state);
@@ -933,6 +946,7 @@ export const {
   focusPaneInTab,
   renamePanes,
   patchSshPaneTag,
+  setSshHiddenMetrics,
   setPaneTree,
   resetPanes,
   setActiveTabId,
@@ -943,5 +957,13 @@ export const {
   movePaneWithinTab,
   movePaneToTab,
 } = panesSlice.actions;
+
+const EMPTY_HIDDEN_METRICS: readonly MetricKey[] = Object.freeze([]);
+
+export function selectSshHiddenMetrics(
+  state: { panes: Pick<PanesState, 'treesByTabId'> }, terminalId: string,
+): readonly MetricKey[] {
+  return findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.hiddenMetrics ?? EMPTY_HIDDEN_METRICS;
+}
 
 export default panesSlice.reducer;
