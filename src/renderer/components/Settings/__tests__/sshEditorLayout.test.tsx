@@ -25,7 +25,7 @@ describe('editor layout', () => {
     expect(names).toEqual(['Connect in new tab', 'Test connection', 'Delete connection…', 'Discard changes', 'Save connection']);
     expect(names[names.length - 1]).toBe('Save connection');
     expect(names.indexOf('Test connection')).toBeLessThan(names.indexOf('Save connection'));
-    expect(actions[0].querySelectorAll('button.au-btn.primary')).toHaveLength(1);
+    expect([...actions[0].querySelectorAll('button.au-btn.primary')].map(b => b.textContent)).toEqual(['Save connection']);
     // Two groups as in the mockup: use actions, then the right-aligned edit group that ends with Save.
     const groups = [...actions[0].children];
     expect(groups.map(g => g.className)).toEqual(['ssh-actions-group', 'ssh-actions-group ssh-actions-end']);
@@ -87,8 +87,9 @@ describe('editor layout', () => {
   });
   test('all inputs and selects use the house setting-input class', () => {
     render();
-    const fields = [...host.querySelectorAll<HTMLElement>('.ssh-editor-grid input, .ssh-editor-grid select')];
-    expect(fields.length).toBeGreaterThanOrEqual(7);
+    // Every text-like field in the whole form, not just the grid; only checkboxes use the house checkbox class.
+    const fields = [...host.querySelectorAll<HTMLElement>('form input:not([type="checkbox"]), form select')];
+    expect(fields.map(f => f.getAttribute('name'))).toEqual(['name','folderId','host','port','user','identityFile','jumpConnectionId','extraOptions']);
     expect(fields.filter(f => !f.classList.contains('setting-input')).map(f => f.getAttribute('name'))).toEqual([]);
   });
 });
