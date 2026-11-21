@@ -11,3 +11,4 @@
 .ssh-folder-dialog input { padding:7px 9px; background:var(--bg-primary, #141414); color:var(--tab-active-foreground, #fff); border:1px solid var(--border-color, #3e3e42); border-radius:4px; }
 .ssh-connection-editor .ssh-editor-field { display:flex; flex-direction:column; gap:4px; min-width:0; }
 .ssh-connection-editor .ssh-argv.invalid { color:var(--text-secondary); border-style:dashed; }
+.ssh-connection-editor .ssh-editor-field input:not(:focus) { text-overflow:ellipsis; }
