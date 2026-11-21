@@ -216,7 +216,7 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
   return <div className="ssh-connection-editor">
     {changed && !view.loadError && <div role="alert" className="ssh-conflict">{removed ? 'Deleted elsewhere' : 'Changed elsewhere'} — <button type="button" className="au-btn sm" onClick={() => removed ? onClose() : reset()}>{removed ? 'Close' : 'Reload'}</button>{!removed && <button type="button" className="au-btn sm" onClick={() => { if (existing) { baseline.current = JSON.stringify(inputOf(existing)); setBaseOptions(optionsText(existing)); setDraft(value => ({ ...value, extraOptions:existing.extraOptions })); } setChanged(false); }}>Keep mine</button>}</div>}
     <form ref={form} noValidate onSubmit={event => { event.preventDefault(); void save(); }}>
-    <div className="ssh-editor-header"><h3 ref={heading} tabIndex={-1} title={existing?.name || undefined}>{existing?.name || (connectionId ? 'SSH connection' : 'New SSH connection')}</h3>
+    <div className="ssh-editor-header"><h3 ref={heading} tabIndex={-1} title={existing?.name || undefined} aria-label={connectionId ? `Edit SSH connection: ${existing?.name || 'SSH connection'}` : undefined}>{existing?.name || (connectionId ? 'SSH connection' : 'New SSH connection')}</h3>
       <label className="ssh-check"><input name="bookmarked" type="checkbox" className="setting-checkbox" disabled={locked} checked={draft.bookmarked} onChange={event => setDraft({ ...draft, bookmarked:event.target.checked })} />Bookmark</label></div>
     <fieldset disabled={locked}>
       <div className="ssh-editor-grid">

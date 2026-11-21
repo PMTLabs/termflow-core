@@ -65,9 +65,9 @@ describe('editor layout', () => {
     expect(kids.indexOf(cell('folderId'))).toBe(kids.indexOf(cell('name')) + 1);
     expect(kids.slice(kids.indexOf(cell('host')), kids.indexOf(cell('host')) + 3)).toEqual([cell('host'), cell('port'), cell('user')]);
     expect(kids.indexOf(cell('folderId'))).toBeLessThan(kids.indexOf(cell('jumpConnectionId')));
-    expect(cell('name').classList.contains('ssh-span-2')).toBe(true);
-    expect(cell('host').classList.contains('ssh-span-2')).toBe(true);
-    expect(cell('port').classList.contains('ssh-span-2')).toBe(false);
+    // Exact spans on the 4-column grid: Name 2 + Folder 2, Host 2 + Port 1 + User 1.
+    const span = (name:string) => [...cell(name).classList].filter(c => c.startsWith('ssh-span')).join(' ') || '1';
+    expect(['name','folderId','host','port','user'].map(span)).toEqual(['ssh-span-2','ssh-span-2','ssh-span-2','1','1']);
   });
   test('visible Authentication caption sits above the segmented control', () => {
     render();
@@ -77,7 +77,10 @@ describe('editor layout', () => {
   });
   test('header shows the connection name; Bookmark stays the house checkbox', () => {
     render();
-    expect(host.querySelector('h3')!.textContent).toBe('web-01');
+    const heading = host.querySelector('h3')!;
+    expect(heading.textContent).toBe('web-01');
+    // Focus lands here after Forget, so the accessible name keeps develop's "editing" context.
+    expect(heading.getAttribute('aria-label')).toBe('Edit SSH connection: web-01');
     const box = input('bookmarked') as HTMLInputElement;
     expect(box.classList.contains('setting-checkbox')).toBe(true);
     expect(box.closest('.ssh-editor-header')).not.toBeNull();
