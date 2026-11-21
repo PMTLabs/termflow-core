@@ -190,6 +190,7 @@ async fn remember_warning_survives_target_prompt_and_waits_for_running() {
         .unwrap();
     let v = f.registry.state("tm-a", false).unwrap();
     assert_eq!(v.state, SessionState::Connected);
+    assert_eq!(v.error_code.as_deref(), Some("remember-unavailable"));
     assert!(v.reason.unwrap().contains("not saved"));
     f.registry.shutdown().await;
 }

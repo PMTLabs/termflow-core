@@ -253,3 +253,221 @@ fn open_from_a_thread_without_a_tokio_runtime_does_not_panic() {
     f.registry.close(&id, true, None).unwrap();
     tauri::async_runtime::block_on(f.registry.shutdown());
 }
+
+fn every_session_error() -> Vec<SessionError> {
+    use SessionError::*;
+    let all = vec![
+        NotConnected,
+        NotFound,
+        Cancelled,
+        StaleAttempt,
+        OwnerRetired,
+        AdmissionClosed,
+        InvalidTarget,
+        HostKeyChanged,
+        HostKeyRevoked,
+        HostCertificateUnsupported,
+        KnownHostsMalformed { line: 12 },
+        KnownHostsUnreadable,
+        TrustWriteFailed,
+        TrustAlreadyPinned,
+        AuthRejected,
+        AgentUnavailable,
+        CapabilityUnavailable,
+        TimedOut,
+        TransportClosed,
+        OutputTooLarge,
+        MissingExitStatus,
+        IdentityUnreadable,
+        UnsupportedAuthentication,
+        RememberUnavailable,
+        StoreUnavailable,
+    ];
+    // Exhaustive: a new variant fails to compile here until it is added to `all`.
+    for e in &all {
+        match e {
+            NotConnected
+            | NotFound
+            | Cancelled
+            | StaleAttempt
+            | OwnerRetired
+            | AdmissionClosed
+            | InvalidTarget
+            | HostKeyChanged
+            | HostKeyRevoked
+            | HostCertificateUnsupported
+            | KnownHostsMalformed { .. }
+            | KnownHostsUnreadable
+            | TrustWriteFailed
+            | TrustAlreadyPinned
+            | AuthRejected
+            | AgentUnavailable
+            | CapabilityUnavailable
+            | TimedOut
+            | TransportClosed
+            | OutputTooLarge
+            | MissingExitStatus
+            | IdentityUnreadable
+            | UnsupportedAuthentication
+            | RememberUnavailable
+            | StoreUnavailable => {}
+        }
+    }
+    all
+}
+#[test]
+fn error_code_is_the_serde_code_tag_for_every_variant() {
+    let all = every_session_error();
+    let mut codes = std::collections::HashSet::new();
+    for e in &all {
+        let tag = serde_json::to_value(e).unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!((e, e.code()), (e, tag.as_str()));
+        assert!(codes.insert(e.code()), "duplicate code {}", e.code());
+    }
+    assert!(!codes.contains(SAVED_CREDENTIAL_UNAVAILABLE));
+}
+#[tokio::test]
+async fn every_failure_snapshot_carries_its_error_code() {
+    // Backlog 017: readers take the code from the snapshot, never from `reason` text.
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    f.connected().await;
+    let e = f.registry.entry("tm-a", false).unwrap();
+    for error in every_session_error() {
+        let view = {
+            let mut s = e.inner.lock();
+            s.view.state = SessionState::Connecting;
+            set_reason(&mut s.view, Some("free text".into()), None);
+            apply_failure(&mut s, error.clone());
+            s.view.clone()
+        };
+        assert_eq!(
+            (&error, view.reason.clone(), view.error_code.as_deref()),
+            (&error, Some(error.reason()), Some(error.code()))
+        );
+        let wire = serde_json::to_value(&view).unwrap();
+        assert_eq!(
+            (&error, wire["errorCode"].as_str()),
+            (&error, Some(error.code()))
+        );
+    }
+    // A free-text reason clears a stale code, and no reason serializes no code.
+    let mut view = e.inner.lock().view.clone();
+    set_reason(&mut view, Some("Local shell ended".into()), None);
+    assert_eq!(view.error_code, None);
+    set_reason(&mut view, None, Some("auth-rejected"));
+    assert_eq!(
+        (view.reason.as_deref(), view.error_code.as_deref()),
+        (None, None)
+    );
+    assert!(serde_json::to_value(&view)
+        .unwrap()
+        .get("errorCode")
+        .is_none());
+    // A refusal keeps its pair when the entry is later invalidated (the Error branch of invalidate).
+    {
+        let mut s = e.inner.lock();
+        s.view.state = SessionState::Connecting;
+        apply_failure(&mut s, SessionError::HostKeyRevoked);
+    }
+    e.invalidate(Some("Local shell ended".into()));
+    let view = e.inner.lock().view.clone();
+    assert_eq!(
+        (view.state, view.reason, view.error_code.as_deref()),
+        (
+            SessionState::Error,
+            Some(SessionError::HostKeyRevoked.reason()),
+            Some("host-key-revoked")
+        )
+    );
+    f.registry.shutdown().await;
+}
+#[test]
+fn view_reason_has_one_writer() {
+    // The fields are pub, so this walks every non-test source in the crate: any write to a
+    // view's reason or code outside set_reason could split the code from its text.
+    fn sources(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if name.ends_with(".rs") && !name.contains("tests") {
+                out.push((name, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.len() > 100, "crate walk found {} files", files.len());
+    let mut writes = Vec::new();
+    let mut literals = 0;
+    for (name, text) in &files {
+        for line in text.lines().map(str::trim).filter(|l| !l.starts_with("//")) {
+            let c: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            if writes_reason(&c) {
+                writes.push(format!("{name}: {line}"));
+            }
+            if c.contains("SessionView{")
+                && !c.contains("->SessionView{")
+                && !c.contains("structSessionView{")
+            {
+                literals += 1;
+            }
+        }
+    }
+    assert_eq!(
+        writes,
+        vec![
+            "session.rs: view.error_code = reason.as_ref().and(code).map(str::to_string);",
+            "session.rs: view.reason = reason;"
+        ]
+    );
+    assert_eq!(literals, 1, "only the registry builds a SessionView");
+}
+/// A whitespace-free source line that writes a view's `reason` or `error_code`.
+fn writes_reason(c: &str) -> bool {
+    ["view.reason", "view.error_code"].iter().any(|field| {
+        c.match_indices(field).any(|(at, _)| {
+            let rest = &c[at + field.len()..];
+            (rest.starts_with('=') && !rest.starts_with("=="))
+                || [
+                    ".take(",
+                    ".replace(",
+                    ".insert(",
+                    ".get_or_insert",
+                    ".as_mut(",
+                ]
+                .iter()
+                .any(|m| rest.starts_with(m))
+        }) || (c.contains("mem::") && c.contains(field))
+    })
+}
+#[test]
+fn the_reason_writer_detector_catches_each_spelling() {
+    for bad in [
+        "s.view.reason=Some(x);",
+        "s.view.error_code=None;",
+        "s.view.error_code.take();",
+        "s.view.reason.replace(x);",
+        "s.view.reason.insert(x);",
+        "s.view.error_code.get_or_insert_with(f);",
+        "std::mem::take(&muts.view.reason);",
+        "mem::replace(&mute.view.error_code,None);",
+    ] {
+        assert!(writes_reason(bad), "{bad}");
+    }
+    for ok in [
+        "assert_eq!(v.reason,x);",
+        "ifs.view.reason==x{",
+        "letr=s.view.reason.clone();",
+        "self.view.state=SessionState::Error;",
+    ] {
+        assert!(!writes_reason(ok), "{ok}");
+    }
+}

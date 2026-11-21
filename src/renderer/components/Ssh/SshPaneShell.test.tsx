@@ -161,3 +161,39 @@ test('SSH prompt and banner controls use the house button and checkbox classes',
   act(() => root.render(<SshDisconnectedBanner reason="Connection ended." onReconnect={jest.fn(async () => {})} />));
   expect([...container.querySelectorAll('button')].every(b => b.classList.contains('au-btn'))).toBe(true);
 });
+test('Test dialog and prompt pick copy from errorCode, never from the reason text', async () => {
+  // Backlog 017. Every reason here is text the renderer must not decode; only errorCode may pick the copy.
+  const odd = 'Backend wording the renderer must not parse.';
+  const dialogFor = async (snapshot: SshSessionView) => {
+    const api = { onSshTestState: async () => () => {}, sshTestConnection: async () => ({ probeId: 'probe-a' }),
+      sshTestState: async () => ({ ...snapshot, terminalId: undefined, probeId: 'probe-a' }), sshTestClose: async () => {} } as unknown as SshAPI;
+    await act(async () => { root.render(<SshTestConnectionDialog connectionId="c-a" api={api} onClose={jest.fn()} />); await flush(); });
+    const text = document.querySelector('.ssh-test-dialog')!.textContent!;
+    act(() => root.unmount()); root = createRoot(container); return text;
+  };
+  const failed = (errorCode?: string): SshSessionView => ({ ...view('error'), hostKey: undefined, reason: odd, errorCode });
+  expect(await dialogFor(failed('host-key-revoked'))).toContain("The host key has been revoked. Contact the server's administrator before trying again.");
+  expect(await dialogFor(failed('cancelled'))).toContain('The SSH attempt was cancelled. Run Test connection again when ready.');
+  // No prompt was seen in this probe, so the final auth copy is the generic one for the code.
+  expect(await dialogFor(failed('auth-rejected'))).toContain("Authentication was not accepted. Check the server's allowed methods and the saved sign-in settings.");
+  const fallback = await dialogFor(failed(undefined));
+  expect(fallback).toContain('The SSH test could not finish.'); expect(fallback).not.toContain(odd);
+  const connected = (errorCode?: string): SshSessionView => ({ ...view('connected'), reason: odd, errorCode });
+  expect(await dialogFor(connected('remember-unavailable'))).toContain('The credential was not saved.');
+  expect(await dialogFor(connected(undefined))).not.toContain('The credential was not saved.');
+  const prompt = (errorCode?: string): SshSessionView => ({ ...view('needs-secret'), reason: odd, errorCode });
+  expect(await dialogFor(prompt('saved-credential-unavailable'))).toContain(odd);
+  // No secretKind: the dialog's own auth copy must reach the prompt, which only happens if the dialog
+  // withholds errorCode (the prompt would otherwise substitute its password copy).
+  const kindless = await dialogFor({ ...prompt('auth-rejected'), secretKind: undefined });
+  expect(kindless).toContain("Authentication was not accepted. Check the server's allowed methods"); expect(kindless).not.toContain("That password wasn't accepted.");
+  const rejected = await dialogFor(prompt('auth-rejected'));
+  expect(rejected).toContain("That password wasn't accepted. Check it and try again."); expect(rejected).not.toContain(odd);
+  // The pane prompt maps the same codes on its own.
+  act(() => root.render(<SshSecretPrompt view={{ ...prompt('auth-rejected'), secretKind: 'passphrase' }} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
+  expect(container.textContent).toContain("That passphrase didn't unlock the key."); expect(container.querySelector('[role=status]')).toBeNull();
+  act(() => root.render(<SshSecretPrompt view={prompt('saved-credential-unavailable')} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
+  expect(container.querySelector('[role=status]')?.textContent).toBe(odd);
+  act(() => root.render(<SshSecretPrompt view={prompt(undefined)} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
+  expect(container.querySelector('[role=status]')).toBeNull(); expect(container.textContent).toContain(odd);
+});

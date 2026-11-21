@@ -28,7 +28,10 @@ export interface SshPromptTarget { connectionId: string; host: string; port: num
 export interface SshSessionView {
   terminalId?: string; probeId?: string; connectionId: string; state: SshState;
   generation?: number; revision?: number; gate: 'pending' | 'verified' | 'network-error' | 'blocked';
-  reason?: string; knownHostsPaths?: { jump?: string; target: string };
+  reason?: string;
+  /** Kebab-case code for `reason` (a backend SessionError code or `saved-credential-unavailable`); read this, never the text. */
+  errorCode?: string;
+  knownHostsPaths?: { jump?: string; target: string };
   promptId?: string; promptTarget?: SshPromptTarget; secretKind?: 'password' | 'passphrase';
   hostKey?: { algorithm: string; fingerprintSha256: string; changed: boolean };
 }

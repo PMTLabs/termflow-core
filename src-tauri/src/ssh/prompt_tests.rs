@@ -85,6 +85,14 @@ async fn duplicate_or_stale_prompt_submission_is_refused() {
             ),
             Err(SessionError::StaleAttempt)
         );
+        // The re-prompt after a rejected secret carries the code with its text (backlog 017).
+        assert_eq!(
+            (e.reason.clone(), e.error_code.as_deref()),
+            (
+                Some(SessionError::AuthRejected.reason()),
+                Some("auth-rejected")
+            )
+        );
         assert_eq!(f.secrets.saves.load(Ordering::SeqCst), 0);
         f.registry
             .submit_secret(

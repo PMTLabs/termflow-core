@@ -118,6 +118,7 @@ async fn healthy_agent_server_rejection_is_auth_rejected() {
     let id = f.registry.probe("c-a").unwrap();
     let v = wait_state(&f.registry, &id, true, SessionState::Error).await;
     assert_eq!(v.reason, Some(SessionError::AuthRejected.reason()));
+    assert_eq!(v.error_code.as_deref(), Some("auth-rejected"));
     f.registry.shutdown().await;
 }
 #[tokio::test]

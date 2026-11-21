@@ -1,6 +1,8 @@
 import React, { useId, useRef, useState } from 'react';
 import { useSshPromptFocus } from './useSshPromptFocus';
 import type { SshSessionView } from '../../types/ssh';
+/** Backend `SAVED_CREDENTIAL_UNAVAILABLE` (ssh/session.rs): a saved secret could not be read. */
+export const savedCredentialUnavailable = 'saved-credential-unavailable';
 export interface SecretPromptProps { view: SshSessionView; onSubmit(secret: string, remember: boolean): Promise<void>; onCancel(): void }
 export function SshSecretPrompt({ view, onSubmit, onCancel }: SecretPromptProps) {
   const root = useRef<HTMLDivElement>(null), busy = useRef(false);
@@ -15,10 +17,11 @@ export function SshSecretPrompt({ view, onSubmit, onCancel }: SecretPromptProps)
   };
   const target = view.promptTarget;
   const errorId = useId();
-  const reason = view.reason === 'Authentication was not accepted. Check the server\'s allowed methods and the saved sign-in settings.'
+  // Branch on the snapshot's code, never on the backend's reason text (backlog 017).
+  const reason = view.errorCode === 'auth-rejected'
     ? view.secretKind === 'passphrase' ? "That passphrase didn't unlock the key. Check it and try again." : "That password wasn't accepted. Check it and try again."
     : view.reason;
-  const warning = reason?.startsWith('Saved credential unavailable.');
+  const warning = !!reason && view.errorCode === savedCredentialUnavailable;
   const fieldError = error ?? (warning ? undefined : reason);
   return <div ref={root} role="region" aria-label="SSH authentication" className="ssh-prompt">
     <form onSubmit={submit}>
