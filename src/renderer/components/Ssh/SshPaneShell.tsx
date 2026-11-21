@@ -22,7 +22,8 @@ export interface SshPaneShellProps {
    *  never a second visible or focusable challenge. Defaults to true. */
   interactive?: boolean;
   /** False where 066's `SshLaunchNotice` already renders this terminal's host-key and secret
-   *  prompts (the pane): the shell then shows no second copy. Defaults to true. */
+   *  prompts and its Reconnect (the pane): the shell then shows no second copy of either, so a
+   *  dropped session never offers two Reconnect buttons. Defaults to true. */
   sessionPrompts?: boolean;
   /** An explicit browser column allocation in CSS px. Canvas passes the frozen allocation so the
    *  terminal slot is the exact remainder of its envelope; panes omit it and keep the CSS sizing. */
@@ -40,7 +41,7 @@ export function SshPaneShell(props: SshPaneShellProps) {
     {interactive && <div className="ssh-pane-chrome">
       {prompts && view.state === 'needs-secret' && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
       {prompts && (view.state === 'needs-hostkey' || (view.state === 'error' && view.hostKey?.changed)) && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
-      {showDisconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
+      {prompts && showDisconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
       {view.state === 'connecting' && <span role="status">Connecting…</span>}
       {connected && view.reason && <span role="status">{view.reason}</span>}
       {view.terminalId && <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult} />}

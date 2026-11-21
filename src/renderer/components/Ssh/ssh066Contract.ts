@@ -15,7 +15,7 @@ export type SshBrowserTagPatch = Partial<Pick<SshPaneTag, 'browserCollapsed' | '
 export type LaunchSnapshot = SshLaunchState;
 
 export type ReconnectCoordinator = (terminalId: string) => Promise<
-  { ok: true; snapshot: unknown } | { ok: false; error: { code: string; message: string } }
+  { ok: true; snapshot: import('../../types/ssh').LaunchSnapshot } | { ok: false; error: { code: string; message: string } }
 >;
 
 export function readSshPaneTag(pane: PaneNode): SshPaneTag | undefined {

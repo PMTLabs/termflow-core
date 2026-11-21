@@ -1,4 +1,7 @@
-.ssh-pane-shell { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; color:var(--text-primary); background:var(--bg-primary); }
+.ssh-pane-shell { position:relative; display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; color:var(--text-primary); background:var(--bg-primary); }
+/* Notices OVERLAY the reserved layout: a session state change (connecting, a reason, an edit
+   warning) must never add a row and resize the terminal grid (SIGWINCH on every reconnect). */
+.ssh-pane-chrome { position:absolute; top:0; left:0; right:0; z-index:5; max-height:100%; overflow:auto; }
 .ssh-pane-chrome:empty { display:none; }
 .ssh-pane-body { display:flex; flex:1; min-width:0; min-height:0; }
 .ssh-browser { flex:0 1 260px; width:260px; max-width:40%; min-width:0; box-sizing:border-box; overflow:auto; border-right:1px solid var(--border-color); }

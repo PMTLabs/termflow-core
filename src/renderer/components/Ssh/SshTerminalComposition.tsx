@@ -63,7 +63,7 @@ function useSshShellActions(terminalId: string, view: SshSessionView) {
 }
 
 /**
- * Wraps a pane's terminal content. No tag (every leaf until 066 lands): renders `children`
+ * Wraps a pane's terminal content. No tag (every local leaf; 066 tags an SSH leaf at creation): renders `children`
  * unchanged, so the DOM is byte-identical to today.
  */
 export function SshPaneSlot({ terminalId, isTabActive, children }: {
