@@ -587,6 +587,15 @@ impl Persisted {
             .bookmarked = bookmarked;
         Ok(())
     }
+    pub fn forget_secret(&mut self, id: &str) -> Result<()> {
+        let row = self
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| StoreError::new("not-found", "Connection not found"))?;
+        row.secret = None;
+        Ok(())
+    }
     pub fn move_row(
         &mut self,
         kind: &str,

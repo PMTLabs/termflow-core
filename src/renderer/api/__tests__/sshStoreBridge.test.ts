@@ -24,6 +24,7 @@ describe('SSH bridge contract', () => {
     ['deleteFolder', [{ id: 'f-clicked', recursive: true }], 'ssh_folder_delete', { id: 'f-clicked', recursive: true }],
     ['upsertConnection', [connection], 'ssh_connection_upsert', { input: connection }],
     ['deleteConnection', [{ id: 'c-clicked' }], 'ssh_connection_delete', { id: 'c-clicked' }],
+    ['forgetSecret', ['c-saved'], 'ssh_forget_secret', { id: 'c-saved' }],
     ['move', [move], 'ssh_move', move], ['setBookmark', ['c-star', true], 'ssh_set_bookmark', { id: 'c-star', bookmarked: true }],
   ];
   test.each(cases)('%s uses exact native command and payload', async (method, args, command, payload) => {

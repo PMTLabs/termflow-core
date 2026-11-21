@@ -18,6 +18,7 @@ export interface SshStoreApi {
   upsertConnection(input: SshConnectionInput): Promise<SshReply>;
   deleteConnection(input: { id: string }): Promise<SshReply>;
   move(input: SshMove): Promise<SshReply>;
+  forgetSecret(id: string): Promise<SshReply>;
   setBookmark(id: string, bookmarked: boolean): Promise<SshReply>;
   onChanged(listener: (reply: SshReply) => void): Promise<() => void>;
 }

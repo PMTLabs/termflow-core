@@ -76,6 +76,18 @@ fn ssh_mutation_logs_are_success_only_and_contain_only_kind_and_ids() {
     )
     .unwrap();
     ssh_set_bookmark_inner(&Quiet, &store, connection.clone(), true).unwrap();
+    store
+        .transact(
+            |s| {
+                s.connections[0].auth = crate::ssh::store::Auth::Password;
+                s.connections[0].secret = Some("v1:log-test-fixture".into());
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
+    ssh_forget_secret_inner(&Quiet, &store, connection.clone()).unwrap();
+    assert!(ssh_forget_secret_inner(&Quiet, &store, "missing".into()).is_err());
     ssh_connection_delete_inner(&Quiet, &store, connection.clone()).unwrap();
     ssh_folder_delete_inner(&Quiet, &store, folder.clone(), false).unwrap();
     assert!(ssh_connection_delete_inner(&Quiet, &store, "missing".into()).is_err());
@@ -86,6 +98,7 @@ fn ssh_mutation_logs_are_success_only_and_contain_only_kind_and_ids() {
             format!("SSH connection upsert: id={:?}", Some(&connection)),
             format!("SSH move: kind=connection, id={connection}"),
             format!("SSH bookmark: id={connection}"),
+            format!("SSH forget saved credential: id={connection}"),
             format!("SSH connection delete: id={connection}"),
             format!("SSH folder delete: id={folder}"),
         ]

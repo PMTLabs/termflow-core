@@ -338,6 +338,91 @@ async fn remember_merge_preserves_concurrent_bookmark_and_mark_used() {
         .contains("ciphertext"));
 }
 #[tokio::test]
+async fn forget_preserves_definition_and_next_test_prompts() {
+    use crate::ssh::auth::{CredentialCipher, SecretKind};
+    use zeroize::Zeroizing;
+    let s = Setup::new();
+    let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
+    let cipher = CredentialCipher::default();
+    let b = AuthBinding::for_hop(&hop("c-b", "alice"), None);
+    for (binding, secret) in [
+        (binding(), f.server.password.clone()),
+        (b.clone(), "other-test-credential".into()),
+    ] {
+        let sealed = cipher
+            .seal(
+                SecretKind::Password,
+                binding.clone(),
+                Zeroizing::new(secret),
+            )
+            .await
+            .unwrap();
+        s.adapter
+            .set_secret_if_binding_matches(&binding, sealed, CancellationToken::new())
+            .await
+            .unwrap();
+    }
+    f.registry
+        .configure(Dependencies {
+            targets: Arc::new(s.adapter.clone()),
+            streams: Arc::new(MemoryStreams(f.server.clone())),
+            agents: Arc::new(NativeAgent),
+            secrets: Arc::new(s.adapter.clone()),
+            events: f.events.clone(),
+            known_hosts: crate::ssh::known_hosts::KnownHosts {
+                path: f.path.clone(),
+            },
+            home: s.path.clone(),
+        })
+        .unwrap();
+    let probe = f.registry.probe("c-a").unwrap();
+    wait_state(&f.registry, &probe, true, SessionState::Connected).await;
+    assert!(f
+        .events
+        .0
+        .lock()
+        .iter()
+        .all(|v| v.state != SessionState::NeedsSecret));
+    f.registry.close(&probe, true, None).unwrap();
+
+    let before = s.store.get().unwrap();
+    assert!(before.view.connections.iter().all(|c| c.has_saved_secret));
+    let mut expected_disk = s.store.snapshot().unwrap();
+    expected_disk.connections[0].secret = None;
+    expected_disk.revision += 1;
+    let err = s
+        .store
+        .transact(
+            |s| s.forget_secret("missing"),
+            |_| panic!("unexpected event"),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "not-found");
+    let forget = || {
+        s.store
+            .transact(|s| s.forget_secret("c-a"), |_| {})
+            .unwrap()
+    };
+    let after = forget();
+    let mut expected = before;
+    expected.revision += 1;
+    expected.view.revision += 1;
+    expected.view.connections[0].has_saved_secret = false;
+    assert_eq!(after, expected);
+    assert!(s.store.snapshot().unwrap() == expected_disk);
+    assert!(s.adapter.load(&binding()).await.unwrap().is_none());
+    assert!(s.adapter.load(&b).await.unwrap().is_some());
+    expected.revision += 1;
+    expected.view.revision += 1;
+    assert_eq!(forget(), expected);
+
+    let probe = f.registry.probe("c-a").unwrap();
+    let prompt = wait_state(&f.registry, &probe, true, SessionState::NeedsSecret).await;
+    assert!(prompt.reason.is_none());
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn settings_test_to_launch_uses_same_target_and_trust() {
     let s = Setup::new();
     let original = s.bytes();

@@ -20,6 +20,7 @@ test('sshStoreRoundTrip: folder → subfolder → connection → bookmark → mo
     upsertConnection:jest.fn(input => mutate(() => { const id = input.id ?? `c-${++connectionSeq}`; view.connections = [...view.connections.filter(c => c.id !== id), { ...input,id,order:0,lastUsedAt:null,hasSavedSecret:false }]; })),
     deleteConnection:jest.fn(({id}) => mutate(() => { view.connections = view.connections.filter(c => c.id !== id); })),
     move:jest.fn(input => mutate(() => { view.connections = view.connections.map(c => c.id === input.id ? { ...c,folderId:input.parentId,order:input.index } : c); })),
+    forgetSecret: jest.fn(),
     setBookmark:jest.fn(async (id,bookmarked) => { const stale = snapshot(); await mutate(() => { view.connections = view.connections.map(c => c.id === id ? { ...c,bookmarked } : c); }); return stale; }),
   };
   window.electronAPI = { ssh:api } as any;

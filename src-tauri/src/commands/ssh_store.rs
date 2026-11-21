@@ -11,6 +11,7 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_folder_upsert, $crate::commands::ssh_folder_delete,
             $crate::commands::ssh_connection_upsert, $crate::commands::ssh_connection_delete,
             $crate::commands::ssh_move, $crate::commands::ssh_set_bookmark,
+            $crate::commands::ssh_forget_secret,
             $crate::commands::ssh_session_open, $crate::commands::ssh_session_state,
             $crate::commands::ssh_session_close, $crate::commands::ssh_session_reconnect,
             $crate::commands::ssh_session_submit_secret, $crate::commands::ssh_session_trust_host,
@@ -172,6 +173,24 @@ fn ssh_set_bookmark_inner(
     Ok(reply)
 }
 
+#[tauri::command]
+pub fn ssh_forget_secret<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, Store>,
+    id: String,
+) -> Result<Reply, StoreError> {
+    ssh_forget_secret_inner(&app, &store, id)
+}
+fn ssh_forget_secret_inner(
+    app: &impl StoreEmitter,
+    store: &Store,
+    id: String,
+) -> Result<Reply, StoreError> {
+    let reply = mutate(store, app, |s| s.forget_secret(&id))?;
+    log::info!("SSH forget saved credential: id={id}");
+    Ok(reply)
+}
+
 #[cfg(test)]
 #[path = "ssh_store_log_tests.rs"]
 mod log_tests;
@@ -224,9 +243,12 @@ mod tests {
             bookmarked: false,
         }
     }
+    fn seed_saved_credential(s: &mut Persisted) {
+        s.connections[0].auth = crate::ssh::store::Auth::Password;
+        s.connections[0].secret = Some("v1:command-test-fixture".into());
+    }
     #[test]
     fn every_mutation_command_emits_exactly_ssh_store_changed_with_post_commit_view_and_revision() {
-        // The command table has six mutations (eight commands minus get/reload).
         for kind in [
             "folder_upsert",
             "folder_delete",
@@ -234,6 +256,7 @@ mod tests {
             "connection_delete",
             "move",
             "bookmark",
+            "forget",
         ] {
             let temp = Temp::new();
             let store = temp.store();
@@ -242,7 +265,11 @@ mod tests {
                 .transact(
                     |s| {
                         s.upsert_folder(folder())?;
-                        s.upsert_connection(connection())
+                        s.upsert_connection(connection())?;
+                        if kind == "forget" {
+                            seed_saved_credential(s);
+                        }
+                        Ok(())
                     },
                     |_| {},
                 )
@@ -267,10 +294,15 @@ mod tests {
                     0,
                 ),
                 "bookmark" => ssh_set_bookmark_inner(&capture, &store, connection_id.clone(), true),
+                "forget" => ssh_forget_secret_inner(&capture, &store, connection_id.clone()),
                 _ => unreachable!(),
             }
             .unwrap();
             assert_eq!(reply.revision, setup.revision + 1, "{kind}");
+            if kind == "forget" {
+                assert!(setup.view.connections[0].has_saved_secret);
+                assert!(!reply.view.connections[0].has_saved_secret);
+            }
             if kind == "bookmark" {
                 assert!(
                     reply
@@ -393,11 +425,24 @@ mod tests {
             moved.view.connections[0].folder_id.as_deref(),
             Some(folder_id.as_str())
         );
+        temp.store()
+            .transact(
+                |s| {
+                    seed_saved_credential(s);
+                    Ok(())
+                },
+                |_| {},
+            )
+            .unwrap();
         let bookmarked = invoke(
             "ssh_set_bookmark",
             serde_json::json!({"id":id,"bookmarked":true}),
         );
         assert!(bookmarked.view.connections[0].bookmarked);
+        assert!(bookmarked.view.connections[0].has_saved_secret);
+        let forgotten = invoke("ssh_forget_secret", serde_json::json!({"id":id}));
+        assert_eq!(forgotten.revision, bookmarked.revision + 1);
+        assert!(!forgotten.view.connections[0].has_saved_secret);
         let deleted = invoke("ssh_connection_delete", serde_json::json!({"id":id}));
         assert!(deleted.view.connections.is_empty());
         let deleted = invoke(
