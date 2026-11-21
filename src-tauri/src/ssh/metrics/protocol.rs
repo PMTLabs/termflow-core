@@ -1,4 +1,5 @@
 //! Version-one framing and raw readings. No session state or rate calculation.
+pub use super::model::MountUsage;
 use std::collections::BTreeMap;
 
 const FIELD_LIMIT: usize = 4096;
@@ -237,22 +238,11 @@ fn os_value(s: &str) -> Option<String> {
     }
 }
 
-fn decimal<T: std::str::FromStr>(s: &str) -> Option<T> {
+pub(super) fn decimal<T: std::str::FromStr>(s: &str) -> Option<T> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     s.parse().ok()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct MountUsage {
-    pub source: String,
-    pub mount_point: String,
-    pub fs_type: String,
-    pub total_bytes: u64,
-    pub used_bytes: u64,
-    pub available_bytes: u64,
-    pub used_percent: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]

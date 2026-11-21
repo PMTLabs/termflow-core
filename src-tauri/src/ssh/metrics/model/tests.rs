@@ -1,0 +1,72 @@
+use super::*;
+use crate::ssh::metrics::reduce::{tests::sample, Reducer};
+use serde_json::{json, to_value};
+
+#[test]
+fn snapshot_json_has_exact_nine_camelcase_keys_and_finite_values() {
+    let mut reducer = Reducer::default();
+    let first = MetricsSnapshot {
+        terminal_id: "derived-A".into(),
+        sampled_at: 125,
+        metrics: sample(&mut reducer, "12.25", &[]),
+    };
+    let a = to_value(first).unwrap();
+    assert_eq!(a, json!({
+        "terminalId": "derived-A", "sampledAt": 125, "metrics": {
+            "host": {"available": true, "hostname": "derived-host",
+                "os": {"available": true, "name": "Derived Linux 12"},
+                "architecture": {"available": true, "name": "arm64"}},
+            "cpu": {"available": true, "percent": null,
+                "cores": {"available": true, "count": 4}, "load1": {"available": true, "value": 1.25}},
+            "ram": {"available": true, "usedBytes": 256000, "totalBytes": 1024000, "percent": 25.0},
+            "netUp": {"available": true, "bytesPerSecond": null},
+            "netDown": {"available": true, "bytesPerSecond": null},
+            "uptime": {"available": true, "seconds": 12.25},
+            "users": {"available": true, "count": 3, "names": ["alex", "zoe"]},
+            "partitions": {"available": true, "mounts": [{"source": "/dev/test", "mountPoint": "/",
+                "fsType": "ext4", "totalBytes": 102400, "usedBytes": 20480, "availableBytes": 76800, "usedPercent": 22}]},
+            "nfs": {"available": true, "mounts": []}
+        }
+    }));
+
+    let nonfinite = "9".repeat(350);
+    let next = MetricsSnapshot {
+        terminal_id: "derived-A".into(),
+        sampled_at: 2115,
+        metrics: sample(&mut reducer, "14.25", &[
+            ("hostname", "derived-next", 0), ("osRelease", "NAME=OnlyName", 0),
+            ("architecture", "", 1), ("stat", "cpu 20 0 5 110 20\nbtime 1000", 0),
+            ("nproc", "", 127), ("cpuinfo", "", 1), ("loadavg", &nonfinite, 0),
+            ("netdev", "eth0: 160 0 0 0 0 0 0 0 240 0 0 0 0 0 0 0", 0),
+            ("meminfo", "", 1), ("who", "", 0), ("dfNfs", "partial stdout", 1),
+        ]),
+    };
+    let b = to_value(next).unwrap();
+    assert_eq!(b, json!({
+        "terminalId": "derived-A", "sampledAt": 2115, "metrics": {
+            "host": {"available": true, "hostname": "derived-next",
+                "os": {"available": false, "reason": "Remote OS metadata unavailable"},
+                "architecture": {"available": false, "reason": "Collection command failed"}},
+            "cpu": {"available": true, "percent": 50.0,
+                "cores": {"available": false, "reason": "CPU core count unavailable"},
+                "load1": {"available": false, "reason": "Invalid load average"}},
+            "ram": {"available": false, "reason": "Collection command failed"},
+            "netUp": {"available": true, "bytesPerSecond": 20.0},
+            "netDown": {"available": true, "bytesPerSecond": 30.0},
+            "uptime": {"available": true, "seconds": 14.25},
+            "users": {"available": true, "count": 0, "names": []},
+            "partitions": {"available": true, "mounts": [{"source": "/dev/test", "mountPoint": "/",
+                "fsType": "ext4", "totalBytes": 102400, "usedBytes": 20480, "availableBytes": 76800, "usedPercent": 22}]},
+            "nfs": {"available": false, "reason": "Collection command failed"}
+        }
+    }));
+
+    let unsupported = to_value(sample(&mut reducer, "", &[("platform", "Darwin", 0)])).unwrap();
+    assert_eq!(unsupported.as_object().unwrap().len(), 9);
+    for key in ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"] {
+        assert_eq!(unsupported[key], json!({"available": false, "reason": "Metrics are supported only on Linux (Darwin)"}));
+    }
+    let after = to_value(sample(&mut reducer, "16", &[])).unwrap();
+    assert_eq!(after["cpu"]["percent"], json!(null));
+    assert_eq!(after["netUp"]["bytesPerSecond"], json!(null));
+}

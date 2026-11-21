@@ -1,0 +1,287 @@
+use super::*;
+use crate::ssh::metrics::protocol::parse;
+
+const NONCE: &str = "06900000000000000000000000000002";
+const BOOT: &str = "4ddb381e-fa3b-403a-b6b3-ea87b4a45089";
+const NEXT_BOOT: &str = "42baccfc-4939-4609-9bed-d5676886fbea";
+const LOCAL: &str = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n/dev/test ext4 100 20 75 22% /";
+const NFS: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\nremote:/share 200 40 150 22% /srv/share";
+const NFS_MOUNTS: &str = "/dev/test / ext4 rw 0 0\nremote:/share /srv/share nfs4 rw 0 0";
+const MEM: &str = "MemTotal: 1000 kB\nMemAvailable: 750 kB";
+const BASE_STAT: &str = "cpu 10 0 5 100 20 0 0 0 1 0\nbtime 1000";
+const SECOND_STAT: &str = "cpu 20 0 5 120 30 0 0 0 9 0\nbtime 1000";
+const THIRD_STAT: &str = "cpu 40 0 5 130 40 0 0 0 10 0\nbtime 1000";
+const BASE_NET: &str = "eth0: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0";
+const SECOND_NET: &str = "eth0: 130 0 0 0 0 0 0 0 260 0 0 0 0 0 0 0";
+const THIRD_NET: &str = "eth0: 140 0 0 0 0 0 0 0 300 0 0 0 0 0 0 0";
+
+// These deterministic framed input pairs are derived (synthetic), not captures.
+pub(in crate::ssh::metrics) fn sample(reducer: &mut Reducer, uptime: &str, overrides: &[(&str, &str, u8)]) -> Metrics {
+    let mut output = format!("__TFM_{NONCE}_V1_BEGIN__\n");
+    let linux = overrides.iter().find(|s| s.0 == "platform").is_none_or(|s| s.1 == "Linux" && s.2 == 0);
+    let sections = [
+        ("platform", "Linux"), ("hostname", "derived-host"), ("architecture", "arm64"),
+        ("stat", BASE_STAT), ("meminfo", MEM), ("netdev", BASE_NET), ("uptime", uptime),
+        ("bootId", BOOT), ("cpuinfo", "processor : 0"), ("nproc", "4"),
+        ("loadavg", "1.25 1.00 0.75 1/10 100"), ("who", "zoe pts/0\nalex pts/1\nzoe pts/2"),
+        ("dfLocal", LOCAL), ("dfNfs", ""), ("mounts", "/dev/test / ext4 rw 0 0"),
+        ("osRelease", "NAME='Derived Linux'\nVERSION_ID=12"),
+    ];
+    for (key, default) in sections.iter().take(if linux { sections.len() } else { 3 }) {
+        use std::fmt::Write;
+        let (val, status) = overrides.iter().find(|s| s.0 == *key).map_or((*default, 0), |s| (s.1, s.2));
+        writeln!(output, "__TFM_{NONCE}_SECTION_{key}_BEGIN__\n{val}\n__TFM_{NONCE}_SECTION_{key}_END_{status}__").unwrap();
+    }
+    output.push_str(&format!("__TFM_{NONCE}_V1_END__\n"));
+    reducer.reduce(parse(output.as_bytes(), NONCE).unwrap())
+}
+
+fn avail<T: std::fmt::Debug>(metric: &Metric<T>) -> &T {
+    match metric {
+        Metric::Available(value) => value,
+        Metric::Unavailable(reason) => panic!("expected available metric: {reason}"),
+    }
+}
+
+fn cpu(m: &Metrics) -> Option<f64> {
+    avail(&m.cpu).percent
+}
+
+fn rates(m: &Metrics) -> (Option<f64>, Option<f64>) {
+    (avail(&m.net_up).bytes_per_second, avail(&m.net_down).bytes_per_second)
+}
+
+fn netrow(name: &str, rx: u64, tx: u64) -> String {
+    format!("{name}: {rx} 0 0 0 0 0 0 0 {tx} 0 0 0 0 0 0 0")
+}
+
+#[test]
+fn cpu_guest_is_not_counted_twice() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[]);
+    // Guest delta 8 is included in user delta 10. Busy 10 / total 40.
+    assert_eq!(cpu(&sample(&mut r, "12", &[("stat", SECOND_STAT, 0)])), Some(25.0));
+    // Same guest, user +20, idle +10, iowait +10: 20 of 40, not 30 of 40.
+    assert_eq!(cpu(&sample(&mut r, "14", &[("stat", "cpu 40 0 5 130 40 0 0 0 9 0", 0)])), Some(50.0));
+}
+
+#[test]
+fn first_cpu_and_network_sample_is_null_not_zero() {
+    let mut r = Reducer::default();
+    let first = sample(&mut r, "10", &[]);
+    assert_eq!(cpu(&first), None);
+    assert_eq!(rates(&first), (None, None));
+    let second = sample(&mut r, "12", &[("stat", SECOND_STAT, 0), ("netdev", SECOND_NET, 0)]);
+    assert_eq!(cpu(&second), Some(25.0));
+    assert_eq!(rates(&second), (Some(30.0), Some(15.0)));
+    let third = sample(&mut r, "14", &[("stat", THIRD_STAT, 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&third), Some(50.0));
+    assert_eq!(rates(&third), (Some(20.0), Some(5.0)));
+}
+
+#[test]
+fn network_tx_is_upload_rx_download_excludes_only_lo() {
+    let mut r = Reducer::default();
+    let first = format!("{BASE_NET}\n{}\n{}\n{}", netrow("lo", 0, 0), netrow("veth1", 10, 20), netrow("br0", 20, 40));
+    let second = format!("{SECOND_NET}\n{}\n{}\n{}", netrow("lo", u64::MAX, u64::MAX), netrow("veth1", 16, 40), netrow("br0", 24, 44));
+    sample(&mut r, "10", &[("netdev", &first, 0)]);
+    assert_eq!(rates(&sample(&mut r, "12", &[("netdev", &second, 0)])), (Some(42.0), Some(20.0)));
+    let swapped = format!("{THIRD_NET}\n{}\n{}", netrow("veth2", 5000, 6000), netrow("br0", 26, 46));
+    assert_eq!(rates(&sample(&mut r, "14", &[("netdev", &swapped, 0)])), (None, None));
+    assert_eq!(rates(&sample(&mut r, "16", &[("netdev", &swapped, 0)])), (Some(0.0), Some(0.0)));
+}
+
+#[test]
+fn rates_use_actual_three_second_remote_elapsed() {
+    let mut r = Reducer::default();
+    sample(&mut r, "100", &[]);
+    assert_eq!(rates(&sample(&mut r, "103", &[("netdev", SECOND_NET, 0)])), (Some(20.0), Some(10.0)));
+    let fractional = netrow("eth0", 135, 275);
+    assert_eq!(rates(&sample(&mut r, "104.25", &[("netdev", &fractional, 0)])), (Some(12.0), Some(4.0)));
+    let later = netrow("eth0", 635, 1275);
+    assert_eq!(rates(&sample(&mut r, "154.25", &[("netdev", &later, 0)])), (Some(20.0), Some(10.0)));
+}
+
+#[test]
+fn u64_wrap_has_exact_small_delta_without_overflow() {
+    let mut r = Reducer::default();
+    let high = netrow("eth0", u64::MAX - 5, u64::MAX - 11);
+    let low = netrow("eth0", 2, 4);
+    sample(&mut r, "10", &[("netdev", &high, 0)]);
+    assert_eq!(rates(&sample(&mut r, "12", &[("netdev", &low, 0)])), (Some(8.0), Some(4.0)));
+    // Exactly one increment from MAX to zero. The other direction stays level.
+    r.reset();
+    sample(&mut r, "20", &[("netdev", &netrow("eth0", 80, u64::MAX), 0)]);
+    assert_eq!(rates(&sample(&mut r, "21", &[("netdev", &netrow("eth0", 80, 0), 0)])), (Some(1.0), Some(0.0)));
+    // Same high-to-low shape is not a wrap across a reboot or without identity.
+    for (new_id, new_id_exit) in [(NEXT_BOOT, 0), ("", 127)] {
+        r.reset();
+        sample(&mut r, "10", &[("netdev", &high, 0), ("stat", "cpu 10 0 5 100", 0)]);
+        assert_eq!(rates(&sample(&mut r, "12", &[("netdev", &low, 0), ("bootId", new_id, new_id_exit), ("stat", "cpu 20 0 5 120", 0)])), (None, None));
+    }
+    r.reset();
+    sample(&mut r, "10", &[("netdev", &netrow("eth0", 13_835_058_055_282_163_711, u64::MAX), 0)]);
+    assert_eq!(rates(&sample(&mut r, "12", &[("netdev", &netrow("eth0", 0, 4_611_686_018_427_387_904), 0)])), (None, None));
+}
+
+#[test]
+fn ambiguous_32bit_decrease_rebaselines_instead_of_guessing_wrap() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[("netdev", &netrow("eth0", 4_294_967_293, 200), 0)]);
+    assert_eq!(rates(&sample(&mut r, "12", &[("netdev", &netrow("eth0", 3, 220), 0)])), (Some(10.0), None));
+    assert_eq!(rates(&sample(&mut r, "14", &[("netdev", &netrow("eth0", 19, 240), 0)])), (Some(10.0), Some(8.0)));
+    sample(&mut r, "16", &[("netdev", &netrow("eth0", u64::MAX - 2, 260), 0)]);
+    assert_eq!(rates(&sample(&mut r, "18", &[("netdev", &netrow("eth0", 3, 280), 0)])), (Some(10.0), Some(3.0)));
+}
+
+#[test]
+fn reboot_with_new_boot_id_and_higher_uptime_resets_rates() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[]);
+    let reboot = sample(&mut r, "100", &[("bootId", NEXT_BOOT, 0), ("stat", SECOND_STAT, 0), ("netdev", SECOND_NET, 0)]);
+    assert_eq!(cpu(&reboot), None);
+    assert_eq!(rates(&reboot), (None, None));
+    let stable = sample(&mut r, "102", &[("bootId", NEXT_BOOT, 0), ("stat", THIRD_STAT, 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&stable), Some(50.0));
+    assert_eq!(rates(&stable), (Some(20.0), Some(5.0)));
+}
+
+#[test]
+fn missing_boot_id_uses_btime_and_uptime() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[("bootId", "", 1)]);
+    let stable = sample(&mut r, "12", &[("bootId", "", 1), ("stat", SECOND_STAT, 0), ("netdev", SECOND_NET, 0)]);
+    assert_eq!(cpu(&stable), Some(25.0));
+    assert_eq!(rates(&stable), (Some(30.0), Some(15.0)));
+    let reboot = sample(&mut r, "14", &[("bootId", "", 1), ("stat", &THIRD_STAT.replace("1000", "1001"), 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&reboot), None);
+    assert_eq!(rates(&reboot), (None, None));
+    let regressed = sample(&mut r, "2", &[("bootId", "", 1), ("stat", "cpu 60 0 5 150 40\nbtime 1001", 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&regressed), None);
+    assert_eq!(rates(&regressed), (None, None));
+}
+
+#[test]
+fn interface_added_removed_or_reset_cannot_spike() {
+    let mut r = Reducer::default();
+    sample(&mut r, "2", &[]);
+    let added = format!("{SECOND_NET}\n{}", netrow("eth1", 999, 999));
+    assert_eq!(rates(&sample(&mut r, "4", &[("netdev", &added, 0)])), (None, None));
+    assert_eq!(rates(&sample(&mut r, "6", &[("netdev", THIRD_NET, 0)])), (None, None));
+    assert_eq!(rates(&sample(&mut r, "8", &[("netdev", BASE_NET, 0)])), (None, None));
+    assert_eq!(rates(&sample(&mut r, "10", &[("netdev", SECOND_NET, 0)])), (Some(30.0), Some(15.0)));
+}
+
+#[test]
+fn iowait_decrease_does_not_wrap() {
+    let mut r = Reducer::default();
+    sample(&mut r, "1", &[]);
+    assert_eq!(cpu(&sample(&mut r, "3", &[("stat", SECOND_STAT, 0)])), Some(25.0));
+    assert_eq!(cpu(&sample(&mut r, "5", &[("stat", "cpu 40 0 5 130 29", 0)])), None);
+    assert_eq!(cpu(&sample(&mut r, "7", &[("stat", "cpu 50 0 5 135 34", 0)])), Some(50.0));
+}
+
+#[test]
+fn zero_elapsed_or_total_delta_is_unavailable() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[]);
+    let zero_elapsed = sample(&mut r, "10", &[("stat", SECOND_STAT, 0), ("netdev", SECOND_NET, 0)]);
+    assert_eq!(zero_elapsed.net_up, Metric::Unavailable("Remote uptime did not advance".into()));
+    assert_eq!(zero_elapsed.net_down, Metric::Unavailable("Remote uptime did not advance".into()));
+    assert_eq!(cpu(&zero_elapsed), Some(25.0));
+    let warm = sample(&mut r, "12", &[("stat", THIRD_STAT, 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&warm), Some(50.0));
+    assert_eq!(rates(&warm), (None, None));
+    let stalled = sample(&mut r, "14", &[("stat", THIRD_STAT, 0), ("netdev", &netrow("eth0", 160, 340), 0)]);
+    assert_eq!(stalled.cpu, Metric::Unavailable("CPU counters did not advance".into()));
+    assert_eq!(rates(&stalled), (Some(20.0), Some(10.0)));
+}
+
+#[test]
+fn memavailable_and_old_kernel_fallback_have_exact_byte_oracles() {
+    let mut r = Reducer::default();
+    let preferred = sample(&mut r, "10", &[("meminfo", &format!("{MEM}\nMemFree: 1 kB"), 0)]);
+    assert_eq!(*avail(&preferred.ram), Ram { used_bytes: 256000, total_bytes: 1024000, percent: 25.0 });
+    let old = "MemTotal: 200 kB\nMemFree: 20 kB\nBuffers: 10 kB\nCached: 55 kB\nSReclaimable: 25 kB\nShmem: 10 kB";
+    assert_eq!(*avail(&sample(&mut r, "11", &[("meminfo", old, 0)]).ram), Ram { used_bytes: 102400, total_bytes: 204800, percent: 50.0 });
+    let bounded = old.replace("Cached: 55", "Cached: 255");
+    assert_eq!(avail(&sample(&mut r, "12", &[("meminfo", &bounded, 0)]).ram).used_bytes, 0);
+    let negative = old.replace("Shmem: 10", "Shmem: 120");
+    assert_eq!(avail(&sample(&mut r, "13", &[("meminfo", &negative, 0)]).ram).used_bytes, 204800);
+    for bad in [old.replace("\nShmem: 10 kB", ""), old.replace("Cached: 55", "Cached: 18446744073709551615").replace("Shmem: 10", "Shmem: 18446744073709551615"), old.replace("MemTotal: 200", "MemTotal: 0"), old.replace("MemTotal: 200", "MemTotal: 18014398509481984")] {
+        assert!(matches!(sample(&mut r, "14", &[("meminfo", &bad, 0)]).ram, Metric::Unavailable(_)));
+    }
+}
+
+#[test]
+fn failed_metric_clears_its_baseline_and_keeps_other_metrics() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[]);
+    let net_failed = sample(&mut r, "12", &[("stat", SECOND_STAT, 0), ("netdev", SECOND_NET, 1)]);
+    assert!(matches!(net_failed.net_up, Metric::Unavailable(_)));
+    assert_eq!(cpu(&net_failed), Some(25.0));
+    let warm = sample(&mut r, "14", &[("stat", THIRD_STAT, 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(rates(&warm), (None, None));
+    assert_eq!(cpu(&warm), Some(50.0));
+    let high = netrow("eth0", 152, 332);
+    let cpu_failed = sample(&mut r, "16", &[("stat", THIRD_STAT, 1), ("netdev", &high, 0)]);
+    assert!(matches!(cpu_failed.cpu, Metric::Unavailable(_)));
+    assert_eq!(rates(&cpu_failed), (Some(16.0), Some(6.0)));
+    let higher = netrow("eth0", 168, 352);
+    let revived = sample(&mut r, "18", &[("stat", BASE_STAT, 0), ("netdev", &higher, 0)]);
+    assert_eq!(cpu(&revived), None);
+    assert_eq!(rates(&revived), (Some(10.0), Some(8.0)));
+    let recovered = sample(&mut r, "20", &[("stat", SECOND_STAT, 0), ("netdev", &higher, 0), ("meminfo", MEM, 1)]);
+    assert!(matches!(recovered.ram, Metric::Unavailable(_)));
+    assert_eq!(cpu(&recovered), Some(25.0));
+    assert_eq!(rates(&recovered), (Some(0.0), Some(0.0)));
+}
+
+#[test]
+fn empty_nfs_is_available_but_failed_df_is_not() {
+    let mut r = Reducer::default();
+    assert!(avail(&sample(&mut r, "1", &[]).nfs).mounts.is_empty());
+    assert!(matches!(sample(&mut r, "2", &[("dfNfs", NFS, 1), ("mounts", NFS_MOUNTS, 0)]).nfs, Metric::Unavailable(_)));
+    let full = sample(&mut r, "3", &[("dfNfs", NFS, 0), ("mounts", NFS_MOUNTS, 0)]);
+    assert_eq!(avail(&full.nfs).mounts, [MountUsage { source: "remote:/share".into(), mount_point: "/srv/share".into(), fs_type: "nfs4".into(), total_bytes: 204800, used_bytes: 40960, available_bytes: 153600, used_percent: 22 }]);
+}
+
+#[test]
+fn watchdog_keeps_completed_gauges_without_carrying_any_baseline() {
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[]);
+    let expired = sample(&mut r, "12", &[("stat", SECOND_STAT, 0), ("netdev", SECOND_NET, 0), ("dfNfs", NFS, 137), ("mounts", NFS_MOUNTS, 0)]);
+    assert_eq!(cpu(&expired), None);
+    assert_eq!(rates(&expired), (None, None));
+    assert_eq!(avail(&expired.partitions).mounts[0].total_bytes, 102400);
+    assert_eq!(expired.nfs, Metric::Unavailable("NFS usage watchdog expired".into()));
+    let warm = sample(&mut r, "14", &[("stat", THIRD_STAT, 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&warm), None);
+    assert_eq!(rates(&warm), (None, None));
+}
+
+#[test]
+fn cpu_core_metadata_falls_back_without_fabricating_values() {
+    let mut r = Reducer::default();
+    let cpuinfo = [("nproc", "", 127), ("cpuinfo", "processor : 0\nprocessor : 1", 0)];
+    assert_eq!(avail(&avail(&sample(&mut r, "10", &cpuinfo).cpu).cores).count, 2);
+    let stat = [("nproc", "", 127), ("cpuinfo", "Processor: generic", 0), ("stat", "cpu 30 0 5 120\ncpu0 30 0 5 120", 0)];
+    assert_eq!(avail(&avail(&sample(&mut r, "12", &stat).cpu).cores).count, 1);
+    let bad = [("nproc", "0", 0), ("cpuinfo", "Processor: generic", 0), ("stat", "cpu 40 0 5 130", 0)];
+    assert!(matches!(avail(&sample(&mut r, "14", &bad).cpu).cores, Metric::Unavailable(_)));
+}
+
+#[test]
+fn numeric_input_overflow_fails_independently() {
+    let mut r = Reducer::default();
+    let bad = "18446744073709551616";
+    let cpu_row = format!("cpu {bad} 0 5 120");
+    let m = sample(&mut r, "10", &[("stat", &cpu_row, 0)]);
+    assert!(matches!(m.cpu, Metric::Unavailable(_)));
+    assert_eq!(rates(&m), (None, None));
+    let net_row = format!("eth0: {bad} 0 0 0 0 0 0 0 100 0 0 0 0 0 0 0");
+    let m = sample(&mut r, "12", &[("netdev", &net_row, 0)]);
+    assert_eq!(cpu(&m), None);
+    assert!(matches!(m.net_down, Metric::Unavailable(_)));
+    assert_eq!(avail(&m.uptime).seconds, 12.0);
+}
