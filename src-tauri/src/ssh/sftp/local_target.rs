@@ -52,7 +52,7 @@ pub enum LocalError {
     Io(io::Error),
 }
 
-fn is_link(meta: &Metadata) -> bool {
+pub(super) fn is_link(meta: &Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

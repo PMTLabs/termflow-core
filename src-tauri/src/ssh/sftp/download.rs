@@ -160,7 +160,7 @@ impl RemoteFs<'_> {
     }
 }
 
-async fn transfer_file(
+pub(super) async fn transfer_file(
     a: &Admission<'_>,
     path: &str,
     target: FileTarget,
@@ -249,7 +249,7 @@ async fn require_directory(a: &Admission<'_>, path: &str, cancel: &CancellationT
     Ok(())
 }
 
-async fn check_remote_parents(a: &Admission<'_>, path: &str, cancel: &CancellationToken) -> Result<(), FsError> {
+pub(super) async fn check_remote_parents(a: &Admission<'_>, path: &str, cancel: &CancellationToken) -> Result<(), FsError> {
     for (end, _) in path.match_indices('/').skip(1) {
         require_directory(a, &path[..end], cancel).await?;
     }
