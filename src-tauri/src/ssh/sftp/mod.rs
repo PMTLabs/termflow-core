@@ -6,7 +6,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use download::DownloadOutcome;
+pub use download::{DownloadOutcome, DownloadPicker, DownloadResult, FileDownloadOutcome};
 pub use local_target::FileTarget;
 pub use types::*;
 

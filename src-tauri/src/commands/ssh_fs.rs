@@ -1,9 +1,40 @@
 //! IPC-only remote browser filesystem commands.
 use crate::{
-    ssh::sftp::{FsError, RemoteFs, RemoteListing, RemoteStat},
+    ssh::sftp::{DownloadPicker, DownloadResult, FsError, RemoteFs, RemoteListing, RemoteStat},
     state::AppState,
 };
-use tauri::{Runtime, State};
+use tauri::{Runtime, State, WebviewWindow};
+use tauri_plugin_dialog::{DialogExt, FilePath};
+use tokio_util::sync::CancellationToken;
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn ssh_fs_download<R: Runtime>(
+    window: WebviewWindow<R>,
+    state: State<'_, AppState<R>>,
+    terminal_id: String,
+    path: String,
+    expected_generation: u64,
+) -> Result<DownloadResult, FsError> {
+    RemoteFs::new(&state.ssh_sessions, &terminal_id, expected_generation)
+        .download_with_picker(&path, &CancellationToken::new(), |picker| async move {
+            let dialog = window.dialog().file().set_parent(&window);
+            let (send, receive) = tokio::sync::oneshot::channel::<Option<FilePath>>();
+            let picked = move |path| {
+                let _ = send.send(path);
+            };
+            match picker {
+                DownloadPicker::Save { default_name } => {
+                    let dialog = if let Some(name) = default_name { dialog.set_file_name(name) } else { dialog };
+                    dialog.save_file(picked);
+                }
+                DownloadPicker::Folder => dialog.pick_folder(picked),
+            }
+            receive.await.map_err(|_| "Native download picker did not return a result.")?
+                .map(|path| path.into_path().map_err(|_| "The native picker did not select a local path."))
+                .transpose()
+        })
+        .await
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_list<R: Runtime>(

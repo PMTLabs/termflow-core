@@ -45,7 +45,7 @@ fn existing_folder_merge_refused() {
     let Tree(root) = &Tree::new();
     let child = create_child_dir_exclusive(root, "selected").unwrap();
     fs::write(child.join("sentinel"), b"keep").unwrap();
-    assert!(matches!(create_child_dir_exclusive(root, "selected"), Err(LocalError::Conflict)));
+    assert!(matches!(create_child_dir_exclusive(root, "selected"), Err(LocalError::Exists)));
     assert_eq!(fs::read(child.join("sentinel")).unwrap(), b"keep");
 }
 

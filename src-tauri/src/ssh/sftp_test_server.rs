@@ -18,6 +18,8 @@ pub struct SftpFaults {
     pub requests: Vec<(String, String)>,
     pub deny: Vec<(&'static str, String)>,
     pub omit_attrs: bool,
+    // One-shot wire names, including names the host filesystem cannot store.
+    pub readdir_names: Option<Vec<String>>,
     pub delay_before_ack: Option<(&'static str, String, Duration)>,
     pub drop_connection_on: Option<(&'static str, String)>,
     pub before: Option<BeforeRequest>,
@@ -335,6 +337,9 @@ impl Handler for TestSftp {
     async fn readdir(&mut self, id: u32, handle: String) -> Result<Name> {
         let path = self.handle_path(&handle)?;
         self.request("readdir", &path, |s| {
+            if let Some(names) = s.faults.lock().readdir_names.take() {
+                return Ok(Name { id, files: names.into_iter().map(File::dummy).collect() });
+            }
             let Resource::Directory(dir) = &mut s.handles.get_mut(&handle).unwrap().resource else {
                 return Err(StatusCode::Failure.into());
             };

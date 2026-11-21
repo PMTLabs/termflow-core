@@ -21,6 +21,7 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_test_close, $crate::commands::ssh_test_submit_secret,
             $crate::commands::ssh_test_trust_host,
             $crate::commands::ssh_fs_list, $crate::commands::ssh_fs_stat,
+            $crate::commands::ssh_fs_download,
             $crate::commands::ssh_fs_mkdir, $crate::commands::ssh_fs_create,
             $crate::commands::ssh_fs_rename, $crate::commands::ssh_fs_delete,
             $crate::commands::ssh_fs_chmod, $crate::commands::ssh_fs_chown,

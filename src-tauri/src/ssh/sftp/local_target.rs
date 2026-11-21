@@ -47,6 +47,7 @@ impl PlannedNames {
 pub enum LocalError {
     InvalidName,
     Conflict,
+    Exists,
     Unsupported,
     Io(io::Error),
 }
@@ -83,7 +84,9 @@ pub fn create_child_dir_exclusive(parent: &Path, name: &str) -> Result<PathBuf, 
     validate_local_name(name).map_err(|_| LocalError::InvalidName)?;
     ensure_real_dir(parent)?;
     let child = parent.join(name);
-    fs::create_dir(&child).map_err(destination_error)?;
+    fs::create_dir(&child).map_err(|err| {
+        if err.kind() == io::ErrorKind::AlreadyExists { LocalError::Exists } else { LocalError::Io(err) }
+    })?;
     Ok(child)
 }
 
@@ -127,6 +130,10 @@ pub struct FileTarget {
 }
 
 impl FileTarget {
+    pub(super) fn no_replace(path: PathBuf) -> Self {
+        Self { path, snapshot: Snapshot::Absent }
+    }
+
     pub fn from_save_dialog(path: PathBuf) -> Result<Self, LocalError> {
         let parent = path.parent().ok_or(LocalError::Conflict)?;
         check_basename(&path)?;
@@ -160,6 +167,21 @@ impl FileTarget {
         }
         Ok(self.path)
     }
+}
+
+/// Keep the canonical spelling for filesystem operations; simplify only the UI path.
+pub(super) fn display_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::{ffi::OsString, os::windows::ffi::{OsStrExt, OsStringExt}, path::Prefix};
+        if let Some(Component::Prefix(prefix)) = path.components().next() {
+            if matches!(prefix.kind(), Prefix::VerbatimDisk(_)) {
+                let wide: Vec<_> = path.as_os_str().encode_wide().skip(4).collect();
+                return PathBuf::from(OsString::from_wide(&wide));
+            }
+        }
+    }
+    path
 }
 
 fn check_basename(path: &Path) -> Result<(), LocalError> {
