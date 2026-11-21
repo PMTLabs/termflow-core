@@ -1,4 +1,5 @@
 use crate::pty_manager;
+use crate::ssh::session::remote_cwd::CwdEvent;
 use crate::state::AppState;
 use tauri::Emitter;
 
@@ -27,7 +28,18 @@ fn stall_ticks(
 /// stalls; a superseded instance exits at the generation check below.
 pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
     let mut rx = state.output_tx.subscribe();
+    state.ssh_sessions.begin_cwd_pipeline(generation);
     tauri::async_runtime::spawn(async move {
+        let resolve_leaf = |process_id: &str| {
+            let leaf = state.terminals.get(process_id)?.renderer_terminal_id.clone()?;
+            // The forward index rejects an old process whose replacement has
+            // already been published but whose terminal maps still exist.
+            (state.identity.process_for_leaf(&leaf).as_deref() == Some(process_id)).then_some(leaf)
+        };
+        let cwd_sink = |event: CwdEvent| {
+            let _ = state.app_handle.emit("ssh-fs:cwd", event);
+        };
+        let flush_cwd = || state.ssh_sessions.flush_remote_cwd(generation, &resolve_leaf, &cwd_sink);
         log::info!("[PIPELINE] output consumer started (gen {})", generation);
         // Coalesce the renderer emit (terminal:data) so a TUI's back-to-back frames —
         // e.g. codex's redraw followed by its SEPARATE cursor-reposition frame — reach the
@@ -55,6 +67,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
                                 serde_json::json!({ "id": id, "data": data }),
                             );
                         }
+                        flush_cwd();
                         flush_at = None;
                         continue;
                     }
@@ -75,6 +88,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
                             serde_json::json!({ "id": id, "data": data }),
                         );
                     }
+                    flush_cwd();
                     break;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -88,6 +102,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
                     // of accumulating stale frames. The pending coalesced emit is
                     // stale now too — drop it; the repaint resyncs.
                     emit_buf.clear();
+                    state.ssh_sessions.reset_cwd_pipeline(generation);
                     flush_at = None;
                     state.repaint_all_terminals_debounced(2_000);
                     continue;
@@ -119,6 +134,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
             // This always reflects the true current screen and is what the
             // client hydrates from on reconnect (no heuristics involved).
             state.feed_screen(&payload.id, &payload.data);
+            state.ssh_sessions.feed_remote_cwd(generation, &payload, &resolve_leaf);
 
             // Track the shell-reported cwd from OSC 9;9 / OSC 7 sequences (backlog
             // 004). Authoritative for shells whose process cwd isn't live (PowerShell).
@@ -294,6 +310,7 @@ pub(crate) fn spawn_output_consumer(state: AppState, generation: u64) {
                         serde_json::json!({ "id": id, "data": data }),
                     );
                 }
+                flush_cwd();
                 flush_at = None;
             } else if flush_at.is_none() {
                 flush_at = Some(

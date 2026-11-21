@@ -1261,10 +1261,10 @@ impl<R: Runtime> AppState<R> {
         // silently does nothing, which is invisible: the symptom is a restarted terminal that is
         // never nagged again rather than an error. Plan 028 §2.4, §10.4c.
         let leaf = self.terminals.get(id).and_then(|t| t.renderer_terminal_id.clone());
-        if let Some(leaf) = leaf {
-            let owns_leaf = matches!(self.host_table.keys().owner_state(&leaf),
+        if let Some(leaf) = leaf.as_deref() {
+            let owns_leaf = matches!(self.host_table.keys().owner_state(leaf),
                 Some((_, super::OwnerState::Registered(s) | super::OwnerState::Closing(s))) if s.process == id);
-            if owns_leaf { self.automations.runtime.forget_terminal(&leaf); }
+            if owns_leaf { self.automations.runtime.forget_terminal(leaf); }
         }
         // `dirty` is keyed by the PROCESS id (`ChannelPayload.id` is a process id), so it is purged
         // with the id this function was given, never with the leaf. Plan 028 §7.4's table.
@@ -1282,7 +1282,9 @@ impl<R: Runtime> AppState<R> {
                 });
             }
         }
-        self.terminals.remove(id);
+        self.ssh_sessions.remove_cwd_process(leaf.as_deref(), id, || {
+            self.terminals.remove(id);
+        });
         // Alongside `terminals`, and for the same reason: the identity lookups are
         // an index OF that map, so an entry outliving its terminal would resolve a
         // durable id to a process that no longer exists. One remover, at the same

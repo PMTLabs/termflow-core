@@ -31,6 +31,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+pub(crate) mod remote_cwd;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "kebab-case")]
 pub enum SessionError {
@@ -356,8 +358,11 @@ struct EntryState {
     launch_seq: u64,
     process_id: Option<String>,
     transport: Option<Arc<SshSession>>,
+    target_host: Option<String>,
+    learned_hostname: Option<String>,
 }
 struct Entry {
+    cwd_streams: Arc<Mutex<remote_cwd::CwdStreams>>,
     owner_receipt: Option<u64>,
     inner: Mutex<EntryState>,
     cancel: CancellationToken,
@@ -375,6 +380,7 @@ impl Entry {
         let was_connected = state.view.state == SessionState::Connected;
         operation(&mut state);
         if was_connected && state.view.state != SessionState::Connected {
+            self.cwd_streams.lock().forget_launch(&state);
             self.cancel.cancel();
             state.transport.take();
             state.pending.take();
@@ -411,6 +417,7 @@ impl Entry {
             return;
         }
         let previous = s.view.clone();
+        self.cwd_streams.lock().forget_launch(&s);
         self.cancel.cancel();
         s.pending.take();
         s.authenticated = false;
@@ -596,6 +603,7 @@ struct RegistryState {
 }
 pub struct SessionRegistry {
     inner: Mutex<RegistryState>,
+    cwd_streams: Arc<Mutex<remote_cwd::CwdStreams>>,
     next: AtomicU64,
     retired: Mutex<Vec<JoinHandle<()>>>,
     deps: RwLock<Arc<Dependencies>>,
@@ -609,6 +617,7 @@ impl SessionRegistry {
                 probes: HashMap::new(),
                 admitting: true,
             }),
+            cwd_streams: Arc::default(),
             next: AtomicU64::new(1),
             retired: Mutex::new(Vec::new()),
             deps: RwLock::new(Arc::new(deps)),
@@ -709,6 +718,7 @@ impl SessionRegistry {
         });
         let deps = self.deps.read().clone();
         let entry = Arc::new(Entry {
+            cwd_streams: self.cwd_streams.clone(),
             owner_receipt,
             inner: Mutex::new(EntryState {
                 definition: None,
@@ -720,6 +730,8 @@ impl SessionRegistry {
                 launch_seq: 0,
                 process_id: None,
                 transport: None,
+                target_host: None,
+                learned_hostname: None,
             }),
             cancel: CancellationToken::new(),
             transitions,
@@ -906,6 +918,7 @@ impl SessionRegistry {
         {
             return Err(SessionError::StaleAttempt);
         }
+        self.cwd_streams.lock().forget_launch(&s);
         s.launch_seq = launch_seq;
         s.launch = Some(launch);
         s.process_id = process_id;
@@ -1293,14 +1306,16 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         .await?;
         handles.push(handle);
     }
-    let target = handles.pop().ok_or(SessionError::TransportClosed)?;
+    let target_host = target.hops.last().map(|hop| hop.host.clone());
+    let handle = handles.pop().ok_or(SessionError::TransportClosed)?;
     let session = Arc::new(SshSession {
-        handle: tokio::sync::Mutex::new(target),
+        handle: tokio::sync::Mutex::new(handle),
         cancel: entry.cancel.clone(),
         sftp: tokio::sync::Mutex::new(None),
     });
     entry.update(|s| {
         s.authenticated = true;
+        s.target_host = target_host;
         s.transport = Some(session.clone());
         s.view.state = if s.view.probe_id.is_some() || s.launch == Some(LaunchState::Running) {
             SessionState::Connected
@@ -1314,6 +1329,24 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         );
         clear_prompt(&mut s.view);
     });
+    if entry.view().terminal_id.is_some() {
+        let entry = entry.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            // Allow a trailing CRLF, and reserve the last 250 ms of the five
+            // second budget for exec_with's bounded channel close on failure.
+            if let Ok(output) = session
+                .exec_bounded("hostname", 257, Duration::from_millis(4750))
+                .await
+            {
+                if let Some(host) = learned_hostname(&output) {
+                    // An Entry belongs to precisely one generation. update
+                    // refuses writes after cancellation, including retirement.
+                    entry.update(|s| s.learned_hostname = Some(host.to_owned()));
+                }
+            }
+        });
+    }
     // Handler callbacks observe real transport completion. Holding the bastion handle
     // keeps direct-tcpip alive; no agent forwarding is ever requested.
     entry.cancel.cancelled().await;
@@ -1334,6 +1367,15 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
     }
     Ok(())
 }
+fn learned_hostname(output: &ExecOutput) -> Option<&str> {
+    let host = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.exit == 0
+        && !host.is_empty()
+        && host.len() <= 255
+        && !host.chars().any(|c| c.is_whitespace() || c.is_control() || c == '/'))
+    .then_some(host)
+}
+
 pub(crate) fn identity_path(home: &std::path::Path, identity: &str) -> PathBuf {
     let relative = identity.strip_prefix("~/");
     #[cfg(windows)]

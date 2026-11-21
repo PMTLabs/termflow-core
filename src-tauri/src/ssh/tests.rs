@@ -11,7 +11,7 @@ use russh::{
     Channel, ChannelId,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -31,6 +31,7 @@ pub struct Counters {
     pub auth: AtomicUsize,
     pub subsystems: AtomicUsize,
     pub closed_channels: AtomicUsize,
+    pub hostname_requests: AtomicUsize,
     pub principals: Mutex<Vec<String>>,
     pub direct_addresses: Mutex<Vec<(String, u32)>>,
     pub environment: Mutex<Vec<(String, String)>>,
@@ -51,6 +52,8 @@ pub struct Server {
     pub sftp_faults: Arc<Mutex<SftpFaults>>,
     sftp_storage: Arc<SftpStorage>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    pub hostname_reply: Option<&'static str>,
+    hostname_channels: HashSet<ChannelId>,
 }
 impl Server {
     pub fn new(seed: u8, user: &str) -> Self {
@@ -67,6 +70,8 @@ impl Server {
             sftp_faults: Arc::default(),
             sftp_storage: Arc::default(),
             channels: Arc::new(Mutex::new(HashMap::new())),
+            hostname_reply: Some("fixture-host\r\n"),
+            hostname_channels: HashSet::new(),
         }
     }
     pub(super) fn start(self, stream: BoxStream) {
@@ -125,7 +130,9 @@ impl server::Handler for Server {
         Ok(())
     }
     async fn channel_close(&mut self, id: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
-        self.counters.closed_channels.fetch_add(1, Ordering::SeqCst);
+        if !self.hostname_channels.remove(&id) {
+            self.counters.closed_channels.fetch_add(1, Ordering::SeqCst);
+        }
         self.channels.lock().remove(&id);
         Ok(())
     }
@@ -173,6 +180,22 @@ impl server::Handler for Server {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if data == b"hostname" {
+            self.hostname_channels.insert(ch);
+            self.counters.hostname_requests.fetch_add(1, Ordering::SeqCst);
+            if self.refuse {
+                session.channel_failure(ch)?;
+                return Ok(());
+            }
+            session.channel_success(ch)?;
+            if let Some(hostname) = self.hostname_reply {
+                session.data(ch, hostname.as_bytes().to_vec())?;
+                session.exit_status_request(ch, 0)?;
+                session.eof(ch)?;
+                session.close(ch)?;
+            }
+            return Ok(());
+        }
         if self.refuse {
             session.channel_failure(ch)?;
             return Ok(());

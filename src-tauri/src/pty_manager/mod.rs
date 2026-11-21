@@ -1,4 +1,6 @@
 mod cwd;
+#[path = "cwd/osc7.rs"]
+pub(crate) mod osc7;
 mod procinfo;
 pub(crate) use procinfo::native_process_birth;
 mod profiles;
