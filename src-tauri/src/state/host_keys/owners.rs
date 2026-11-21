@@ -251,7 +251,7 @@ impl HostKeys {
             Owner::Parked { pg, .. } => row.ssh_reserved && inner.window_pages.window_of(*pg).is_some(),
             Owner::Transfer { tx, .. } => row.ssh_reserved && inner.panes.transfers.get(tx)
                 .is_some_and(|transfer| transfer.members.iter().any(|m| m.descriptor.leaf == leaf)),
-            Owner::Orphaned | Owner::Headless => false,
+            Owner::Orphaned | Owner::Headless | Owner::Offered(_) => false,
         }
     }
 
