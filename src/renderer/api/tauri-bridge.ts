@@ -1,4 +1,4 @@
-import type { SshAPI, SshSessionView, SshPromptReceipt } from '../types/ssh';
+import type { SshAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent } from '../types/ssh';
 import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
@@ -364,9 +364,9 @@ const buildAuthHeaders = (): Record<string, string> => {
   return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
-async function listenSsh(event: string, listener: (view: SshSessionView) => void): Promise<UnlistenFn> {
+async function listenSsh<T>(event: string, listener: (view: T) => void): Promise<UnlistenFn> {
   let active = true;
-  const unlisten = await listen<SshSessionView>(event, e => { if (active) listener(e.payload); });
+  const unlisten = await listen<T>(event, e => { if (active) listener(e.payload); });
   const dispose = () => { if (!active) return; active = false; unlisten(); };
   trackUnlisten(Promise.resolve(dispose));
   return dispose;
@@ -384,6 +384,7 @@ const tauriBridge: ElectronAPI = {
   sshTestClose: async (probeId: string) => invoke<void>('ssh_test_close', { probeId }),
   sshTestSubmitSecret: async (probeId: string, secret: string, remember: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_submit_secret', { probeId, secret, remember, ...receipt }),
   sshTestTrustHost: async (probeId: string, accept: boolean, receipt: SshPromptReceipt = {}) => invoke<void>('ssh_test_trust_host', { probeId, accept, ...receipt }),
+  onSshLaunchState: (listener) => listenSsh<SshLaunchEvent>('ssh-launch:state', listener),
   onSshSessionState: (listener) => listenSsh('ssh-session:state', listener),
   onSshTestState: (listener) => listenSsh('ssh-test:state', listener),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {

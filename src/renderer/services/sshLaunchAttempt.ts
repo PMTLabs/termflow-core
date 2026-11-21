@@ -1,4 +1,4 @@
-import type { LaunchAttemptRef, LaunchSnapshot, SshAPI, SshLaunchApi, SshSessionView } from '../types/ssh';
+import type { LaunchError, LaunchAttemptRef, LaunchSnapshot, SshAPI, SshLaunchApi, SshSessionView } from '../types/ssh';
 import type { PaneCapture } from './paneIncarnations';
 
 export type OwnedSshLaunchApi = Pick<SshAPI, 'sshSessionOpen' | 'sshSessionState' | 'sshSessionReconnect'> & { ssh?: SshLaunchApi };
@@ -13,6 +13,23 @@ export interface SshLaunchObservation {
   session: SshSessionView;
   snapshot?: LaunchSnapshot;
 }
+export type ReconnectSshResult =
+  | { ok: true; snapshot: LaunchSnapshot }
+  | { ok: false; error: { code: string; message: string } };
+
+export const isWaitingForSshLaunch = (stage: LaunchSnapshot['stage']) =>
+  stage === 'preparing' || stage === 'waiting-ready' || stage === 'waiting-trust';
+
+export function sshLaunchFailure(error: unknown): { code: string; message: string } {
+  if (typeof error === 'object' && error && 'code' in error && typeof error.code === 'string'
+      && 'message' in error && typeof error.message === 'string') {
+    return { code: error.code, message: error.message };
+  }
+  return { code: 'LaunchFailed', message: 'The SSH launch could not be completed.' };
+}
+
+export const staleSshLaunch: LaunchError = { code: 'StaleAttempt', message: 'The SSH launch attempt is no longer current.' };
+
 const hasCode = (error: unknown, code: string): boolean =>
   typeof error === 'object' && error !== null && 'code' in error && error.code === code;
 
@@ -20,7 +37,7 @@ const hasCode = (error: unknown, code: string): boolean =>
 export async function observeOwnedSshLaunch(
   api: OwnedSshLaunchApi,
   placement: OwnedSshPlacement,
-  action: 'open' | 'restart' | 'query',
+  action: 'open' | 'restart' | 'query' | 'reconnect',
 ): Promise<SshLaunchObservation | undefined> {
   const { terminalId, connectionId, processIncarnation, current } = placement;
   const { ssh } = api;
@@ -35,8 +52,12 @@ export async function observeOwnedSshLaunch(
       if (!current()) return;
       if (session && (session.terminalId !== terminalId || session.connectionId !== connectionId || session.probeId)) return;
     }
-    if (action === 'restart' && session) session = await api.sshSessionReconnect(terminalId);
-    else if (action !== 'query') session = await api.sshSessionOpen(terminalId, connectionId);
+    if (action === 'reconnect' && !session) return;
+    if ((action === 'restart' || action === 'reconnect') && session) {
+      const previous = session.generation;
+      session = await api.sshSessionReconnect(terminalId);
+      if (action === 'reconnect' && (previous === undefined || session.generation === undefined || session.generation <= previous)) return;
+    } else if (action !== 'query') session = await api.sshSessionOpen(terminalId, connectionId);
     if (!current() || !session || session.terminalId !== terminalId || session.connectionId !== connectionId || session.probeId) return;
     const { generation, gate, reason, knownHostsPaths } = session;
     if (generation === undefined || !Number.isSafeInteger(generation)) return;
@@ -51,7 +72,8 @@ export async function observeOwnedSshLaunch(
         ? await ssh.terminalLaunchState(terminalId, attempt)
         : await ssh.launchTerminal(terminalId, connectionId, attempt);
     } catch (error) {
-      if (action !== 'query' || !hasCode(error, 'NotFound')) throw error;
+      // A fresh reconnect can reserve its session before registering the new launch.
+      if (action !== 'query' || (!hasCode(error, 'NotFound') && !hasCode(error, 'StaleAttempt'))) throw error;
     }
     if (!current()) return;
     if (snapshot && (snapshot.terminalId !== terminalId || snapshot.connectionId !== connectionId

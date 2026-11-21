@@ -1,0 +1,24 @@
+.ssh-launch-notice {
+  flex: none;
+  max-height: 65%;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+/* The terminal surface relocates into Canvas; keep the same notice in that node. */
+.canvas-surface > .ssh-launch-notice {
+  position: absolute;
+  z-index: 2;
+  inset: 0 0 auto;
+}
+
+.ssh-launch-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}

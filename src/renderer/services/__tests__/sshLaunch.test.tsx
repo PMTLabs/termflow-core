@@ -23,7 +23,8 @@ import { removeTabTree } from '../../store/slices/panesSlice';
 import { CANVAS_SHELL_TYPE } from '../tabKinds';
 import { installPaneIncarnations, PaneIncarnations, type PaneBridge, type PaneResult } from '../paneIncarnations';
 import { terminalService, TerminalServiceClass } from '../TerminalService';
-import { launchSshConnection } from '../sshLaunch';
+import { launchSshConnection, reconnectSshTerminal } from '../sshLaunch';
+import { sshOwnersChanged } from '../../store/slices/sshSessionSlice';
 import { observeOwnedSshLaunch } from '../sshLaunchAttempt';
 import { getTabPanesGlobal, clearTabPanesInPlace } from '../tabPanesStore';
 import type { LaunchAttemptRef, LaunchSnapshot, SshSessionView } from '../../types/ssh';
@@ -52,6 +53,8 @@ function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = f
   const api = {
     setDefaultProfile: jest.fn(), createTerminal: jest.fn().mockResolvedValue('pc-legacy'), takeReattachPromptHook,
     onTerminalData: jest.fn(), onTerminalExit: jest.fn(), updateTerminalName: jest.fn().mockResolvedValue(true),
+    writeToTerminal: jest.fn(), closeTerminal: jest.fn(),
+    sshSessionTrustHost: jest.fn().mockResolvedValue(undefined), sshSessionSubmitSecret: jest.fn().mockResolvedValue(undefined),
     sshSessionOpen: jest.fn(async (id: string, connection: string) => open(id, connection)),
     sshSessionReconnect: jest.fn(async (id: string) => open(id, sessions.get(id)!.connectionId)),
     sshSessionState: jest.fn(async (id: string) => {
@@ -92,7 +95,7 @@ function harness(admission: PaneResult = { status: 'Create', cg: 7 }, attach = f
       order: 0, lastUsedAt: null, hasSavedSecret: false,
     }],
   } }));
-  return { api, client, create };
+  return { api, client, create, snapshots, sessions };
 }
 
 const launch = (placement?: typeof canvas) => {
@@ -275,6 +278,102 @@ test('remount_queries_same_process_with_current_owner_and_session_receipt', asyn
   const attempt = { ...source!.snapshot!.attempt, ownerIncarnation: { pg: 42, seq: 1 } };
   expect(api.ssh.terminalLaunchState.mock.calls).toEqual([['tm-adopted', attempt]]);
   expect(acquired?.snapshot).toEqual({ ...source!.snapshot, attempt });
+});
+
+test('reconnectSshTerminal gets a fresh generation for the exact same shell and terminal', async () => {
+  const { api, snapshots, create } = harness();
+  let leaf = '';
+  await act(async () => { render(); leaf = launch().terminalId; await flush(); });
+  const prior = snapshots.get(leaf)!;
+  snapshots.set(leaf, { ...prior, stage: 'ended' });
+  api.ssh.launchTerminal.mockImplementationOnce(async (terminalId, connectionId, attempt) =>
+    ({ ...makeSnapshot(terminalId, connectionId, attempt), stage: 'typed' }));
+  let result;
+  await act(async () => { result = await reconnectSshTerminal(leaf); });
+  expect(result).toEqual({ ok: true, snapshot: expect.objectContaining({ terminalId: leaf, stage: 'typed' }) });
+  expect(api.sshSessionReconnect.mock.calls).toEqual([[leaf]]);
+  expect(api.ssh.launchTerminal.mock.calls[1]).toEqual([leaf, 'saved', {
+    ...prior.attempt, sessionGeneration: 2, attemptReceipt: { generation: 2, gate: 'pending' },
+  }]);
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(api.writeToTerminal).not.toHaveBeenCalled();
+  expect(api.closeTerminal).not.toHaveBeenCalled();
+});
+
+test('reconnectSshTerminal refuses a running login without writing or killing', async () => {
+  const { api, snapshots } = harness();
+  let leaf = '';
+  await act(async () => { render(); leaf = launch().terminalId; await flush(); });
+  snapshots.set(leaf, { ...snapshots.get(leaf)!, stage: 'running' });
+  expect(await reconnectSshTerminal(leaf)).toEqual({ ok: false, error: {
+    code: 'NotAtPrompt', message: 'Return to the local prompt to reconnect',
+  } });
+  expect(api.ssh.terminalLaunchState).toHaveBeenCalledTimes(1);
+  expect(api.sshSessionReconnect).not.toHaveBeenCalled();
+  expect(api.ssh.launchTerminal).toHaveBeenCalledTimes(1); // initial start only
+  expect(api.writeToTerminal).not.toHaveBeenCalled();
+  expect(api.closeTerminal).not.toHaveBeenCalled();
+});
+
+test('native prompt timeout maps to NotAtPrompt without a renderer input or teardown', async () => {
+  const { api, snapshots } = harness();
+  let leaf = '';
+  await act(async () => { render(); leaf = launch().terminalId; await flush(); });
+  snapshots.set(leaf, { ...snapshots.get(leaf)!, stage: 'ended' });
+  jest.useFakeTimers();
+  try {
+    api.ssh.terminalLaunchState.mockImplementationOnce(async () => snapshots.get(leaf)!);
+    api.ssh.terminalLaunchState.mockImplementationOnce(async (_id, attempt) => ({
+      ...makeSnapshot(leaf, 'saved', attempt), stage: 'error',
+      error: { code: 'Timeout', message: 'native readiness expired' },
+    }));
+    let result;
+    await act(async () => {
+      const pending = reconnectSshTerminal(leaf);
+      await flush();
+      jest.advanceTimersByTime(250);
+      result = await pending;
+    });
+    expect(result).toEqual({ ok: false, error: { code: 'NotAtPrompt', message: 'Return to the local prompt to reconnect' } });
+    expect(api.ssh.launchTerminal).toHaveBeenCalledTimes(2);
+    expect(api.writeToTerminal).not.toHaveBeenCalled();
+    expect(api.closeTerminal).not.toHaveBeenCalled();
+  } finally { jest.useRealTimers(); }
+});
+
+test('mounted notice sends exact native prompt identity and cancels the qualified attempt', async () => {
+  const { api, sessions, snapshots } = harness();
+  const bridge = Object.assign(api, { onSshLaunchState: jest.fn().mockResolvedValue(() => {}) });
+  let leaf = '';
+  await act(async () => {
+    render(); leaf = launch().terminalId;
+    store.dispatch(sshOwnersChanged({ [leaf]: 'saved' }));
+    await flush();
+  });
+  const attempt = snapshots.get(leaf)!.attempt;
+  // Force a prompt switch without changing generation. Qualified reads, never the event payload,
+  // carry the revised prompt and current owner.
+  const receive = bridge.onSshLaunchState.mock.calls.at(-1)![0];
+  const view = sessions.get(leaf)!;
+  const promptTarget = { connectionId: 'saved', user: 'alice', host: 'target.test', port: 22, hop: 'target' as const };
+  const findButton = (name: string) => [...element.querySelectorAll('button')].find(b => b.textContent === name)!;
+  await act(async () => {
+    sessions.set(leaf, { ...view, revision: 2, promptTarget, promptId: 'jump',
+      hostKey: { algorithm: 'ssh-ed25519', changed: false, fingerprintSha256: 'SHA256:fixture' } });
+    receive({ terminalId: leaf, state: 'typed' }); await flush();
+  });
+  await act(async () => findButton('Trust').click());
+  expect(api.sshSessionTrustHost.mock.calls).toEqual([[leaf, true, { generation: 1, promptId: 'jump' }]]);
+  await act(async () => {
+    sessions.set(leaf, { ...view, revision: 3, promptTarget, promptId: 'target', state: 'needs-secret' });
+    receive({ terminalId: leaf, state: 'typed' }); await flush();
+  });
+  await act(async () => findButton('Continue').click());
+  expect(api.sshSessionSubmitSecret.mock.calls).toEqual([[leaf, '', false, { generation: 1, promptId: 'target' }]]);
+  await act(async () => findButton('Cancel').click());
+  expect(api.ssh.cancelTerminalLaunch.mock.calls).toEqual([[leaf, attempt]]);
+  expect(api.ssh.launchTerminal).toHaveBeenCalledTimes(1);
+  act(() => { store.dispatch(sshOwnersChanged({})); });
 });
 
 test('displacement_during_open_receipt_never_invokes_launch', async () => {

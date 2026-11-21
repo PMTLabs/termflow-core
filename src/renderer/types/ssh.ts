@@ -50,6 +50,7 @@ export interface LaunchSnapshot {
   stage: 'preparing' | 'waiting-ready' | 'waiting-trust' | 'typed' | 'running' | 'ended' | 'blocked' | 'cancelled' | 'error';
   error?: LaunchError;
 }
+export interface SshLaunchEvent { terminalId: string; state: 'typed' | 'running' | 'ended' }
 export interface SshLaunchApi {
   launchTerminal(terminalId: string, connectionId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
   cancelTerminalLaunch(terminalId: string, attempt: LaunchAttemptRef): Promise<LaunchSnapshot>;
@@ -96,6 +97,7 @@ export interface SshAPI {
   sshTestClose(probeId: string): Promise<void>;
   sshTestSubmitSecret(probeId: string, secret: string, remember: boolean, receipt?: SshPromptReceipt): Promise<void>;
   sshTestTrustHost(probeId: string, accept: boolean, receipt?: SshPromptReceipt): Promise<void>;
+  onSshLaunchState?(listener: (event: SshLaunchEvent) => void): Promise<SshUnlisten>;
   onSshSessionState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
   onSshTestState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
 }

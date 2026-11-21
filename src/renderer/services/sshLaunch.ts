@@ -7,7 +7,19 @@ import { setNodeGeom } from '../store/slices/canvasSlice';
 import type { Rect } from '../components/Canvas/canvasGeometry';
 import { generateId } from '../utils/id';
 import { buildNewTabFields, resolveDefaultProfile } from './newTabActions';
+import { terminalService } from './TerminalService';
+import { sshLaunchObserved } from '../store/slices/sshSessionSlice';
+import { addToast } from '../store/slices/uiSlice';
+import type { ReconnectSshResult } from './sshLaunchAttempt';
 import { getTabPanesGlobal } from './tabPanesStore';
+
+export function reconnectSshTerminal(terminalId: string): Promise<ReconnectSshResult> {
+  return terminalService.reconnectSshTerminal(terminalId, snapshot => {
+    store.dispatch(sshLaunchObserved(snapshot));
+    const recentFailed = () => store.dispatch(addToast({ message: 'Recent could not be updated.', type: 'warning' }));
+    void window.electronAPI.ssh?.markUsed(snapshot.connectionId).then(reply => store.dispatch(applyView(reply)), recentFailed);
+  });
+}
 
 export type SshLaunchPlacement = { kind: 'tab' } | { kind: 'canvas'; rect: Rect; sourceTerminalId?: string };
 export type SshLaunchInsertion =

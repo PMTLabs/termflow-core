@@ -1,5 +1,5 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
-import { newerSshView, SshSessionView } from '../../types/ssh';
+import { newerSshView, SshSessionView, type LaunchSnapshot } from '../../types/ssh';
 export interface SshPaneState { connectionId: string; session?: SshSessionView; metrics?: Record<string, unknown>; files?: unknown[]; browserPath?: string }
 export interface SshSessionsState { byTerminal: Record<string, SshPaneState> }
 const initialState: SshSessionsState = { byTerminal: {} };
@@ -25,3 +25,53 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
 export const { sshOwnersChanged, sshSessionObserved, sshLiveData } = slice.actions;
 export const sshFilesEnabled = (state: SshSessionsState, terminalId: string): boolean => state.byTerminal[terminalId]?.session?.state === 'connected';
 export default slice.reducer;
+
+export interface SshLaunchState {
+  stage: LaunchSnapshot['stage'];
+  sessionGeneration: number;
+  launchSeq: number;
+  revision: number;
+}
+
+interface LaunchSliceState {
+  byTerminal: Record<string, SshLaunchState>;
+  owners: Record<string, string>;
+}
+
+export function newerSshLaunch(previous: SshLaunchState | undefined, next: SshLaunchState): boolean {
+  if (!previous) return true;
+  if (next.sessionGeneration !== previous.sessionGeneration) return next.sessionGeneration > previous.sessionGeneration;
+  if (next.launchSeq !== previous.launchSeq) return next.launchSeq > previous.launchSeq;
+  return next.revision > previous.revision;
+}
+
+export function sshLaunchState(snapshot: LaunchSnapshot): SshLaunchState {
+  return {
+    stage: snapshot.stage, sessionGeneration: snapshot.attempt.sessionGeneration,
+    launchSeq: snapshot.launchSeq, revision: snapshot.revision,
+  };
+}
+
+const launchSlice = createSlice({
+  name: 'sshLaunch',
+  initialState: { byTerminal: {}, owners: {} } as LaunchSliceState,
+  reducers: {
+    sshLaunchObserved(state, { payload }: PayloadAction<LaunchSnapshot>) {
+      if (state.owners[payload.terminalId] !== payload.connectionId) return;
+      const next = sshLaunchState(payload);
+      if (newerSshLaunch(state.byTerminal[payload.terminalId], next)) state.byTerminal[payload.terminalId] = next;
+    },
+  },
+  extraReducers: builder => builder.addCase(sshOwnersChanged, (state, { payload }) => {
+    for (const id of Object.keys(state.byTerminal)) {
+      if (state.owners[id] !== payload[id]) delete state.byTerminal[id];
+    }
+    state.owners = payload;
+  }),
+});
+
+export const { sshLaunchObserved } = launchSlice.actions;
+export const sshLaunchReducer = launchSlice.reducer;
+export function selectSshLaunch(state: { sshLaunch: LaunchSliceState }, terminalId: string): SshLaunchState | undefined {
+  return state.sshLaunch.byTerminal[terminalId];
+}

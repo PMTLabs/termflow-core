@@ -28,7 +28,7 @@ import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
-import { sshSessionObserved } from '../../store/slices/sshSessionSlice';
+import { OwnedSshLaunchNotice } from '../Ssh/OwnedSshLaunchNotice';
 import { isAdminUacCancelled, takeOptimisticAdminTab } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
@@ -633,17 +633,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
   const sshConnectionId = useSelector((state: RootState) => terminalId
     ? findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.connectionId : undefined);
-  useEffect(() => {
-    // A render may still carry the old copy's process while the new copy is binding.
-    if (!terminalId || !processId || !incarnation || processBinding?.owner !== incarnation || !sshConnectionId) return;
-    let mounted = true;
-    void terminalService.querySshLaunch(terminalId, paneId, incarnation, processId, sshConnectionId, () => mounted)
-      .then(result => {
-        if (mounted && result && paneIncarnations.isCurrent(terminalId, paneId, incarnation)
-            && terminalService.getProcessId(terminalId) === processId) dispatch(sshSessionObserved(result.session));
-      }).catch(() => { /* T4 surfaces launch notices; no synthetic session state. */ });
-    return () => { mounted = false; };
-  }, [terminalId, paneId, incarnation, processId, processBinding?.owner, sshConnectionId, dispatch]);
+
 
   // Restart the session IN PLACE: spawn a fresh shell for the same pane id,
   // reusing the original profile + working directory. The process map and init
@@ -955,6 +945,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           </div>
           {isBroadcastMember && <span className="broadcast-chip">⇉ broadcast</span>}
         </div>
+        {terminalId && processId && incarnation && processBinding?.owner === incarnation && sshConnectionId &&
+          <OwnedSshLaunchNotice key={processId} terminalId={terminalId} paneId={paneId}
+            processId={processId} owner={incarnation} connectionId={sshConnectionId} />}
         <div className="terminal-pane-content" onPointerDownCapture={handleBroadcastPointerDown}>
           {terminalId && processId ? (
             <TerminalDisplay
