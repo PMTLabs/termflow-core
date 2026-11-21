@@ -495,6 +495,31 @@ async fn verified_and_typed_network_error_require_ready_and_current_receipt() {
 }
 
 #[tokio::test]
+async fn startup_question_that_never_reaches_a_prompt_times_out_and_a_late_prompt_types_nothing() {
+    // A startup file that stops on a question (zsh compinit's "insecure
+    // directories ... [y]/[n]?") never reaches a prompt. The gate must fail
+    // with Timeout, never wait on it, and an answer after that must not type.
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.gate(Gate::Verified).await;
+    let start = Instant::now();
+    let driver = f.driver(&a);
+    assert!(driver.tick(start));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingReady);
+    assert!(driver.tick(start + READY_TIMEOUT - Duration::from_millis(1)), "still inside the readiness window");
+    assert!(!driver.tick(start + READY_TIMEOUT));
+    let failed = f.access(&a, Operation::Query).unwrap();
+    assert_eq!((failed.stage, failed.error.unwrap().code), (LaunchStage::Error, Code::Timeout));
+    f.ready(1);
+    assert!(!f.tick(&a));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::Error);
+    f.zero();
+    f.shutdown().await;
+}
+
+#[tokio::test]
 async fn stale_ready_or_connection_edit_requires_new_verification() {
     for edit in [false, true] {
         let f = Fixture::direct();

@@ -67,6 +67,27 @@ jobs:
             zsh \
             fish
 
+      # Ubuntu's global /etc/zsh/zshrc runs compinit. When an fpath directory on
+      # the image is group/world-writable or not owned by root, every login zsh
+      # stops on "insecure directories ... [y]/[n]?" before its first prompt,
+      # with or without TermFlow's helpers. Print what compaudit refuses, make it
+      # root-owned and not group/world-writable, and fail if anything is still
+      # refused. The launch gate's handling of that question has its own test
+      # (zsh_compinit_question_holds_the_gate_and_helper_dirs_pass_compaudit).
+      # GitHub-hosted runners only: they are ephemeral. Never chown or chmod a
+      # self-hosted runner's system directories.
+      - name: Make the zsh completion dirs pass compaudit (Linux)
+        if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+        run: |
+          insecure=$(zsh -fc 'autoload -Uz compaudit; compaudit' 2>/dev/null || true)
+          printf 'compaudit refused: %s\n' "${insecure:-nothing}"
+          if [ -n "$insecure" ]; then
+            printf '%s\n' "$insecure" | xargs -d '\n' ls -ld
+            printf '%s\n' "$insecure" | xargs -d '\n' sudo chown root:root
+            printf '%s\n' "$insecure" | xargs -d '\n' sudo chmod g-w,o-w
+          fi
+          zsh -fc 'autoload -Uz compaudit; compaudit'
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
