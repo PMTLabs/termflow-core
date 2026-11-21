@@ -2,7 +2,7 @@ import { paneIncarnations, acceptsTransferNotice, describePanes, type PaneCaptur
 import { captureWorkspace, isCurrentWorkspace } from './services/workspaceReplacement';
 import React, { useEffect, useRef, useState } from 'react';
 import { hydrateSsh } from './services/sshHydration';
-import { installSshSessionEvents } from './services/sshSessionEvents';
+import { refenceSshMetricsOnSystemResume } from './services/sshMetricsWatch';
 import { installInputBroadcast } from './services/inputBroadcast';
 import { BroadcastOverlay } from './components/Broadcast/BroadcastOverlay';
 import { listen } from '@tauri-apps/api/event';
@@ -383,6 +383,8 @@ const App: React.FC = () => {
     let resumeAlive = true;
     let unlistenResume: (() => void) | undefined;
     listen('system:resume', () => {
+      if (!resumeAlive) return;
+      refenceSshMetricsOnSystemResume();
       refreshGlyphAtlases();
     })
       .then(fn => { if (resumeAlive) unlistenResume = fn; else fn(); })
@@ -1866,7 +1868,6 @@ const App: React.FC = () => {
   };
 
   useEffect(() => installInputBroadcast(store), []);
-  useEffect(() => installSshSessionEvents(store, window.electronAPI), []);
 
   return (
     <div className="app">

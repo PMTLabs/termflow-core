@@ -2,7 +2,7 @@
 // `services/automationEvents.ts` — a `.d.ts` cannot hold runtime values, and the whole
 // point of those constants is that they are imported rather than spelled inline. The
 // runtime payload is also what `get_automation_runtime` returns, so it is needed here.
-import type { SshAPI } from './ssh';
+import type { SshAPI, SshMetricsAPI } from './ssh';
 // SSH IPC census: ssh_session_open, ssh_session_state, ssh_session_close, ssh_session_reconnect, ssh_session_submit_secret, ssh_session_trust_host, ssh_test_connection, ssh_test_state, ssh_test_close, ssh_test_submit_secret, ssh_test_trust_host
 // SSH file IPC census: ssh_fs_list, ssh_fs_stat, ssh_fs_mkdir, ssh_fs_create, ssh_fs_rename, ssh_fs_delete, ssh_fs_chmod, ssh_fs_chown,
 // ssh_fs_download, ssh_fs_open, ssh_fs_open_with, ssh_fs_insert_path, ssh_fs_edit_stop, ssh_fs_edit_list
@@ -149,7 +149,7 @@ export interface PermissionView {
 
 export type ExpectedPermissionSubject = PermissionView['subject'] & { target: PermissionView['target'] };
 
-export interface ElectronAPI extends SshAPI {
+export interface ElectronAPI extends SshAPI, SshMetricsAPI {
   pickFile?: (title?: string) => Promise<string | null>;
   ssh?: import('./ssh').SshBridgeApi & import('./ssh').SshLaunchApi;
   // Terminal output history

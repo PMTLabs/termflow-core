@@ -1,4 +1,4 @@
-import type { SshAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent } from '../types/ssh';
+import type { SshAPI, SshSessionView, SshPromptReceipt, SshLaunchEvent, SshMetricsWatchReceipt, SshMetricsResumeReceipt } from '../types/ssh';
 import { invoke } from '@tauri-apps/api/core';
 import { createSshBridge } from './sshBridge';
 import { listen } from '@tauri-apps/api/event';
@@ -371,6 +371,12 @@ async function listenSsh<T>(event: string, listener: (view: T) => void): Promise
   trackUnlisten(Promise.resolve(dispose));
   return dispose;
 }
+const SSH_METRICS_PAGE_HEADER = 'x-termflow-page';
+async function invokeSshMetrics<T>(command: string, terminalId: string, consumerId: string, pg?: number): Promise<T> {
+  if (pg === undefined || !Number.isSafeInteger(pg) || pg <= 0) throw { code: 'invalid-page' };
+  return invoke<T>(command, { terminalId, consumerId }, { headers: { [SSH_METRICS_PAGE_HEADER]: String(pg) } });
+}
+
 const tauriBridge: ElectronAPI = {
   ssh: createSshBridge(invoke, listen),
   sshSessionOpen: async (terminalId: string, connectionId: string) => invoke<SshSessionView>('ssh_session_open', { terminalId, connectionId }),
@@ -387,6 +393,11 @@ const tauriBridge: ElectronAPI = {
   onSshLaunchState: (listener) => listenSsh<SshLaunchEvent>('ssh-launch:state', listener),
   onSshSessionState: (listener) => listenSsh('ssh-session:state', listener),
   onSshTestState: (listener) => listenSsh('ssh-test:state', listener),
+  sshMetricsWatch: (terminalId, consumerId, pg) => invokeSshMetrics<SshMetricsWatchReceipt>('ssh_metrics_watch', terminalId, consumerId, pg),
+  sshMetricsUnwatch: (terminalId, consumerId, pg) => invokeSshMetrics<void>('ssh_metrics_unwatch', terminalId, consumerId, pg),
+  sshMetricsResume: (terminalId, consumerId, pg) => invokeSshMetrics<SshMetricsResumeReceipt>('ssh_metrics_resume', terminalId, consumerId, pg),
+  onSshMetricsSample: listener => listenSsh('ssh-metrics:sample', listener),
+  onSshMetricsControl: listener => listenSsh('ssh-metrics:control', listener),
   getTerminalOutput: async (terminalId, lines = 1000, offset = 0) => {
     const response = await fetch(`${await apiBase()}/terminals/${terminalId}/output?lines=${lines}&offset=${offset}`, {
       headers: {
