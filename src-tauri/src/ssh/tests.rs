@@ -3,6 +3,7 @@ use super::{
     auth::{AuthBinding, BoxFuture, SecretSink},
     known_hosts::KnownHosts,
     session::*,
+    sftp_test_server::{self, SftpFaults, SftpStorage},
 };
 use parking_lot::Mutex;
 use russh::{
@@ -18,7 +19,6 @@ use std::{
     },
     time::Duration,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 pub fn key(seed: u8) -> ssh_key::PrivateKey {
@@ -48,6 +48,8 @@ pub struct Server {
     pub refuse: bool,
     pub target: Option<Box<Server>>,
     pub deny_jump: bool,
+    pub sftp_faults: Arc<Mutex<SftpFaults>>,
+    sftp_storage: Arc<SftpStorage>,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
 impl Server {
@@ -62,6 +64,8 @@ impl Server {
             refuse: false,
             target: None,
             deny_jump: false,
+            sftp_faults: Arc::default(),
+            sftp_storage: Arc::default(),
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -201,26 +205,22 @@ impl server::Handler for Server {
     async fn subsystem_request(
         &mut self,
         ch: ChannelId,
-        _: &str,
+        name: &str,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.counters.subsystems.fetch_add(1, Ordering::SeqCst);
-        if self.refuse {
+        if self.refuse || name != "sftp" {
             session.channel_failure(ch)?;
             return Ok(());
         }
         session.channel_success(ch)?;
         let channel = self.channels.lock().remove(&ch).unwrap();
-        tokio::spawn(async move {
-            let mut stream = channel.into_stream();
-            let mut init = [0; 9];
-            if stream.read_exact(&mut init).await.is_ok() {
-                assert_eq!(init, [0, 0, 0, 5, 1, 0, 0, 0, 3]);
-                let _ = stream.write_all(&[0, 0, 0, 5, 2, 0, 0, 0, 3]).await;
-                let mut discard = [0; 1024];
-                while stream.read(&mut discard).await.is_ok_and(|n| n > 0) {}
-            }
-        });
+        tokio::spawn(sftp_test_server::serve(
+            channel,
+            session.handle(),
+            self.sftp_storage.clone(),
+            self.sftp_faults.clone(),
+        ));
         Ok(())
     }
     async fn channel_open_direct_tcpip(
@@ -255,6 +255,13 @@ impl StreamFactory for MemoryStreams {
             self.0.clone().start(Box::new(server));
             Ok(Box::new(client) as BoxStream)
         })
+    }
+}
+struct FixtureStreams(Mutex<Server>);
+impl StreamFactory for FixtureStreams {
+    fn connect<'a>(&'a self, hop: &'a SessionHop) -> BoxFuture<'a, Result<BoxStream, SessionError>> {
+        let server = self.0.lock().clone();
+        Box::pin(async move { MemoryStreams(server).connect(hop).await })
     }
 }
 #[derive(Default)]
@@ -318,6 +325,7 @@ pub struct Fixture {
     pub events: Arc<Capture>,
     pub secrets: Arc<Secrets>,
     pub path: PathBuf,
+    streams: Arc<FixtureStreams>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -335,6 +343,17 @@ pub fn hop(connection: &str, user: &str) -> SessionHop {
     }
 }
 impl Fixture {
+    pub fn with_sftp_root(path: PathBuf) -> Self {
+        let mut server = Server::new(1, "alice");
+        Arc::get_mut(&mut server.sftp_storage).unwrap().root = Some(path);
+        Self::new(server, vec![hop("c-a", "alice")], true)
+    }
+
+    /// Route the next handshake to an independent server with the pinned identity.
+    pub fn use_server_for_next_connection(&self, server: &Server) {
+        *self.streams.0.lock() = server.clone();
+    }
+
     pub fn new(server: Server, hops: Vec<SessionHop>, trusted: bool) -> Self {
         let root = std::env::temp_dir().join(format!("tf-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -359,9 +378,10 @@ impl Fixture {
         }
         let events = Arc::new(Capture::default());
         let secrets = Arc::new(Secrets::default());
+        let streams = Arc::new(FixtureStreams(Mutex::new(server.clone())));
         let registry = Arc::new(SessionRegistry::new(Dependencies {
             targets: Arc::new(Targets(SessionTarget { hops })),
-            streams: Arc::new(MemoryStreams(server.clone())),
+            streams: streams.clone(),
             agents: Arc::new(NativeAgent),
             secrets: secrets.clone(),
             events: events.clone(),
@@ -374,6 +394,7 @@ impl Fixture {
             events,
             secrets,
             path,
+            streams,
         }
     }
     pub async fn connected(&self) -> (String, Arc<SshSession>) {

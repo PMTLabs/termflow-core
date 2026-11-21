@@ -959,6 +959,24 @@ impl SessionRegistry {
         }
         s.transport.clone().ok_or(SessionError::NotConnected)
     }
+    /// Check the generation and acquire its transport under the same registry lock.
+    pub fn lease_at(
+        &self,
+        id: &str,
+        expected_generation: u64,
+    ) -> Result<(Arc<SshSession>, String), SessionError> {
+        let registry = self.inner.lock();
+        let e = registry.panes.get(id).ok_or(SessionError::NotConnected)?;
+        let s = e.inner.lock();
+        if s.view.generation != expected_generation {
+            return Err(SessionError::StaleAttempt);
+        }
+        if e.cancel.is_cancelled() || s.view.state != SessionState::Connected {
+            return Err(SessionError::NotConnected);
+        }
+        let session = s.transport.clone().ok_or(SessionError::NotConnected)?;
+        Ok((session, s.view.connection_id.clone()))
+    }
     pub fn owner_map(&self) -> HashMap<String, (String, SessionState)> {
         self.inner
             .lock()
@@ -1545,7 +1563,7 @@ async fn authenticate(
 pub struct SshSession {
     handle: tokio::sync::Mutex<client::Handle<ClientHandler>>,
     cancel: CancellationToken,
-    sftp: tokio::sync::Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
+    sftp: tokio::sync::Mutex<Option<Arc<russh_sftp::client::RawSftpSession>>>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecOutput {
@@ -1691,9 +1709,12 @@ impl SshSession {
                         _ => {}
                     }
                 }
-                let sftp = russh_sftp::client::SftpSession::new(ch.into_stream())
-                    .await
-                    .map_err(|_| SessionError::CapabilityUnavailable)?;
+                // The raw client allows bounded READDIR and preserves typed CLOSE status.
+                let sftp = russh_sftp::client::RawSftpSession::new(ch.into_stream());
+                let version = sftp.init().await.map_err(|_| SessionError::CapabilityUnavailable)?;
+                if version.version != russh_sftp::protocol::VERSION {
+                    return Err(SessionError::CapabilityUnavailable);
+                }
                 sftp.set_timeout(30);
                 *cached = Some(Arc::new(sftp));
             }
@@ -1721,15 +1742,15 @@ impl SshSession {
     }
 }
 pub struct SftpLease {
-    client: Arc<russh_sftp::client::SftpSession>,
+    client: Arc<russh_sftp::client::RawSftpSession>,
     cancel: CancellationToken,
 }
 impl SftpLease {
-    /// All operations are scoped through this fence; never expose an unfenced client.
-    pub async fn request<T>(
-        &self,
-        operation: impl for<'a> FnOnce(
-            &'a russh_sftp::client::SftpSession,
+    /// All operations are scoped through this fence; the owned result cannot borrow the client.
+    pub async fn request<'a, T: 'static>(
+        &'a self,
+        operation: impl FnOnce(
+            &'a russh_sftp::client::RawSftpSession,
         ) -> BoxFuture<'a, Result<T, SessionError>>,
     ) -> Result<T, SessionError> {
         let result = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(SessionError::Cancelled), result = tokio::time::timeout(Duration::from_secs(30), operation(&self.client)) => result.map_err(|_| SessionError::TimedOut)? };

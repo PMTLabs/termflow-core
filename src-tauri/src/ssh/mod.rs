@@ -21,6 +21,9 @@ pub mod session;
 pub(crate) mod launch;
 pub(crate) mod launch_process;
 pub mod sessions;
+pub mod sftp;
+#[cfg(test)]
+mod sftp_test_server;
 #[cfg(test)]
 pub(crate) mod tests;
 #[cfg(test)]
