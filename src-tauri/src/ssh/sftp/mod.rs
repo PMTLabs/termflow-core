@@ -257,7 +257,7 @@ impl<'a> RemoteFs<'a> {
             }
             Ok(entries)
         }.await;
-        let closed = a.read(path, |c| Box::pin(c.close(handle))).await;
+        let closed = a.read(path, |sftp| Box::pin(sftp.close(handle))).await;
         let entries = listing?;
         closed?;
         Ok(RemoteListing { path: resolved, entries, session_generation: self.generation })
@@ -299,7 +299,7 @@ impl<'a> RemoteFs<'a> {
         let handle = a.mutation_result(path, path, reply).await?.handle;
         // CLOSE itself does not mutate the namespace, but a failure cannot undo
         // the already acknowledged OPEN. Do not retry the exclusive creation.
-        match a.request(path, false, |c| Box::pin(c.close(handle))).await {
+        match a.request(path, false, |sftp| Box::pin(sftp.close(handle))).await {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(err)) => {
                 let wire = wire_error(op, path, err, true);

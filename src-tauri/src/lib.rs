@@ -670,8 +670,12 @@ pub fn run() {
         }
         state.ssh_sessions.set_edit_registry(&ssh_edits);
         app.manage(ssh_edits.clone());
-        let sessions = state.ssh_sessions.clone();
-        tauri::async_runtime::spawn(async move { ssh_edits.start(sessions) });
+        // The edit poller spawns onto tokio; enter Tauri's runtime for that call instead of
+        // a second setup spawn (the setup closure owns exactly one boot task).
+        {
+            let _runtime = tauri::async_runtime::handle().inner().enter();
+            ssh_edits.start(state.ssh_sessions.clone());
+        }
         // Tauri has already built the configured window before calling setup.
         if let Some(main) = app.get_webview_window("main") {
             let build = window_lifetime::reserve(app.handle(), "main")?;

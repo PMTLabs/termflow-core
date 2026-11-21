@@ -82,7 +82,7 @@ impl SftpUploader {
         let result = async {
             let written = remote.write_snapshot(&handle, &mut input).await;
             // Close on the pinned lease even after an aborted write or editor stop.
-            let closed = remote.lease.request(|c| Box::pin(async move { Ok(c.close(handle).await) })).await;
+            let closed = remote.lease.request(|sftp| Box::pin(async move { Ok(sftp.close(handle).await) })).await;
             let closed = remote.reply(Request::Normal, closed);
             // A transport failure in CLOSE still makes the mutation outcome unknown.
             if matches!(closed, Err(UploadResult::Error(UNKNOWN))) {

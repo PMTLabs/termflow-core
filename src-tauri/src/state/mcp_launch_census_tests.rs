@@ -202,6 +202,7 @@ fn constructs(src: &Src, at: usize) -> bool {
 /// `McpLaunch`, and no `AppState` field is a launch record of its own.
 fn check_construction_sites(files: &[(String, String)]) -> Result<(), String> {
     let mut process_sites = 0;
+    let mut app_state_files = 0;
     for (name, text) in files {
         let src = Src::production(text);
         for found in find_calls(&src.masked, "McpProcess {") {
@@ -227,12 +228,17 @@ fn check_construction_sites(files: &[(String, String)]) -> Result<(), String> {
                 return Err(format!("{name} constructs a McpLaunch outside mcp_launch_env"));
             }
         }
-        if name == "types.rs" {
+        // Keyed on the declaration, not the file name: other modules have a `types.rs` too.
+        if src.masked.contains("pub struct AppState<") {
+            app_state_files += 1;
             let app_state = src.braced_after("pub struct AppState<");
             if src.masked[app_state].contains("McpLaunch") {
                 return Err("an AppState field is a launch record of its own".into());
             }
         }
+    }
+    if app_state_files != 1 {
+        return Err(format!("expected one file declaring AppState, found {app_state_files}"));
     }
     if process_sites != 2 {
         return Err(format!("expected McpProcess to be built in exactly two places, found {process_sites}"));
@@ -267,8 +273,8 @@ fn a_construction_outside_the_spawn_paths_is_caught() {
     ));
     assert!(check_construction_sites(&files).is_err());
     let mut field = named_sources();
-    for (name, text) in &mut field {
-        if name == "types.rs" {
+    for (_, text) in &mut field {
+        if text.contains("pub struct AppState<") {
             *text = mutate(text, "pub mcp_process: Arc<Mutex<GenerationSlot<McpProcess>>>,", "pub mcp_process: Arc<Mutex<GenerationSlot<McpProcess>>>,\n    pub launch: McpLaunch,");
         }
     }

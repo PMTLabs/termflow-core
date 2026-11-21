@@ -175,7 +175,7 @@ impl Admission<'_> {
             }
             Ok(paths)
         }.await;
-        let closed = self.read(path, |c| Box::pin(c.close(handle))).await;
+        let closed = self.read(path, |sftp| Box::pin(sftp.close(handle))).await;
         let paths = result?;
         closed?;
         Ok(paths)

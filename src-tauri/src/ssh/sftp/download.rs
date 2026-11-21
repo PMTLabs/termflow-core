@@ -185,11 +185,11 @@ pub(super) async fn transfer_file(
         Err(err) => {
             // Clean the staging file before waiting on best-effort remote close.
             drop(part);
-            let _ = a.request(path, false, |c| Box::pin(c.close(handle))).await;
+            let _ = a.request(path, false, |sftp| Box::pin(sftp.close(handle))).await;
             return Err(err);
         }
     };
-    let closed = a.request(path, false, |c| Box::pin(c.close(handle))).await;
+    let closed = a.request(path, false, |sftp| Box::pin(sftp.close(handle))).await;
     if cancel.is_cancelled() {
         return Err(cancelled(path));
     }
@@ -299,7 +299,7 @@ async fn directory_children(
         children.sort_unstable();
         Ok(children)
     }.await;
-    let closed = a.request(path, false, |c| Box::pin(c.close(handle))).await;
+    let closed = a.request(path, false, |sftp| Box::pin(sftp.close(handle))).await;
     let children = listed?;
     request_result(path, closed)?;
     check_fence(a, path, cancel)?;
