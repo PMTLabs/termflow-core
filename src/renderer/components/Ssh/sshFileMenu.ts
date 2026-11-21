@@ -18,6 +18,7 @@ export function fileActionReason(action: FileAction, entry: RemoteEntry, live: b
     if (!regular && !folder) return 'Only regular files and folders support this action.';
   }
   if (action === 'insert') return insertPathReason(entry.path);
+  return undefined;
 }
 
 export function sshFileMenu(entry: RemoteEntry, live: boolean, run: (action: FileAction) => void): ContextMenuItem[] {

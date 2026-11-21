@@ -1,6 +1,7 @@
 import React from 'react';
 import { SshFileDialog } from './SshFileDialog';
 import { copyRemotePath } from './sshFileFeedback';
+import type { RemoteStat } from './sshFileTypes';
 import type { SshRowScope } from './useSshFileBrowser';
 import { staleTarget, useSshTargetStat } from './useSshTargetStat';
 

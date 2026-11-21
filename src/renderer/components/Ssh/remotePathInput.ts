@@ -3,6 +3,7 @@ import type { SshRowScope } from './useSshFileBrowser';
 export function insertPathReason(path: string): string | undefined {
   if (!path.startsWith('/')) return 'Terminal insertion requires an absolute remote path.';
   if (/\p{Cc}/u.test(path)) return 'Terminal insertion refuses paths containing control characters.';
+  return undefined;
 }
 
 export async function insertRemotePath(scope: SshRowScope): Promise<void> {

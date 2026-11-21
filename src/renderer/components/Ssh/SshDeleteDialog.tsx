@@ -53,6 +53,6 @@ export function SshDeleteDialog({ scope, recursive, onClose }: {
       {!!completedPaths.length && <details>
         <summary>{completedPaths.length} removals acknowledged</summary>
         <ul>{completedPaths.map(path => <li key={path}><code className="ssh-remote-path">{path}</code></li>)}</ul>
-      </details>
+      </details>}
     </>} />;
 }
