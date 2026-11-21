@@ -53,7 +53,10 @@ pub(crate) fn canonical_host(host: &str) -> Result<String, SessionError> {
 }
 #[test]
 fn canonical_internal_labels_and_one_root_dot() {
-    assert_eq!(canonical_host("Web_01.Internal.").unwrap(), "web_01.internal");
+    assert_eq!(
+        canonical_host("Web_01.Internal.").unwrap(),
+        "web_01.internal"
+    );
     assert_eq!(lookup_token("Web_01.Internal.", 22), "web_01.internal");
     for host in ["host..", "host.example..", "a..b", ".."] {
         assert_eq!(canonical_host(host), Err(SessionError::InvalidTarget));

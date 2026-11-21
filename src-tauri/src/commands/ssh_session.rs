@@ -16,13 +16,19 @@ pub(crate) fn native_registry<R: Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Arc<crate::ssh::session::SessionRegistry> {
     // Managed before setup; lazy test fallback creates no files or keyring access.
-    let store = app.try_state::<crate::ssh::store::Store>().map(|s| s.inner().clone())
+    let store = app
+        .try_state::<crate::ssh::store::Store>()
+        .map(|s| s.inner().clone())
         .unwrap_or_else(|| crate::ssh::store::Store::new(crate::ssh::store::store_path()));
     let emitter = app.clone();
     Arc::new(crate::ssh::session::SessionRegistry::new(
-        crate::ssh::session::Dependencies::native(Arc::new(TauriSshEvents(app)), store, Arc::new(move |reply| {
-            let _ = emitter.emit(crate::commands::ssh_store::CHANGED, reply);
-        })),
+        crate::ssh::session::Dependencies::native(
+            Arc::new(TauriSshEvents(app)),
+            store,
+            Arc::new(move |reply| {
+                let _ = emitter.emit(crate::commands::ssh_store::CHANGED, reply);
+            }),
+        ),
     ))
 }
 pub(crate) fn open_core(
@@ -287,7 +293,10 @@ mod tests {
         ) else {
             panic!("restart again");
         };
-        assert_eq!(new_cg, cg, "abort with the pane present must preserve SSH ownership");
+        assert_eq!(
+            new_cg, cg,
+            "abort with the pane present must preserve SSH ownership"
+        );
         let latest = super::reconnect_core(&keys, &f.registry, "tm-a").unwrap();
         f.registry
             .reconcile_owners(|leaf, receipt| keys.ssh_owner_receipt(leaf) == receipt);
