@@ -75,7 +75,28 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
         onClick={() => onSelect(row, kind)} onDoubleClick={() => kind === 'folder' && toggle(row.id)}
         onContextMenu={event => { event.preventDefault(); event.stopPropagation(); if (!readOnly) onMenu?.(event, row, kind); }}
         onKeyDown={event => {
-          if (event.key === 'Enter') { event.preventDefault(); onSelect(row, kind); }
+          if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+            event.preventDefault();
+            if (readOnly) return;
+            const up = event.key === 'ArrowUp';
+            const sibling = nodes.find(candidate => candidate.row.order === row.order + (up ? -1 : 1));
+            const move = sibling && sshMoveIndex(view, { kind,id:row.id }, { zone:up ? 'before' : 'after',id:sibling.row.id });
+            if (!move || !allowed({ kind,id:row.id },move.parentId,sibling?.row.id)) return;
+            const control = event.currentTarget;
+            const parent = control.parentElement?.parentElement;
+            if (parent) {
+              const observer = new MutationObserver(() => {
+                observer.disconnect();
+                if (document.activeElement === document.body && control.isConnected) control.focus();
+              });
+              observer.observe(parent, { childList:true });
+              window.setTimeout(() => observer.disconnect(), 3000);
+            }
+            onMove(move);
+            const status = document.getElementById('ssh-move-status');
+            if (status) status.textContent = `Moving ${row.name} ${up ? 'up' : 'down'}.`;
+          }
+          else if (event.key === 'Enter') { event.preventDefault(); onSelect(row, kind); }
           else if (event.key === 'ArrowRight' && kind === 'folder') toggle(row.id, false);
           else if (event.key === 'ArrowLeft' && kind === 'folder') toggle(row.id, true);
           else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); const rows = [...event.currentTarget.closest('[role="tree"]')!.querySelectorAll<HTMLElement>('.ssh-tree-row')]; rows[rows.indexOf(event.currentTarget) + (event.key === 'ArrowDown' ? 1 : -1)]?.focus(); }
@@ -90,5 +111,5 @@ export function SshTree({ tree, view, filter, selectedId, onSelect, onBookmark, 
       {kind === 'folder' && expanded && <div role="group" className="ssh-tree-children">{render(node.children, inherited || (!!query && row.name.toLocaleLowerCase().includes(query)))}</div>}
     </div>;
   });
-  return <><div className="ssh-filter-summary" aria-live="polite" aria-atomic="true">{query ? `${resultCount} of ${view.connections.length} connections` : null}</div>{!tree.length && <p className="ssh-tree-note ssh-tree-message">No saved connections yet.</p>}{query && !!tree.length && !resultCount && <p className="ssh-tree-note ssh-tree-message">No connections match “{filter.trim()}”.</p>}<div ref={treeRef} role="tree" aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); if (!readOnly) onMenu?.(event); }} onDragOver={event => over(event,{zone:'root'})} onDrop={event => drop(event,{zone:'root'})}>{render(tree)}</div></>;
+  return <><div className="ssh-filter-summary" aria-live="polite" aria-atomic="true">{query ? `${resultCount} of ${view.connections.length} connections` : null}</div>{!tree.length && <p className="ssh-tree-note ssh-tree-message">No saved connections yet.</p>}{query && !!tree.length && !resultCount && <p className="ssh-tree-note ssh-tree-message">No connections match “{filter.trim()}”.</p>}<div ref={treeRef} role="tree" tabIndex={-1} aria-label="Saved SSH connections" className="ssh-tree" onContextMenu={event => { event.preventDefault(); if (!readOnly) onMenu?.(event); }} onDragOver={event => over(event,{zone:'root'})} onDrop={event => drop(event,{zone:'root'})}>{render(tree)}</div></>;
 }

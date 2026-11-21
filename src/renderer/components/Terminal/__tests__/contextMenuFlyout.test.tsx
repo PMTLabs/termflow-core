@@ -110,6 +110,23 @@ it('wraps arrow navigation past disabled items and restores the invoker on Escap
     }
 });
 
+it('Tab closes the menu and returns focus to the invoker', async () => {
+    const invoker = document.createElement('textarea');
+    container.before(invoker);
+    try {
+        invoker.focus();
+        onClose.mockImplementation(() => root.render(null));
+        await render([{ label: 'First' }, { label: 'Last' }]);
+        await key(menu(), 'ArrowDown');
+        await key(menuItem('First'), 'Tab');
+        expect(onClose).toHaveBeenCalledTimes(1);
+        expect(menu()).toBeNull();
+        expect(document.activeElement).toBe(invoker);
+    } finally {
+        invoker.remove();
+    }
+});
+
 describe('dismissal suppression and action flashes', () => {
     const flyout = (actions: NonNullable<ContextMenuItem['submenu']>['headerActions'] = []) => ({
         rows: [row('one', 'One')],
