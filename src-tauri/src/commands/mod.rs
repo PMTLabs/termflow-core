@@ -7,7 +7,6 @@ mod ssh_fs;
 pub mod ssh_session;
 pub(crate) mod ssh_launch;
 pub(crate) use ssh_launch::*;
-pub use ssh_fs::{ssh_fs_download, __cmd__ssh_fs_download, __tauri_command_name_ssh_fs_download};
 pub use ssh_fs::{
     ssh_fs_insert_path, __cmd__ssh_fs_insert_path, __tauri_command_name_ssh_fs_insert_path,
     ssh_fs_download, __cmd__ssh_fs_download, __tauri_command_name_ssh_fs_download,
