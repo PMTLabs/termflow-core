@@ -37,7 +37,7 @@ export interface SshPaneTag {
   hiddenMetrics: MetricKey[];
 }
 
-export type LaunchAttemptReceipt = Pick<SshSessionView, 'gate' | 'reason' | 'knownHostsPaths'> & { generation: number };
+export type LaunchAttemptReceipt = Pick<SshSessionView, 'gate' | 'reason' | 'errorCode' | 'knownHostsPaths'> & { generation: number };
 export interface LaunchAttemptRef {
   sessionGeneration: number;
   attemptReceipt: LaunchAttemptReceipt;

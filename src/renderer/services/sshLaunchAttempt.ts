@@ -59,11 +59,11 @@ export async function observeOwnedSshLaunch(
       if (action === 'reconnect' && (previous === undefined || session.generation === undefined || session.generation <= previous)) return;
     } else if (action !== 'query') session = await api.sshSessionOpen(terminalId, connectionId);
     if (!current() || !session || session.terminalId !== terminalId || session.connectionId !== connectionId || session.probeId) return;
-    const { generation, gate, reason, knownHostsPaths } = session;
+    const { generation, gate, reason, errorCode, knownHostsPaths } = session;
     if (generation === undefined || !Number.isSafeInteger(generation)) return;
     const attempt: LaunchAttemptRef = {
       sessionGeneration: generation,
-      attemptReceipt: { generation, gate, ...(reason !== undefined ? { reason } : {}), ...(knownHostsPaths ? { knownHostsPaths } : {}) },
+      attemptReceipt: { generation, gate, ...(reason !== undefined ? { reason } : {}), ...(errorCode !== undefined ? { errorCode } : {}), ...(knownHostsPaths ? { knownHostsPaths } : {}) },
       processIncarnation, ownerIncarnation,
     };
     let snapshot: LaunchSnapshot | undefined;

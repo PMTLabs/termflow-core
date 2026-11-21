@@ -285,6 +285,23 @@ fn join_existing_host_attach_and_strictmode_write_once() {
 }
 
 #[test]
+fn attempt_receipt_copies_the_reason_code_with_the_reason() {
+    let f = Fixture::new();
+    let pi = f.page(A);
+    f.place(f.admit(A, pi, 2, CreateMode::Mount), "pc-a", true);
+    let mut value = serde_json::to_value(open_core(&f.keys, &f.sessions, LEAF, CONNECTION).unwrap()).unwrap();
+    value["reason"] = json!("Host key verification failed");
+    value["errorCode"] = json!("host-key-changed");
+    let view: SessionView = serde_json::from_value(value).unwrap();
+    let receipt = AttemptReceipt::from(&view);
+    assert_eq!(receipt.reason.as_deref(), Some("Host key verification failed"));
+    assert_eq!(receipt.error_code.as_deref(), Some("host-key-changed"));
+    let wire = serde_json::to_value(&receipt).unwrap();
+    assert_eq!(wire["errorCode"], "host-key-changed");
+    assert_eq!(serde_json::from_value::<AttemptReceipt>(wire).unwrap(), receipt);
+}
+
+#[test]
 fn launch_receipt_uses_authoritative_067_fields() {
     let f = Fixture::new();
     let pi = f.page(A);

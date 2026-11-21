@@ -455,6 +455,17 @@ test('delayed_old_launch_cannot_join_successor_attempt', async () => {
   expect(next?.session.promptId).toBe('prompt-target');
 });
 
+test('attempt_receipt_carries_the_session_error_code_with_its_reason', async () => {
+  const { api } = harness();
+  api.sshSessionOpen.mockImplementationOnce(async (terminalId: string, connectionId: string) => ({
+    terminalId, connectionId, generation: 5, state: 'error', revision: 1, gate: 'blocked',
+    reason: 'Host key changed', errorCode: 'host-key-changed' }));
+  await observeOwnedSshLaunch(api, { terminalId: 'tm-code', connectionId: 'saved', processIncarnation: 'pc-code',
+    owner: Promise.resolve({ pg: 41, seq: 1 }), current: () => true }, 'open');
+  expect(api.ssh.launchTerminal.mock.calls[0][2].attemptReceipt).toEqual({
+    generation: 5, gate: 'blocked', reason: 'Host key changed', errorCode: 'host-key-changed' });
+});
+
 test('remount_queries_same_process_with_current_owner_and_session_receipt', async () => {
   const { api } = harness();
   const target = { terminalId: 'tm-adopted', connectionId: 'saved', processIncarnation: 'pc-same', current: () => true };

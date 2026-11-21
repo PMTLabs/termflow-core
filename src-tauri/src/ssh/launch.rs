@@ -17,6 +17,9 @@ pub(crate) struct AttemptReceipt {
     pub gate: Gate,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// The code for `reason`, copied with it (see `SessionView::error_code`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_hosts_paths: Option<KnownHostsPaths>,
 }
@@ -27,6 +30,7 @@ impl From<&SessionView> for AttemptReceipt {
             generation: view.generation,
             gate: view.gate,
             reason: view.reason.clone(),
+            error_code: view.error_code.clone(),
             known_hosts_paths: view.known_hosts_paths.clone(),
         }
     }
