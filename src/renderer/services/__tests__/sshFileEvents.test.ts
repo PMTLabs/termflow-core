@@ -72,3 +72,19 @@ test('late_ack_after_disconnect_never_toasts_success', async () => {
   a.unregister();
   b.unregister();
 });
+
+test('retiring_generation_final_edit_states_still_reach_the_owner', async () => {
+  const f = fixture();
+  const onEdit = jest.fn(), onCwd = jest.fn();
+  const a = sshFileEvents(f.api).register('tm-a', { session: () => ({ connected: true, generation: 8 }), onEdit, onCwd });
+  await a.ready;
+  const old = { ...notice, sessionGeneration: 7 };
+  for (const state of ['watching', 'uploading', 'uploaded']) f.edit({ ...old, state });
+  f.cwd({ ...cwd, sessionGeneration: 7 });
+  expect(onEdit).not.toHaveBeenCalled();
+  expect(onCwd).not.toHaveBeenCalled();
+  const finals = ['stopped', 'paused', 'conflict', 'error'].map(state => ({ ...old, state, localPath: '/kept' }));
+  finals.forEach(event => f.edit(event));
+  expect(onEdit.mock.calls).toEqual(finals.map(event => [event]));
+  a.unregister();
+});

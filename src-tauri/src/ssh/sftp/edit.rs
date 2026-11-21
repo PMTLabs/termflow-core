@@ -186,6 +186,14 @@ impl EditRegistry {
     }
 
     pub(crate) async fn begin_edit(&self, fs: &RemoteFs<'_>, remote_path: &str) -> Result<Arc<EditJob>, FsError> {
+        self.begin_edit_tracked(fs, remote_path).await.map(|(job, _)| job)
+    }
+
+    /// Like `begin_edit`, also saying whether the job was created by this call (`true`) or is
+    /// an existing edit of the same file that the caller must not stop on its own failure.
+    pub(crate) async fn begin_edit_tracked(
+        &self, fs: &RemoteFs<'_>, remote_path: &str,
+    ) -> Result<(Arc<EditJob>, bool), FsError> {
         validate(OP, remote_path, true)?;
         let key = (fs.terminal_id.to_owned(), remote_path.to_owned());
         let _opening = self.opening.lock().await;
@@ -198,7 +206,7 @@ impl EditRegistry {
                 return Err(error(OP, remote_path, FsCode::Conflict, FsOutcome::Unchanged,
                     "The previous edit is still stopping."));
             }
-            return Ok(job);
+            return Ok((job, false));
         }
 
         let a = fs.admit(OP, remote_path).await?;
@@ -261,7 +269,7 @@ impl EditRegistry {
             jobs.insert(key, job.clone());
             dir.0.take();
             self.sink.emit(EditNotice::current(&record, None));
-            return Ok(job);
+            return Ok((job, true));
         }
         unreachable!("each edit download either succeeds or returns on the second attempt")
     }

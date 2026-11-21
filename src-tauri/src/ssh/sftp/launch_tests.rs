@@ -87,6 +87,50 @@ async fn picker_cancel_stops_watch_without_error_toast() {
 }
 
 #[tokio::test]
+async fn second_open_cancel_or_failure_keeps_the_existing_edit_running() {
+    let h = Harness::new().await;
+    let first = h.open(OpenMode::Text(Some("editor")), &Launcher::default()).await.unwrap();
+    let EditOpen::Opened { edit_id, local_path, .. } = first else { panic!("first open must launch") };
+    let job = h.edits.jobs().pop().unwrap();
+    let cancelled = Launcher { cancel: true, ..Default::default() };
+    assert!(matches!(h.open(OpenMode::With, &cancelled).await.unwrap(), EditOpen::Other { state: OpenStatus::Cancelled }));
+    let failing = Launcher { fail: true, ..Default::default() };
+    let err = h.open(OpenMode::Text(Some("editor")), &failing).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::Io, FsOutcome::Unchanged));
+    assert!(err.retained_local_path.is_none(), "the reused edit was not retained, it is still live");
+    // Same job, still watching, copy untouched, and no stop notice was published for it.
+    assert_eq!(h.edits.jobs().len(), 1);
+    assert!(Arc::ptr_eq(&h.edits.jobs()[0], &job));
+    assert!(!job.cancellation().is_cancelled());
+    assert_eq!(job.record().await.edit_id, edit_id);
+    assert_eq!(fs::read(&local_path).unwrap(), b"base");
+    assert!(h.capture.0.lock().unwrap().iter().all(|n| n.state == "watching"));
+    h.finish().await;
+}
+
+#[tokio::test]
+async fn reopen_after_conflict_takes_a_fresh_baseline_and_keeps_the_old_copy() {
+    let h = Harness::new().await;
+    let EditOpen::Opened { edit_id: old_id, local_path: old_path, .. } =
+        h.open(OpenMode::Text(Some("editor")), &Launcher::default()).await.unwrap() else { panic!() };
+    fs::write(&old_path, b"mine").unwrap();
+    // Arrange the watcher's terminal Conflict outcome (an upload found the server copy changed).
+    h.edits.jobs()[0].data.lock().await.record.state = EditState::Conflict;
+    fs::write(h.remote.path("a"), b"server change").unwrap();
+    let EditOpen::Opened { edit_id: new_id, local_path: new_path, .. } =
+        h.open(OpenMode::Text(Some("editor")), &Launcher::default()).await.unwrap() else { panic!("reopen must launch") };
+    assert_ne!(new_id, old_id, "reopen must not hand back the dead conflicted job");
+    assert_ne!(new_path, old_path);
+    assert_eq!(fs::read(&new_path).unwrap(), b"server change", "fresh baseline from the server");
+    assert_eq!(fs::read(&old_path).unwrap(), b"mine", "the conflicted copy is retained");
+    let listed = h.edits.list("tm-a", ".").await.unwrap();
+    assert!(listed.iter().any(|e| e.retained && e.notice.edit_id == old_id));
+    assert!(listed.iter().any(|e| !e.retained && e.notice.edit_id == new_id));
+    assert_eq!(h.edits.jobs().len(), 1);
+    h.finish().await;
+}
+
+#[tokio::test]
 async fn editor_launch_failure_retains_copy() {
     let h = Harness::new().await;
     let launcher = Launcher { fail: true, ..Default::default() };

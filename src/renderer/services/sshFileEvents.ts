@@ -10,6 +10,10 @@ interface FileListener {
   onCwd?(event: CwdEvent): void;
 }
 
+// A retiring generation's edits still finish (F5 stop/retain) after a reconnect: their final
+// states must reach the owner, while its live states and cwd reports stay dropped.
+const RETIRING_STATES = new Set(['stopped', 'paused', 'conflict', 'error']);
+
 function createFileEvents(api: FileEventsApi) {
   const listeners = new Map<string, Set<FileListener>>();
   let subscription: { stop(): void; ready: Promise<void> } | undefined;
@@ -18,12 +22,12 @@ function createFileEvents(api: FileEventsApi) {
     let disposed = false;
     const unlisten: (() => void)[] = [];
     function route<T extends { terminalId: string; sessionGeneration: number }>(
-      event: T, deliver: (listener: FileListener, session: SshFileSession) => void,
+      event: T, deliver: (listener: FileListener, session: SshFileSession) => void, olderAllowed = false,
     ) {
       if (disposed) return;
       for (const listener of listeners.get(event.terminalId) ?? []) {
         const session = listener.session();
-        if (session.generation !== undefined && event.sessionGeneration < session.generation) continue;
+        if (!olderAllowed && session.generation !== undefined && event.sessionGeneration < session.generation) continue;
         deliver(listener, session);
       }
     }
@@ -32,7 +36,7 @@ function createFileEvents(api: FileEventsApi) {
       api.onFsEditState(notice => route(notice, (listener, session) => {
         if (notice.state === 'uploaded' && (!session.connected || session.generation !== notice.sessionGeneration)) return;
         listener.onEdit?.(notice);
-      })).then(keep),
+      }, RETIRING_STATES.has(notice.state))).then(keep),
       api.onFsCwd(event => route(event, listener => listener.onCwd?.(event))).then(keep),
     ]).then(() => undefined);
     const stop = () => {

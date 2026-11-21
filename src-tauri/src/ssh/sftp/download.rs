@@ -57,7 +57,8 @@ impl RemoteFs<'_> {
         F: FnOnce(DownloadPicker) -> Fut + Send,
         Fut: Future<Output = Result<Option<PathBuf>, &'static str>> + Send,
     {
-        validate(OP, path, false)?;
+        // `/` can never be downloaded (folder download refuses it), so refuse it before the picker.
+        validate(OP, path, true)?;
         let a = admit(self, path, cancel).await?;
         check_remote_parents(&a, path, cancel).await?;
         let kind = remote_type(&a, path, cancel).await?;

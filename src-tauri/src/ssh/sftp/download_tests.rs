@@ -9,6 +9,20 @@ fn no_file_requests(f: &crate::ssh::tests::Fixture) {
 }
 
 #[tokio::test]
+async fn root_download_is_refused_before_the_picker_opens() {
+    let remote = Tree::new();
+    let f = remote.fixture();
+    f.connected().await;
+    let err = browser(&f).download_with_picker("/", &CancellationToken::new(), |_| async {
+        panic!("the native picker must not open for /");
+        #[allow(unreachable_code)]
+        Ok(None)
+    }).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::InvalidPath, FsOutcome::Unchanged));
+    no_file_requests(&f);
+}
+
+#[tokio::test]
 async fn download_folder_recreates_nested_tree_under_picked_parent() {
     let (remote, local) = (Tree::new(), Tree::new());
     fs::create_dir_all(remote.path("folder/sub/empty")).unwrap();

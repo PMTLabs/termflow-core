@@ -1,7 +1,7 @@
 //! Launch only a trusted editor or an explicitly chosen application; never
 //! dispatch the downloaded copy through its default file association.
 use super::{
-    edit::EditRegistry, error, session_error, validate, BoxFuture, FsCode, FsError, FsOutcome, RemoteFs,
+    edit::{EditRegistry, EditState}, error, session_error, validate, BoxFuture, FsCode, FsError, FsOutcome, RemoteFs,
 };
 use crate::open_commands::launch_editor;
 use serde::Serialize;
@@ -166,7 +166,13 @@ impl EditRegistry {
         if cfg!(not(any(windows, target_os = "macos"))) && matches!(mode, OpenMode::Text(None)) {
             return Ok(EditOpen::Other { state: OpenStatus::NeedsEditor });
         }
-        let job = self.begin_edit(fs, path).await?;
+        let (mut job, mut created) = self.begin_edit_tracked(fs, path).await?;
+        if !created && matches!(job.record().await.state, EditState::Conflict | EditState::Error) {
+            // A conflicted or failed edit is finished: stopping retains its copy (F5), and the
+            // reopen the conflict notice asks for downloads a fresh baseline.
+            self.stop(&job).await;
+            (job, created) = self.begin_edit_tracked(fs, path).await?;
+        }
         let _launch = job.launching.lock().await;
         let record = job.record().await;
         let stale = || error(operation, path, FsCode::Stale, FsOutcome::Unchanged, "The edit is no longer active.");
@@ -188,10 +194,16 @@ impl EditRegistry {
                 }
                 Ok(EditOpen::Opened { edit_id: record.edit_id, state: job.record().await.state, local_path: record.local_path })
             }
+            // A second Open of a file already being edited reuses that edit; cancelling or
+            // failing this launch must leave the first editor's watcher running.
             Ok(LaunchOutcome::Cancelled) => {
-                self.stop(&job).await;
+                if created {
+                    self.stop(&job).await;
+                }
                 Ok(EditOpen::Other { state: OpenStatus::Cancelled })
             }
+            Err(_) if !created => Err(error(operation, path, FsCode::Io, FsOutcome::Unchanged,
+                "Could not launch the editor. The existing edit is still active.")),
             Err(_) => {
                 const DETAIL: &str = "Could not launch the editor. The local copy was retained.";
                 self.stop_failed_launch(&job, DETAIL).await;
