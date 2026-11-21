@@ -150,7 +150,7 @@ fn failure(path: &str, code: FsCode, detail: &str) -> FsError {
 }
 
 fn unconfirmed(path: &str) -> FsError {
-    failure(path, FsCode::Unknown, "Could not confirm the SFTP transfer; destination unchanged.")
+    failure(path, FsCode::Io, "Could not confirm the SFTP transfer; destination unchanged.")
 }
 
 fn cancelled(path: &str) -> FsError {

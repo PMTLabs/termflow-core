@@ -40,7 +40,7 @@ async fn disconnect_during_download_keeps_previous_destination_and_no_success() 
         f.server.sftp_faults.lock().drop_connection_on = Some((op, "/source".into()));
         let err = browser(&f).download_file("/source", save_target(&local, "dest"), &CancellationToken::new())
             .await.unwrap_err();
-        assert_eq!((err.code, err.outcome), (FsCode::Unknown, FsOutcome::Unchanged));
+        assert_eq!((err.code, err.outcome), (FsCode::Io, FsOutcome::Unchanged));
         assert!(f.server.sftp_faults.lock().requests.iter().any(|(seen, path)| seen == op && path == "/source"));
         assert_eq!(fs::read(local.path("dest")).unwrap(), b"preserve me");
         assert_eq!(fs::read_dir(local.root()).unwrap().count(), 1);
