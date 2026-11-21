@@ -61,6 +61,6 @@ export function SshConnectionsPanel() {
       }} /> : selected ? selected.row.name : 'Select a connection to edit its details.'}</div></div>
     {menu && !readOnly && <SshMenus key={menu.key} target={menu} view={state.view} api={api} commit={commit} onClose={() => setMenu(null)} onFolder={newFolder} onConnection={newConnection} onRename={rename} />}
     {folderDraft && !readOnly && <SshFolderDialog input={folderDraft} onSave={input => commit(() => api.upsertFolder(input))} onClose={() => setFolderDraft(null)} />}
-    <UnsavedChangesDialog isOpen={!!pending} categoryLabel="SSH connection" onCancel={() => setPending(null)} onDiscard={() => { discardSshEditorDraft(); const go = pending; setPending(null); go?.(); }} onSave={() => { void saveSshEditorDraft().then(saved => { if (saved) { const go = pending; setPending(null); go?.(); } }); }} />
+    <UnsavedChangesDialog isOpen={!!pending} stayLabel="Keep editing" body={<p>You have unsaved changes {selected?.kind === 'connection' ? <>to <strong>{selected.row.name}</strong></> : 'to this SSH connection'}. Save them, discard them, or keep editing?</p>} onCancel={() => setPending(null)} onDiscard={() => { discardSshEditorDraft(); const go = pending; setPending(null); go?.(); }} onSave={() => { void saveSshEditorDraft().then(saved => { if (saved) { const go = pending; setPending(null); go?.(); } }); }} />
   </section>;
 }

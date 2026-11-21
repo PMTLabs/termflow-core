@@ -26,6 +26,7 @@ interface Props {
    *  rule as `saveLabel`/`saveMnemonic` above. */
   discardLabel?: string;
   discardMnemonic?: string;
+  stayLabel?: string;
 }
 
 /**
@@ -50,14 +51,16 @@ export const UnsavedChangesDialog: React.FC<Props> = ({
   saveMnemonic = 'S',
   discardLabel = 'Discard',
   discardMnemonic = 'D',
+  stayLabel = 'Cancel',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
+  const stayMnemonic = stayLabel.charAt(0).toUpperCase();
   const mnemonics: MnemonicType[] = [
     { key: saveMnemonic, handler: onSave },
     { key: discardMnemonic, handler: onDiscard },
-    { key: 'C', handler: onCancel },
+    { key: stayMnemonic, handler: onCancel },
   ];
 
   useDialogA11y(containerRef, { isOpen, onCancel, mnemonics, initialFocus: 'confirm' });
@@ -88,7 +91,7 @@ export const UnsavedChangesDialog: React.FC<Props> = ({
         </div>
         <div className="confirm-dialog-footer">
           <button className="confirm-btn cancel" data-dialog-cancel onClick={onCancel}>
-            <Mnemonic label="Cancel" char="C" />
+            <Mnemonic label={stayLabel} char={stayMnemonic} />
           </button>
           <button className="confirm-btn destructive" onClick={onDiscard}>
             <Mnemonic label={discardLabel} char={discardMnemonic} />
