@@ -1,11 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { openSettingsTab } from '../../services/openSettings';
 import { rehydrateSshEdits, sshFileEvents } from '../../services/sshFileEvents';
-import { store } from '../../store';
 import { readSshFileSession } from './ssh066Contract';
 import type { EditOpen, EditStatus, SshFileApi } from './sshFileTypes';
+import type { SshSessionsState } from '../../store/slices/sshSessionSlice';
 import './SshEditWarning.css';
 import '../Settings/Automations/AutomationsPanel.css';
+
+// Read the live store through the window handle (and load openSettings lazily): importing `store`
+// drags tauri-bridge into every test that mounts the SSH shell.
+const sshSessions = (): SshSessionsState =>
+  (window as any).__REDUX_STORE__?.getState().sshSession ?? { byTerminal: {} };
 
 interface Props {
   terminalId: string;
@@ -30,7 +34,7 @@ function EditWarnings({ terminalId, openResult, api }: Props) {
     owner.current = ownership;
     const touched = new Set<string>();
     let seeding = true;
-    const session = () => readSshFileSession(store.getState().sshSession, terminalId);
+    const session = () => readSshFileSession(sshSessions(), terminalId);
     const registration = sshFileEvents(api).register(terminalId, {
       session,
       onEdit(notice) {
@@ -98,7 +102,7 @@ function EditWarnings({ terminalId, openResult, api }: Props) {
   return <section className="ssh-edit-warning" aria-label="Remote file edits">
     {needsEditor && <div>
       Configure a default editor to open remote files.
-      <button type="button" className="au-btn" onClick={() => openSettingsTab('terminal')}>Open editor settings</button>
+      <button type="button" className="au-btn" onClick={() => void import('../../services/openSettings').then(({ openSettingsTab }) => openSettingsTab('terminal'))}>Open editor settings</button>
     </div>}
     {failure && <div role="alert">{failure}</div>}
     {edits.length > 0 && <ul>

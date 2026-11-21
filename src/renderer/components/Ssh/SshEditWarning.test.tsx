@@ -64,7 +64,11 @@ test('ssh_edit_warning_shows_retained_path_and_stop', async () => {
 test('needs_editor_routes_to_existing_terminal_setting_and_cancelled_is_silent', async () => {
   const { files } = bridge([]);
   await act(async () => { root.render(<SshEditWarning terminalId={edit.terminalId} api={files} openResult={{ state: 'needsEditor' }} />); });
-  act(() => { container.querySelector('button')!.click(); });
+  // The settings module loads lazily (keeps the store out of SSH shell imports).
+  await act(async () => { container.querySelector('button')!.click(); });
+  for (let i = 0; i < 20 && !(openSettingsTab as jest.Mock).mock.calls.length; i++) {
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  }
   expect(openSettingsTab).toHaveBeenCalledWith('terminal');
   act(() => root.render(<SshEditWarning terminalId={edit.terminalId} api={files} openResult={{ state: 'cancelled' }} />));
   expect(container.textContent).toBe('');

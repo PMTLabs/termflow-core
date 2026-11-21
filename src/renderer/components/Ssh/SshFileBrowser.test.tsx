@@ -1,4 +1,7 @@
 /** @jest-environment jsdom */
+// The real store pulls TerminalContainer -> tauri-bridge; cut that chain like the pane transfer tests.
+jest.mock('@termflow/terminal-core', () => ({ DEFAULT_THEME: {}, terminalCache: new Map() }));
+jest.mock('../TerminalContainer', () => ({ clearTabPanes: jest.fn() }));
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
