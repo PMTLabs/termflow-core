@@ -10,6 +10,9 @@ import '../Settings/Automations/AutomationsPanel.css'; // house .au-btn styles f
 export interface SshPaneShellProps {
   view: SshSessionView; terminal: React.ReactNode; browser?: React.ReactNode; status?: React.ReactNode;
   editOpenResult?: EditOpen;
+  // Only slots that fence their own actions may render a stale listing.
+  browserHandlesOffline?: boolean;
+  launchDisconnected?: boolean;
   browserCollapsed: boolean; onBrowserCollapsedChange(collapsed: boolean): void;
   onSecret(secret: string, remember: boolean, receipt: SshPromptReceipt): Promise<void>; onTrust(receipt: SshPromptReceipt): Promise<void>; onCancel(): void;
   // 066 owns the real end-old-login/relaunch coordinator, not a bare IPC retry.
@@ -17,19 +20,22 @@ export interface SshPaneShellProps {
 }
 export function SshPaneShell(props: SshPaneShellProps) {
   const { view } = props, connected = view.state === 'connected';
+  const showDisconnected = (connected && props.launchDisconnected) || view.state === 'disconnected'
+    || (view.state === 'error' && !view.hostKey?.changed);
   return <section className="ssh-pane-shell" aria-label="SSH session">
     <div className="ssh-pane-chrome">
       {view.state === 'needs-secret' && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
       {(view.state === 'needs-hostkey' || (view.state === 'error' && view.hostKey?.changed)) && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
-      {(view.state === 'disconnected' || (view.state === 'error' && !view.hostKey?.changed)) && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
+      {showDisconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
       {view.state === 'connecting' && <span role="status">Connecting…</span>}
       {connected && view.reason && <span role="status">{view.reason}</span>}
       {view.terminalId && <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult} />}
     </div>
     <div className="ssh-pane-body">
-      <aside className={props.browserCollapsed ? 'ssh-browser collapsed' : 'ssh-browser'} aria-label="Remote browser" aria-disabled={!connected}>
-        <button onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>
-        {!props.browserCollapsed && (connected ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
+      <aside className={props.browserCollapsed ? 'ssh-browser collapsed' : 'ssh-browser'} aria-label="Remote browser">
+        <button type="button" className="au-btn ssh-browser-toggle" title={props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser'} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>
+        {props.browserHandlesOffline ? <div hidden={props.browserCollapsed}>{props.browser}</div>
+          : !props.browserCollapsed && (connected ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
       </aside>
       <div className="ssh-terminal-host">{props.terminal}</div>
     </div>

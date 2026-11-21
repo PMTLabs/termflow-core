@@ -1,9 +1,10 @@
+import type { RootState } from '../../store';
 import type { PaneNode } from '../../store/slices/panesSlice';
 import type { SshSessionsState } from '../../store/slices/sshSessionSlice';
 
 type MetricKey = 'host' | 'cpu' | 'ram' | 'netUp' | 'netDown' | 'uptime' | 'users' | 'partitions' | 'nfs';
 
-// 064 §3.1: 066 owns the tag and persists these preferences.
+// 066-rebase: import SshPaneTag from types/ssh.
 export interface SshPaneTag {
   connectionId: string;
   browserCollapsed: boolean;
@@ -12,15 +13,20 @@ export interface SshPaneTag {
   hiddenMetrics: MetricKey[];
 }
 
-export interface SshLaunchStateEvent {
-  terminalId: string;
-  state: 'typed' | 'running' | 'ended';
+// 066-rebase: wire the injected callback to patchSshPaneTag({ terminalId, patch }).
+export type SshBrowserTagPatch = Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserPath' | 'followCd'>>;
+
+export interface LaunchSnapshot {
+  stage: 'preparing' | 'waiting-ready' | 'waiting-trust' | 'typed' | 'running'
+    | 'ended' | 'blocked' | 'cancelled' | 'error';
+  sessionGeneration: number;
+  launchSeq: number;
+  revision: number;
 }
 
-/** Consumer port, not a 066 implementation. Reopens the app channel and retypes SSH. */
-export interface ReconnectCoordinator {
-  reconnect(terminalId: string): Promise<unknown>;
-}
+export type ReconnectCoordinator = (terminalId: string) => Promise<
+  { ok: true; snapshot: LaunchSnapshot } | { ok: false; error: { code: string; message: string } }
+>;
 
 export function readSshPaneTag(pane: PaneNode): SshPaneTag | undefined {
   // 066-rebase: replace the structural read with the actual 066 PaneNode tag.
@@ -38,12 +44,12 @@ export function readSshFileSession(sessions: SshSessionsState, terminalId: strin
   return { generation: session?.generation, connected: session?.state === 'connected' };
 }
 
-export function readSshLaunchState(_terminalId: string): SshLaunchStateEvent['state'] | undefined {
-  // 066-rebase: read launch state from 066. Rust current_launch is not exposed by IPC.
+export function readSshLaunchState(_state: RootState, _terminalId: string): LaunchSnapshot | undefined {
+  // 066-rebase: return selectSshLaunch(state, terminalId).
   return undefined;
 }
 
 export function readReconnectCoordinator(): ReconnectCoordinator | undefined {
-  // 066-rebase: supply the 066 coordinator, never a bare sshSessionReconnect.
+  // 066-rebase: return reconnectSshTerminal from services/sshLaunch.ts, never bare sshSessionReconnect.
   return undefined;
 }
