@@ -10,6 +10,7 @@ import { findTabIdByTerminalId, getAllTerminalIds, findLeaf } from '../store/sli
 import { setDefaultProfile } from '../store/slices/settingsSlice';
 import { clearTabPanes } from '../components/TerminalContainer';
 import { restoreTabPanesInPlace } from './tabPanesStore';
+import { sanitizePaneSshFields, sanitizePaneTreeMapSshFields, sanitizePaneTreeSshFields } from './sshPanePersistence';
 import { generateId } from '../utils/id';
 import { terminalService } from './TerminalService';
 import { pruneCwds, seedRestoredCwds, remapCwds } from './stateManagerCwd';
@@ -191,6 +192,8 @@ export interface SavedLayout {
    *  falls back to the old single-tree behavior per tab when it is missing
    *  (an old-format layout, or one saved before this field was introduced). */
   treesByTabId?: Record<string, any>;
+  /** Legacy window mirror, accepted on import but not written by named-layout save. */
+  tabPanes?: Record<string, any>;
   /** plan/025 §2.4. Absent means 'workspace' — every layout saved before this
    *  field existed, and every ordinary (whole-workspace) save going forward,
    *  loads exactly as it always has. */
@@ -1767,7 +1770,14 @@ class StateManagerClass {
 
       // Merge with existing layouts (avoid duplicates by ID)
       const existingIds = new Set(existingLayouts.map(l => l.id));
-      const newLayouts = validLayouts.filter(l => !existingIds.has(l.id));
+      // Clean SSH data at import, not only when the user later loads the layout.
+      // Leave legacy ID migration to load so all tree maps share its remapping.
+      const newLayouts = validLayouts.filter(l => !existingIds.has(l.id)).map(layout => ({
+        ...layout,
+        paneTree: sanitizePaneTreeSshFields(layout.paneTree),
+        tabPanes: layout.tabPanes && sanitizePaneTreeMapSshFields(layout.tabPanes),
+        treesByTabId: layout.treesByTabId && sanitizePaneTreeMapSshFields(layout.treesByTabId),
+      }));
       
       const allLayouts = [...existingLayouts, ...newLayouts];
       localStorage.setItem(this.LAYOUTS_KEY, JSON.stringify(allLayouts, omitInternalCreateFields));
@@ -1860,8 +1870,7 @@ class StateManagerClass {
     // Helper to recursively sanitize pane tree
     const sanitizeNode = (node: any, tabId: string): any => {
       if (!node) return null;
-      const newNode = { ...node };
-      delete newNode.sshLaunchConnectionId;
+      const newNode = sanitizePaneSshFields(node);
       // The pane leaf, not the tab, is what decides whether a shell spawns elevated
       // (`findElevatedByTerminalId`), so the same session-restore-only rule applies here.
       if (!keepElevated) delete newNode.elevated;

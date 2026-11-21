@@ -17,6 +17,7 @@ import { getCwdSnapshot, setCwdSnapshot } from '../../../services/cwdSnapshot';
 import { generateId } from '../../../utils/id';
 import { computeZone } from './zone';
 import { tabHasNoPanes, getAllTerminalIds } from '../../../store/slices/paneTreeOps';
+import { sanitizePaneTreeSshFields } from '../../../services/sshPanePersistence';
 import { clearSessionClosed } from '../../../store/slices/sessionExitSlice';
 import { DetachPayload, DetachTerminal } from './types';
 
@@ -497,6 +498,7 @@ export function applyDetachPayload(payload: DetachPayload): void {
     // it travelled with the payload because the map doesn't cross windows.
     setCwdSnapshot(t.terminalId, t.cwd);
   });
+  store.dispatch(addTabTree({ tabId: payload.tabId, tree: sanitizePaneTreeSshFields(payload.paneTree) }));
   store.dispatch(addTab({
     id: payload.tabId,
     title: payload.tabTitle,
@@ -508,7 +510,6 @@ export function applyDetachPayload(payload: DetachPayload): void {
     notifyMuted: payload.notifyMuted,
     elevated: payload.elevated,
   }));
-  store.dispatch(addTabTree({ tabId: payload.tabId, tree: payload.paneTree }));
   store.dispatch(setActiveTab(payload.tabId));
   store.dispatch(setActiveTabId(payload.tabId));
 }
@@ -557,7 +558,8 @@ export function applyCrossWindowPayload(payload: DetachPayload, x?: number, y?: 
   });
 
   store.dispatch(insertPaneIntoTab({
-    tabId: target.tabId, targetPaneId: target.paneId, zone: target.zone, node: payload.paneTree,
+    tabId: target.tabId, targetPaneId: target.paneId, zone: target.zone,
+    node: sanitizePaneTreeSshFields(payload.paneTree),
   }));
   store.dispatch(setActiveTab(target.tabId));
   store.dispatch(setActiveTabId(target.tabId));

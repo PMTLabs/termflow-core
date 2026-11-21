@@ -20,7 +20,15 @@ export interface SshPreviewError {
   message: string;
   fields?: SshError[];
 }
-export type MetricKey = 'host' | 'cpu' | 'ram' | 'netUp' | 'netDown' | 'uptime' | 'users' | 'partitions' | 'nfs';
+/** Display order. Persisted preferences preserve their encoded order. */
+export const METRIC_KEYS = ['host', 'cpu', 'ram', 'netUp', 'netDown', 'uptime', 'users', 'partitions', 'nfs'] as const;
+export type MetricKey = (typeof METRIC_KEYS)[number];
+const knownMetrics: ReadonlySet<unknown> = new Set(METRIC_KEYS);
+
+export function normalizeHiddenMetrics(value: unknown): MetricKey[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((key): key is MetricKey => knownMetrics.has(key)))];
+}
 export interface SshPaneTag {
   connectionId: string;
   browserCollapsed: boolean;

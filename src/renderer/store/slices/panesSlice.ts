@@ -1,6 +1,6 @@
 import { createSlice, PayloadAction, createAsyncThunk } from '@reduxjs/toolkit';
 import { generateId } from '../../utils/id';
-import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, EdgeZone } from './paneTreeOps';
+import { removeLeaf, insertByZone, swapLeaves, findLeaf, firstLeafId, terminalIdentityOf, findLeafByTerminalId, EdgeZone } from './paneTreeOps';
 import { setInitialCwd } from '../../services/initialCwd';
 
 import type { SshPaneTag } from '../../types/ssh';
@@ -621,6 +621,27 @@ const panesSlice = createSlice({
       }
     },
 
+    patchSshPaneTag: (state, action: PayloadAction<{
+      terminalId: string;
+      patch: Partial<Pick<SshPaneTag, 'browserCollapsed' | 'browserPath' | 'followCd'>>;
+    }>) => {
+      const { terminalId, patch } = action.payload;
+      for (const [tabId, tree] of Object.entries(state.treesByTabId)) {
+        const tag = findLeafByTerminalId({ [tabId]: tree }, terminalId)?.ssh;
+        if (!tag) continue;
+
+        // Copy only the three browser fields, even if an untyped caller sends more.
+        if (typeof patch.browserCollapsed === 'boolean') tag.browserCollapsed = patch.browserCollapsed;
+        if (typeof patch.followCd === 'boolean') tag.followCd = patch.followCd;
+        if (Object.prototype.hasOwnProperty.call(patch, 'browserPath')) {
+          if (patch.browserPath === undefined) delete tag.browserPath;
+          else if (typeof patch.browserPath === 'string') tag.browserPath = patch.browserPath;
+        }
+        if (state.activeTabId === tabId) state.paneTree = state.treesByTabId[tabId];
+        return;
+      }
+    },
+
     setPaneTree: (state, action: PayloadAction<PaneNode | null>) => {
       state.paneTree = action.payload;
       syncActive(state);
@@ -911,6 +932,7 @@ export const {
   focusPane,
   focusPaneInTab,
   renamePanes,
+  patchSshPaneTag,
   setPaneTree,
   resetPanes,
   setActiveTabId,

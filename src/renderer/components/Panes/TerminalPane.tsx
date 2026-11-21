@@ -194,6 +194,12 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     return () => window.removeEventListener('pty:host-wait', onWait);
   }, [terminalId]);
 
+  const sshConnectionId = useSelector((state: RootState) => terminalId
+    ? findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.connectionId : undefined);
+  const sshUnavailable = useSelector((state: RootState) => !!sshConnectionId
+    && (state.ssh?.status !== 'ready' || !!state.ssh.view.loadError
+      || !state.ssh.view.connections.some(connection => connection.id === sshConnectionId)));
+
   // Initialize terminal when component mounts or terminalId changes
   useEffect(() => {
     console.log(`TerminalPane: Terminal init effect - terminalId: ${terminalId}, name: ${name}, tab: ${tab?.id}`);
@@ -275,6 +281,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       return cleanup;
     }
 
+    // Leave a missing connection classified as SSH. Do not replace it with a
+    // fresh local or SSH session. A surviving process above may still attach.
+    if (sshUnavailable) return cleanup;
+
     // A "this leaf IS a tab, and that tab is gone" guard stood here, keyed on
     // `terminalId.startsWith('tb-'|'tab-')`. Design 014 mints a `tm-` leaf for every
     // pane, so it could never fire again. It is NOT generalised to `if (!tab)`: a
@@ -355,7 +365,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // R8: read off the tree, not a prop, so this and the restart-in-place call
     // site below can never disagree about whether this pane is elevated.
     const elevated = findElevatedByTerminalId(store.getState().panes.treesByTabId, terminalId);
-    const launchId = findLeafByTerminalId(store.getState().panes.treesByTabId, terminalId)?.ssh?.connectionId;
+    const launchId = pi && protocol.isAdopted(pi) ? undefined
+      : findLeafByTerminalId(store.getState().panes.treesByTabId, terminalId)?.ssh?.connectionId;
     const initPromise = terminalService.createTerminal(
       terminalId, finalShellType, terminalName, cwd, undefined, undefined, owningTabId,
       sessionKey, elevated, 'Mount', paneId, ...(launchId ? [launchId] as const : [] as const),
@@ -501,7 +512,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     // decides the shell, nothing else. `tab?.shellType` used to sit here and is
     // gone with the branch that read it — leaving it would re-run this effect on
     // a tab profile change now that `tab` actually resolves (design 014).
-  }, [terminalId, paneId, incarnation, defaultProfile, retryAttempt]);
+  }, [terminalId, paneId, incarnation, defaultProfile, retryAttempt, sshUnavailable]);
 
   useEffect(() => {
     const handleClick = () => {
@@ -631,10 +642,6 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     };
   }, [elevationRequired]);
 
-  const sshConnectionId = useSelector((state: RootState) => terminalId
-    ? findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.connectionId : undefined);
-
-
   // Restart the session IN PLACE: spawn a fresh shell for the same pane id,
   // reusing the original profile + working directory. The process map and init
   // guards were already cleared when the old process exited, so createTerminal
@@ -643,7 +650,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // session's; the engine's hydrate() already skips reset() for a brand-new
   // process with an empty snapshot (see TerminalEngine.hydrate).
   const handleRestart = useCallback(async () => {
-    if (!terminalId || !currentCopy() || elevationRequired) return;
+    if (!terminalId || !currentCopy() || elevationRequired || sshUnavailable) return;
     if (isRestartingRef.current) return;
     isRestartingRef.current = true;
     const pi = incarnation;
@@ -717,7 +724,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     } finally {
       isRestartingRef.current = false;
     }
-  }, [terminalId, paneId, incarnation, shellType, defaultProfile, tab?.title, shellProfiles, name, dispatch, elevationRequired]);
+  }, [terminalId, paneId, incarnation, shellType, defaultProfile, tab?.title, shellProfiles, name, dispatch, elevationRequired, sshUnavailable]);
 
   const handleDismissBanner = useCallback(
     () => { if (terminalId) dispatch(clearSessionClosed({ terminalId })); },
@@ -945,7 +952,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           </div>
           {isBroadcastMember && <span className="broadcast-chip">⇉ broadcast</span>}
         </div>
-        {terminalId && processId && incarnation && processBinding?.owner === incarnation && sshConnectionId &&
+        {sshUnavailable && <div role="status" className="terminal-startup-status">This saved SSH connection is unavailable.</div>}
+        {terminalId && processId && incarnation && processBinding?.owner === incarnation && sshConnectionId && !sshUnavailable &&
           <OwnedSshLaunchNotice key={processId} terminalId={terminalId} paneId={paneId}
             processId={processId} owner={incarnation} connectionId={sshConnectionId} />}
         <div className="terminal-pane-content" onPointerDownCapture={handleBroadcastPointerDown}>
@@ -1025,7 +1033,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
                 }}>Retry</button>
               )}
             </div>
-          ) : terminalId && !processId ? (
+          ) : sshUnavailable ? null : terminalId && !processId ? (
             (() => {
               const status = getPaneStartupStatus(processId, startupFailed);
               // status is never null here (processId is falsy in this branch),

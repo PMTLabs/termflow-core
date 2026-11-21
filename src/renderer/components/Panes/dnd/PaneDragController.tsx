@@ -39,22 +39,13 @@ const THRESHOLD = 5; // px the pointer must travel before a press becomes a drag
  * the same defect class as the split and swap paths.
  *
  * Reading the tree instead of widening `PaneDragSource` is deliberate: the tree is the
- * authority on what a pane holds, and a seventh terminal-bound field then travels with
- * no change here at all.
- *
- * The fallback covers only a source pane the tree cannot name, where losing the drag
- * outright would be worse than losing the extra fields — this is exactly the old
- * behaviour, kept for that one case rather than as the normal path.
+ * authority on what a pane holds. If it no longer has this terminal at this
+ * position, refuse the drag rather than reconstructing a local/stale identity.
  */
-function leafForDrag(s: PaneDragSource): PaneNode {
+export function leafForDrag(s: PaneDragSource): PaneNode | null {
   const live = findLeaf(store.getState().panes.treesByTabId[s.sourceTabId] ?? null, s.sourcePaneId);
-  return {
-    id: s.sourcePaneId,
-    type: 'terminal',
-    ...(live
-      ? terminalIdentityOf(live)
-      : { terminalId: s.terminalId, name: s.name, shellType: s.shellType }),
-  };
+  if (!live || live.terminalId !== s.terminalId) return null;
+  return { id: live.id, type: 'terminal', ...terminalIdentityOf(live) };
 }
 const DWELL_MS = 400; // hover-over-tab dwell before activating it (Phase 2)
 const ORPHAN_DELAY_MS = 160; // give a destination window a chance to claim before we open a new window
@@ -313,6 +304,7 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (outsideWindow && api?.beginGlobalPaneDrag && !globalSourceRef.current) {
         const s = press.source;
         const leaf = leafForDrag(s);
+        if (!leaf) { reset(); return; }
         const token = newDetachToken();
         const source: GlobalSource = {
           token, sourceTabId: s.sourceTabId, sourcePaneId: s.sourcePaneId, terminalId: s.terminalId,
@@ -409,9 +401,10 @@ export const PaneDragProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         } else if (!gs) {
           // No broker (not under Tauri): best-effort direct detach to a new window.
           const s = d.source;
-          void detachPaneToNewWindow({
+          const leaf = leafForDrag(s);
+          if (leaf) void detachPaneToNewWindow({
             sourceTabId: s.sourceTabId,
-            paneNode: leafForDrag(s),
+            paneNode: leaf,
             cursor: { x: sx, y: sy },
             gesture: press?.gesture,
           });

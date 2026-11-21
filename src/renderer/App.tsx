@@ -73,7 +73,7 @@ import { terminalTitleColor } from './store/titleColor';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { getAllTerminalIds, resolveExitedTabId } from './store/slices/paneTreeOps';
 import { resolveActivityTabId, type ExternalActivityDetail } from './services/externalActivity';
-import { buildApiCreatedTab, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
+import { buildApiCreatedTab, buildApiFallbackPane, resolveApiCreateIds, runApiCreateMode0 } from './services/apiCreatedTab';
 import { runningActivityTracker } from './services/RunningActivityTracker';
 import { notificationService } from './services/NotificationService';
 import { resolveActivation } from './services/notificationRouting';
@@ -1752,14 +1752,7 @@ const App: React.FC = () => {
         }
 
         const newPaneId = generateId('pn');
-        const paneTree = {
-          id: newPaneId,
-          type: 'terminal' as const,
-          terminalId: newTabId,
-          name: name || 'API Terminal', // Add name to the pane
-          shellType: profile || defaultProfile || 'cmd', // Include shell type
-          apiCreated: true as const, // plan 048
-        };
+        const paneTree = buildApiFallbackPane(newPaneId, newTabId, name, profile || defaultProfile || 'cmd');
 
         // Seed the authoritative per-tab tree and add the tab. Default: do NOT
         // steal focus (same rule as Mode 0). Activate only when the user opted in
