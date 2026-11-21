@@ -80,6 +80,19 @@ async fn fs_primitives_confirm_exact_target() {
     assert!(!tree.path("etc/a").exists());
     assert_eq!(fs::read(tree.path("etc/dir/a")).unwrap(), b"target");
     assert_sibling();
+
+    client.chmod("/etc/dir/a", 0o640).await.unwrap();
+    assert_eq!(client.stat("/etc/dir/a").await.unwrap().entry.mode, Some(0o100640));
+    assert_sibling();
+    client.chown("/etc/dir/a", Some(123), Some(456)).await.unwrap();
+    client.chown("/etc/dir/a", Some(789), None).await.unwrap();
+    let changed = client.stat("/etc/dir/a").await.unwrap().entry;
+    assert_eq!((changed.uid, changed.gid), (Some(789), Some(456)));
+    assert_sibling();
+
+    client.delete("/etc/dir/a", false, true).await.unwrap();
+    assert!(!tree.path("etc/dir/a").exists());
+    assert_sibling();
     f.registry.shutdown().await;
 }
 
@@ -292,5 +305,224 @@ async fn stale_generation_request_sends_nothing_to_successor() {
         assert_eq!(fs::read(tree.path("sentinel")).unwrap(), bytes);
         assert_eq!(fs::read_dir(tree.root()).unwrap().count(), 1);
     }
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_directory_requires_recursive_confirmation() {
+    let tree = Tree::new();
+    fs::create_dir(tree.path("dir")).unwrap();
+    fs::write(tree.path("dir/file"), b"keep").unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    let client = browser(&f);
+    for recursive in [false, true] {
+        let err = client.delete("/dir", recursive, false).await.unwrap_err();
+        assert_eq!((err.code, err.outcome), (FsCode::InvalidPath, FsOutcome::Unchanged));
+    }
+    assert!(f.server.sftp_faults.lock().requests.is_empty());
+    let err = client.delete("/dir", false, true).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::InvalidPath, FsOutcome::Unchanged));
+    let requests = f.server.sftp_faults.lock().requests.clone();
+    let calls: Vec<_> = requests.iter().map(|(op, path)| (op.as_str(), path.as_str())).collect();
+    assert_eq!(calls, [("init", ""), ("lstat", "/dir")]);
+    assert_eq!(fs::read(tree.path("dir/file")).unwrap(), b"keep");
+    f.registry.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recursive_delete_does_not_follow_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let tree = Tree::new();
+    fs::create_dir_all(tree.path("outside/nested")).unwrap();
+    fs::write(tree.path("outside/nested/file"), b"\0sentinel\xff").unwrap();
+    fs::create_dir_all(tree.path("dir/sub")).unwrap();
+    fs::write(tree.path("dir/sub/file"), b"delete").unwrap();
+    symlink("../outside", tree.path("dir/link")).unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    browser(&f).delete("/dir", true, true).await.unwrap();
+    assert!(!tree.path("dir").exists());
+    assert_eq!(fs::read(tree.path("outside/nested/file")).unwrap(), b"\0sentinel\xff");
+    assert_eq!(fs::read_dir(tree.path("outside")).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(tree.path("outside/nested")).unwrap().count(), 1);
+    let requests = f.server.sftp_faults.lock().requests.clone();
+    assert!(requests.iter().any(|(op, path)| op == "remove" && path == "/dir/link"));
+    assert!(!requests.iter().any(|(op, path)| {
+        (op == "opendir" && path == "/dir/link") || path.starts_with("/dir/link/")
+    }));
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn recursive_delete_midtree_denied_reports_partial() {
+    let tree = Tree::new();
+    fs::create_dir_all(tree.path("dir/a")).unwrap();
+    fs::write(tree.path("dir/a/file"), b"first").unwrap();
+    fs::write(tree.path("dir/b"), b"denied").unwrap();
+    fs::write(tree.path("dir/c"), b"not attempted").unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    f.server.sftp_faults.lock().deny.push(("remove", "/dir/b".into()));
+    let err = browser(&f).delete("/dir", true, true).await.unwrap_err();
+    assert_eq!((err.code, err.outcome, err.path.as_str()),
+        (FsCode::PermissionDenied, FsOutcome::Partial, "/dir/b"));
+    assert_eq!(serde_json::to_value(&err).unwrap()["completedPaths"], serde_json::json!(["/dir/a/file", "/dir/a"]));
+    assert!(!tree.path("dir/a").exists());
+    assert_eq!(fs::read(tree.path("dir/b")).unwrap(), b"denied");
+    assert_eq!(fs::read(tree.path("dir/c")).unwrap(), b"not attempted");
+    assert_eq!(fs::read_dir(tree.path("dir")).unwrap().count(), 2);
+    f.registry.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn swap_descendant_dir_after_preflight_refuses() {
+    use std::os::unix::fs::symlink;
+
+    let tree = Tree::new();
+    fs::create_dir_all(tree.path("dir/b")).unwrap();
+    fs::write(tree.path("dir/a"), b"first").unwrap();
+    fs::write(tree.path("dir/b/file"), b"selected").unwrap();
+    fs::create_dir(tree.path("outside")).unwrap();
+    fs::write(tree.path("outside/file"), b"sentinel").unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    let (selected, moved) = (tree.path("dir/b"), tree.path("saved"));
+    f.server.sftp_faults.lock().before = Some(Box::new(move |op, path| {
+        if (op, path) == ("remove", "/dir/a") {
+            fs::rename(&selected, &moved).unwrap();
+            symlink("../outside", &selected).unwrap();
+        }
+    }));
+    let err = browser(&f).delete("/dir", true, true).await.unwrap_err();
+    assert_eq!((err.code, err.outcome, err.path.as_str()), (FsCode::Conflict, FsOutcome::Partial, "/dir/b"));
+    assert_eq!(err.completed_paths, Some(vec![String::from("/dir/a")]));
+    assert!(!tree.path("dir/a").exists());
+    assert!(fs::symlink_metadata(tree.path("dir/b")).unwrap().is_symlink());
+    assert_eq!(fs::read(tree.path("outside/file")).unwrap(), b"sentinel");
+    assert_eq!(fs::read_dir(tree.path("outside")).unwrap().count(), 1);
+    assert_eq!(fs::read(tree.path("saved/file")).unwrap(), b"selected");
+    let requests = f.server.sftp_faults.lock().requests.clone();
+    let first = requests.iter().position(|(op, path)| op == "remove" && path == "/dir/a").unwrap();
+    assert!(requests[..first].iter().any(|(op, path)| op == "lstat" && path == "/dir/b/file"));
+    assert!(!requests[first + 1..].iter().any(|(_, path)| path.starts_with("/dir/b/")));
+    f.registry.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn swap_chmod_target_to_symlink_refuses() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::sync::atomic::AtomicUsize;
+
+    let tree = Tree::new();
+    fs::write(tree.path("file"), b"selected").unwrap();
+    fs::write(tree.path("sentinel"), b"keep").unwrap();
+    fs::set_permissions(tree.path("sentinel"), fs::Permissions::from_mode(0o644)).unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    let (file, saved) = (tree.path("file"), tree.path("saved"));
+    let checks = AtomicUsize::new(0);
+    f.server.sftp_faults.lock().before = Some(Box::new(move |op, path| {
+        if (op, path) == ("lstat", "/file") && checks.fetch_add(1, Ordering::SeqCst) == 1 {
+            fs::rename(&file, &saved).unwrap();
+            symlink("sentinel", &file).unwrap();
+        }
+    }));
+    let err = browser(&f).chmod("/file", 0o600).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::Conflict, FsOutcome::Unchanged));
+    assert_eq!(fs::read(tree.path("sentinel")).unwrap(), b"keep");
+    assert_eq!(fs::metadata(tree.path("sentinel")).unwrap().permissions().mode() & 0o7777, 0o644);
+    assert!(!f.server.sftp_faults.lock().requests.iter().any(|(op, _)| op == "setstat"));
+    f.registry.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn ipc_chmod_on_symlink_refused_by_backend() {
+    use crate::{commands::ssh_fs_chmod, state::AppState};
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use tauri::Manager;
+
+    let tree = Tree::new();
+    fs::write(tree.path("sentinel"), b"keep").unwrap();
+    fs::set_permissions(tree.path("sentinel"), fs::Permissions::from_mode(0o644)).unwrap();
+    symlink("sentinel", tree.path("link")).unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
+    let (tx, _) = tokio::sync::broadcast::channel(16);
+    let mut state = AppState::new(tx, app.handle().clone(), crate::app_config::NetworkConfig::defaults());
+    state.ssh_sessions = f.registry.clone();
+    app.manage(state);
+    let err = ssh_fs_chmod::<tauri::test::MockRuntime>(
+        app.state(), "tm-a".into(), "/link".into(), generation(&f), 0o600,
+    ).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::Unsupported, FsOutcome::Unchanged));
+    assert_eq!(fs::metadata(tree.path("sentinel")).unwrap().permissions().mode() & 0o7777, 0o644);
+    assert!(!f.server.sftp_faults.lock().requests.iter().any(|(op, _)| op == "setstat"));
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn chown_requires_uid_or_gid() {
+    let tree = Tree::new();
+    fs::write(tree.path("file"), b"keep").unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    let err = browser(&f).chown("/file", None, None).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::InvalidPath, FsOutcome::Unchanged));
+    assert!(f.server.sftp_faults.lock().requests.is_empty());
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_root_refused() {
+    let tree = Tree::new();
+    fs::write(tree.path("file"), b"keep").unwrap();
+    let f = tree.fixture();
+    f.connected().await;
+    let err = browser(&f).delete("/", true, true).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::InvalidPath, FsOutcome::Unchanged));
+    assert!(f.server.sftp_faults.lock().requests.is_empty());
+    assert_eq!(fs::read(tree.path("file")).unwrap(), b"keep");
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn stale_generation_between_recursive_mutations_stops() {
+    let (a, b) = (Tree::new(), Tree::new());
+    for (tree, bytes) in [(&a, b"A"), (&b, b"B")] {
+        fs::create_dir(tree.path("dir")).unwrap();
+        fs::write(tree.path("dir/first"), bytes).unwrap();
+        fs::write(tree.path("dir/second"), bytes).unwrap();
+    }
+    let (f, successor) = (a.fixture(), b.fixture());
+    f.connected().await;
+    let old = generation(&f);
+    f.use_server_for_next_connection(&successor.server);
+    let advance = |path: &str| {
+        assert_eq!(path, "/dir/first");
+        f.registry.close("tm-a", false, Some(old)).unwrap();
+        let next = f.registry.open("tm-a", "c-a", false, || true).unwrap();
+        assert_ne!(next.generation, old);
+    };
+    let err = browser(&f).delete_with("/dir", true, true, &advance).await.unwrap_err();
+    assert_eq!((err.code, err.outcome), (FsCode::Stale, FsOutcome::Partial));
+    assert_eq!(err.completed_paths, Some(vec![String::from("/dir/first")]));
+    let requests = f.server.sftp_faults.lock().requests.clone();
+    assert_eq!(requests.last().map(|(o, p)| (o.as_str(), p.as_str())), Some(("remove", "/dir/first")));
+    f.connected().await;
+    assert_ne!(generation(&f), old);
+    assert_eq!(successor.server.counters.subsystems.load(Ordering::SeqCst), 0);
+    assert!(successor.server.sftp_faults.lock().requests.is_empty());
+    assert!(!a.path("dir/first").exists());
+    assert_eq!(fs::read(a.path("dir/second")).unwrap(), b"A");
+    assert_eq!(fs::read(b.path("dir/first")).unwrap(), b"B");
+    assert_eq!(fs::read(b.path("dir/second")).unwrap(), b"B");
     f.registry.shutdown().await;
 }

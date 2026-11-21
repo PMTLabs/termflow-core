@@ -1,4 +1,5 @@
 //! SFTP primitives scoped to a browser's terminal and expected session generation.
+mod ops;
 mod types;
 #[cfg(test)]
 mod tests;
