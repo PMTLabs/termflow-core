@@ -33,18 +33,21 @@ function Browser(props: SshFileBrowserProps) {
   const browser = useSshFileBrowser(props);
   const connection = useSelector((state: RootState) => state.ssh.view.connections.find(c => c.id === props.sshTag.connectionId)?.name);
   const [menu, setMenu] = useState<FileMenu>();
-  const [rowDialog, setRowDialog] = useState<{ action: DialogAction; entry: RemoteEntry; scope: SshRowScope }>();
+  const [rowDialog, setRowDialog] = useState<{ id: number; action: DialogAction; entry: RemoteEntry; scope: SshRowScope }>();
+  const rowDialogSeq = React.useRef(0);
   const active = props.surfaceActive && !props.sshTag.browserCollapsed;
   React.useLayoutEffect(() => {
     if (!active) { setMenu(undefined); setRowDialog(undefined); }
   }, [active]);
-  const closeRowDialog = () => setRowDialog(undefined);
+  // A dialog's close only clears that dialog instance: a completion that outlives it (surface
+  // hidden, then another dialog opened) must not close the replacement.
+  const closeRowDialog = (id: number) => () => setRowDialog(current => current?.id === id ? undefined : current);
 
   const run = (action: FileAction, { entry, scope, trigger }: RowTarget) => {
     if (!scope || fileActionReason(action, entry, scope.isLive())) return;
     if (action === 'rename' || action === 'delete' || action === 'properties' || action === 'permissions') {
       trigger.focus(); // modal captures the row, not the menu item that is about to unmount
-      setRowDialog({ action, entry, scope });
+      setRowDialog({ id: ++rowDialogSeq.current, action, entry, scope });
       return;
     }
     const { api, request } = scope;
@@ -133,12 +136,13 @@ function Browser(props: SshFileBrowserProps) {
         items={sshFileMenu(menu.entry, !!menu.scope?.isLive(), action => run(action, menu))} />
     </div>}
     {active && rowDialog && (() => {
-      const { action, scope, entry } = rowDialog;
-      if (action === 'properties') return <SshPropertiesDialog scope={scope} connection={connection} onClose={closeRowDialog} />;
-      if (action === 'permissions') return <SshPermissionsDialog scope={scope} onClose={closeRowDialog} />;
-      if (action === 'delete') return <SshDeleteDialog scope={scope} recursive={entry.kind === 'directory'} onClose={closeRowDialog} />;
-      return <SshNameDialog kind="rename" path={entry.path} initialName={entry.name} disabled={!scope.isLive()}
-        onClose={closeRowDialog} onSubmit={async name => {
+      const { id, action, scope, entry } = rowDialog;
+      const onClose = closeRowDialog(id);
+      if (action === 'properties') return <SshPropertiesDialog key={id} scope={scope} connection={connection} onClose={onClose} />;
+      if (action === 'permissions') return <SshPermissionsDialog key={id} scope={scope} onClose={onClose} />;
+      if (action === 'delete') return <SshDeleteDialog key={id} scope={scope} recursive={entry.kind === 'directory'} onClose={onClose} />;
+      return <SshNameDialog key={id} kind="rename" path={entry.path} initialName={entry.name} disabled={!scope.isLive()}
+        onClose={onClose} onSubmit={async name => {
           if (!scope.isLive()) return { error: staleTarget };
           if (name === entry.name) return {};
           const newPath = entry.path.slice(0, entry.path.lastIndexOf('/') + 1) + name;
@@ -155,6 +159,7 @@ function Browser(props: SshFileBrowserProps) {
         }} />;
     })()}
     {dialogVisible && dialog && <SshNameDialog kind={dialog.kind} path={dialog.path}
-      onClose={() => setDialog(undefined)} onSubmit={name => browser.create(dialog.kind, name)} />}
+      onClose={() => setDialog(current => current === dialog ? undefined : current)}
+      onSubmit={name => browser.create(dialog.kind, name)} />}
   </div>;
 }

@@ -460,6 +460,24 @@ test('recursive_delete_cancel_no_request_confirm_exact_target', async () => {
   expect(api.fsDelete).toHaveBeenCalledWith({ ...entryRequest, path: '/home/logs', recursive: true, confirmed: true });
 });
 
+test('late_completion_of_a_hidden_dialog_does_not_close_its_replacement', async () => {
+  await act(async () => render());
+  const pending = deferred<void>();
+  api.fsDelete.mockImplementationOnce(() => pending.promise);
+  await choose('Delete…', '.env');
+  await act(async () => button('Delete', dialog()).click());
+  expect(api.fsDelete).toHaveBeenCalledTimes(1);
+  // Hiding the surface unmounts the pending delete dialog; the user then opens another one.
+  await act(async () => render(false));
+  await act(async () => render());
+  api.fsStat.mockResolvedValueOnce({ name: '.env', path: entryRequest.path, kind: 'file' });
+  await choose('Properties');
+  expect(dialog().textContent).toContain('Properties');
+  await act(async () => { pending.resolve(); await pending.promise; });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Properties');
+});
+
 test('all_ssh_dialogs_trap_tab_escape_and_restore_trigger_focus', async () => {
   await act(async () => render());
   const trapAndClose = (trigger: HTMLElement) => {
