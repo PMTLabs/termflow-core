@@ -9,7 +9,12 @@ import type { SshSessionView } from '../../types/ssh';
 import { SshBrowserPaneShell } from './SshBrowserPaneShell';
 import { SshFileBrowser } from './SshFileBrowser';
 import { readReconnectCoordinator, readSshLaunchState, type LaunchSnapshot, type SshPaneTag } from './ssh066Contract';
-import type { CwdEvent, FsRequest, RemoteListing } from './sshFileTypes';
+import type { CwdEvent, EditOpen, FsRequest, RemoteListing, RemoteStat } from './sshFileTypes';
+import { writeClipboardText } from '../../utils/clipboard';
+import { terminalService } from '../../services/TerminalService';
+
+jest.mock('../../utils/clipboard', () => ({ writeClipboardText: jest.fn() }));
+jest.mock('../../services/TerminalService', () => ({ terminalService: { writeToTerminal: jest.fn() } }));
 
 jest.mock('./ssh066Contract', () => ({
   ...jest.requireActual('./ssh066Contract'), readSshLaunchState: jest.fn(), readReconnectCoordinator: jest.fn(),
@@ -22,7 +27,7 @@ const snapshot = (sessionGeneration = 1, stage: LaunchSnapshot['stage'] = 'runni
 const view = (state: SshSessionView['state'], generation = 1, revision = 1): SshSessionView =>
   ({ terminalId, connectionId: initialTag.connectionId, state, generation, revision, gate: 'blocked', promptId: 'p', secretKind: 'password' });
 const listing = (path = '/home', sessionGeneration = 1): RemoteListing => ({ path, sessionGeneration, entries: [
-  { name: '.env', path: `${path}/.env`, kind: 'file' },
+  { name: '.env', path: `${path}/.env`, kind: 'file', size: '1', mtime: 1 },
   { name: 'logs', path: `${path}/logs`, kind: 'directory' },
 ] });
 function deferred<T>() {
@@ -36,6 +41,17 @@ function createBridge() {
   return {
     fsList: jest.fn(async ({ path, expectedGeneration }: FsRequest) => listing(path, expectedGeneration)),
     fsCreate: jest.fn(async (_request: FsRequest) => {}), fsMkdir: jest.fn(async (_request: FsRequest) => {}),
+    fsStat: jest.fn(async ({ path }: FsRequest): Promise<RemoteStat> => ({
+      name: path.split('/').pop()!, path, kind: 'file', mode: 0o104640, uid: 100, gid: 200,
+    })),
+    fsChown: jest.fn(async (_request: FsRequest & { uid?: number; gid?: number }) => {}),
+    fsChmod: jest.fn(async (_request: FsRequest & { mode: number }) => {}),
+    fsRename: jest.fn(async (_request: FsRequest & { newPath: string }) => {}),
+    fsDelete: jest.fn(async (_request: FsRequest & { recursive: boolean; confirmed: boolean }) => {}),
+    fsOpen: jest.fn(async (_request: FsRequest): Promise<EditOpen> => ({ state: 'cancelled' })),
+    fsOpenWith: jest.fn(async (_request: FsRequest): Promise<EditOpen> => ({ state: 'cancelled' })),
+    fsDownload: jest.fn(async (_request: FsRequest) => ({ status: 'cancelled' as const })),
+    fsInsertPath: jest.fn(async (_request: FsRequest) => ({ written: true })),
     onFsEditState: jest.fn(async () => () => {}), fsEditList: jest.fn(async () => []),
     onFsCwd: jest.fn(async (cb: (event: CwdEvent) => void) => { cwd = cb; return () => { cwd = undefined; }; }),
     emit(path: string, sessionGeneration = 1) { cwd?.({ terminalId, path, sessionGeneration, host: 'remote' }); },
@@ -68,6 +84,8 @@ const toasts = () => store.getState().ui.toasts;
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 beforeEach(() => {
   jest.mocked(readReconnectCoordinator).mockReset();
+  jest.mocked(writeClipboardText).mockReset().mockResolvedValue(undefined);
+  jest.mocked(terminalService.writeToTerminal).mockClear();
   store.dispatch(sshOwnersChanged({ [terminalId]: initialTag.connectionId }));
   store.dispatch(dismissAllToasts());
   observe(view('connected'));
@@ -256,4 +274,277 @@ test('shell_reconnect_displays_coordinator_error_without_using_fallback', async 
   await act(async () => button('Reconnect').click());
   expect(reconnect).toHaveBeenCalledWith(terminalId); expect(fallback).not.toHaveBeenCalled();
   expect(container.textContent).toContain('Return to the local prompt to reconnect');
+});
+
+const row = (name = '.env') => [...container.querySelectorAll<HTMLButtonElement>('.ssh-file-name')]
+  .find(el => el.lastChild?.textContent === name)!;
+const dialog = () => document.querySelector<HTMLElement>('[role="dialog"]')!;
+const entryRequest = { terminalId, path: '/home/.env', expectedGeneration: 1 };
+const field = (name: string) => [...dialog().querySelectorAll('label')]
+  .find(label => label.textContent?.trim() === name)!.querySelector('input')!;
+const mouse = (target: Element, type: string, button: number) => {
+  const event = new MouseEvent(type, { button, bubbles: true, cancelable: true });
+  target.dispatchEvent(event);
+  return event;
+};
+const menuButton = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+  .find(el => el.querySelector('.context-menu-label')?.textContent === label)!;
+async function choose(label: string, name?: string) {
+  act(() => { mouse(row(name).parentElement!, 'contextmenu', 2); });
+  await act(async () => menuButton(label).click());
+}
+const key = (target: Element, key: string, shiftKey = false) =>
+  target.dispatchEvent(new KeyboardEvent('keydown', { key, shiftKey, bubbles: true, cancelable: true }));
+
+test('right_clicked_B_not_selected_A_is_target_for_every_menu_action', async () => {
+  await act(async () => render());
+  // A parent outside the React root observes whether the event escaped the file row.
+  const ancestor = jest.fn();
+  container.parentElement!.addEventListener('contextmenu', ancestor, { once: true });
+  const selectA = () => act(() => row('logs').click());
+  selectA();
+  await choose('Open'); expect(api.fsOpen).toHaveBeenCalledWith(entryRequest);
+  expect(ancestor).not.toHaveBeenCalled();
+  container.parentElement!.removeEventListener('contextmenu', ancestor);
+  expect(row('logs').getAttribute('aria-pressed')).toBe('true');
+  await choose('Open with…'); expect(api.fsOpenWith).toHaveBeenCalledWith(entryRequest);
+  await choose('Download…'); expect(api.fsDownload).toHaveBeenCalledWith(entryRequest);
+  await choose('Copy path'); expect(writeClipboardText).toHaveBeenCalledWith(entryRequest.path);
+  await choose('Insert path'); expect(api.fsInsertPath).toHaveBeenCalledWith(entryRequest);
+  await choose('Properties'); expect(api.fsStat).toHaveBeenLastCalledWith(entryRequest);
+  act(() => button('Close', dialog()).click());
+  await choose('Permissions…'); expect(api.fsStat).toHaveBeenLastCalledWith(entryRequest);
+  act(() => { input(field('UID'), '101'); input(field('Octal mode'), '4600'); });
+  await act(async () => { submit(dialog().querySelector('form')!); });
+  expect(api.fsChown).toHaveBeenCalledWith({ ...entryRequest, uid: 101 });
+  expect(api.fsChmod).toHaveBeenCalledWith({ ...entryRequest, mode: 0o4600 });
+  await choose('Rename');
+  act(() => input(field('New name'), 'changed'));
+  await act(async () => { submit(dialog().querySelector('form')!); });
+  expect(api.fsRename).toHaveBeenCalledWith({ ...entryRequest, newPath: '/home/changed' });
+  selectA();
+  await choose('Delete…');
+  await act(async () => button('Delete', dialog()).click());
+  expect(api.fsDelete).toHaveBeenCalledWith({ ...entryRequest, recursive: false, confirmed: true });
+});
+
+test('folder_open_disabled_but_download_enabled', async () => {
+  await act(async () => render());
+  act(() => { mouse(row('logs').parentElement!, 'contextmenu', 2); });
+  expect(menuButton('Open').disabled).toBe(true);
+  expect(menuButton('Open with…').title).toMatch(/regular files/);
+  expect(menuButton('Download…').disabled).toBe(false);
+  expect(menuButton('Delete…').classList.contains('danger')).toBe(true);
+  expect([...document.querySelector('[role="menu"]')!.children].map(el =>
+    el.getAttribute('role') === 'separator' ? '|' : el.querySelector('.context-menu-label')?.textContent)).toEqual([
+    'Open', 'Open with…', 'Download…', '|', 'Copy path', 'Insert path', '|',
+    'Rename', 'Delete…', '|', 'Properties', 'Permissions…',
+  ]);
+});
+
+test('disconnected_menu_and_middle_click_make_no_calls', async () => {
+  await act(async () => render());
+  act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
+  act(() => observe(view('disconnected', 1, 2), snapshot(1, 'ended')));
+  const items = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+  expect(items).toHaveLength(9);
+  act(() => {
+    items.forEach(item => { expect(item.disabled && item.title).toBeTruthy(); item.click(); });
+    expect(mouse(row().parentElement!, 'mousedown', 1).defaultPrevented).toBe(true);
+    expect(mouse(row().parentElement!, 'auxclick', 1).defaultPrevented).toBe(true);
+  });
+  for (const command of [api.fsOpen, api.fsOpenWith, api.fsDownload, api.fsInsertPath,
+    api.fsRename, api.fsDelete, api.fsStat, api.fsChown, api.fsChmod, writeClipboardText]) {
+    expect(command).not.toHaveBeenCalled();
+  }
+  expect(dialog()).toBeNull();
+});
+
+test('middle_pointer_and_auxclick_insert_only_once', async () => {
+  await act(async () => render());
+  await act(async () => {
+    expect(mouse(row(), 'mousedown', 1).defaultPrevented).toBe(true);
+    expect(mouse(row(), 'auxclick', 1).defaultPrevented).toBe(true);
+  });
+  expect(api.fsInsertPath).toHaveBeenCalledTimes(1);
+});
+
+test('insert_sends_to_own_terminal_not_broadcast_and_has_no_CR_LF', async () => {
+  await act(async () => render());
+  await choose('Insert path');
+  expect(api.fsInsertPath).toHaveBeenCalledTimes(1);
+  expect(api.fsInsertPath).toHaveBeenCalledWith(entryRequest);
+  expect(api.fsInsertPath.mock.calls[0][0].path).not.toMatch(/[\r\n]/);
+  expect(terminalService.writeToTerminal).not.toHaveBeenCalled();
+});
+
+test('clipboard_failure_has_no_copied_toast', async () => {
+  await act(async () => render());
+  const clipboard = deferred<void>();
+  jest.mocked(writeClipboardText).mockReturnValueOnce(clipboard.promise.then(() => { throw new Error('denied'); }));
+  await choose('Copy path');
+  expect(toasts()).toHaveLength(0);
+  await act(async () => clipboard.resolve());
+  expect(toasts()).toEqual([expect.objectContaining({ type: 'error', message: 'Could not copy the remote path.' })]);
+});
+
+test('properties_stat_targets_context_item_and_renders_missing_attrs_as_unavailable', async () => {
+  await act(async () => render());
+  api.fsStat.mockResolvedValueOnce({ name: '.env', path: entryRequest.path, kind: 'file' });
+  await choose('Properties');
+  expect(api.fsStat).toHaveBeenCalledWith(entryRequest);
+  expect(dialog().textContent).toContain(entryRequest.path);
+  const fields = [...dialog().querySelectorAll('dd')].map(el => el.textContent);
+  expect(fields).toContain('Unavailable : Unavailable');
+  expect(fields.filter(value => value === 'Unavailable').length).toBeGreaterThanOrEqual(4);
+});
+
+test('octal_checkboxes_roundtrip_and_preserve_special_bits', async () => {
+  await act(async () => render());
+  await choose('Permissions…');
+  const mode = field('Octal mode');
+  const execute = dialog().querySelector<HTMLInputElement>('[aria-label="Group execute"]')!;
+  expect(mode.value).toBe('4640');
+  act(() => execute.click());
+  expect(mode.value).toBe('4650');
+  act(() => input(mode, '2750'));
+  expect(execute.checked).toBe(true);
+  act(() => execute.click());
+  expect(mode.value).toBe('2740');
+  await act(async () => { submit(mode.form!); });
+  expect(api.fsChmod).toHaveBeenCalledWith({ ...entryRequest, mode: 0o2740 });
+  expect(api.fsChown).not.toHaveBeenCalled();
+});
+
+const denied = { code: 'permissionDenied', outcome: 'unchanged', message: 'Permission denied. Nothing was changed.' };
+async function submitPermissionChanges() {
+  await choose('Permissions…');
+  act(() => { input(field('UID'), '101'); input(field('Octal mode'), '4600'); });
+  await act(async () => { submit(dialog().querySelector('form')!); });
+}
+
+test('ownership_denied_does_not_send_chmod_and_keeps_dialog', async () => {
+  await act(async () => render());
+  api.fsChown.mockRejectedValueOnce(denied);
+  await submitPermissionChanges();
+  expect(api.fsChown).toHaveBeenCalledWith({ ...entryRequest, uid: 101 });
+  expect(api.fsChmod).not.toHaveBeenCalled();
+  expect(dialog().querySelector('[role="alert"]')?.textContent).toContain('Nothing was changed');
+});
+
+test('chmod_denied_after_chown_shows_partial_not_nothing_changed', async () => {
+  await act(async () => render());
+  api.fsChmod.mockRejectedValueOnce(denied);
+  await submitPermissionChanges();
+  expect(api.fsChown.mock.invocationCallOrder[0]).toBeLessThan(api.fsChmod.mock.invocationCallOrder[0]);
+  expect(api.fsStat).toHaveBeenCalledTimes(2);
+  const message = dialog().querySelector('[role="alert"]')?.textContent;
+  expect(message).toContain('Partially completed: ownership changed');
+  expect(message).not.toContain('Nothing was changed');
+});
+
+test('recursive_delete_cancel_no_request_confirm_exact_target', async () => {
+  await act(async () => render());
+  act(() => row().click());
+  await choose('Delete…', 'logs');
+  expect(dialog().textContent).toContain('/home/logs');
+  expect(dialog().textContent).toContain('recursively');
+  expect(document.activeElement).toBe(button('Cancel', dialog()));
+  act(() => button('Cancel', dialog()).click());
+  expect(api.fsDelete).not.toHaveBeenCalled();
+  await choose('Delete…', 'logs');
+  await act(async () => button('Delete', dialog()).click());
+  expect(api.fsDelete).toHaveBeenCalledWith({ ...entryRequest, path: '/home/logs', recursive: true, confirmed: true });
+});
+
+test('all_ssh_dialogs_trap_tab_escape_and_restore_trigger_focus', async () => {
+  await act(async () => render());
+  const trapAndClose = (trigger: HTMLElement) => {
+    const controls = [...dialog().querySelectorAll<HTMLElement>('input:not(:disabled),button:not(:disabled)')];
+    act(() => {
+      controls[0].focus();
+      key(controls[0], 'Tab', true);
+      const last = controls[controls.length - 1];
+      expect(document.activeElement).toBe(last);
+      key(last, 'Tab');
+      expect(document.activeElement).toBe(controls[0]);
+      key(controls[0], 'Escape');
+    });
+    expect(dialog()).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  };
+  for (const action of ['Properties', 'Permissions…', 'Rename', 'Delete…']) {
+    await choose(action);
+    trapAndClose(row());
+  }
+  for (const label of ['New file', 'New folder']) {
+    const trigger = button(label);
+    act(() => { trigger.focus(); trigger.click(); });
+    trapAndClose(trigger);
+  }
+});
+
+test('invalid_name_never_invokes_create_or_rename', async () => {
+  const form = await openCreate();
+  act(() => { input(form.querySelector('input')!, '..'); submit(form); });
+  expect(api.fsCreate).not.toHaveBeenCalled();
+  expect(dialog().querySelector('[role="alert"]')).not.toBeNull();
+  act(() => button('Cancel', dialog()).click());
+  act(() => { key(pathBox(), 'F2'); key(pathBox(), 'Delete'); });
+  expect(dialog()).toBeNull();
+  act(() => key(row(), 'F2'));
+  act(() => { const name = field('New name'); input(name, 'a/b'); submit(name.form!); });
+  expect(api.fsRename).not.toHaveBeenCalled();
+  expect(dialog().querySelector('[role="alert"]')).not.toBeNull();
+});
+
+test('rename_success_waits_for_ack_and_refresh', async () => {
+  await act(async () => render());
+  await choose('Rename');
+  const ack = deferred<void>(), refreshed = deferred<RemoteListing>();
+  api.fsRename.mockReturnValueOnce(ack.promise);
+  api.fsList.mockReturnValueOnce(refreshed.promise);
+  act(() => { const name = field('New name'); input(name, 'replacement'); submit(name.form!); });
+  expect(api.fsList).toHaveBeenCalledTimes(1);
+  expect(toasts()).toHaveLength(0);
+  await act(async () => ack.resolve());
+  expect(api.fsList).toHaveBeenLastCalledWith({ ...entryRequest, path: '/home' });
+  expect(dialog()).not.toBeNull();
+  expect(toasts()).toHaveLength(0);
+  await act(async () => refreshed.resolve(listing()));
+  expect(dialog()).toBeNull();
+  expect(toasts()).toEqual([expect.objectContaining({ type: 'success', message: 'Remote entry renamed.' })]);
+});
+
+test('hidden_browser_menu_closes_on_keyboard_tab_change_without_focus_steal', async () => {
+  await act(async () => render());
+  act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
+  const nextTab = document.createElement('button');
+  document.body.append(nextTab);
+  try {
+    await act(async () => { nextTab.focus(); render(false); });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    expect(document.activeElement).toBe(nextTab);
+  } finally { nextTab.remove(); }
+});
+
+test('open_result_reaches_the_shell_edit_warning', async () => {
+  api.fsOpen.mockResolvedValueOnce({ state: 'needsEditor' });
+  await act(async () => shell(view('connected')));
+  await choose('Open');
+  expect(button('Open editor settings')).toBeDefined();
+  await choose('Open with…');
+  expect(button('Open editor settings')).toBeUndefined();
+});
+
+test('control_path_insertion_disabled_but_copy_remains_exact', async () => {
+  const path = '/home/with\nnewline';
+  api.fsList.mockResolvedValueOnce({ ...listing(), entries: [{ name: '.env', path, kind: 'file' }] });
+  await act(async () => render());
+  act(() => { mouse(row().parentElement!, 'contextmenu', 2); });
+  expect(menuButton('Insert path').title).toMatch(/control characters/);
+  expect(menuButton('Insert path').disabled).toBe(true);
+  await act(async () => { mouse(row(), 'mousedown', 1); menuButton('Copy path').click(); });
+  expect(api.fsInsertPath).not.toHaveBeenCalled();
+  expect(writeClipboardText).toHaveBeenCalledWith(path);
 });

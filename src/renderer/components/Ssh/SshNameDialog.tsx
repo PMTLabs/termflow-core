@@ -1,20 +1,23 @@
 import React, { useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialogA11y } from '../UI/useDialogA11y';
+import { validRemoteName } from './sshFileMenu';
 import type { CreateKind } from './useSshFileBrowser';
 import '../UI/ConfirmDialog.css';
 
 interface Props {
-  kind: CreateKind;
+  kind: CreateKind | 'rename';
   path: string;
+  initialName?: string;
+  disabled?: boolean;
   onSubmit(name: string): Promise<{ error?: string; acknowledged?: boolean }>;
   onClose(): void;
 }
 
-export function SshNameDialog({ kind, path, onSubmit, onClose }: Props) {
+export function SshNameDialog({ kind, path, initialName = '', disabled = false, onSubmit, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  const [name, setName] = useState('');
+  const [name, setName] = useState(initialName);
   const [error, setError] = useState<string>();
   const [done, setDone] = useState(false);
   const [pending, setPending] = useState(false);
@@ -24,10 +27,11 @@ export function SshNameDialog({ kind, path, onSubmit, onClose }: Props) {
   return createPortal(<div className="confirm-dialog-overlay" onClick={cancel}>
     <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
       className="confirm-dialog" onClick={event => event.stopPropagation()}>
-      <div className="confirm-dialog-header"><h3 id={titleId}>New {kind}</h3></div>
+      <div className="confirm-dialog-header"><h3 id={titleId}>{kind === 'rename' ? 'Rename remote entry' : `New ${kind}`}</h3></div>
       <form onSubmit={async event => {
         event.preventDefault();
-        if (busy.current || done || !name) return;
+        if (busy.current || done || disabled) return;
+        if (!validRemoteName(name)) { setError('Enter a single valid remote name.'); return; }
         busy.current = true; setPending(true); setError(undefined);
         try {
           const result = await onSubmit(name);
@@ -36,8 +40,8 @@ export function SshNameDialog({ kind, path, onSubmit, onClose }: Props) {
         } finally { busy.current = false; setPending(false); }
       }}>
         <div className="confirm-dialog-body">
-          <p>In <code>{path}</code></p>
-          <label>{kind === 'folder' ? 'Folder name' : 'File name'}
+          <p>{kind === 'rename' ? 'Rename' : 'In'} <code className="ssh-remote-path">{path}</code></p>
+          <label>{kind === 'rename' ? 'New name' : kind === 'folder' ? 'Folder name' : 'File name'}
             <input className="ssh-remote-name" required value={name} readOnly={pending || done}
               onChange={event => setName(event.target.value)} />
           </label>
@@ -46,7 +50,7 @@ export function SshNameDialog({ kind, path, onSubmit, onClose }: Props) {
         <div className="confirm-dialog-footer">
           <button type="button" className="confirm-btn cancel" disabled={pending}
             data-dialog-cancel onClick={cancel}>{done ? 'Close' : 'Cancel'}</button>
-          <button type="submit" className="confirm-btn primary" disabled={pending || done}>Create</button>
+          <button type="submit" className="confirm-btn primary" disabled={pending || done || disabled}>{kind === 'rename' ? 'Rename' : 'Create'}</button>
         </div>
       </form>
     </div>

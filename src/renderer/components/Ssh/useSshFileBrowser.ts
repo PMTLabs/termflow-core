@@ -4,7 +4,8 @@ import { store, type RootState } from '../../store';
 import { addToast } from '../../store/slices/uiSlice';
 import { sshFileEvents } from '../../services/sshFileEvents';
 import { readSshFileSession, readSshLaunchState, type SshBrowserTagPatch, type SshPaneTag } from './ssh066Contract';
-import type { FsError, RemoteEntry, RemoteListing } from './sshFileTypes';
+import type { FsError, FsRequest, RemoteEntry, RemoteListing, SshFileApi } from './sshFileTypes';
+import { validRemoteName } from './sshFileMenu';
 
 export interface SshBrowserControllerProps {
   terminalId: string;
@@ -40,6 +41,14 @@ function describeFailure(error: unknown, path: string): string {
 interface ChildListing { entries?: RemoteEntry[]; error?: string }
 interface Confirmed { listing: RemoteListing; epoch: BrowserEpoch; loadedAt: Date }
 export type CreateKind = 'folder' | 'file';
+
+export interface SshRowScope {
+  api: SshFileApi;
+  request: FsRequest;
+  isCurrent(): boolean;
+  isLive(): boolean;
+  refresh(): Promise<boolean>;
+}
 
 export function useSshFileBrowser({ terminalId, sshTag, surfaceActive, onPatchTag }: SshBrowserControllerProps) {
   const api = window.electronAPI?.ssh;
@@ -208,7 +217,7 @@ export function useSshFileBrowser({ terminalId, sshTag, surfaceActive, onPatchTa
     if (!api || !owner || !path || !canUseRows || owner.rootPending || owner.createRequest || !isCurrent(owner)) {
       return { error: 'The directory is not available.' };
     }
-    if (!name.trim() || name === '.' || name === '..' || /[/\x00-\x1f\x7f]/.test(name)) {
+    if (!validRemoteName(name)) {
       return { error: 'Enter a single valid remote name.' };
     }
     const target = { terminalId, expectedGeneration: owner.generation, path: `${path === '/' ? '' : path}/${name}` };
@@ -231,9 +240,24 @@ export function useSshFileBrowser({ terminalId, sshTag, surfaceActive, onPatchTa
     }
   }
 
+  const isLiveNow = () => !!current && confirmed.current === current && canUseRows && !current.epoch.rootPending
+    && !current.epoch.createRequest && isCurrent(current.epoch);
+
+  function captureRow(path: string): SshRowScope | undefined {
+    if (!api || !current || !isLiveNow()) return;
+    const owner = current.epoch;
+    const version = rootVersion.current;
+    const sameListing = () => isCurrent(owner) && rootVersion.current === version;
+    const isLive = () => sameListing() && !owner.rootPending && !owner.createRequest;
+    return {
+      api, request: { terminalId, path, expectedGeneration: owner.generation },
+      isCurrent: () => isCurrent(owner), isLive,
+      refresh: async () => isLive() && list(current.listing.path, owner, 'refresh'),
+    };
+  }
+
   return { path, draft, setDraft, navigate, refresh, online, live, stale, loading, creating, error,
     entries: current?.listing.entries, loadedAt: current?.loadedAt, canUseRows, create, reported,
-    children, expanded, toggleFolder, selected, setSelected,
-    isLiveNow: () => !!current && canUseRows && !current.epoch.rootPending && !current.epoch.createRequest && isCurrent(current.epoch),
+    children, expanded, toggleFolder, selected, setSelected, isLiveNow, captureRow,
   };
 }
