@@ -953,9 +953,17 @@ const FlyoutPanel: React.FC<FlyoutPanelProps> = ({
  * list: just the caller's own content, in its own hook instance (a `.map()` callback may not
  * call hooks directly — this component exists so each open custom flyout gets one).
  */
+// Merged into `ContextMenuItem` above; declared here to keep that interface's lines unchanged.
+export interface ContextMenuItem {
+  /** Destructive action (delete, remove): rendered in the danger colour. */
+  danger?: boolean;
+}
+
 const CustomFlyoutPanel: React.FC<{ flyout: ContextMenuCustomFlyout }> = ({ flyout }) => {
   const { panelRef, flip } = useSubmenuEdgeFlip(true, [flyout.content]);
   useEffect(() => {
+    // The content's own effects run first: keep a focus it already placed (e.g. the selected icon).
+    if (panelRef.current?.contains(document.activeElement)) return;
     panelRef.current?.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), [tabindex="0"]')?.focus();
   }, [panelRef]);
   return (
@@ -1254,7 +1262,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         const button = (
           <button
             key={index}
-            className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}`}
+            className={`context-menu-item${submenuOpen ? ' is-submenu-open' : ''}${item.danger ? ' danger' : ''}`}
             disabled={disabled}
             role="menuitem"
             tabIndex={-1}
