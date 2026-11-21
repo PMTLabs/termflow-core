@@ -1,17 +1,17 @@
 use super::*;
 use crate::pty_manager::spawn_spec::{build_spawn_spec_with, PS_CWD_INTEGRATION};
 
-fn installed(var: &str, path: PathBuf) -> String {
+pub(super) fn installed(var: &str, path: PathBuf) -> String {
     let path = std::env::var_os(var).map(PathBuf::from).unwrap_or(path);
     assert!(path.is_absolute() && path.is_file(), "required Windows shell missing: set {var} ({path:?})");
     path.into_os_string().into_string().expect("Unicode shell path")
 }
 
-fn system32() -> PathBuf {
+pub(super) fn system32() -> PathBuf {
     PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot")).join("System32")
 }
 
-fn ordinary(f: &Fixture, shell: &str, args: &[&str]) -> SpawnSpec {
+pub(super) fn ordinary(f: &Fixture, shell: &str, args: &[&str]) -> SpawnSpec {
     let args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     build_spawn_spec_with(PC, Some(LEAF), Some(shell), "fixture", Some(&args),
         f.0.to_str(), 120, 32, false, |_| None)

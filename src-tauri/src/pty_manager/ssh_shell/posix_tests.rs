@@ -7,6 +7,9 @@ use termflow_pty_protocol::{da1::{StartupDa1, StartupDrain, StartupReplies}, pum
 #[path = "ordinary_baseline.rs"]
 mod baseline;
 
+#[path = "launch_tests.rs"]
+mod launch_tests;
+
 #[cfg(windows)]
 #[path = "windows_tests.rs"]
 mod windows_tests;
