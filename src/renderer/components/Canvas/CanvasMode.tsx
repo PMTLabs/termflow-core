@@ -1140,7 +1140,7 @@ export const CanvasMode: React.FC = () => {
     // A port click on a node that vanished between press and release — its tab closed, its
     // pane was re-homed — has nowhere to fan from and nothing to connect to. Dropping the
     // spawn is right: half of what was asked for is a terminal wired to nothing.
-    if (menu.fromId && !source) return undefined;
+    if (menu.fromId && !source) return;
 
     // `model` is deliberately the RAW (un-spaced) model: a spawn must avoid the terminals' true
     // stored positions. For an SSH launch the render-time closure may be stale, so it is re-read.
@@ -1163,7 +1163,7 @@ export const CanvasMode: React.FC = () => {
       if (!tab || !tree) return 'The new SSH terminal could not be placed on Canvas.';
       plan = { tab: { ...tab, isActive: false }, leafId: result.terminalId, rect, tree };
     } else {
-      if (!profile) return undefined;
+      if (!profile) return;
       plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
       dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
       dispatch(addTab(plan.tab));
