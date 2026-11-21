@@ -177,8 +177,25 @@ impl HostKeys {
                 let restore_complete = matches!(op, PaneOp::Settle);
                 let ended = inner.window_pages.settle(page).expect("validated sender page");
                 Self::end_pages_locked(inner, &ended);
+                if restore_complete { Self::retire_unrestored_parked_rows(inner, page.pg, effects); }
                 effects.release_restore_sweep = restore_complete && inner.window_pages.settle_restore_participant(page);
                 PaneResult::Ok
+            }
+        }
+    }
+
+    fn retire_unrestored_parked_rows(inner: &mut Inner, page_pg: u64, effects: &mut PaneEffects) {
+        // Enter has announced the full restored tree, even if some panes have not mounted.
+        let present: std::collections::HashSet<_> = inner.panes.present.iter()
+            .filter(|(pi, _)| pi.pg == page_pg).map(|(_, pane)| pane.leaf.as_str()).collect();
+        let retired: Vec<_> = inner.owners.iter().filter(|(leaf, row)| {
+            matches!(row.owner, Owner::Parked { pg, by } if pg == page_pg && by.pg != page_pg)
+                && !present.contains(leaf.as_str())
+        }).map(|(leaf, row)| (leaf.clone(), row.cg)).collect();
+        for (leaf, cg) in retired {
+            effects.ssh_retired.push((leaf.clone(), cg));
+            if !(Self::remove_held(inner, &leaf) || Self::release_unstarted(inner, &leaf)) {
+                inner.owners.get_mut(&leaf).unwrap().owner = Owner::Orphaned;
             }
         }
     }

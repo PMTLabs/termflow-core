@@ -47,11 +47,10 @@ async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
             }
             "reload-settle" => {
                 let mut reload = Page::register(&keys, page.label, page.wi);
-                assert_eq!(reload.op(&keys, PaneOp::Settle), PaneResult::Ok);
-                reconcile(&f, &keys);
-                assert!(f.registry.state("tm-a", false).is_ok(), "reload parked receipt");
+                assert_eq!(reload.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
                 let next = reload.enter(&keys, "tm-a");
                 assert_eq!(reload.admit(&keys, next.pi), receipt);
+                assert_eq!(reload.op(&keys, PaneOp::Settle), PaneResult::Ok);
             }
             "cancel" | "self-take" => {
                 page.op(&keys, PaneOp::Stash { tx: "round2".into(), pairs: vec![a], ui: None });
@@ -80,6 +79,71 @@ async fn held_nonretiring_transitions_preserve_receipt_and_reconnect() {
         f.registry.shutdown().await;
     }
 }
+#[tokio::test]
+async fn settle_retires_unrestored_ssh_leaf() {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "unrestored-ssh");
+    page.enter(&keys, "tm-a");
+    let f = fixture();
+    open(&f, &keys, "tm-a", "c-a");
+    let receipt = keys.ssh_owner_receipt("tm-a").unwrap();
+    let mut reload = Page::register(&keys, page.label, page.wi);
+    assert_eq!(reload.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
+    assert_eq!(keys.ssh_owner_receipt("tm-a"), Some(receipt));
+    reload.enter(&keys, "tm-b");
+    let (result, effects) = reload.op_at(&keys, PaneOp::Settle, Instant::now());
+    assert_eq!(result, PaneResult::Ok);
+    assert_eq!(keys.ssh_owner_receipt("tm-a"), None);
+    assert!(effects.ssh_retired.contains(&("tm-a".into(), receipt)));
+    reconcile(&f, &keys);
+    assert!(f.registry.state("tm-a", false).is_err());
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn settle_preserves_ssh_leaf_departed_on_current_page() {
+    let keys = HostKeys::default();
+    let page = Page::new(&keys, "same-page-ssh");
+    let mut reload = Page::register(&keys, page.label, page.wi);
+    assert_eq!(reload.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
+    let a = reload.enter(&keys, "tm-a");
+    let f = fixture();
+    open(&f, &keys, "tm-a", "c-a");
+    let receipt = keys.ssh_owner_receipt("tm-a").unwrap();
+    assert_eq!(reload.op(&keys, PaneOp::Depart { pi: a.pi }), PaneResult::Ok);
+    let (result, effects) = reload.op_at(&keys, PaneOp::Settle, Instant::now());
+    assert_eq!(result, PaneResult::Ok);
+    assert!(effects.ssh_retired.is_empty());
+    assert_eq!(keys.ssh_owner_receipt("tm-a"), Some(receipt));
+    reconcile(&f, &keys);
+    assert!(f.registry.state("tm-a", false).is_ok());
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn settle_preserves_entered_ssh_leaf_after_two_reloads() {
+    let keys = HostKeys::default();
+    let mut page = Page::new(&keys, "double-reload-ssh");
+    page.enter(&keys, "tm-a");
+    let f = fixture();
+    open(&f, &keys, "tm-a", "c-a");
+    let receipt = keys.ssh_owner_receipt("tm-a").unwrap();
+    let mut first = Page::register(&keys, page.label, page.wi);
+    assert_eq!(first.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
+    let mut second = Page::register(&keys, first.label, first.wi);
+    assert_eq!(second.op(&keys, PaneOp::ReplacePage), PaneResult::Ok);
+    let a = second.enter(&keys, "tm-a");
+    // Enter protects the receipt even when mount admission happens after Settle.
+    let (result, effects) = second.op_at(&keys, PaneOp::Settle, Instant::now());
+    assert_eq!(result, PaneResult::Ok);
+    assert!(effects.ssh_retired.is_empty());
+    assert_eq!(keys.ssh_owner_receipt("tm-a"), Some(receipt));
+    assert_eq!(second.admit(&keys, a.pi), receipt);
+    reconcile(&f, &keys);
+    assert!(f.registry.state("tm-a", false).is_ok());
+    f.registry.shutdown().await;
+}
+
 #[tokio::test]
 async fn shell_termination_retains_only_live_ssh_receipt_holders() {
     let leaf = "tm-a";
