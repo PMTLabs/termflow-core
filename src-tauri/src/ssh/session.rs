@@ -63,11 +63,11 @@ pub enum SessionError {
 impl SessionError {
     pub fn reason(&self) -> String {
         match self {
-            Self::NotConnected => "The SSH connection is not open. Run Test connection again.".into(),
-            Self::NotFound => "The saved connection could not be found. Reopen SSH Connections and select a saved connection.".into(),
-            Self::Cancelled => "The SSH attempt was cancelled. Run Test connection again when ready.".into(),
-            Self::StaleAttempt => "This SSH attempt is no longer current. Run Test connection again.".into(),
-            Self::OwnerRetired => "The SSH attempt was closed. Run Test connection again.".into(),
+            Self::NotConnected => "The SSH connection is not open. Try again.".into(),
+            Self::NotFound => "The saved SSH connection could not be found. It may have been deleted or changed.".into(),
+            Self::Cancelled => "The SSH attempt was cancelled.".into(),
+            Self::StaleAttempt => "This SSH attempt is no longer current. Try again.".into(),
+            Self::OwnerRetired => "The SSH attempt was closed. Try again.".into(),
             Self::AdmissionClosed => "TermFlow is not accepting new SSH attempts. Reopen the app and try again.".into(),
             Self::InvalidTarget => "The SSH destination is not valid. Check the saved host, port, user and jump host settings.".into(),
             Self::HostKeyChanged => "The host key changed. Confirm the new fingerprint with the server's administrator before updating ~/.ssh/known_hosts. There is no override.".into(),
@@ -76,7 +76,7 @@ impl SessionError {
             Self::KnownHostsMalformed { line } => format!("An entry in known_hosts could not be read at line {line}. Repair the file before connecting."),
             Self::KnownHostsUnreadable => "Could not read known_hosts. Check that the file is accessible.".into(),
             Self::TrustWriteFailed => "Could not save host trust safely. Check access to known_hosts before retrying.".into(),
-            Self::TrustAlreadyPinned => "The host already has a saved key. Run Test connection again to verify it.".into(),
+            Self::TrustAlreadyPinned => "The host already has a saved key. Try again to verify it.".into(),
             Self::AuthRejected => "Authentication was not accepted. Check the server's allowed methods and the saved sign-in settings.".into(),
             Self::AgentUnavailable => "The OpenSSH agent could not sign in. Check that it is running, unlocked and has the correct key loaded.".into(),
             Self::CapabilityUnavailable => "The server did not allow a required SSH operation. If using a jump host, check that it allows forwarding to the target.".into(),

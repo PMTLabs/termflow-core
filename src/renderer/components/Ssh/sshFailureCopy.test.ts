@@ -1,6 +1,6 @@
 import path from 'path';
 import { readSource } from '../../utils/readSource';
-import { failureCopy, reasonCode } from './SshTestConnectionDialog';
+import { failureCopy, reasonCode, testDialogCopy } from './SshTestConnectionDialog';
 
 // Probe snapshots carry only the backend's human reason, not its code, so the Test dialog maps
 // that text back to a code (backlog 017: the snapshot should carry the code). This pins both
@@ -34,5 +34,20 @@ test('every renderer code has a backend variant', () => {
 test('backend reason text maps back to its code', () => {
   for (const { code, text } of arms) {
     expect([text, reasonCode(text.replace('{line}', '12'))]).toEqual([text, code]);
+  }
+});
+
+// The same reasons reach SSH panes, the file browser and metrics, so the backend text must not
+// point at one surface. Test-dialog actions live in the renderer's testDialogCopy instead.
+test('backend reasons are context-neutral', () => {
+  for (const { code, text } of arms) {
+    expect([code, /Test connection|SSH Connections/.test(text)]).toEqual([code, false]);
+  }
+});
+
+test('Test dialog copy only overrides backend codes and names its next step', () => {
+  const codes = new Set(arms.map(arm => arm.code));
+  for (const [code, copy] of testDialogCopy) {
+    expect([code, codes.has(code), /Test connection|SSH Connections/.test(copy)]).toEqual([code, true, true]);
   }
 });

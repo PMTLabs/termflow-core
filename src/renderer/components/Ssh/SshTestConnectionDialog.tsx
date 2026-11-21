@@ -39,11 +39,11 @@ export function startSshProbe(api: SshAPI, connectionId: string, observed: (view
 }
 
 export const failureCopy = new Map([
-  ["not-connected","The SSH connection is not open. Run Test connection again."],
-  ["not-found","The saved connection could not be found. Reopen SSH Connections and select a saved connection."],
-  ["cancelled","The SSH attempt was cancelled. Run Test connection again when ready."],
-  ["stale-attempt","This SSH attempt is no longer current. Run Test connection again."],
-  ["owner-retired","The SSH attempt was closed. Run Test connection again."],
+  ["not-connected","The SSH connection is not open. Try again."],
+  ["not-found","The saved SSH connection could not be found. It may have been deleted or changed."],
+  ["cancelled","The SSH attempt was cancelled."],
+  ["stale-attempt","This SSH attempt is no longer current. Try again."],
+  ["owner-retired","The SSH attempt was closed. Try again."],
   ["admission-closed","TermFlow is not accepting new SSH attempts. Reopen the app and try again."],
   ["invalid-target","The SSH destination is not valid. Check the saved host, port, user and jump host settings."],
   ["host-key-changed","The host key changed. Confirm the new fingerprint with the server's administrator before updating ~/.ssh/known_hosts. There is no override."],
@@ -52,7 +52,7 @@ export const failureCopy = new Map([
   ["known-hosts-malformed","An entry in known_hosts could not be read. Repair the file before connecting."],
   ["known-hosts-unreadable","Could not read known_hosts. Check that the file is accessible."],
   ["trust-write-failed","Could not save host trust safely. Check access to known_hosts before retrying."],
-  ["trust-already-pinned","The host already has a saved key. Run Test connection again to verify it."],
+  ["trust-already-pinned","The host already has a saved key. Try again to verify it."],
   ["auth-rejected","Authentication was not accepted. Check the server's allowed methods and the saved sign-in settings."],
   ["agent-unavailable","The OpenSSH agent could not sign in. Check that it is running, unlocked and has the correct key loaded."],
   ["capability-unavailable","The server did not allow a required SSH operation. If using a jump host, check that it allows forwarding to the target."],
@@ -64,6 +64,16 @@ export const failureCopy = new Map([
   ["unsupported-authentication","This sign-in method is not supported. Check which methods the server allows and select a supported one."],
   ["remember-unavailable","The credential was not saved. Check access to the system keyring before using Remember again."],
   ["store-unavailable","The SSH connection store is unavailable. Check that saved connections can be opened."],
+]);
+// The backend reasons above are context-neutral because they also reach SSH panes, the file
+// browser and metrics. In this dialog the next step is a specific action, so these codes say so.
+export const testDialogCopy = new Map([
+  ["not-connected","The SSH connection is not open. Run Test connection again."],
+  ["not-found","The saved connection could not be found. Reopen SSH Connections and select a saved connection."],
+  ["cancelled","The SSH attempt was cancelled. Run Test connection again when ready."],
+  ["stale-attempt","This SSH attempt is no longer current. Run Test connection again."],
+  ["owner-retired","The SSH attempt was closed. Run Test connection again."],
+  ["trust-already-pinned","The host already has a saved key. Run Test connection again to verify it."],
 ]);
 const fallback = 'The SSH test could not finish. Check the saved connection settings and try again.';
 const savedCredentialWarning = 'Saved credential unavailable. Enter it again; Remember may be unavailable.';
@@ -135,7 +145,7 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
   const destination = failedHop ? `${failedHop.hop === 'jump' ? 'jump host ' : ''}${endpoint(failedHop)}`
     : target ? `${endpoint(target)}${jump ? ' through jump host ' + endpoint(jump) : ''}` : undefined;
   const auth = failedHop?.hop === 'jump' ? jump?.auth : target?.auth;
-  const message = code === 'auth-rejected' ? authCopy(credential?.secretKind, auth, true) : failureCopy.get(code ?? '') ?? fallback;
+  const message = code === 'auth-rejected' ? authCopy(credential?.secretKind, auth, true) : testDialogCopy.get(code ?? '') ?? failureCopy.get(code ?? '') ?? fallback;
   return createPortal(<div className="ssh-test-backdrop"><div className="ssh-test-dialog" ref={root} role="dialog" aria-modal="true" aria-label="Test SSH connection">
     <h2>Test SSH connection</h2>
     {secretPrompt && view ? <SshSecretPrompt key={view.promptId} view={{
