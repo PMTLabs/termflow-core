@@ -31,6 +31,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
+pub(crate) mod remote_cwd;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "code", rename_all = "kebab-case")]
 pub enum SessionError {
@@ -356,8 +358,11 @@ struct EntryState {
     launch_seq: u64,
     process_id: Option<String>,
     transport: Option<Arc<SshSession>>,
+    target_host: Option<String>,
+    learned_hostname: Option<String>,
 }
 struct Entry {
+    cwd_streams: Arc<Mutex<remote_cwd::CwdStreams>>,
     owner_receipt: Option<u64>,
     inner: Mutex<EntryState>,
     cancel: CancellationToken,
@@ -375,6 +380,7 @@ impl Entry {
         let was_connected = state.view.state == SessionState::Connected;
         operation(&mut state);
         if was_connected && state.view.state != SessionState::Connected {
+            self.cwd_streams.lock().forget_launch(&state);
             self.cancel.cancel();
             state.transport.take();
             state.pending.take();
@@ -411,6 +417,7 @@ impl Entry {
             return;
         }
         let previous = s.view.clone();
+        self.cwd_streams.lock().forget_launch(&s);
         self.cancel.cancel();
         s.pending.take();
         s.authenticated = false;
@@ -596,9 +603,11 @@ struct RegistryState {
 }
 pub struct SessionRegistry {
     inner: Mutex<RegistryState>,
+    cwd_streams: Arc<Mutex<remote_cwd::CwdStreams>>,
     next: AtomicU64,
     retired: Mutex<Vec<JoinHandle<()>>>,
     deps: RwLock<Arc<Dependencies>>,
+    edits: RwLock<std::sync::Weak<super::sftp::edit::EditRegistry>>,
 }
 impl SessionRegistry {
     pub fn new(deps: Dependencies) -> Self {
@@ -608,9 +617,24 @@ impl SessionRegistry {
                 probes: HashMap::new(),
                 admitting: true,
             }),
+            cwd_streams: Arc::default(),
             next: AtomicU64::new(1),
             retired: Mutex::new(Vec::new()),
             deps: RwLock::new(Arc::new(deps)),
+            edits: RwLock::new(std::sync::Weak::new()),
+        }
+    }
+
+    pub(crate) fn set_edit_registry(&self, edits: &Arc<super::sftp::edit::EditRegistry>) {
+        *self.edits.write() = Arc::downgrade(edits);
+    }
+
+    fn stop_edits(&self, terminal_id: &str, generation: u64) {
+        if let Some(edits) = self.edits.read().upgrade() {
+            let terminal_id = terminal_id.to_owned();
+            // The caller already invalidated the generation's lease. Do not take
+            // edit locks here: admission takes them before its final lease check.
+            engine_runtime().spawn(async move { edits.stop_terminal(&terminal_id, generation).await });
         }
     }
     /// Install the 065 adapter before admitting any sessions. Never swaps dependencies under an attempt.
@@ -694,6 +718,7 @@ impl SessionRegistry {
         });
         let deps = self.deps.read().clone();
         let entry = Arc::new(Entry {
+            cwd_streams: self.cwd_streams.clone(),
             owner_receipt,
             inner: Mutex::new(EntryState {
                 definition: None,
@@ -705,6 +730,8 @@ impl SessionRegistry {
                 launch_seq: 0,
                 process_id: None,
                 transport: None,
+                target_host: None,
+                learned_hostname: None,
             }),
             cancel: CancellationToken::new(),
             transitions,
@@ -756,6 +783,10 @@ impl SessionRegistry {
     }
     fn retire_entry(&self, entry: &Entry) {
         entry.invalidate(None);
+        let view = entry.view();
+        if let Some(id) = view.terminal_id.as_deref() {
+            self.stop_edits(id, view.generation);
+        }
         if let Some(task) = entry.task.lock().take() {
             let mut retired = self.retired.lock();
             retired.retain(|task| !task.is_finished());
@@ -887,6 +918,7 @@ impl SessionRegistry {
         {
             return Err(SessionError::StaleAttempt);
         }
+        self.cwd_streams.lock().forget_launch(&s);
         s.launch_seq = launch_seq;
         s.launch = Some(launch);
         s.process_id = process_id;
@@ -908,6 +940,10 @@ impl SessionRegistry {
             );
         }
         e.publish_locked(&mut s);
+        drop(s);
+        if launch == LaunchState::Ended {
+            self.stop_edits(terminal_id, generation);
+        }
         Ok(())
     }
     /// Terminal SSH can outlive its app channel. Keep the observed terminal
@@ -948,6 +984,7 @@ impl SessionRegistry {
         if let Some(e) = registry.panes.get(id) {
             if e.view().generation == generation {
                 e.invalidate(Some(reason.into()));
+                self.stop_edits(id, generation);
             }
         }
     }
@@ -958,6 +995,56 @@ impl SessionRegistry {
             return Err(SessionError::NotConnected);
         }
         s.transport.clone().ok_or(SessionError::NotConnected)
+    }
+    /// Fence a synchronous, process-addressed PTY write against the latest launch.
+    /// Lock order is registry -> entry -> writer routing; the writer must not
+    /// call back into this registry. An unobserved SSH exit is not detectable here.
+    pub(crate) fn insert_path(
+        &self,
+        terminal_id: &str,
+        expected_generation: u64,
+        path: &str,
+        identity: &crate::identity_index::IdentityIndex,
+        writer: impl FnOnce(&str) -> Result<(), String>,
+    ) -> Result<(), super::sftp::FsError> {
+        use super::sftp::{error, insert::OPERATION, FsCode, FsOutcome};
+
+        let refuse = |code, detail| error(OPERATION, path, code, FsOutcome::Unchanged, detail);
+        let not_connected = || refuse(FsCode::NotConnected, "SSH is not connected and running.");
+        let registry = self.inner.lock();
+        let entry = registry.panes.get(terminal_id).ok_or_else(not_connected)?;
+        let state = entry.inner.lock();
+        if state.view.generation != expected_generation {
+            return Err(refuse(FsCode::Stale, "The SSH session generation changed."));
+        }
+        let process_id = state.process_id.as_deref().ok_or_else(not_connected)?;
+        if !remote_cwd::active(entry, &state, process_id) {
+            return Err(not_connected());
+        }
+        if identity.process_for_leaf(terminal_id).as_deref() != Some(process_id) {
+            return Err(refuse(FsCode::Stale, "The terminal process mapping changed."));
+        }
+        writer(process_id)
+            .map_err(|detail| error(OPERATION, path, FsCode::Io, FsOutcome::Unknown, &detail))
+    }
+
+    /// Check the generation and acquire its transport under the same registry lock.
+    pub fn lease_at(
+        &self,
+        id: &str,
+        expected_generation: u64,
+    ) -> Result<(Arc<SshSession>, String), SessionError> {
+        let registry = self.inner.lock();
+        let e = registry.panes.get(id).ok_or(SessionError::NotConnected)?;
+        let s = e.inner.lock();
+        if s.view.generation != expected_generation {
+            return Err(SessionError::StaleAttempt);
+        }
+        if e.cancel.is_cancelled() || s.view.state != SessionState::Connected {
+            return Err(SessionError::NotConnected);
+        }
+        let session = s.transport.clone().ok_or(SessionError::NotConnected)?;
+        Ok((session, s.view.connection_id.clone()))
     }
     pub fn owner_map(&self) -> HashMap<String, (String, SessionState)> {
         self.inner
@@ -1251,14 +1338,16 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         .await?;
         handles.push(handle);
     }
-    let target = handles.pop().ok_or(SessionError::TransportClosed)?;
+    let target_host = target.hops.last().map(|hop| hop.host.clone());
+    let handle = handles.pop().ok_or(SessionError::TransportClosed)?;
     let session = Arc::new(SshSession {
-        handle: tokio::sync::Mutex::new(target),
+        handle: tokio::sync::Mutex::new(handle),
         cancel: entry.cancel.clone(),
         sftp: tokio::sync::Mutex::new(None),
     });
     entry.update(|s| {
         s.authenticated = true;
+        s.target_host = target_host;
         s.transport = Some(session.clone());
         s.view.state = if s.view.probe_id.is_some() || s.launch == Some(LaunchState::Running) {
             SessionState::Connected
@@ -1272,6 +1361,24 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
         );
         clear_prompt(&mut s.view);
     });
+    if entry.view().terminal_id.is_some() {
+        let entry = entry.clone();
+        let session = session.clone();
+        tokio::spawn(async move {
+            // Allow a trailing CRLF, and reserve the last 250 ms of the five
+            // second budget for exec_with's bounded channel close on failure.
+            if let Ok(output) = session
+                .exec_bounded("hostname", 257, Duration::from_millis(4750))
+                .await
+            {
+                if let Some(host) = learned_hostname(&output) {
+                    // An Entry belongs to precisely one generation. update
+                    // refuses writes after cancellation, including retirement.
+                    entry.update(|s| s.learned_hostname = Some(host.to_owned()));
+                }
+            }
+        });
+    }
     // Handler callbacks observe real transport completion. Holding the bastion handle
     // keeps direct-tcpip alive; no agent forwarding is ever requested.
     entry.cancel.cancelled().await;
@@ -1292,6 +1399,15 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
     }
     Ok(())
 }
+fn learned_hostname(output: &ExecOutput) -> Option<&str> {
+    let host = std::str::from_utf8(&output.stdout).ok()?.trim();
+    (output.exit == 0
+        && !host.is_empty()
+        && host.len() <= 255
+        && !host.chars().any(|c| c.is_whitespace() || c.is_control() || c == '/'))
+    .then_some(host)
+}
+
 pub(crate) fn identity_path(home: &std::path::Path, identity: &str) -> PathBuf {
     let relative = identity.strip_prefix("~/");
     #[cfg(windows)]
@@ -1545,7 +1661,7 @@ async fn authenticate(
 pub struct SshSession {
     handle: tokio::sync::Mutex<client::Handle<ClientHandler>>,
     cancel: CancellationToken,
-    sftp: tokio::sync::Mutex<Option<Arc<russh_sftp::client::SftpSession>>>,
+    sftp: tokio::sync::Mutex<Option<Arc<SftpClient>>>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecOutput {
@@ -1691,11 +1807,17 @@ impl SshSession {
                         _ => {}
                     }
                 }
-                let sftp = russh_sftp::client::SftpSession::new(ch.into_stream())
-                    .await
-                    .map_err(|_| SessionError::CapabilityUnavailable)?;
+                // The raw client allows bounded READDIR and preserves typed CLOSE status.
+                let sftp = russh_sftp::client::RawSftpSession::new(ch.into_stream());
+                let version = sftp.init().await.map_err(|_| SessionError::CapabilityUnavailable)?;
+                if version.version != russh_sftp::protocol::VERSION {
+                    return Err(SessionError::CapabilityUnavailable);
+                }
                 sftp.set_timeout(30);
-                *cached = Some(Arc::new(sftp));
+                *cached = Some(Arc::new(SftpClient {
+                    raw: sftp,
+                    posix_rename: version.extensions.get("posix-rename@openssh.com").is_some_and(|v| v == "1"),
+                }));
             }
             Ok(SftpLease {
                 client: cached
@@ -1720,19 +1842,28 @@ impl SshSession {
         }
     }
 }
+struct SftpClient {
+    raw: russh_sftp::client::RawSftpSession,
+    posix_rename: bool,
+}
+
 pub struct SftpLease {
-    client: Arc<russh_sftp::client::SftpSession>,
+    client: Arc<SftpClient>,
     cancel: CancellationToken,
 }
 impl SftpLease {
-    /// All operations are scoped through this fence; never expose an unfenced client.
-    pub async fn request<T>(
-        &self,
-        operation: impl for<'a> FnOnce(
-            &'a russh_sftp::client::SftpSession,
+    pub(crate) fn supports_posix_rename(&self) -> bool {
+        self.client.posix_rename
+    }
+
+    /// All operations are scoped through this fence; the owned result cannot borrow the client.
+    pub async fn request<'a, T: 'static>(
+        &'a self,
+        operation: impl FnOnce(
+            &'a russh_sftp::client::RawSftpSession,
         ) -> BoxFuture<'a, Result<T, SessionError>>,
     ) -> Result<T, SessionError> {
-        let result = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(SessionError::Cancelled), result = tokio::time::timeout(Duration::from_secs(30), operation(&self.client)) => result.map_err(|_| SessionError::TimedOut)? };
+        let result = tokio::select! { biased; _ = self.cancel.cancelled() => return Err(SessionError::Cancelled), result = tokio::time::timeout(Duration::from_secs(30), operation(&self.client.raw)) => result.map_err(|_| SessionError::TimedOut)? };
         if self.cancel.is_cancelled() {
             Err(SessionError::Cancelled)
         } else {

@@ -296,8 +296,7 @@ async fn dead_sftp_can_be_evicted_once_without_evicting_replacement() {
     dead.request(|client| {
         Box::pin(async move {
             client
-                .close()
-                .await
+                .close_session()
                 .map_err(|_| SessionError::TransportClosed)
         })
     })

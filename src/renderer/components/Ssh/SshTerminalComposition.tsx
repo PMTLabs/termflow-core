@@ -1,0 +1,116 @@
+import React, { useCallback, useLayoutEffect, useMemo } from 'react';
+import { useDispatch, useSelector } from 'react-redux';
+import type { RootState } from '../../store';
+import { patchSshPaneTag, type PaneNode } from '../../store/slices/panesSlice';
+import { findLeafByTerminalId } from '../../store/slices/paneTreeOps';
+import { useSurfaceHost } from '../../services/surfaceHosts';
+import type { SshPromptReceipt, SshSessionView } from '../../types/ssh';
+import { SshBrowserPaneShell } from './SshBrowserPaneShell';
+import { readSshPaneTag, type SshBrowserTagPatch, type SshPaneTag } from './ssh066Contract';
+import { publishSshPresentation, useSshPresentation } from './sshPresentations';
+import { useSshFileBrowser } from './useSshFileBrowser';
+
+/**
+ * Shared SSH composition for the two presentations of one terminal (plan 070 §4.1 A, gap G1).
+ *
+ * - The PANE presentation (`SshPaneSlot`, mounted by `TerminalPane`) is the owner. It runs the one
+ *   file controller, publishes it with the tag-patch route, and stays laid out while Canvas hosts
+ *   the terminal so returning has a real box. While `useSurfaceHost(terminalId)` is non-null it is
+ *   inert: no prompt, banner action, edit notice, menu or dialog.
+ * - The CANVAS presentation (`SshCanvasPresentation`, rendered by `NodeTerminal`) shows the same
+ *   shell around the single registered `.terminal-display` host and reads the published
+ *   controller. It never lists, subscribes, opens or closes a session itself.
+ *
+ * Everything is gated on the 066 tag: a leaf without one renders exactly today's DOM.
+ */
+
+/** The canonical leaf's tag, resolved by terminalId (never pane id). */
+export function readSshTagForTerminal(treesByTabId: Record<string, PaneNode | null>, terminalId: string): SshPaneTag | undefined {
+  const leaf = findLeafByTerminalId(treesByTabId, terminalId);
+  return leaf ? readSshPaneTag(leaf) : undefined;
+}
+
+// A presentation with no pane owner to route through has nothing to patch.
+const NOOP_PATCH = (_patch: SshBrowserTagPatch): void => {};
+
+/** App-channel view for this terminal; an honest disconnected view before any session exists. */
+function useSshView(terminalId: string, connectionId: string): SshSessionView {
+  const session = useSelector((state: RootState) => state.sshSession.byTerminal[terminalId]?.session);
+  return useMemo<SshSessionView>(() => session ?? { terminalId, connectionId, state: 'disconnected', gate: 'pending' },
+    [session, terminalId, connectionId]);
+}
+
+/** Prompt actions route renderer → Rust for this terminal only; nothing is stored. */
+function useSshShellActions(terminalId: string, view: SshSessionView) {
+  return useMemo(() => ({
+    onSecret: (secret: string, remember: boolean, receipt: SshPromptReceipt): Promise<void> => {
+      const api = window.electronAPI;
+      return api ? api.sshSessionSubmitSecret(terminalId, secret, remember, receipt) : Promise.reject(new Error('SSH is unavailable.'));
+    },
+    onTrust: (receipt: SshPromptReceipt): Promise<void> => {
+      const api = window.electronAPI;
+      return api ? api.sshSessionTrustHost(terminalId, true, receipt) : Promise.reject(new Error('SSH is unavailable.'));
+    },
+    onCancel: (): void => {
+      const api = window.electronAPI;
+      // A refused host key is answered on its own receipt. 070: a secret-prompt Cancel
+      // goes through the launch coordinator (ssh_terminal_cancel_launch), never a PTY write.
+      if (api && view.state === 'needs-hostkey') {
+        api.sshSessionTrustHost(terminalId, false, { generation: view.generation, promptId: view.promptId }).catch(() => undefined);
+      }
+    },
+  }), [terminalId, view]);
+}
+
+/**
+ * Wraps a pane's terminal content. No tag (every local leaf; 066 tags an SSH leaf at creation): renders `children`
+ * unchanged, so the DOM is byte-identical to today.
+ */
+export function SshPaneSlot({ terminalId, isTabActive, children }: {
+  terminalId?: string; isTabActive: boolean; children: React.ReactNode;
+}) {
+  const sshTag = useSelector((state: RootState) => terminalId ? readSshTagForTerminal(state.panes.treesByTabId, terminalId) : undefined);
+  if (!terminalId || !sshTag) return <>{children}</>;
+  return <SshPaneOwner key={terminalId} terminalId={terminalId} sshTag={sshTag} isTabActive={isTabActive}>{children}</SshPaneOwner>;
+}
+
+function SshPaneOwner({ terminalId, sshTag, isTabActive, children }: {
+  terminalId: string; sshTag: SshPaneTag; isTabActive: boolean; children: React.ReactNode;
+}) {
+  // Canvas owns interaction while it hosts this terminal (plan 070 §4.1 A).
+  const canvasOwns = useSurfaceHost(terminalId) !== null;
+  const dispatch = useDispatch();
+  // The canonical tag on the leaf, by terminalId (066 patchSshPaneTag).
+  const onPatchTag = useCallback((patch: SshBrowserTagPatch) => { dispatch(patchSshPaneTag({ terminalId, patch })); }, [dispatch, terminalId]);
+  // The ONE controller. Live while either surface shows the terminal; Canvas reads it below.
+  const browser = useSshFileBrowser({ terminalId, sshTag, surfaceActive: isTabActive || canvasOwns, onPatchTag });
+  useLayoutEffect(() => publishSshPresentation(terminalId, { browser, onPatchTag }), [terminalId, browser, onPatchTag]);
+  const view = useSshView(terminalId, sshTag.connectionId);
+  const actions = useSshShellActions(terminalId, view);
+  return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive={isTabActive && !canvasOwns}
+    onPatchTag={onPatchTag} browserController={browser} interactive={!canvasOwns} view={view} terminal={children}
+    // 066's SshLaunchNotice (TerminalPane) owns this terminal's host-key and secret prompts.
+    sessionPrompts={false}
+    onSecret={actions.onSecret} onTrust={actions.onTrust} onCancel={actions.onCancel} />;
+}
+
+/** The slot `NodeTerminal` renders for an SSH leaf; `terminal` is its `.terminal-display` wrapper. */
+export interface SshCanvasShellProps {
+  terminalId: string;
+  sshTag: SshPaneTag;
+  /** The frozen browser allocation for the current collapse state, in CSS px. */
+  browserWidth?: number;
+  terminal: React.ReactNode;
+}
+
+export function SshCanvasPresentation({ terminalId, sshTag, browserWidth, terminal }: SshCanvasShellProps) {
+  const presentation = useSshPresentation(terminalId);
+  const view = useSshView(terminalId, sshTag.connectionId);
+  const actions = useSshShellActions(terminalId, view);
+  // `null` controller: with no pane owner there is nothing to show, and building one here would
+  // be the second controller this composition exists to prevent.
+  return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive
+    onPatchTag={presentation?.onPatchTag ?? NOOP_PATCH} browserController={presentation?.browser ?? null}
+    view={view} browserWidth={browserWidth} terminal={terminal}
+    onSecret={actions.onSecret} onTrust={actions.onTrust} onCancel={actions.onCancel} />;
+}

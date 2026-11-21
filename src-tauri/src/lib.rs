@@ -659,6 +659,23 @@ pub fn run() {
 
         // Manage state in Tauri
         app.manage(state.clone());
+        let edit_root = ssh::sftp::edit::edit_root(app.handle())?;
+        let ssh_edits = std::sync::Arc::new(ssh::sftp::edit::EditRegistry::with_sink(
+            edit_root,
+            std::sync::Arc::new(ssh::sftp::watch::TokioClock),
+            std::sync::Arc::new(ssh::sftp::edit::AppEditEvents(app.handle().clone())),
+        ));
+        if let Err(error) = ssh_edits.load_recovered() {
+            log::warn!("Could not recover SSH editor copies: {error}");
+        }
+        state.ssh_sessions.set_edit_registry(&ssh_edits);
+        app.manage(ssh_edits.clone());
+        // The edit poller spawns onto tokio; enter Tauri's runtime for that call instead of
+        // a second setup spawn (the setup closure owns exactly one boot task).
+        {
+            let _runtime = tauri::async_runtime::handle().inner().enter();
+            ssh_edits.start(state.ssh_sessions.clone());
+        }
         // Tauri has already built the configured window before calling setup.
         if let Some(main) = app.get_webview_window("main") {
             let build = window_lifetime::reserve(app.handle(), "main")?;
@@ -1258,6 +1275,9 @@ pub fn run() {
                 // makes §7.5's actual requirement — each entry keeping its own decision timestamp
                 // rather than a flush-time `now` — trivially true. Corrected in the plan.
                 state.automations.stop();
+                if let Some(edits) = app_handle.try_state::<std::sync::Arc<ssh::sftp::edit::EditRegistry>>() {
+                    tauri::async_runtime::block_on(edits.shutdown());
+                }
                 tauri::async_runtime::block_on(state.ssh_sessions.shutdown());
                 // Persist every terminal's scrollback before the process dies.
                 flush_all_history(&state);

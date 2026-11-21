@@ -1,9 +1,13 @@
-.ssh-pane-shell { display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; color:var(--text-primary); background:var(--bg-primary); }
+.ssh-pane-shell { position:relative; display:flex; flex-direction:column; flex:1; min-width:0; min-height:0; color:var(--text-primary); background:var(--bg-primary); }
+/* Notices OVERLAY the reserved layout: a session state change (connecting, a reason, an edit
+   warning) must never add a row and resize the terminal grid (SIGWINCH on every reconnect). */
+.ssh-pane-chrome { position:absolute; top:0; left:0; right:0; z-index:5; max-height:100%; overflow:auto; }
 .ssh-pane-chrome:empty { display:none; }
 .ssh-pane-body { display:flex; flex:1; min-width:0; min-height:0; }
-.ssh-browser { flex:0 1 260px; width:260px; max-width:40%; min-width:30px; overflow:auto; border-right:1px solid var(--border-color); }
-.ssh-browser.collapsed { flex:0 0 30px; width:30px; max-width:30px; overflow:hidden; }
-.ssh-browser.collapsed button { writing-mode:vertical-rl; }
+.ssh-browser { flex:0 1 260px; width:260px; max-width:40%; min-width:0; box-sizing:border-box; overflow:auto; border-right:1px solid var(--border-color); }
+.ssh-browser.collapsed { flex:0 1 30px; width:30px; max-width:min(30px, 40%); overflow:hidden; }
+.ssh-browser-toggle.au-btn { max-width:100%; padding:2px 4px; }
+.ssh-browser.collapsed .ssh-browser-toggle { writing-mode:vertical-rl; }
 .ssh-browser-unavailable { opacity:.55; }
 .ssh-terminal-host { display:flex; flex:1; min-width:0; min-height:0; }
 .ssh-terminal-host > .terminal-pane-content { flex:1; min-width:0; min-height:0; }

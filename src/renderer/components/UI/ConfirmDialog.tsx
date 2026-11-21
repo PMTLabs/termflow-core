@@ -13,6 +13,8 @@ interface ConfirmDialogProps {
   onCancel: () => void;
   confirmText?: string;
   cancelText?: string;
+  confirmDisabled?: boolean;
+  cancelDisabled?: boolean;
   /**
    * Is the primary action itself destructive?
    *
@@ -61,6 +63,8 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   onCancel,
   confirmText = 'Confirm',
   cancelText = 'Cancel',
+  confirmDisabled = false,
+  cancelDisabled = false,
   destructive = false,
   confirmMnemonic,
   cancelMnemonic,
@@ -72,12 +76,12 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   const titleId = useId();
 
   const mnemonics: MnemonicType[] = [];
-  if (confirmMnemonic) mnemonics.push({ key: confirmMnemonic, handler: onConfirm });
-  if (cancelMnemonic) mnemonics.push({ key: cancelMnemonic, handler: onCancel });
+  if (confirmMnemonic && !confirmDisabled) mnemonics.push({ key: confirmMnemonic, handler: onConfirm });
+  if (cancelMnemonic && !cancelDisabled) mnemonics.push({ key: cancelMnemonic, handler: onCancel });
 
   useDialogA11y(containerRef, {
     isOpen,
-    onCancel,
+    onCancel: () => { if (!cancelDisabled) onCancel(); },
     mnemonics,
     initialFocus: destructive ? 'cancel' : 'confirm',
   });
@@ -97,7 +101,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
   // next thing to paint above 100 would hit it identically. A modal has to be a child of
   // <body>.
   return createPortal(
-    <div className="confirm-dialog-overlay" onClick={onCancel}>
+    <div className="confirm-dialog-overlay" onClick={cancelDisabled ? undefined : onCancel}>
       <div
         className="confirm-dialog"
         ref={containerRef}
@@ -114,7 +118,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           {typeof message === 'string' ? <p>{message}</p> : message}
         </div>
         <div className="confirm-dialog-footer">
-          <button className="confirm-btn cancel" data-dialog-cancel onClick={onCancel}>
+          <button className="confirm-btn cancel" data-dialog-cancel disabled={cancelDisabled} onClick={onCancel}>
             {cancelMnemonic ? <Mnemonic label={cancelText} char={cancelMnemonic} /> : cancelText}
           </button>
           {secondaryText && onSecondary && (
@@ -128,6 +132,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           <button
             className={`confirm-btn ${destructive ? 'danger' : 'primary'}`}
             data-dialog-confirm
+            disabled={confirmDisabled}
             onClick={onConfirm}
           >
             {confirmMnemonic ? (
