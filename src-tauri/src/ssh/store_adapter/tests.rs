@@ -345,9 +345,22 @@ async fn forget_preserves_definition_and_next_test_prompts() {
     let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], true);
     let cipher = CredentialCipher::default();
     let b = AuthBinding::for_hop(&hop("c-b", "alice"), None);
-    for (binding, secret) in [(binding(), f.server.password.clone()), (b.clone(), "other-test-credential".into())] {
-        let sealed = cipher.seal(SecretKind::Password, binding.clone(), Zeroizing::new(secret)).await.unwrap();
-        s.adapter.set_secret_if_binding_matches(&binding, sealed, CancellationToken::new()).await.unwrap();
+    for (binding, secret) in [
+        (binding(), f.server.password.clone()),
+        (b.clone(), "other-test-credential".into()),
+    ] {
+        let sealed = cipher
+            .seal(
+                SecretKind::Password,
+                binding.clone(),
+                Zeroizing::new(secret),
+            )
+            .await
+            .unwrap();
+        s.adapter
+            .set_secret_if_binding_matches(&binding, sealed, CancellationToken::new())
+            .await
+            .unwrap();
     }
     f.registry
         .configure(Dependencies {
@@ -364,7 +377,12 @@ async fn forget_preserves_definition_and_next_test_prompts() {
         .unwrap();
     let probe = f.registry.probe("c-a").unwrap();
     wait_state(&f.registry, &probe, true, SessionState::Connected).await;
-    assert!(f.events.0.lock().iter().all(|v| v.state != SessionState::NeedsSecret));
+    assert!(f
+        .events
+        .0
+        .lock()
+        .iter()
+        .all(|v| v.state != SessionState::NeedsSecret));
     f.registry.close(&probe, true, None).unwrap();
 
     let before = s.store.get().unwrap();
@@ -372,9 +390,19 @@ async fn forget_preserves_definition_and_next_test_prompts() {
     let mut expected_disk = s.store.snapshot().unwrap();
     expected_disk.connections[0].secret = None;
     expected_disk.revision += 1;
-    let err = s.store.transact(|s| s.forget_secret("missing"), |_| panic!("unexpected event")).unwrap_err();
+    let err = s
+        .store
+        .transact(
+            |s| s.forget_secret("missing"),
+            |_| panic!("unexpected event"),
+        )
+        .unwrap_err();
     assert_eq!(err.code, "not-found");
-    let forget = || s.store.transact(|s| s.forget_secret("c-a"), |_| {}).unwrap();
+    let forget = || {
+        s.store
+            .transact(|s| s.forget_secret("c-a"), |_| {})
+            .unwrap()
+    };
     let after = forget();
     let mut expected = before;
     expected.revision += 1;

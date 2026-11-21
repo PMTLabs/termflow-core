@@ -76,11 +76,16 @@ fn ssh_mutation_logs_are_success_only_and_contain_only_kind_and_ids() {
     )
     .unwrap();
     ssh_set_bookmark_inner(&Quiet, &store, connection.clone(), true).unwrap();
-    store.transact(|s| {
-        s.connections[0].auth = crate::ssh::store::Auth::Password;
-        s.connections[0].secret = Some("v1:log-test-fixture".into());
-        Ok(())
-    }, |_| {}).unwrap();
+    store
+        .transact(
+            |s| {
+                s.connections[0].auth = crate::ssh::store::Auth::Password;
+                s.connections[0].secret = Some("v1:log-test-fixture".into());
+                Ok(())
+            },
+            |_| {},
+        )
+        .unwrap();
     ssh_forget_secret_inner(&Quiet, &store, connection.clone()).unwrap();
     assert!(ssh_forget_secret_inner(&Quiet, &store, "missing".into()).is_err());
     ssh_connection_delete_inner(&Quiet, &store, connection.clone()).unwrap();

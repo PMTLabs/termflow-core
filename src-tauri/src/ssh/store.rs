@@ -588,7 +588,10 @@ impl Persisted {
         Ok(())
     }
     pub fn forget_secret(&mut self, id: &str) -> Result<()> {
-        let row = self.connections.iter_mut().find(|c| c.id == id)
+        let row = self
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
             .ok_or_else(|| StoreError::new("not-found", "Connection not found"))?;
         row.secret = None;
         Ok(())

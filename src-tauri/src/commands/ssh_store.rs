@@ -425,10 +425,15 @@ mod tests {
             moved.view.connections[0].folder_id.as_deref(),
             Some(folder_id.as_str())
         );
-        temp.store().transact(|s| {
-            seed_saved_credential(s);
-            Ok(())
-        }, |_| {}).unwrap();
+        temp.store()
+            .transact(
+                |s| {
+                    seed_saved_credential(s);
+                    Ok(())
+                },
+                |_| {},
+            )
+            .unwrap();
         let bookmarked = invoke(
             "ssh_set_bookmark",
             serde_json::json!({"id":id,"bookmarked":true}),
