@@ -331,6 +331,7 @@ impl HostKeys {
     }
     /// Stable placement generation survives transfers/reload, but not final close.
     pub(crate) fn ssh_owner_receipt(&self, leaf: &str) -> Option<u64> {
+        let _input_order = self.input_owner_change();
         let mut inner = self.lock();
         if !inner.owners.contains_key(leaf) {
             let pi = inner.panes.present.iter().filter(|(_, d)| d.leaf == leaf).map(|(pi, _)| *pi).max_by_key(|pi| (pi.pg, pi.seq))?;

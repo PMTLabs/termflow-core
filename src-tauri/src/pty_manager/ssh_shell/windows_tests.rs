@@ -17,16 +17,32 @@ fn ordinary(f: &Fixture, shell: &str, args: &[&str]) -> SpawnSpec {
         f.0.to_str(), 120, 32, false, |_| None)
 }
 
-fn ps_literal(path: &Path) -> String {
-    format!("'{}'", path.to_str().unwrap().replace('\'', "''"))
-}
-
 fn visible_has(p: &Prompts, text: &str) -> bool {
     String::from_utf8_lossy(&p.visible).contains(text)
 }
 
 #[test]
 fn powershell_original_prompt_and_cwd_hook_survive() {
+    assert_powershell_prompt_and_cwd(false);
+}
+
+#[test]
+fn powershell_readiness_works_under_restricted_execution_policy() {
+    assert_powershell_prompt_and_cwd(true);
+}
+
+#[test]
+fn ssh_powershell_command_never_contains_nonce() {
+    let f = Fixture::new();
+    let ordinary = ordinary(&f, r"C:\fixture\powershell.exe", &["-NoProfile"]);
+    let adapter = f.instrument(&ordinary);
+    assert_eq!(adapter.spec.args[adapter.spec.args.len() - 2], "-Command");
+    assert!(!adapter.spec.args.iter().any(|arg| arg.contains(NONCE)));
+    assert!(!adapter.spec.env.iter().any(|(_, value)| value.contains(NONCE)));
+    adapter.finish_after_shell_quiescence().unwrap();
+}
+
+fn assert_powershell_prompt_and_cwd(restricted: bool) {
     let pwsh = PathBuf::from(std::env::var_os("ProgramFiles").expect("ProgramFiles"))
         .join(r"PowerShell\7\pwsh.exe");
     for (var, exe, version) in [
@@ -35,21 +51,25 @@ fn powershell_original_prompt_and_cwd_hook_survive() {
     ] {
         let f = Fixture::new();
         fs::create_dir(f.0.join("new cwd")).unwrap();
-        f.write("fixture-profile.ps1", "Set-Location -LiteralPath 'new cwd'\n\
-            function prompt { 'FIXTURE_PS> ' }\n\
-            [Console]::WriteLine('FIXTURE_PROFILE_' + $PSVersionTable.PSVersion)\n\
-            while (-not [IO.File]::Exists($env:TF_FIXTURE_RELEASE)) { Start-Sleep -Milliseconds 50 }\n");
-        // Dot-source an isolated profile in the same interactive session before
-        // the production wrapper. Never consult or modify installed profiles.
-        let mut ordinary = ordinary(&f, &installed(var, exe), &["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass"]);
+        let mut flags = vec!["-NoLogo", "-NoProfile"];
+        if restricted {
+            flags.extend(["-ExecutionPolicy", "Restricted"]);
+        }
+        let mut ordinary = ordinary(&f, &installed(var, exe), &flags);
         ordinary.env.push(("TF_FIXTURE_RELEASE".into(), f.0.join("release").to_str().unwrap().into()));
         assert_eq!(ordinary.args.last().map(String::as_str), Some(PS_CWD_INTEGRATION));
         let adapter = f.instrument(&ordinary);
         let mut spec = adapter.spec.clone();
-        assert!(!spec.args.iter().any(|arg| arg.contains(NONCE)));
-        assert!(!spec.env.iter().any(|(_, value)| value.contains(NONCE)));
+        // Simulate profile effects in inline text, without sourcing a script or
+        // touching installed profiles. The production hook follows unchanged.
         let command = spec.args.last_mut().unwrap();
-        *command = format!(". {}; {command}", ps_literal(&f.0.join("fixture-profile.ps1")));
+        let policy_check = if restricted {
+            "if ((Get-ExecutionPolicy) -ne 'Restricted') { throw 'Expected Restricted' }; "
+        } else { "" };
+        *command = format!("{policy_check}Set-Location -LiteralPath 'new cwd'; \
+            function prompt {{ 'FIXTURE_PS> ' }}; \
+            [Console]::WriteLine('FIXTURE_PROFILE_' + $PSVersionTable.PSVersion); \
+            while (-not [IO.File]::Exists($env:TF_FIXTURE_RELEASE)) {{ Start-Sleep -Milliseconds 50 }}; {command}");
         let mut shell = Running::start(&spec);
         let mut prompts = Prompts::new();
         prompts.until(&shell, |p| visible_has(p, &format!("FIXTURE_PROFILE_{version}")));

@@ -6,7 +6,7 @@ use std::{io, path::Path};
 use termflow_pty_protocol::{ssh_prompt::valid_nonce, SpawnSpec};
 
 #[path = "windows.rs"]
-mod windows;
+pub(crate) mod windows;
 
 const BASH_BOOTSTRAP: &str = "__TERMFLOW_SSH_BOOTSTRAP";
 

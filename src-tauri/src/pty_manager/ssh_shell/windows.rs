@@ -31,9 +31,9 @@ fn prepare(
     }
     let mut output = PosixAdapter { spec: ordinary.clone(), hooks: Vec::new() };
     let result = (|| {
-        let (ext, script) = if ps { ("ps1", ps_script(nonce)) }
+        let (ext, payload) = if ps { ("txt", nonce.to_owned()) }
             else { ("cmd", CMD_SCRIPT.replace("@NONCE@", nonce)) };
-        let helper = root.publish(owner.clone(), HelperKind::ShellHook, ext, script.as_bytes())?;
+        let helper = root.publish(owner.clone(), HelperKind::ShellHook, ext, payload.as_bytes())?;
         let usage = helper.acquire()?;
         let path = usage.path();
         output.hooks.push((helper, usage));
@@ -42,7 +42,7 @@ fn prepare(
             if !args.iter().any(|a| a.eq_ignore_ascii_case("-NoExit")) {
                 args.push("-NoExit".into());
             }
-            args.extend(["-Command".into(), format!(". '{}'", path.replace('\'', "''"))]);
+            args.extend(["-Command".into(), powershell_hook_command(path)?]);
         } else {
             // Expand a single cmd token after startup/AutoRun. Keeping the quotes
             // in the env value avoids relying on CRT argv quoting for cmd syntax.
@@ -114,11 +114,34 @@ fn cmd_flags(ordinary: &[String]) -> io::Result<Vec<String>> {
     Ok(ordinary.to_vec())
 }
 
-fn ps_script(nonce: &str) -> String {
-    // Dot-source after normal profile startup, reusing the ordinary captured
-    // prompt and cwd logic. Increment only after the captured prompt returns.
+const PS_HOOK_PREFIX: &str = "$script:__termflowSshReadyNonce = [System.IO.File]::ReadAllText('";
+const PS_HOOK_SUFFIX: &str = "; $script:__termflowSshReadySequence++; [Console]::Write([string][char]27 + ']633;TermFlowSshReady;' + $script:__termflowSshReadyNonce + ';' + $script:__termflowSshReadySequence + [string][char]27 + '\\') }";
+
+fn powershell_hook_tail() -> String {
     let wrapper = PS_CWD_INTEGRATION.strip_suffix(" }").expect("PowerShell prompt wrapper");
-    format!("$script:__termflowSshReadySequence = 0\n{wrapper}; $script:__termflowSshReadySequence++; [Console]::Write([string][char]27 + ']633;TermFlowSshReady;{nonce};' + $script:__termflowSshReadySequence + [string][char]27 + '\u{5c}') }}\n")
+    format!("'); $script:__termflowSshReadySequence = 0; {wrapper}{PS_HOOK_SUFFIX}")
+}
+
+pub(crate) fn powershell_hook_command(path: &str) -> io::Result<String> {
+    // PowerShell also parses typographic single quotes as delimiters.
+    if path.contains(['\u{2018}', '\u{2019}', '\u{201a}', '\u{201b}']) {
+        return Err(adapter_error("unsafe SSH readiness PowerShell helper path"));
+    }
+    // Inline fixed code runs under Restricted/AllSigned. The helper is data only,
+    // so the nonce stays out of the command line and the environment.
+    Ok(format!("{PS_HOOK_PREFIX}{}{tail}", path.replace('\'', "''"), tail = powershell_hook_tail()))
+}
+
+pub(crate) fn is_powershell_hook_command(arg: &str) -> bool {
+    let Some(encoded) = arg.strip_prefix(PS_HOOK_PREFIX) else { return false };
+    let tail = powershell_hook_tail();
+    let Some(encoded) = encoded.strip_suffix(tail.as_str()) else { return false };
+    let path = encoded.replace("''", "'");
+    let path_ref = Path::new(&path);
+    path_ref.is_absolute()
+        && path_ref.file_name().is_some_and(|name| name == "helper.txt")
+        && literal_path(path_ref).is_ok_and(|literal| literal == path.as_str())
+        && powershell_hook_command(&path).is_ok_and(|generated| generated == arg)
 }
 
 // Detect the existing delayed expansion state and keep it. In the off case,

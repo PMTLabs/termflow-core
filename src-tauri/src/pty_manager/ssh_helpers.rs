@@ -178,6 +178,7 @@ impl HelperRoot {
         process.validate()?;
         let file = match extension {
             "ps1" | "cmd" | "sh" | "fish" | "json" => format!("helper.{extension}"),
+            "txt" if kind == HelperKind::ShellHook => "helper.txt".into(),
             ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin" if kind == HelperKind::ShellHook => extension.into(),
             _ => return Err(denied()),
         };
@@ -259,7 +260,7 @@ fn verified_manifest(dir: &platform::Dir, id: Uuid) -> io::Result<Manifest> {
     component(&manifest.file)?;
     let valid_name = matches!(manifest.file.as_str(), "helper.ps1" | "helper.cmd" | "helper.sh" | "helper.fish" | "helper.json")
         || (manifest.kind == HelperKind::ShellHook
-            && matches!(manifest.file.as_str(), ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin"));
+            && matches!(manifest.file.as_str(), "helper.txt" | ".zshenv" | ".zprofile" | ".zshrc" | ".zlogin"));
     if !valid_name || digest(&dir.read_file(&manifest.file)?) != manifest.sha256
     {
         return Err(denied());

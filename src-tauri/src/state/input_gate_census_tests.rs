@@ -246,6 +246,84 @@ fn sources(root: &Path, directory: &Path, prefix: &str, out: &mut BTreeMap<Strin
     }
 }
 
+// Lexical census: mutable access to the owners map counts as a sink even
+// before a field assignment. Follow Self:: calls through locked helpers so
+// moving the write to an inner: &mut Inner function cannot hide the entry point.
+fn owner_mutation_violations(corpus: &BTreeMap<String, String>) -> Vec<String> {
+    let sink = Regex::new(
+        r"\.\s*owners\s*\.\s*(?:insert|remove(?:_entry)?|retain|clear|entry|get_mut|values_mut|iter_mut|drain|extract_if|append)\s*\(|&\s*mut\s+\w+\s*\.\s*owners\b|\.\s*(?:cg|owner|state|ssh_reserved)\s*=[^=]",
+    ).unwrap();
+    let helper_call = Regex::new(r"\bSelf\s*::\s*(\w+)\s*\(").unwrap();
+    let receiver = Regex::new(r"\(\s*&\s*(?:mut\s+)?self\b").unwrap();
+    let barrier = Regex::new(r"\blet\s+\w+\s*=\s*self\.input_owner_change\(\)\s*;").unwrap();
+    let lock = Regex::new(r"\bself\.lock\(\)").unwrap();
+    let mut methods = Vec::new();
+    for (file, source) in corpus {
+        let code = production(source);
+        for (name, body) in fn_spans(&code) {
+            let header = &code[..body.start];
+            let declaration = format!("fn {name}");
+            let at = header.rfind(declaration.as_str()).unwrap();
+            methods.push((file, name, receiver.is_match(&header[at..]), code[body].to_owned()));
+        }
+    }
+    let mut helpers = std::collections::BTreeSet::new();
+    loop {
+        let count = helpers.len();
+        for (_, name, takes_self, body) in &methods {
+            if !takes_self && (sink.is_match(body) || helper_call.captures_iter(body)
+                .any(|call| helpers.contains(&call[1]))) {
+                helpers.insert(name.as_str());
+            }
+        }
+        if count == helpers.len() {
+            break;
+        }
+    }
+    let mut errors = Vec::new();
+    for (file, name, takes_self, body) in &methods {
+        if !takes_self {
+            continue;
+        }
+        let writes = sink.find_iter(body).map(|hit| hit.start()).chain(
+            helper_call.captures_iter(body).filter(|call| helpers.contains(&call[1]))
+                .map(|call| call.get(0).unwrap().start()),
+        );
+        for at in writes {
+            let prior = &body[..at];
+            let ordered = barrier.find_iter(prior).last()
+                .is_some_and(|guard| lock.is_match(&prior[guard.end()..]));
+            if !ordered {
+                errors.push(format!("{file}:{name}: owner mutation without input barrier before HostKeys lock"));
+                break;
+            }
+        }
+    }
+    errors
+}
+
+#[test]
+fn owner_mutations_take_the_input_barrier_census() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/state/host_keys");
+    let mut corpus = BTreeMap::new();
+    sources(&root, &root, "host_keys", &mut corpus);
+    assert!(corpus.contains_key("host_keys/panes.rs"));
+    let errors = owner_mutation_violations(&corpus);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
+
+    let panes = corpus.get_mut("host_keys/panes.rs").unwrap();
+    panes.push_str("\nimpl HostKeys {\n\
+        fn planted(&self, leaf: &str) {\n\
+            let mut inner = self.lock();\n\
+            let _too_late = self.input_owner_change();\n\
+            inner.owners.get_mut(leaf).unwrap().cg = 42;\n\
+        }\n\
+    }\n");
+    assert_eq!(owner_mutation_violations(&corpus), vec![
+        "host_keys/panes.rs:planted: owner mutation without input barrier before HostKeys lock"
+    ]);
+}
+
 #[test]
 fn input_gate_sink_census_rejects_new_production_writers() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
