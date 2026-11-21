@@ -206,40 +206,59 @@ export function SshConnectionEditor({ connectionId, initialFolder, view, api, on
   useEffect(() => registerSshEditorGuard({ isDirty:() => current.current.dirty, save:() => current.current.save(), discard:() => current.current.reset() }), []);
   const errorProps = (name:string) => { const message = fieldMessage(name); return { 'aria-invalid':!!message, 'aria-describedby':message ? `${errorPrefix}-${name}` : undefined }; };
   const fieldError = (name:string) => { const message = fieldMessage(name); return message && <span id={`${errorPrefix}-${name}`} role="alert" className="ssh-field-error">{message}</span>; };
-  const field = (name: 'name' | 'host' | 'user' | 'identityFile', label:string) => <div className="ssh-editor-field"><label>{label}<input ref={name === 'name' ? nameInput : undefined} name={name} value={draft[name] ?? ''} title={draft[name] || undefined} onChange={event => { clearField(name); setDraft({ ...draft, [name]:event.target.value }); }} {...errorProps(name)} /></label>{fieldError(name)}</div>;
+  const identityId = useId();
+  const field = (name: 'name' | 'host' | 'user', label:string, extra = '') => <div className={`ssh-editor-field ${extra}`.trim()}><label>{label}<input className="setting-input" ref={name === 'name' ? nameInput : undefined} name={name} value={draft[name] ?? ''} title={draft[name] || undefined} onChange={event => { clearField(name); setDraft({ ...draft, [name]:event.target.value }); }} {...errorProps(name)} /></label>{fieldError(name)}</div>;
   const inlineFields = ['name','host','port','user','extraOptions','jumpConnectionId','folderId', ...(draft.auth === 'keyFile' ? ['identityFile'] : [])];
   const invalidOptions = !!parsed.code || !!fieldErrors.extraOptions;
-  return <div className="ssh-connection-editor"><h3 ref={heading} tabIndex={-1}>{connectionId ? 'Edit SSH connection' : 'New SSH connection'}</h3>
+  const locked = busy || readOnly || removed;
+  const browse = async () => { try { const path = await window.electronAPI?.pickFile?.('Select SSH identity file'); if (path) { clearField('identityFile'); setDraft(value => ({ ...value, identityFile:path })); } } catch (e) { setError({ code:'picker', message:sshErrorMessage(e) }); } };
+  const canConnect = !!existing && !!onConnect;
+  return <div className="ssh-connection-editor">
     {changed && !view.loadError && <div role="alert" className="ssh-conflict">{removed ? 'Deleted elsewhere' : 'Changed elsewhere'} — <button type="button" className="au-btn sm" onClick={() => removed ? onClose() : reset()}>{removed ? 'Close' : 'Reload'}</button>{!removed && <button type="button" className="au-btn sm" onClick={() => { if (existing) { baseline.current = JSON.stringify(inputOf(existing)); setBaseOptions(optionsText(existing)); setDraft(value => ({ ...value, extraOptions:existing.extraOptions })); } setChanged(false); }}>Keep mine</button>}</div>}
     <form ref={form} noValidate onSubmit={event => { event.preventDefault(); void save(); }}>
-    <fieldset disabled={busy || readOnly || removed}>
-      {field('name','Name')}{field('host','Host')}
-      <div className="ssh-editor-field"><label>Port<input name="port" type="number" min={1} max={65535} value={draft.port} onChange={event => { clearField('port'); setDraft({ ...draft, port:Number(event.target.value) }); }} {...errorProps('port')} /></label>{fieldError('port')}</div>
-      {field('user','User')}
-      <div role="group" aria-label="Authentication" className="au-seg ssh-auth">{(['keyFile','agent','password'] as const).map(auth => <button type="button" key={auth} className={draft.auth === auth ? 'on' : undefined} aria-pressed={draft.auth === auth} onClick={() => { clearField('identityFile'); setDraft({ ...draft, auth, identityFile:auth === 'keyFile' ? draft.identityFile ?? '' : null }); }}>{auth === 'keyFile' ? 'Key file' : auth === 'agent' ? 'SSH agent' : 'Ask for password'}</button>)}</div>
-      {draft.auth === 'keyFile' && <>{field('identityFile','Identity file')}<button type="button" className="au-btn sm ssh-browse" onClick={async () => { try { const path = await window.electronAPI?.pickFile?.('Select SSH identity file'); if (path) { clearField('identityFile'); setDraft(value => ({ ...value, identityFile:path })); } } catch (e) { setError({ code:'picker', message:sshErrorMessage(e) }); } }}>Browse…</button></>}
-      {showSavedCredential && <div><small id={credentialDescription}>Saved credential for the app channel</small>{' '}<button type="button" ref={forgetButton} className="au-btn sm" aria-describedby={credentialDescription} disabled={readOnly || busy} onClick={() => setConfirmForget(true)}>Forget</button></div>}
-      <div className="ssh-editor-field"><label>Jump host<select name="jumpConnectionId" value={draft.jumpConnectionId ?? ''} {...errorProps('jumpConnectionId')} onChange={event => { clearField('jumpConnectionId'); setDraft({ ...draft, jumpConnectionId:event.target.value || null }); }}><option value="">None</option>{draft.jumpConnectionId && !jumpChoices.some(c => c.id === draft.jumpConnectionId) && <option value={draft.jumpConnectionId} disabled>(unavailable: {draft.jumpConnectionId})</option>}{jumpChoices.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>{fieldError('jumpConnectionId')}</div>
-      <div className="ssh-editor-field"><label>Folder<select name="folderId" value={draft.folderId ?? ''} {...errorProps('folderId')} onChange={event => { clearField('folderId'); setDraft({ ...draft, folderId:event.target.value || null }); }}><option value="">Top level</option>{draft.folderId && !view.folders.some(f => f.id === draft.folderId) && <option value={draft.folderId} disabled>(unavailable: {draft.folderId})</option>}{view.folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>{fieldError('folderId')}</div>
-      <label className="ssh-check"><input name="bookmarked" type="checkbox" className="setting-checkbox" checked={draft.bookmarked} onChange={event => setDraft({ ...draft, bookmarked:event.target.checked })} />Bookmark</label>
-      <div className="ssh-editor-field"><label>Extra options<input name="extraOptions" value={options} {...errorProps('extraOptions')} onChange={event => { clearField('extraOptions'); setOptions(event.target.value); }} onPaste={event => { if (/[\r\n\u2028\u2029]/.test(event.clipboardData.getData('text'))) { event.preventDefault(); setFieldErrors(errors => ({ ...errors, extraOptions:sshFieldMessage('extraOptions','one-line') })); } }} /><small>Applies to the terminal ssh only</small></label>{fieldError('extraOptions')}</div>
-      <div className={invalidOptions ? 'ssh-argv invalid' : 'ssh-argv'} aria-label="Command preview"><strong>Command preview</strong>
-        {invalidOptions ? <small>Fix Extra options to preview the command.</small> : currentPreview?.value && <><code>{currentPreview.value.display}</code><small>{currentPreview.value.wrapper} — {currentPreview.value.configNotice}</small></>}
-        {previewErrors.filter(e => !inlineFields.includes(e.field ?? '')).map(e => <small role="alert" key={e.field ?? e.code}>{e.message || e.code}</small>)}
+    <div className="ssh-editor-header"><h3 ref={heading} tabIndex={-1} title={existing?.name || undefined} aria-label={connectionId ? `Edit SSH connection: ${existing?.name || 'SSH connection'}` : undefined}>{existing?.name || (connectionId ? 'SSH connection' : 'New SSH connection')}</h3>
+      <label className="ssh-check"><input name="bookmarked" type="checkbox" className="setting-checkbox" disabled={locked} checked={draft.bookmarked} onChange={event => setDraft({ ...draft, bookmarked:event.target.checked })} />Bookmark</label></div>
+    <fieldset disabled={locked}>
+      <div className="ssh-editor-grid">
+        {field('name','Name','ssh-span-2')}
+        <div className="ssh-editor-field ssh-span-2"><label>Folder<select className="setting-input" name="folderId" value={draft.folderId ?? ''} {...errorProps('folderId')} onChange={event => { clearField('folderId'); setDraft({ ...draft, folderId:event.target.value || null }); }}><option value="">Top level</option>{draft.folderId && !view.folders.some(f => f.id === draft.folderId) && <option value={draft.folderId} disabled>(unavailable: {draft.folderId})</option>}{view.folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}</select></label>{fieldError('folderId')}</div>
+        {field('host','Host','ssh-span-2')}
+        <div className="ssh-editor-field"><label>Port<input className="setting-input" name="port" type="number" min={1} max={65535} value={draft.port} onChange={event => { clearField('port'); setDraft({ ...draft, port:Number(event.target.value) }); }} {...errorProps('port')} /></label>{fieldError('port')}</div>
+        {field('user','User')}
+        <div className="ssh-editor-field ssh-span-all"><span className="ssh-caption" aria-hidden="true">Authentication</span>
+          <div role="group" aria-label="Authentication" className="au-seg ssh-auth">{(['keyFile','agent','password'] as const).map(auth => <button type="button" key={auth} className={draft.auth === auth ? 'on' : undefined} aria-pressed={draft.auth === auth} onClick={() => { clearField('identityFile'); setDraft({ ...draft, auth, identityFile:auth === 'keyFile' ? draft.identityFile ?? '' : null }); }}>{auth === 'keyFile' ? 'Key file' : auth === 'agent' ? 'SSH agent' : 'Ask for password'}</button>)}</div></div>
+        {draft.auth === 'keyFile' && <div className="ssh-editor-field ssh-span-all"><label htmlFor={identityId}>Identity file</label>
+          <div className="ssh-inline-row"><input id={identityId} className="setting-input" name="identityFile" value={draft.identityFile ?? ''} title={draft.identityFile || undefined} onChange={event => { clearField('identityFile'); setDraft({ ...draft, identityFile:event.target.value }); }} {...errorProps('identityFile')} /><button type="button" className="au-btn ssh-browse" onClick={browse}>Browse…</button></div>{fieldError('identityFile')}</div>}
+        {showSavedCredential && <div className="ssh-span-all"><small id={credentialDescription}>Saved credential for the app channel</small>{' '}<button type="button" ref={forgetButton} className="au-btn sm" aria-describedby={credentialDescription} disabled={readOnly || busy} onClick={() => setConfirmForget(true)}>Forget</button></div>}
+        <div className="ssh-editor-field ssh-span-2"><label>Jump host<select className="setting-input" name="jumpConnectionId" value={draft.jumpConnectionId ?? ''} {...errorProps('jumpConnectionId')} onChange={event => { clearField('jumpConnectionId'); setDraft({ ...draft, jumpConnectionId:event.target.value || null }); }}><option value="">None</option>{draft.jumpConnectionId && !jumpChoices.some(c => c.id === draft.jumpConnectionId) && <option value={draft.jumpConnectionId} disabled>(unavailable: {draft.jumpConnectionId})</option>}{jumpChoices.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></label>{fieldError('jumpConnectionId')}</div>
+        <div className="ssh-editor-field ssh-span-2"><label>Extra options<input className="setting-input" name="extraOptions" value={options} title={options || undefined} {...errorProps('extraOptions')} onChange={event => { clearField('extraOptions'); setOptions(event.target.value); }} onPaste={event => { if (/[\r\n\u2028\u2029]/.test(event.clipboardData.getData('text'))) { event.preventDefault(); setFieldErrors(errors => ({ ...errors, extraOptions:sshFieldMessage('extraOptions','one-line') })); } }} /><small>Applies to the terminal ssh only</small></label>{fieldError('extraOptions')}</div>
+        <div className={invalidOptions ? 'ssh-argv invalid ssh-span-all' : 'ssh-argv ssh-span-all'} aria-label="Command preview"><strong>Command preview</strong>
+          {invalidOptions ? <small>Fix Extra options to preview the command.</small> : currentPreview?.value && <><code>{currentPreview.value.display}</code><small>{currentPreview.value.wrapper} — {currentPreview.value.configNotice}</small></>}
+          {previewErrors.filter(e => !inlineFields.includes(e.field ?? '')).map(e => <small role="alert" key={e.field ?? e.code}>{e.message || e.code}</small>)}
+        </div>
+        {error && <p role="alert" className="ssh-span-all">{error.message}</p>}
       </div>
-      {error && <p role="alert">{error.message}</p>}
-      <div className="ssh-editor-actions"><button type="submit" className="au-btn primary">Save connection</button>{connectionId && <button type="button" className="au-btn danger" onClick={() => setConfirmDelete(true)}>Delete connection…</button>}</div>
     </fieldset>
-    </form>
-    <div className="ssh-editor-actions"><button type="button" className="au-btn" disabled={!canTest} aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test connection</button>
+    {/* One wrapping action row in two groups, as in the mockup: use actions left, edit actions right. DOM order is
+        Tab order, so Save (primary) is last. The end group wraps as a unit and right-aligns, so Save stays bottom-right. */}
+    <div className="ssh-editor-actions">
+      <div className="ssh-actions-group">
+        {canConnect && <button type="button" className="au-btn" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>}
+        <button type="button" className="au-btn" disabled={!canTest} aria-describedby="ssh-test-help" onClick={() => { if (canTest) setTestOpen(true); }}>Test connection</button>
+      </div>
+      <div className="ssh-actions-group ssh-actions-end">
+        {connectionId && <button type="button" className="au-btn danger" disabled={locked} onClick={() => setConfirmDelete(true)}>Delete connection…</button>}
+        <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
+        <button type="submit" className="au-btn primary" disabled={locked}>Save connection</button>
+      </div>
+    </div>
+    <div className="ssh-editor-help">
+      {canConnect && <small id="ssh-connect-help">{dirty || changed ? 'Opens the last saved version; you will be asked about unsaved changes.' : 'Opens a new tab and starts this saved connection.'}</small>}
       <small id="ssh-test-help">{!existing || dirty || changed ? 'Save changes before testing the saved connection.' : 'Tests the native app channel only; no terminal is opened.'}</small>
     </div>
-      <div role="status">{forgotten && !existing?.hasSavedSecret ? 'Saved credential forgotten.' : ''}</div>
-    {existing && onConnect && <div className="ssh-editor-actions"><button type="button" className="au-btn primary" disabled={readOnly || removed || busy} aria-describedby="ssh-connect-help" onClick={connect}>Connect in new tab</button>
-      <small id="ssh-connect-help">{dirty || changed ? 'Opens the last saved version; you will be asked about unsaved changes.' : 'Opens a new tab and starts this saved connection.'}</small>
-    </div>}
+    </form>
+    <div role="status">{forgotten && !existing?.hasSavedSecret ? 'Saved credential forgotten.' : ''}</div>
     {testOpen && canTest && sessionApi && <SshTestConnectionDialog connectionId={connectionId!} api={sessionApi} onClose={() => setTestOpen(false)} />}
-    <button type="button" className="au-btn" disabled={busy} onClick={() => { reset(); onClose(); }}>Discard changes</button>
     <ConfirmDialog isOpen={confirmForget && showSavedCredential && !readOnly && !busy} title="Forget saved credential" message={`Forget the saved credential for ${existing?.name}? You'll be asked for it next time.`} destructive confirmText="Forget" onCancel={() => setConfirmForget(false)} onConfirm={forget} />
     <ConfirmDialog isOpen={confirmDelete && !readOnly && !removed} title="Delete connection" message={`Delete ${draft.name}?`} destructive confirmText="Delete" onCancel={() => setConfirmDelete(false)} onConfirm={async () => { if (readOnly || removed) { setConfirmDelete(false); return; } try { const reply = await api.deleteConnection({ id:connectionId! }); onSaved(reply,draft); onClose(); } catch (e) { setError({ code:'delete', message:sshErrorMessage(e) }); try { await refreshReadOnly(e,api,reply => onSaved(reply,draft)); } catch (refreshError) { setError({ code:'refresh', message:sshErrorMessage(refreshError) }); } } setConfirmDelete(false); }} />
   </div>;
