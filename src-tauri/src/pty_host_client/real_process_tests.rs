@@ -56,12 +56,45 @@ pub(crate) fn guard_path(path: &Path, temp: Option<&Path>) -> PathBuf {
         );
     }
     let r = canonical(&repo());
+    let build_roots = configured_build_roots(
+        |name| std::env::var_os(name),
+        &std::env::current_exe().expect("test executable path"),
+    );
     let allowed = beneath(&p, &r.join("src-tauri/target"))
         || beneath(&p, &r.join("src-tauri/pty-host/target"))
         || (beneath(&p, &r.join(".claude/worktrees")) && parts.iter().any(|s| s == "target"))
+        || build_roots.iter().any(|root| beneath(&p, &canonical(root)))
         || temp.is_some_and(|t| beneath(&p, &canonical(t)));
     assert!(allowed, "unsafe path outside test roots: {}", p.display());
     p
+}
+
+/// Where cargo actually builds this test binary, which need not be under this checkout:
+/// a worktree pointed at the shared `CARGO_TARGET_DIR`, or a global cargo `build-dir`
+/// elsewhere. The deny rules in `guard_path` run first, so these never admit an installed
+/// TermFlow or a Pro build.
+fn configured_build_roots(
+    env: impl Fn(&str) -> Option<std::ffi::OsString>,
+    exe: &Path,
+) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"]
+        .into_iter()
+        .filter_map(|name| env(name))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .filter(|root| root.is_absolute())
+        .collect();
+    // `<root>/<profile>/deps/<test>.exe`: cargo's own layout identifies the build root.
+    let deps = exe.parent();
+    if deps
+        .and_then(Path::file_name)
+        .is_some_and(|name| name == "deps")
+    {
+        if let Some(root) = deps.and_then(Path::parent).and_then(Path::parent) {
+            roots.push(root.to_path_buf());
+        }
+    }
+    roots
 }
 
 pub(crate) fn prerequisite(message: &str) -> Option<PathBuf> {
@@ -429,6 +462,44 @@ pub(crate) async fn connect_only(
     #[cfg(unix)]
     let client = wire_unix_host_client(stream, deps);
     Ok(client)
+}
+
+#[test]
+fn configured_build_roots_come_from_cargo_env_and_the_test_binary_layout() {
+    let base = std::env::temp_dir().join("tf-guard-019");
+    let target = base.join("shared-target");
+    let build = base.join("build-dir");
+    let exe = base
+        .join("ws")
+        .join("debug")
+        .join("deps")
+        .join("app_lib-0.exe");
+    let env = |name: &str| match name {
+        "CARGO_TARGET_DIR" => Some(target.clone().into_os_string()),
+        "CARGO_BUILD_BUILD_DIR" => Some(build.clone().into_os_string()),
+        _ => None,
+    };
+    assert_eq!(
+        configured_build_roots(env, &exe),
+        vec![target.clone(), build.clone(), base.join("ws")]
+    );
+    // Unset, empty or relative values add nothing; an exe outside cargo's layout adds nothing.
+    let none = |_: &str| None;
+    assert!(configured_build_roots(none, &base.join("tool.exe")).is_empty());
+    let odd = |name: &str| match name {
+        "CARGO_TARGET_DIR" => Some(std::ffi::OsString::new()),
+        "CARGO_BUILD_BUILD_DIR" => Some("relative/target".into()),
+        _ => None,
+    };
+    assert!(configured_build_roots(odd, &base.join("tool.exe")).is_empty());
+}
+
+#[test]
+fn the_running_test_binary_is_inside_a_test_root() {
+    // Backlog 019: a worktree run on the shared target, or a global cargo build-dir, put the
+    // test exe outside this checkout's target and the guard refused the test's own binary.
+    let exe = std::env::current_exe().unwrap();
+    assert_eq!(guard_path(&exe, None), canonical(&exe));
 }
 
 #[test]
