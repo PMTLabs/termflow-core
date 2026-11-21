@@ -1,5 +1,7 @@
+import { configureStore } from '@reduxjs/toolkit';
+import { hydrateSsh } from '../../../services/sshHydration';
 import reducer, { applyView, selectTree, selectBookmarked, SshState } from '../sshSlice';
-import type { SshReply, SshConnection, SshFolder } from '../../../types/ssh';
+import type { SshReply, SshConnection, SshFolder, SshStoreApi } from '../../../types/ssh';
 const folder = (id: string, parentId: string | null, order: number): SshFolder => ({ id, parentId, order, name: id, icon: 'folder', color: 'sky' });
 const connection = (id: string, folderId: string | null, order: number, bookmarked: boolean): SshConnection => ({ id, folderId, order, bookmarked, name: id, host: 'h', port: 22, user: '', auth: 'agent', identityFile: null, jumpConnectionId: null, extraOptions: [], lastUsedAt: null, hasSavedSecret: false });
 export const reply = (revision: number): SshReply => ({ revision, view: { revision, folders: [folder('f-root', null, 1), folder('f-middle', 'f-root', 1), folder('f-leaf', 'f-middle', 0)], connections: [connection('c-leaf', 'f-leaf', 0, true), connection('c-parent', 'f-root', 0, false), connection('c-root', null, 0, true)], loadError: null } });
@@ -17,6 +19,27 @@ test('older/equal views cannot overwrite the mirror', () => {
   expect(reducer(newer, applyView(reply(2)))).toEqual(newer);
   expect(reducer(newer, applyView(reply(9)))).toEqual(newer);
 });
+test('older_get_reply_cannot_erase_newer_recent', async () => {
+  const store = configureStore({ reducer:{ ssh:reducer } });
+  const old = reply(4);
+  const marked = reply(5);
+  marked.view.connections[1].lastUsedAt = 1_800_000_000_123;
+  marked.view.connections[0].bookmarked = false;
+  let emit!: (reply:SshReply) => void;
+  let releaseGet!: (reply:SshReply) => void;
+  const get = jest.fn(() => new Promise<SshReply>(resolve => { releaseGet = resolve; }));
+  const hydration = hydrateSsh({
+    get, onChanged:async (listener:(reply:SshReply) => void) => { emit = listener; return () => {}; },
+  } as SshStoreApi, store.dispatch);
+  await Promise.resolve();
+  expect(get).toHaveBeenCalledTimes(1);
+  emit(marked);
+  releaseGet(old);
+  await hydration.ready;
+  hydration.stop();
+  expect(store.getState().ssh).toEqual({ revision:5,view:marked.view,status:'ready',error:null });
+});
+
 test('selectTree nests three distinct levels in sibling order', () => {
   const ssh: SshState = reducer(undefined, applyView(reply(1))); const tree = selectTree({ ssh });
   expect(tree.map(n => n.row.id)).toEqual(['c-root', 'f-root']);

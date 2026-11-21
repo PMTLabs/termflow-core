@@ -1,5 +1,6 @@
 //! IPC-only saved SSH definitions. Events are published while the disk lock is held.
 use crate::ssh::store::{ConnectionInput, FolderInput, Persisted, Reply, Store, StoreError};
+use crate::ssh::preview::{self, Preview, PreviewError, PreviewSource};
 use tauri::{Emitter, State};
 pub const CHANGED: &str = "ssh-store:changed";
 /// One registration list shared by the real desktop handler and invoke tests.
@@ -12,6 +13,7 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_connection_upsert, $crate::commands::ssh_connection_delete,
             $crate::commands::ssh_move, $crate::commands::ssh_set_bookmark,
             $crate::commands::ssh_forget_secret,
+            $crate::commands::ssh_connection_preview, $crate::commands::ssh_connection_mark_used,
             $crate::commands::ssh_session_open, $crate::commands::ssh_session_state,
             $crate::commands::ssh_session_close, $crate::commands::ssh_session_reconnect,
             $crate::commands::ssh_session_submit_secret, $crate::commands::ssh_session_trust_host,
@@ -191,6 +193,26 @@ fn ssh_forget_secret_inner(
     Ok(reply)
 }
 
+#[tauri::command]
+pub fn ssh_connection_preview(
+    store: State<'_, Store>,
+    source: PreviewSource,
+) -> Result<Preview, PreviewError> {
+    preview::connection_preview(&store, source)
+}
+
+#[tauri::command]
+pub fn ssh_connection_mark_used<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    store: State<'_, Store>,
+    id: String,
+) -> Result<Reply, StoreError> {
+    mark_used(&app, &store, &id)
+}
+fn mark_used(app: &impl StoreEmitter, store: &Store, id: &str) -> Result<Reply, StoreError> {
+    mutate(store, app, |s| s.mark_used(id))
+}
+
 #[cfg(test)]
 #[path = "ssh_store_log_tests.rs"]
 mod log_tests;
@@ -340,6 +362,77 @@ mod tests {
         }
     }
     #[test]
+    fn mark_used_locked_reload_preserves_concurrent_bookmark_and_editor_save() {
+        let temp = Temp::new();
+        let recent = temp.store();
+        let editor = temp.store();
+        let capture = Capture::default();
+        let initial = recent.transact(|s| s.upsert_connection(connection()), |_| {}).unwrap();
+        let id = initial.view.connections[0].id.clone();
+
+        // Keep Recent's independent cache at the old revision while other
+        // handles commit the bookmark and editor save.
+        let bookmark = ssh_set_bookmark_inner(&Capture::default(), &temp.store(), id.clone(), true).unwrap();
+        let mut edit = connection();
+        edit.id = Some(id.clone());
+        edit.bookmarked = bookmark.view.connections[0].bookmarked;
+        edit.host = "edited.test".into();
+        let mut expected = editor.snapshot().unwrap();
+        expected.upsert_connection(edit.clone()).unwrap();
+        let before = chrono::Utc::now().timestamp_millis();
+        let (saved, marked) = std::thread::scope(|scope| {
+            use std::sync::mpsc::{self, RecvTimeoutError};
+            use std::time::Duration;
+            let (started, start) = mpsc::channel();
+            let (finished, finish) = mpsc::channel();
+            let saved = editor.transact(|s| {
+                s.upsert_connection(edit.clone())?;
+                let (recent, capture, id) = (&recent, &capture, &id);
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    finished.send(mark_used(capture, recent, id)).unwrap();
+                });
+                start.recv().unwrap();
+                assert!(matches!(finish.recv_timeout(Duration::from_millis(100)), Err(RecvTimeoutError::Timeout)),
+                    "mark-used must wait for the editor's config lock");
+                Ok(())
+            }, |_| {}).unwrap();
+            (saved, finish.recv().unwrap().unwrap())
+        });
+        let after = chrono::Utc::now().timestamp_millis();
+        let timestamp = marked.view.connections[0].last_used_at.unwrap();
+        assert!((before..=after).contains(&timestamp));
+        assert_eq!(marked.revision, saved.revision + 1);
+        expected.revision = saved.revision + 1;
+        expected.connections[0].last_used_at = Some(timestamp.to_string());
+        let bytes = std::fs::read(temp.0.join("ssh.json")).unwrap();
+        assert_eq!(bytes, serde_json::to_vec_pretty(&expected).unwrap());
+        assert_eq!(marked, expected.view(None));
+        assert_eq!(*capture.0.lock().unwrap(), vec![(CHANGED.into(), marked.clone())]);
+
+        // A save submitted without backend-owned fields keeps the usage.
+        edit.name = "Another edit".into();
+        let resaved = ssh_connection_upsert_inner(&Capture::default(), &editor, edit).unwrap();
+        assert_eq!(resaved.view.connections[0].last_used_at, Some(timestamp));
+    }
+
+    #[test]
+    fn mark_used_failed_write_emits_no_new_revision() {
+        let temp = Temp::new();
+        let store = temp.store().failing_writer();
+        let saved = temp.store().transact(|s| s.upsert_connection(connection()), |_| {}).unwrap();
+        assert_eq!(store.get().unwrap(), saved);
+        let file = temp.0.join("ssh.json");
+        let bytes = std::fs::read(&file).unwrap();
+        let capture = Capture::default();
+        assert_eq!(mark_used(&capture, &store, &saved.view.connections[0].id).unwrap_err().code, "io");
+        assert!(capture.0.lock().unwrap().is_empty());
+        assert_eq!(store.get().unwrap(), saved);
+        assert_eq!(store.reload(|_| panic!("unchanged reload emitted")).unwrap(), saved);
+        assert_eq!(std::fs::read(file).unwrap(), bytes);
+    }
+
+    #[test]
     fn refused_and_failed_mutations_emit_nothing() {
         let temp = Temp::new();
         let store = temp.store();
@@ -394,6 +487,7 @@ mod tests {
             "ssh_session_open", "ssh_session_state", "ssh_session_close", "ssh_session_reconnect",
             "ssh_session_submit_secret", "ssh_session_trust_host", "ssh_test_connection",
             "ssh_test_state", "ssh_test_close", "ssh_test_submit_secret", "ssh_test_trust_host",
+            "ssh_connection_preview", "ssh_connection_mark_used",
         ] {
             let error = get_ipc_response(&window, tauri::webview::InvokeRequest {
                 cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),

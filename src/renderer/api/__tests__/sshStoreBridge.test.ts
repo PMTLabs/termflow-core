@@ -11,6 +11,10 @@ test('both actual bridges wire the SSH surface',async()=>{
   expect(browserBridge.ssh).toBe(browserSshBridge);
   await expect(browserBridge.ssh!.get()).rejects.toMatchObject({code:'desktop-only'});
   expect(tauriBridge.ssh).toBeDefined();
+  const source = { kind:'saved' as const, id:'c-real' };
+  await expect(browserBridge.ssh!.previewConnection({source})).rejects.toMatchObject({code:'desktop-only'});
+  await tauriBridge.ssh!.previewConnection({source});
+  expect(invoke).toHaveBeenCalledWith('ssh_connection_preview',{source});
   await tauriBridge.ssh!.setBookmark('c-real',true);
   expect(invoke).toHaveBeenCalledWith('ssh_set_bookmark',{id:'c-real',bookmarked:true});
 });
@@ -18,7 +22,10 @@ describe('SSH bridge contract', () => {
   const folder = { parentId: null, name: 'F', icon: 'server', color: 'sky' };
   const connection = { folderId: null, name: 'C', host: 'h', port: 22, user: 'u', auth: 'agent' as const, identityFile: null, jumpConnectionId: null, extraOptions: [], bookmarked: true };
   const move = { kind: 'connection' as const, id: 'c-dragged', parentId: 'f-target', index: 2 };
+  const draftPreview = { source:{ kind:'draft', draft:{ ...connection,id:'c-edit' },editingId:'c-edit' } };
   const cases: [keyof SshStoreApi, any[], string, object | undefined][] = [
+    ['previewConnection', [draftPreview], 'ssh_connection_preview', draftPreview],
+    ['markUsed', ['c-used'], 'ssh_connection_mark_used', { id:'c-used' }],
     ['get', [], 'ssh_store_get', undefined], ['reload', [], 'ssh_store_reload', undefined],
     ['upsertFolder', [folder], 'ssh_folder_upsert', { input: folder }],
     ['deleteFolder', [{ id: 'f-clicked', recursive: true }], 'ssh_folder_delete', { id: 'f-clicked', recursive: true }],

@@ -7,11 +7,22 @@ export interface SshConnectionInput {
   auth: SshAuth; identityFile: string | null; jumpConnectionId: string | null;
   extraOptions: [string, string][]; bookmarked: boolean;
 }
-export interface SshConnection extends Omit<SshConnectionInput, 'id'> { id: string; order: number; lastUsedAt: string | null; hasSavedSecret: boolean }
+export interface SshConnection extends Omit<SshConnectionInput, 'id'> { id: string; order: number; lastUsedAt: number | null; hasSavedSecret: boolean }
 export interface SshView { revision: number; folders: SshFolder[]; connections: SshConnection[]; loadError: SshError | null }
 export interface SshReply { revision: number; view: SshView }
 export interface SshMove { kind: 'folder' | 'connection'; id: string; parentId: string | null; index: number }
+export type SshPreviewSource =
+  | { kind: 'saved'; id: string }
+  | { kind: 'draft'; draft: SshConnectionInput; editingId?: string };
+export interface SshPreview { argv: string[]; display: string; storeRevision: number; configNotice: string; wrapper: string }
+export interface SshPreviewError {
+  code: 'Validation' | 'NotFound' | 'UnsupportedContext' | 'StoreUnavailable' | 'desktop-only';
+  message: string;
+  fields?: SshError[];
+}
 export interface SshStoreApi {
+  previewConnection(input: { source: SshPreviewSource }): Promise<SshPreview>;
+  markUsed(id: string): Promise<SshReply>;
   get(): Promise<SshReply>; reload(): Promise<SshReply>;
   upsertFolder(input: SshFolderInput): Promise<SshReply>;
   deleteFolder(input: { id: string; recursive: boolean }): Promise<SshReply>;

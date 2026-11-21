@@ -227,7 +227,7 @@ pub struct ConnectionView {
     pub extra_options: Vec<(String, String)>,
     pub bookmarked: bool,
     pub order: usize,
-    pub last_used_at: Option<String>,
+    pub last_used_at: Option<i64>,
     pub has_saved_secret: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,7 +268,14 @@ impl Persisted {
                         extra_options: c.extra_options.clone(),
                         bookmarked: c.bookmarked,
                         order: c.order,
-                        last_used_at: c.last_used_at.clone(),
+                        // Keep the v1 on-disk string readable by older builds.
+                        last_used_at: c.last_used_at.as_deref().and_then(|value| {
+                            value.parse().ok().or_else(|| {
+                                chrono::DateTime::parse_from_rfc3339(value)
+                                    .ok()
+                                    .map(|date| date.timestamp_millis())
+                            })
+                        }),
                         has_saved_secret: c.secret.is_some(),
                     })
                     .collect(),
@@ -578,6 +585,12 @@ impl Persisted {
         self.connections.retain(|c| !connections.contains(&c.id));
         Ok(())
     }
+    pub(crate) fn mark_used(&mut self, id: &str) -> Result<()> {
+        let row = self.connections.iter_mut().find(|c| c.id == id)
+            .ok_or_else(|| StoreError::new("not-found", "Connection not found"))?;
+        row.last_used_at = Some(chrono::Utc::now().timestamp_millis().to_string());
+        Ok(())
+    }
     pub fn set_bookmark(&mut self, id: &str, bookmarked: bool) -> Result<()> {
         self.connections
             .iter_mut()
@@ -846,6 +859,13 @@ impl Store {
     /// Rust-only fresh snapshot; secrets must never cross the IPC view boundary.
     pub(crate) fn snapshot(&self) -> Result<Persisted> {
         let _lock = self.lock()?;
+        self.load()
+    }
+
+    /// Preview needs one fresh, consistent snapshot, not a read/merge/write.
+    /// Atomic replacement makes a single read sufficient; don't create a lock
+    /// file (or even a config directory) for an unsaved preview.
+    pub(super) fn preview_snapshot(&self) -> Result<Persisted> {
         self.load()
     }
 

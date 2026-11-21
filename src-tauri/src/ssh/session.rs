@@ -543,15 +543,19 @@ pub struct Dependencies {
     pub known_hosts: KnownHosts,
     pub home: PathBuf,
 }
+pub(super) fn native_home() -> PathBuf {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(PathBuf::from)
+        .unwrap_or_default()
+}
+
 impl Dependencies {
     pub fn native(
         events: Arc<dyn EventSink>,
         store: crate::ssh::store::Store,
         changed: Arc<dyn Fn(&crate::ssh::store::Reply) + Send + Sync>,
     ) -> Self {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .map(PathBuf::from)
-            .unwrap_or_default();
+        let home = native_home();
         let adapter = Arc::new(super::store_adapter::StoreAdapter::new(
             store,
             home.clone(),

@@ -11,6 +11,8 @@ export function createSshBridge(invoke: Invoke, listen: Listen): SshStoreApi {
     move: input => invoke('ssh_move', { ...input }),
     forgetSecret: id => invoke('ssh_forget_secret', { id }),
     setBookmark: (id, bookmarked) => invoke('ssh_set_bookmark', { id, bookmarked }),
+    previewConnection: input => invoke('ssh_connection_preview', input),
+    markUsed: id => invoke('ssh_connection_mark_used', { id }),
     onChanged: listener => listen<SshReply>('ssh-store:changed', event => listener(event.payload)),
   };
 }
@@ -18,5 +20,5 @@ const desktopOnly = async (): Promise<never> => { throw { code: 'desktop-only', 
 export const browserSshBridge: SshStoreApi = {
   get: desktopOnly, reload: desktopOnly, upsertFolder: desktopOnly, deleteFolder: desktopOnly,
   upsertConnection: desktopOnly, deleteConnection: desktopOnly, move: desktopOnly,
-  forgetSecret: desktopOnly, setBookmark: desktopOnly, onChanged: desktopOnly,
+  forgetSecret: desktopOnly, setBookmark: desktopOnly, previewConnection: desktopOnly, markUsed: desktopOnly, onChanged: desktopOnly,
 };
