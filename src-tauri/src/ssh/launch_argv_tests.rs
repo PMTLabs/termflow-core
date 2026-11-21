@@ -67,9 +67,27 @@ fn extra_options_allowlist_is_case_insensitive_and_rejects_unlisted_or_malformed
         ("SetEnv", "X=Y\r", "invalid-value"),
         ("SetEnv", "X=Y\0", "invalid-value"),
         ("SetEnv", "X=Y\t", "invalid-value"),
+        // OpenSSH would fill these in from the local computer (or abort the launch).
+        ("SetEnv", "TF=$(touch${IFS}canary)", "local-expansion"),
+        ("SetEnv", "TF=%h", "local-expansion"),
+        ("SetEnv", "TF=100%%", "local-expansion"),
+        ("LocalForward", "/tmp/s_%u /tmp/remote", "local-expansion"),
+        ("RemoteForward", "/tmp/${USER} /tmp/r", "local-expansion"),
+        ("DynamicForward", "${PORT}", "local-expansion"),
+        ("ServerAliveInterval", "${X}", "local-expansion"),
     ] {
         target.extra_options = vec![(key.into(), value.into())];
         assert_eq!(make(&target).err().unwrap().code, code, "{key:?}={value:?}");
+    }
+    // Non-expanding literals stay accepted: shell syntax, `$` without braces, and a
+    // `%` in a TCP forward host (e.g. an IPv6 zone id) where OpenSSH expands nothing.
+    for (key, value) in [
+        ("SetEnv", "TF=$(touch canary);$HOME;`id`"),
+        ("LocalForward", "1234 [fe80::1%en0]:22"),
+        ("SendEnv", "LC_*"),
+    ] {
+        target.extra_options = vec![(key.into(), value.into())];
+        assert!(make(&target).is_ok(), "{key:?}={value:?}");
     }
 }
 
@@ -153,7 +171,7 @@ mod openssh {
     }
     impl Drop for Temp {
         fn drop(&mut self) {
-            fs::remove_dir_all(&self.0).unwrap();
+            crate::pty_manager::ssh_helpers::remove_test_tree(&self.0).unwrap();
         }
     }
 
@@ -422,7 +440,10 @@ mod openssh {
         let reservation = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = reservation.local_addr().unwrap().port();
         drop(reservation);
-        let literal = "$(touch${IFS}local-canary);literal";
+        // `${…}`/`%` values are refused by the shared validator (OpenSSH ≥ 10 expands
+        // them locally); the accepted shell syntax must still arrive literally.
+        // No whitespace: SetEnv splits its argument on it.
+        let literal = "$(>local-canary);`>local-canary`;$IFS;literal";
         rig.target.extra_options.extend([
             ("serveraliveinterval".into(), "10".into()),
             ("ServerAliveCountMax".into(), "2".into()),
@@ -440,6 +461,11 @@ mod openssh {
         assert!(String::from_utf8_lossy(&output.stderr).contains(&format!("Local forwarding listening on 127.0.0.1 port {port}")));
         assert!(rig.destination.counters.environment.lock().contains(&("TF_LAUNCH".into(), literal.into())));
         assert!(!Path::new(&rig.temp.path("local-canary")).exists());
+        for (key, value) in [("SetEnv", "TF_LAUNCH=$(touch${IFS}local-canary)"), ("SetEnv", "TF_LAUNCH=%d")] {
+            rig.target.extra_options.push((key.into(), value.into()));
+            assert_eq!(build_launch_argv(&rig.target, &rig.trust, &ssh, &rig.temp.0).err().unwrap().code, "local-expansion");
+            rig.target.extra_options.pop();
+        }
         for key in ["LocalCommand", "PermitLocalCommand", "RemoteCommand", "SessionType"] {
             rig.target.extra_options.push((key.into(), "touch local-canary".into()));
             assert!(build_launch_argv(&rig.target, &rig.trust, &ssh, &rig.temp.0).is_err());

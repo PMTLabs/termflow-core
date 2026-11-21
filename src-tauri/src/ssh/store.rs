@@ -73,6 +73,19 @@ pub(super) fn canonical_option(key: &str, value: &str) -> Result<&'static str> {
     if value.chars().any(char::is_control) {
         return Err(StoreError::field("extraOptions", "invalid-value"));
     }
+    // ssh would fill these in from THIS computer (its environment, local user or
+    // host), or fail the whole launch when a variable is unset. `${…}` expands in
+    // SetEnv (OpenSSH ≥ 10), DynamicForward and forward socket paths; `%` tokens
+    // expand in SetEnv (≥ 10) and socket paths (a forward part containing `/`).
+    // `%%` is no portable escape: 9.x passes it through, 10.x reduces it to `%`.
+    let percent = match canonical {
+        "SetEnv" => value.contains('%'),
+        "LocalForward" | "RemoteForward" => value.contains('%') && value.contains('/'),
+        _ => false,
+    };
+    if value.contains("${") || percent {
+        return Err(StoreError::field("extraOptions", "local-expansion"));
+    }
     Ok(canonical)
 }
 
@@ -128,6 +141,7 @@ impl StoreError {
                 ("extraOptions", "invalid-key") => "Option names must contain only letters A–Z.",
                 ("extraOptions", "invalid-value") => "Option values can't contain control characters.",
                 ("extraOptions", "length") => "Each option value must be at most 1024 characters.",
+                ("extraOptions", "local-expansion") => "Option values can't use “${…}” or “%” tokens, which ssh would fill in from this computer.",
                 _ => "Check this field.",
             }.into(),
         }
