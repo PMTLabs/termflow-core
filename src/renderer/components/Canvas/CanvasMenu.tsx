@@ -88,11 +88,13 @@ export const CanvasMenuItem: React.FC<{
   icon?: React.ReactNode;
   onClick: () => void;
   danger?: boolean;
+  disabled?: boolean;
   children: React.ReactNode;
-}> = ({ icon, onClick, danger, children }) => (
+}> = ({ icon, onClick, danger, disabled, children }) => (
   <button
     className={`context-menu-item ${danger ? 'danger' : ''}`.trim()}
     onClick={onClick}
+    disabled={disabled}
   >
     {icon && <span className="menu-icon">{icon}</span>}
     {children}

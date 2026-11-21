@@ -26,3 +26,40 @@ export const selectBookmarked = createSelector([selectTree], (tree): SshConnecti
   const flatten = (tree: SshTreeNode[]): SshConnection[] => tree.flatMap(node => node.kind === 'folder' ? flatten(node.children) : node.row.bookmarked ? [node.row] : []);
   return flatten(tree);
 });
+
+export type SshConnectionFilter = 'All' | 'Bookmarked' | 'Recent';
+export type SshSearchRow = { connection: SshConnection; breadcrumb: string; host: string };
+
+export const selectSshSearchRows = createSelector(
+  [(state: { ssh: SshState }) => state.ssh.view, selectTree],
+  (view, tree): SshSearchRow[] => {
+    const rows: SshSearchRow[] = [];
+    const walk = (nodes: SshTreeNode[], path: string[]) => {
+      for (const node of nodes) {
+        if (node.kind === 'folder') walk(node.children, [...path, node.row.name]);
+        else {
+          const { host, user, port } = node.row;
+          const address = port !== 22 && host.includes(':') ? `[${host}]` : host;
+          rows.push({
+            connection: node.row, breadcrumb: path.join(' / '),
+            host: `${user ? `${user}@` : ''}${address}${port === 22 ? '' : `:${port}`}`,
+          });
+        }
+      }
+    };
+    if (!view.loadError) walk(tree, []);
+    return rows;
+  },
+);
+
+export function filterSshConnections(rows: SshSearchRow[], filter: SshConnectionFilter, search: string): SshSearchRow[] {
+  const terms = search.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const matches = rows.filter(({ connection, host, breadcrumb }) => {
+    if (filter === 'Bookmarked' && !connection.bookmarked) return false;
+    if (filter === 'Recent' && connection.lastUsedAt == null) return false;
+    const text = `${connection.name} ${host} ${breadcrumb}`.toLowerCase();
+    return terms.every(term => text.includes(term));
+  });
+  if (filter === 'Recent') matches.sort((a, b) => b.connection.lastUsedAt! - a.connection.lastUsedAt!);
+  return matches;
+}

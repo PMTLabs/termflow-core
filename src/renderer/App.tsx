@@ -13,6 +13,7 @@ import { PaneDragProvider } from './components/Panes/dnd/PaneDragController';
 import { isDetachWindow, reconstructDetachedWindow, applyReattachByToken } from './components/Panes/dnd/detach';
 import { LayoutManager } from './components/LayoutManager';
 import { GlobalDialog } from './components/UI/GlobalDialog';
+import { SshConnectionsDialogHost } from './components/Ssh/AllSshConnectionsDialog';
 import { ConfirmDialog } from './components/UI/ConfirmDialog';
 import { ToastContainer } from './components/UI/ToastContainer';
 import { GlobalPeerRequests } from './components/GlobalPeerRequests';
@@ -1876,16 +1877,18 @@ const App: React.FC = () => {
 
   return (
     <div className="app">
-      <PaneDragProvider>
-        <TitleBar />
-        <BroadcastOverlay />
-        <div className="app-body">
-          {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
-              by TerminalContainer alongside every other tab — see services/openCanvas.ts
-              and backlog/007 §4. */}
-          <TerminalContainer />
-        </div>
-      </PaneDragProvider>
+      <SshConnectionsDialogHost>
+        <PaneDragProvider>
+          <TitleBar />
+          <BroadcastOverlay />
+          <div className="app-body">
+            {/* Canvas Mode used to be a sibling overlay here. It is now a tab, rendered
+                by TerminalContainer alongside every other tab — see services/openCanvas.ts
+                and backlog/007 §4. */}
+            <TerminalContainer />
+          </div>
+        </PaneDragProvider>
+      </SshConnectionsDialogHost>
       <LayoutManager />
       <GlobalDialog />
       <ToastContainer />
