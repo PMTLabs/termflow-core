@@ -115,7 +115,10 @@ impl HostKeys {
             inner.keys.insert(address, Record { state: KeyState::Held(cg), pid, order: std::time::Instant::now(), alive: true });
             (Some(stage), pid)
         } else { (None, 0) };
-        if let Some(old) = &old { self.release_stage(&mut inner, old, false); }
+        if let Some(old) = &old {
+            self.input.forget(&old.process);
+            self.release_stage(&mut inner, old, false);
+        }
         let row = inner.owners.get_mut(leaf).unwrap();
         if let OwnerState::Placing { stage: target, staged_exited, .. } = &mut row.state {
             *target = Some(StagedShell { process: process.into(), stage: stage.clone().map_or(ShellStage::Local, ShellStage::Hosted) });
@@ -147,6 +150,7 @@ impl HostKeys {
         let row = inner.owners.get_mut(leaf).unwrap();
         let OwnerState::Placing { staged_exited, cancel, .. } = row.state else { unreachable!() };
         if staged_exited && cancel.is_none() {
+            self.input.forget(&shell.process);
             self.end_staged_exit(&mut inner, shell);
             let mut row = inner.owners.remove(leaf).unwrap();
             row.outcome.send_replace(Some(Ok(shell.process.clone())));
@@ -177,7 +181,10 @@ impl HostKeys {
         let mut row = inner.owners.remove(leaf).unwrap();
         row.outcome.send_replace(Some(Err(retry())));
         let shell = shell_of(&row.state).cloned();
-        if let Some(shell) = &shell { self.release_stage(&mut inner, shell, false); }
+        if let Some(shell) = &shell {
+            self.input.forget(&shell.process);
+            self.release_stage(&mut inner, shell, false);
+        }
         Self::retain_present_receipt(&mut inner, leaf, &mut row);
         if matches!(row.state, OwnerState::Held) { inner.owners.insert(leaf.into(), row); }
         shell
@@ -187,6 +194,19 @@ impl HostKeys {
         let inner = self.lock();
         let row = inner.owners.values().find(|row| matches!(&row.state,
             OwnerState::Registered(shell) if shell.process == process))?;
+        Some(crate::pty_manager::input_gate::OwnerStamp {
+            generation: row.cg, owner: format!("{:?}", row.owner),
+        })
+    }
+
+    // A fresh hosted shell can emit its first live prompt during Spawn, before the
+    // spawn reply commits placement. No writes are admitted to a staged process.
+    pub(crate) fn ssh_prompt_stamp(&self, process: &str) -> Option<crate::pty_manager::input_gate::OwnerStamp> {
+        let inner = self.lock();
+        let row = inner.owners.values().find(|row| match &row.state {
+            OwnerState::Registered(s) | OwnerState::Placing { stage: Some(s), staged_exited: false, .. } => s.process == process,
+            _ => false,
+        })?;
         Some(crate::pty_manager::input_gate::OwnerStamp {
             generation: row.cg, owner: format!("{:?}", row.owner),
         })

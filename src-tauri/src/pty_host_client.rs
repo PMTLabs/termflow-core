@@ -1072,6 +1072,15 @@ where
                         ),
                     }
                 }
+                Ok(Some(Frame::Data(Data::SshPrompt { tab_id, nonce, sequence, stdin_writes }))) => {
+                    if let Some(id) = route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
+                        let binding = sessions_r.lock().unwrap().clone();
+                        let proof = crate::pty_manager::ssh_shell::PromptProof::Hosted {
+                            channel: binding.channel, key: &tab_id, epoch: binding.epoch, stdin_writes,
+                        };
+                        let _ = binding.keys.observe_shell_prompt(&id, &nonce, sequence, proof);
+                    }
+                }
                 Ok(Some(Frame::Data(Data::Gap { tab_id, .. }))) => {
                     match route_inbound(&tab_id, |k| (deps.resolve_process)(k)) {
                         Some(id) => (deps.on_gap)(id),

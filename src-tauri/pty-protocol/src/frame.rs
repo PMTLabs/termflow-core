@@ -195,6 +195,9 @@ pub enum Data {
     Gap { tab_id: String, at_offset: u64 },
     /// Sidecar → GUI: child exited; `exit_cwd` is its last known directory.
     Exit { tab_id: String, exit_cwd: Option<String> },
+    /// Live-only prompt observation from the host reader after its startup drain.
+    /// Never ring-buffered or replayed. Appended to preserve existing wire tags.
+    SshPrompt { tab_id: String, nonce: String, sequence: u64, stdin_writes: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -541,6 +544,7 @@ mod tests {
             (Data::Stdout { tab_id: t(), offset: 0, bytes: vec![] }, 1),
             (Data::Gap { tab_id: t(), at_offset: 0 }, 2),
             (Data::Exit { tab_id: t(), exit_cwd: None }, 3),
+            (Data::SshPrompt { tab_id: t(), nonce: t(), sequence: 1, stdin_writes: 0 }, 4),
         ];
         for (d, index) in data {
             assert_eq!(tags(&Frame::Data(d.clone())), (2, index), "{d:?}");
@@ -549,7 +553,7 @@ mod tests {
         // Additive permission variants occupy indices 12–13 and 10–11.
         assert!(variant_count_error(0, 14).contains("0 <= i < 14"), "{}", variant_count_error(0, 14));
         assert!(variant_count_error(1, 12).contains("0 <= i < 12"), "{}", variant_count_error(1, 12));
-        assert!(variant_count_error(2, 4).contains("0 <= i < 4"), "{}", variant_count_error(2, 4));
+        assert!(variant_count_error(2, 5).contains("0 <= i < 5"), "{}", variant_count_error(2, 5));
         assert!(variant_count_error(3, 0).contains("0 <= i < 3"), "{}", variant_count_error(3, 0));
 
         // Exact wire bytes of one new reply: Resp tag, McpReleaseAck tag, req, bool.

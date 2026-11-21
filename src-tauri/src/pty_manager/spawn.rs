@@ -364,6 +364,8 @@ pub fn spawn_terminal(
     });
     if published.is_none() { return Err("host-ownership-pending: local placement changed before publication; retry".into()); }
     unpublished.0 = None;
+    let mut ssh_prompt = app_state.host_table.keys().ssh_prompt_nonce(&id)
+        .map(termflow_pty_protocol::ssh_prompt::PromptParser::new);
     app_state.complete_create(&owner_leaf, cg, &crate::state::StagedShell {
         process: id.clone(), stage: crate::state::ShellStage::Local,
     });
@@ -386,23 +388,31 @@ pub fn spawn_terminal(
                     termflow_pty_protocol::da1::write_reply(writer, bytes)
                 })
             });
+        let drain = ssh_prompt.as_ref().map(|_| replies.drain());
+        let emit = |data| {
+            app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = output_tx.send(ChannelPayload { id: thread_id.clone(), data });
+        };
         termflow_pty_protocol::pump::pump_output(
             &mut reader,
             find_utf8_boundary,
             &mut da1,
             |reply| replies.send(reply),
             |data| {
-                // Producer heartbeat for the pipeline watchdog (lib.rs):
-                // "produced advances while consumed doesn't" = stalled consumer.
-                app_state.output_produced.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Send to channel (broadcast::Sender::send returns Result<usize, SendError>)
-                // We ignore error if no receivers
-                let _ = output_tx.send(ChannelPayload {
-                    id: thread_id.clone(),
-                    data,
-                });
+                let data = super::ssh_shell::filter_local_output(
+                    &mut ssh_prompt, app_state.host_table.keys(), &thread_id, drain.as_ref(), data, |_| {},
+                );
+                if !data.is_empty() {
+                    emit(data);
+                }
             },
         );
+        if let Some(parser) = &mut ssh_prompt {
+            let tail = parser.finish();
+            if !tail.is_empty() {
+                emit(tail);
+            }
+        }
         // Spec 045 §3.3: capture the cwd BEFORE cleanup — cleanup_terminal_state
         // removes `terminal_cwds` and `terminals`, so this is the last moment the
         // shell's final directory is knowable. The renderer needs it to restart

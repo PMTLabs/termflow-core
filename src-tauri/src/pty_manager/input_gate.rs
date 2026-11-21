@@ -196,8 +196,16 @@ struct Attempt {
     id: Uuid,
     submitted: bool,
 }
+struct RegisteredPrompt {
+    generation: u64,
+    nonce: String,
+    last_sequence: u64,
+    stdin_writes: u64,
+}
+
 struct ProcessInput {
     owner: OwnerStamp,
+    ssh_prompt: Option<RegisteredPrompt>,
     lease_epoch: u64,
     input_generation: u64,
     prompt_epoch: u64,
@@ -208,6 +216,7 @@ impl ProcessInput {
     fn new(owner: OwnerStamp) -> Self {
         Self {
             owner,
+            ssh_prompt: None,
             lease_epoch: 0,
             input_generation: 0,
             prompt_epoch: 0,
@@ -348,13 +357,80 @@ impl crate::state::HostKeys {
         state.invalidate_ready()
     }
 
-    /// Called by the nonce/parser adapter only after startup replies are drained and current
-    /// process provenance is established. A replay is NOT a prompt observation.
-    pub fn observe_shell_prompt(
+    // Registration is wired into the internal SSH create opt-in in CP3D.
+    #[allow(dead_code)]
+    pub(crate) fn register_ssh_prompt(&self, process: &str, generation: u64, nonce: &str) -> Result<(), Refusal> {
+        let _order = self.input.ownership.read();
+        let owner = self.ssh_prompt_stamp(process).ok_or(Refusal::StaleAttempt)?;
+        if owner.generation != generation || !termflow_pty_protocol::ssh_prompt::valid_nonce(nonce) {
+            return Err(Refusal::StaleAttempt);
+        }
+        let entry = self.input.process(process, &owner);
+        let mut state = entry.lock();
+        state.owner(&owner)?;
+        if state.ssh_prompt.is_some() || state.input_generation != 0 {
+            return Err(Refusal::StaleAttempt);
+        }
+        state.ssh_prompt = Some(RegisteredPrompt { generation, nonce: nonce.into(), last_sequence: 0, stdin_writes: 0 });
+        Ok(())
+    }
+
+    pub(crate) fn ssh_prompt_nonce(&self, process: &str) -> Option<String> {
+        let entry = self.input.processes.lock().get(process)?.clone();
+        let state = entry.try_lock()?;
+        Some(state.ssh_prompt.as_ref()?.nonce.clone())
+    }
+
+    pub(crate) fn ssh_prompt_input_generation(&self, process: &str) -> Option<u64> {
+        let entry = self.input.processes.try_lock()?.get(process)?.clone();
+        let state = entry.try_lock()?;
+        state.ssh_prompt.as_ref()?;
+        Some(state.input_generation)
+    }
+
+    /// Reader-side observations never wait for the ownership barrier or the input writer.
+    /// Hosted observations have their real drain checked at the source (never a dummy drain).
+    pub(crate) fn observe_shell_prompt(
         &self,
         process: &str,
-        drain: &termflow_pty_protocol::da1::StartupDrain,
+        nonce: &str,
+        sequence: u64,
+        proof: super::ssh_shell::PromptProof<'_>,
     ) -> Result<ReadyEpoch, Refusal> {
+        use super::ssh_shell::PromptProof;
+        let _order = self.input.ownership.try_read().ok_or(Refusal::NotReady)?;
+        let entry = self.input.processes.try_lock().ok_or(Refusal::NotReady)?
+            .get(process).cloned().ok_or(Refusal::StaleAttempt)?;
+        let mut state = entry.try_lock().ok_or(Refusal::NotReady)?;
+        let owner = self.ssh_prompt_stamp(process).ok_or(Refusal::StaleAttempt)?;
+        state.owner(&owner)?;
+        let registration = state.ssh_prompt.as_mut().ok_or(Refusal::StaleAttempt)?;
+        if registration.generation != owner.generation || registration.nonce != nonce || sequence <= registration.last_sequence {
+            return Err(Refusal::StaleAttempt);
+        }
+        registration.last_sequence = sequence;
+        match proof {
+            PromptProof::Local { drain, input_generation } => {
+                if !drain.is_drained() || input_generation != state.input_generation {
+                    return Err(Refusal::NotReady);
+                }
+                Self::publish_prompt_epoch(process, owner, &mut state)
+            }
+            PromptProof::Hosted { channel, key, epoch, stdin_writes } => {
+                if stdin_writes != registration.stdin_writes {
+                    return Err(Refusal::NotReady);
+                }
+                let mut observed = Err(Refusal::NotReady);
+                self.publish_frame(channel, key, epoch, process, || {
+                    observed = Self::publish_prompt_epoch(process, owner, &mut state);
+                });
+                observed
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_uninstrumented_test_prompt(&self, process: &str, drain: &termflow_pty_protocol::da1::StartupDrain) -> Result<ReadyEpoch, Refusal> {
         let _order = self.input.ownership.read();
         let owner = self.input_stamp(process).ok_or(Refusal::StaleAttempt)?;
         let entry = self.input.process(process, &owner);
@@ -363,6 +439,10 @@ impl crate::state::HostKeys {
         if !drain.is_drained() {
             return Err(Refusal::NotReady);
         }
+        Self::publish_prompt_epoch(process, owner, &mut state)
+    }
+
+    fn publish_prompt_epoch(process: &str, owner: OwnerStamp, state: &mut ProcessInput) -> Result<ReadyEpoch, Refusal> {
         state.prompt_epoch = state
             .prompt_epoch
             .checked_add(1)
@@ -432,6 +512,7 @@ impl crate::state::HostKeys {
         let entry = self.input.process(process, &owner);
         let mut state = entry.lock();
         state.owner(&owner)?;
+        let is_protocol = matches!(&kind, WriteKind::Protocol);
         match kind {
             WriteKind::Ordinary(lease) => {
                 if let Some(lease) = lease {
@@ -470,6 +551,11 @@ impl crate::state::HostKeys {
             }
         }
         state.invalidate_ready()?;
+        if !is_protocol {
+            if let Some(prompt) = &mut state.ssh_prompt {
+                prompt.stdin_writes = prompt.stdin_writes.checked_add(1).ok_or(Refusal::StaleAttempt)?;
+            }
+        }
         // No HostKeys mutex is retained across local WriteFile. The ownership barrier and
         // this process's admission mutex remain held until writer/host FIFO acceptance.
         enqueue(&InputPermit { process })

@@ -5,6 +5,7 @@ mod spawn;
 mod local_process;
 mod spawn_spec;
 pub mod ssh_helpers;
+pub(crate) mod ssh_shell;
 pub mod input_gate;
 
 pub(crate) use cwd::exit_cwd_for;

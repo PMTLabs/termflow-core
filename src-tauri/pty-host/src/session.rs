@@ -92,6 +92,15 @@ pub struct Session {
     /// the inbox ConPTY never asks, so `true` means the modern handshake's query was observed.
     #[cfg_attr(not(test), allow(dead_code))]
     da1_reply_requested: Arc<AtomicBool>,
+    prompt_clock: Option<Arc<PromptClock>>,
+}
+
+// Even values count completed writes (times two); odd values mean an in-flight write.
+// The session manager has one stdin consumer. The output reader only loads this clock.
+#[derive(Default)]
+struct PromptClock {
+    writes: std::sync::atomic::AtomicU64,
+    uncertain: AtomicBool,
 }
 
 impl Session {
@@ -118,9 +127,17 @@ impl Session {
         for k in &spec.env_remove {
             cmd.env_remove(k);
         }
+        let mut prompt_nonce = None;
         for (k, v) in &spec.env {
-            cmd.env(k, v);
+            if k == termflow_pty_protocol::ssh_prompt::HOST_REGISTRATION_ENV {
+                if termflow_pty_protocol::ssh_prompt::valid_nonce(v) {
+                    prompt_nonce = Some(v.clone());
+                }
+            } else {
+                cmd.env(k, v);
+            }
         }
+        let prompt_clock = prompt_nonce.as_ref().map(|_| Arc::new(PromptClock::default()));
         if let Some(dir) = &spec.cwd {
             if !dir.is_empty() {
                 cmd.cwd(dir);
@@ -161,6 +178,7 @@ impl Session {
             tab_id: tab_id.clone(),
             writer: writer.clone(),
             da1_reply_requested: da1_reply_requested.clone(),
+            ssh_prompt: prompt_nonce.zip(prompt_clock.clone()),
         };
         std::thread::spawn(move || run_reader(pair_reader, shared, StartupDa1::for_spawn(cursor_row)));
 
@@ -176,6 +194,7 @@ impl Session {
             killing: Arc::new(AtomicBool::new(false)),
             kill_done: Arc::new(AtomicBool::new(false)),
             da1_reply_requested,
+            prompt_clock,
         })
     }
 
@@ -195,6 +214,9 @@ impl Session {
     }
 
     pub fn set_attached(&self, on: bool) {
+        if let Some(clock) = &self.prompt_clock {
+            clock.uncertain.store(true, Ordering::Release);
+        }
         self.attached.store(on, Ordering::Release);
     }
 
@@ -204,6 +226,9 @@ impl Session {
     /// guarantees the GUI receives replay strictly before any live frame.
     pub fn attach(&self, from_offset: u64) {
         let r = lock(&self.ring);
+        if let Some(clock) = &self.prompt_clock {
+            clock.uncertain.store(true, Ordering::Release);
+        }
         let snap = r.snapshot_from(from_offset);
         if snap.gap {
             let _ = self.events.try_send(Data::Gap {
@@ -233,7 +258,17 @@ impl Session {
         // Core admission ends at this process-bound FIFO's acceptance, not a new wire ack.
         // The manager retains this exact Session; both queued input and StartupReplies use
         // this one complete-write/flush boundary, never an independent raw writer handle.
-        termflow_pty_protocol::da1::write_reply(&self.writer, bytes)
+        if let Some(clock) = &self.prompt_clock {
+            clock.writes.fetch_add(1, Ordering::AcqRel);
+        }
+        let result = termflow_pty_protocol::da1::write_reply(&self.writer, bytes);
+        if let Some(clock) = &self.prompt_clock {
+            if result.is_err() {
+                clock.uncertain.store(true, Ordering::Release);
+            }
+            clock.writes.fetch_add(1, Ordering::Release);
+        }
+        result
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
@@ -320,6 +355,7 @@ struct ReaderShared {
     tab_id: String,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     da1_reply_requested: Arc<AtomicBool>,
+    ssh_prompt: Option<(String, Arc<PromptClock>)>,
 }
 
 /// The reader thread body, over any `Read` so it is testable without a PTY.
@@ -334,6 +370,19 @@ fn run_reader<R: Read>(mut reader: R, sh: ReaderShared, mut da1: StartupDa1) {
     // successful send is preceded by a Gap so the GUI resyncs.
     let mut lost = false;
     let mut replies = StartupReplies::new(sh.writer.clone(), sh.tab_id.clone());
+    let mut ssh_prompt = sh.ssh_prompt.as_ref().map(|(nonce, clock)| (
+        termflow_pty_protocol::ssh_prompt::PromptParser::new(nonce.clone()), clock,
+    ));
+    let drain = ssh_prompt.as_ref().map(|_| replies.drain());
+    let stream = |data: Vec<u8>, lost: &mut bool| {
+        if data.is_empty() { return; }
+        let mut r = lock(&sh.ring);
+        let off = r.tail();
+        r.push(&data);
+        if sh.attached.load(Ordering::Acquire) {
+            *lost = stream_live(&sh.events, &sh.tab_id, off, data, *lost);
+        }
+    };
     pump_output(
         &mut reader,
         find_utf8_boundary,
@@ -345,15 +394,33 @@ fn run_reader<R: Read>(mut reader: R, sh: ReaderShared, mut da1: StartupDa1) {
             replies.send(reply);
         },
         |data| {
-            let mut r = lock(&sh.ring);
-            let off = r.tail();
-            r.push(&data);
-            if sh.attached.load(Ordering::Acquire) {
-                lost = stream_live(&sh.events, &sh.tab_id, off, data, lost);
-            }
-            drop(r);
+            let data = match (&mut ssh_prompt, &drain) {
+                (Some((parser, clock)), Some(drain)) => {
+                    let write_stamp = clock.writes.load(Ordering::Acquire);
+                    let stamp = (write_stamp % 2 == 0 && drain.is_drained()).then_some(write_stamp);
+                    parser.filter(data, stamp, |nonce, sequence, observed| {
+                        // Serialize with attach/replay, but never with the PTY writer.
+                        let _ring = lock(&sh.ring);
+                        if !lost && sh.attached.load(Ordering::Acquire)
+                            && !clock.uncertain.load(Ordering::Acquire)
+                            && clock.writes.load(Ordering::Acquire) == observed
+                            && drain.is_drained()
+                        {
+                            let _ = sh.events.try_send(Data::SshPrompt {
+                                tab_id: sh.tab_id.clone(), nonce: nonce.into(), sequence,
+                                stdin_writes: observed / 2,
+                            });
+                        }
+                    })
+                }
+                _ => data,
+            };
+            stream(data, &mut lost);
         },
     );
+    if let Some((parser, _)) = &mut ssh_prompt {
+        stream(parser.finish(), &mut lost);
+    }
     sh.exited.store(true, Ordering::Release);
     // Only stream Exit if attached; while detached (Hold) the tombstone is the
     // durable signal and attach() re-emits Exit after replay on reconnect.
@@ -747,6 +814,7 @@ mod tests {
                 tab_id: "tab-fake".into(),
                 writer: writer.clone(),
                 da1_reply_requested: answered.clone(),
+                ssh_prompt: None,
             },
             StartupDa1::new(armed),
         );
@@ -762,6 +830,7 @@ mod tests {
             killing: Arc::new(Flag::new(true)), // nothing to kill: Drop must not taskkill pid 0
             kill_done: Arc::new(Flag::new(false)),
             da1_reply_requested: answered,
+            prompt_clock: None,
         };
         (sess, rx, cap)
     }
@@ -880,6 +949,7 @@ mod tests {
             tab_id: "tab-blocked".into(),
             writer: writer.clone(),
             da1_reply_requested: Arc::new(Flag::new(false)),
+            ssh_prompt: None,
         };
         std::thread::spawn(move || {
             run_reader(Script::new(&[PRE, b"after the query\r\n"]), shared, StartupDa1::new(true));
@@ -902,6 +972,39 @@ mod tests {
         let src = include_str!("session.rs").replace("\r\n", "\n");
         let cut = src.find("#[cfg(test)]\nmod tests").expect("test module marker");
         src[..cut].to_string()
+    }
+
+    #[test]
+    fn ssh_prompt_is_live_only_and_absent_from_the_replay_ring() {
+        let (events, rx) = channel(16);
+        let ring = Arc::new(Mutex::new(ReplayRing::new(1024)));
+        let nonce = "0123456789abcdef0123456789abcdef";
+        let marker = format!("\x1b]633;TermFlowSshReady;{nonce};1\x1b\\");
+        run_reader(
+            Script::new(&[b"before", &marker.as_bytes()[..7], &marker.as_bytes()[7..], b"after"]),
+            ReaderShared {
+                ring: ring.clone(),
+                attached: Arc::new(Flag::new(true)),
+                exited: Arc::new(Flag::new(false)),
+                events,
+                tab_id: "tab-ssh".into(),
+                writer: Arc::new(Mutex::new(Box::new(std::io::sink()))),
+                da1_reply_requested: Arc::new(Flag::new(false)),
+                ssh_prompt: Some((nonce.into(), Arc::new(PromptClock::default()))),
+            },
+            StartupDa1::new(false),
+        );
+        let events = drain(&rx);
+        assert_eq!(events.iter().filter(|event| matches!(event,
+            Data::SshPrompt { tab_id, nonce: observed, sequence: 1, stdin_writes: 0 }
+            if tab_id == "tab-ssh" && observed == nonce
+        )).count(), 1);
+        let live = events.into_iter().filter_map(|event| match event {
+            Data::Stdout { bytes, .. } => Some(bytes),
+            _ => None,
+        }).flatten().collect::<Vec<_>>();
+        assert_eq!(live.as_slice(), b"beforeafter");
+        assert_eq!(lock(&ring).snapshot_from(0).bytes.as_slice(), b"beforeafter");
     }
 
     /// Spellings that drain a reader without going through the pump.

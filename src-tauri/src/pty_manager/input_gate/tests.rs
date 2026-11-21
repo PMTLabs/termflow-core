@@ -148,7 +148,7 @@ impl Backend {
     }
     fn ready(&self) -> ReadyEpoch {
         self.keys
-            .observe_shell_prompt(PC, &termflow_pty_protocol::da1::StartupDrain::default())
+            .observe_uninstrumented_test_prompt(PC, &termflow_pty_protocol::da1::StartupDrain::default())
             .unwrap()
     }
 }
@@ -533,6 +533,9 @@ fn startup_replies_drain_before_ready() {
             stage: ShellStage::Local,
         },
     );
+    use crate::pty_manager::ssh_shell::PromptProof;
+    let nonce = "0123456789abcdef0123456789abcdef";
+    keys.register_ssh_prompt(PC, cg, nonce).unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let writer: LocalWriter =
         Arc::new(std::sync::Mutex::new(Box::new(Recording(recorded.clone()))));
@@ -551,15 +554,18 @@ fn startup_replies_drain_before_ready() {
         da1: true,
         consumed: 2,
     });
+    let observe = |seq| keys.observe_shell_prompt(PC, nonce, seq, PromptProof::Local {
+        drain: &drain, input_generation: keys.ssh_prompt_input_generation(PC).unwrap(),
+    });
     assert!(!drain.is_drained(), "reply pending before writer release");
     assert!(matches!(
-        keys.observe_shell_prompt(PC, &drain),
+        observe(1),
         Err(Refusal::NotReady)
     ));
     assert!(recorded.lock().is_empty());
     drop(held_writer);
     drain.wait();
-    let ready = keys.observe_shell_prompt(PC, &drain).unwrap();
+    let ready = observe(2).unwrap();
     let ticket = keys.prepare_ssh_input(PC).unwrap();
     keys.submit_ssh_input(&ticket, &ready, |_permit| {
         writer
@@ -574,7 +580,7 @@ fn startup_replies_drain_before_ready() {
         [b"\x1b[4;1R".to_vec(), DA1_REPLY.to_vec(), LAUNCH.to_vec()]
     );
     let next_ticket = keys.prepare_ssh_input(PC).unwrap();
-    let next_ready = keys.observe_shell_prompt(PC, &drain).unwrap();
+    let next_ready = observe(3).unwrap();
     keys.admit_protocol_input(PC, |_permit| Ok::<_, String>(()))
         .unwrap();
     assert_eq!(
