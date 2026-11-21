@@ -87,11 +87,17 @@ export const CanvasNode: React.FC<{
   /** This terminal's own host box, measured from its pane before the canvas took it
    *  (`plan/017`). Omitted only by tests and by a terminal with nothing to measure. */
   hostBox?: { w: number; h: number };
+  /**
+   * SSH leaves only: the frozen full content envelope — browser + terminal + status row, no title
+   * (plan 070 §4.1 B). It sizes the outer `.canvas-ssh-surface`; `hostBox` keeps meaning the
+   * terminal's own measuring box. Absent for every local node, which renders exactly as before.
+   */
+  sshEnvelope?: { w: number; h: number };
   children?: React.ReactNode;
 }> = ({
   node, tier, zoom, selected, focused, dimmed, linkTarget, hidden, nodeHidden, busyCue,
   onPointerDown, onHeaderPointerDown, onDoubleClick, onChipClick, onOpenAsTab, onOpenOverlay,
-  onClose, onContextMenu, overlaid, hostBox, combos, children, onToggleHide,
+  onClose, onContextMenu, overlaid, hostBox, sshEnvelope, combos, children, onToggleHide,
 }) => {
   const isChip = tier === 'chip' && !overlaid;
   const { x, y, w, h } = node.rect;
@@ -103,6 +109,8 @@ export const CanvasNode: React.FC<{
   // `term.element` is about to move into. See `canvasHostBoxes.measureHostBox`.
   const fallback = useCanvasMetrics();
   const host = hostBox ?? { w: fallback.hostW, h: fallback.hostH };
+  // What the outer surface is sized to: the terminal box for a local node, the envelope for SSH.
+  const surface = sshEnvelope ?? host;
 
   // The title bar stops growing once it has reached its natural size — see `headScale`.
   // Above zoom 1 it counter-scales, so the header holds a constant HEAD_H on screen and every
@@ -175,17 +183,17 @@ export const CanvasNode: React.FC<{
         // These must be real pixel lengths and must never be a percentage of the node: the body
         // collapses at the chip tier, and a percentage host would then resize a live PTY on a
         // zoom-out (`012` §6.5 RC2).
-        ['--node-host-w' as string]: `${host.w}px`,
-        ['--node-host-h' as string]: `${host.h}px`,
+        ['--node-host-w' as string]: `${surface.w}px`,
+        ['--node-host-h' as string]: `${surface.h}px`,
         // Per node rather than global, so a node of any width scales its host correctly.
         // This is the whole of the overlay's implementation: an overlaid node is a node with
         // a big world rect, and this line is what puts its terminal at screen scale 1.
-        ['--node-surface-scale' as string]: `${w / host.w}`,
+        ['--node-surface-scale' as string]: `${w / surface.w}`,
         // The scale above fits by WIDTH, so a portrait pane's replica is taller than the body
         // and the body clips the overflow off the bottom — where the newest rows are. This
         // lifts it back (`plan/020` §1). Zero whenever the surface already fits, and provably
         // zero in the overlay, whose `h` is `hostH * w / hostW + HEAD_H` by construction.
-        ['--node-surface-shift' as string]: `${surfaceShift(host, w, h - HEAD_H)}px`,
+        ['--node-surface-shift' as string]: `${surfaceShift(surface, w, h - HEAD_H)}px`,
       } as React.CSSProperties}
       onPointerDown={onPointerDown}
       onClick={isChip ? onChipClick : undefined}

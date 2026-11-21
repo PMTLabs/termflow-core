@@ -100,8 +100,10 @@ void PENDING_AFTER_REBASE;
 /**
  * EXCEPTIONS (documented, not orphans):
  * Bridge members with no production renderer caller on this branch. Each is a ledger row:
- *  - sshSessionOpen / sshSessionReconnect / sshSessionSubmitSecret / sshSessionTrustHost: PENDING-066,
- *    the 066 launch coordinator (services/sshLaunchAttempt.ts, OwnedSshLaunchNotice.tsx) calls them.
+ *  - sshSessionOpen / sshSessionReconnect: PENDING-066, the 066 launch coordinator
+ *    (services/sshLaunchAttempt.ts, OwnedSshLaunchNotice.tsx) calls them. sshSessionSubmitSecret and
+ *    sshSessionTrustHost left this list with 070 T2: the shared SSH composition's visible prompt
+ *    (components/Ssh/SshTerminalComposition.tsx) now calls them (gap G1).
  *  - sshSessionClose: GAP in every branch. Pane disposal closes the session in Rust through pane_op
  *    `ssh_retired` -> SessionRegistry::retire_owner; the bridge method has no renderer caller at all.
  * The comparison is two-way: when 066 lands a caller, this list must shrink with it.
@@ -110,8 +112,6 @@ const CONSUMER_EXCEPTIONS: readonly string[] = [
   'sshSessionClose',
   'sshSessionOpen',
   'sshSessionReconnect',
-  'sshSessionSubmitSecret',
-  'sshSessionTrustHost',
 ];
 
 /** Events the Rust side emits and the renderer listens to (065 store, 067 session/probe, 068 files). */

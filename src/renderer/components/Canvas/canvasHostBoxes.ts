@@ -1,4 +1,5 @@
 import { terminalCache } from '@termflow/terminal-core';
+import { sshFallbackSurfaceBox, sshSurfaceBoxFrom, type SshSurfaceBox } from './canvasSshGeometry';
 
 /**
  * Per-terminal host boxes for a canvas session — `plan/017`.
@@ -56,15 +57,24 @@ export interface HostBox {
  */
 const boxes = new Map<string, HostBox>();
 
+/** The SSH envelope descriptors (plan 070 §4.1 B), frozen and cleared with the host boxes. */
+const sshBoxes = new Map<string, SshSurfaceBox>();
+
 /** Called when Canvas Mode unmounts. A stale box from a previous session would be measured
  *  against a window size, split layout and font that may all have changed since. */
 export function clearHostBoxes(): void {
   boxes.clear();
+  sshBoxes.clear();
 }
 
 /** Test seam only. */
 export function _hostBoxCount(): number {
   return boxes.size;
+}
+
+/** Test seam only. */
+export function _sshBoxCount(): number {
+  return sshBoxes.size;
 }
 
 /**
@@ -122,5 +132,55 @@ export function measureHostBox(terminalId: string, fallback: HostBox): HostBox {
 
   const box: HostBox = { w: r.width, h: r.height };
   boxes.set(terminalId, box);
+  return box;
+}
+
+/**
+ * The SSH node's full content envelope, captured from the SAME untransformed source pane and at
+ * the same moment as `measureHostBox` — during `CanvasMode`'s render, BEFORE `NodeTerminal`
+ * registers its host (plan 070 §4.1 B). Everything `measureHostBox` says about timing, fractional
+ * px and refusing our own replica applies here unchanged.
+ *
+ * The terminal half is the fit host's border box (the box `HostBox` already means); the other
+ * halves are the shell's actual rendered allocations — the browser column or its rail (border
+ * included), the status row (border included) and the body's column gap — read from the pane's
+ * layout rather than restated, so a change to `SshPaneShell.css` moves the envelope with it.
+ *
+ * Refuses a `.canvas-surface` replica, a pane with no SSH shell around its host and any zero box,
+ * and never replaces a cached valid source. A leaf with nothing valid to measure gets an honest
+ * fallback built from `fallbackTerminal` plus the shared allocations; the fallback is NOT cached,
+ * so a later real capture still wins. Logs dimensions and terminalId only.
+ *
+ * @param collapsed the leaf's current `browserCollapsed`, used only to build the fallback.
+ */
+export function measureSshSurfaceBox(terminalId: string, fallbackTerminal: HostBox, collapsed: boolean): SshSurfaceBox {
+  const cached = sshBoxes.get(terminalId);
+  if (cached) return cached;
+  const fallback = () => sshFallbackSurfaceBox(fallbackTerminal, collapsed);
+
+  const host = terminalCache.get(terminalId)?.terminal?.element?.parentElement ?? null;
+  if (!host || isOurOwnReplica(host)) return fallback();
+  const shell = host.closest('.ssh-pane-shell');
+  const body = shell?.querySelector(':scope > .ssh-pane-body') ?? null;
+  const browser = body?.querySelector(':scope > .ssh-browser') ?? null;
+  const status = shell?.querySelector(':scope > .ssh-status') ?? null;
+  if (!shell || !body || !browser || !status) return fallback();
+
+  const t = host.getBoundingClientRect();
+  const b = browser.getBoundingClientRect();
+  const st = status.getBoundingClientRect();
+  if (t.width < 1 || t.height < 1 || b.width < 1 || st.height < 1) {
+    console.warn('[canvas] SSH envelope not captured', { terminalId, terminal: [t.width, t.height], browser: b.width, status: st.height });
+    return fallback();
+  }
+  const gap = parseFloat(getComputedStyle(body).columnGap);
+  const box = sshSurfaceBoxFrom({
+    terminal: { w: t.width, h: t.height },
+    browserW: b.width,
+    collapsed: browser.classList.contains('collapsed'),
+    statusH: st.height,
+    columnGap: Number.isFinite(gap) ? gap : 0,
+  });
+  sshBoxes.set(terminalId, box);
   return box;
 }

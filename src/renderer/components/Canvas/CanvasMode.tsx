@@ -27,7 +27,9 @@ import {
   paintedNodeRect, screenToWorld, Viewport, NODE_W, NODE_H, HEAD_H, Z_MIN,
 } from './canvasGeometry';
 import { CanvasMetricsContext } from './canvasMetricsContext';
-import { measureHostBox, clearHostBoxes } from './canvasHostBoxes';
+import { measureHostBox, measureSshSurfaceBox, clearHostBoxes } from './canvasHostBoxes';
+import { sshBrowserAllocation, type SshSurfaceBox } from './canvasSshGeometry';
+import { SshCanvasPresentation } from '../Ssh/SshTerminalComposition';
 import { DragTarget, useCanvasDrag } from './useCanvasDrag';
 import { useArrange } from './useArrange';
 import { PortClick, useWireDrag } from './useWireDrag';
@@ -58,7 +60,7 @@ import { boundsOf, centreOn, fitViewport } from './viewportStyles';
 import { useCanvasRenderPolicy } from './useCanvasRenderPolicy';
 import {
   CanvasNodeModel, isNodePainted,
-  selectCanvasModel, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
+  selectCanvasModel, sshTagsByTerminal, visibleNodeIds, allCollapsed, snapshotNodeIds, nodeRegistryPayload,
   GROUP_CHIP_ZOOM, NODE_CHIP_ZOOM,
 } from './canvasSelectors';
 import { createEdge, deleteEdge, fetchGraph, putNodes } from '../../services/canvasGraph';
@@ -614,6 +616,22 @@ export const CanvasMode: React.FC = () => {
     return out;
   }, [model.nodes, metrics]);
 
+  // SSH leaves only (plan 070 §4.1 A/D): each terminal's canonical tag, by terminalId, by
+  // reference — an untouched leaf keeps its tag object, so pan/zoom never churns `NodeTerminal`.
+  const sshTags = useMemo(() => sshTagsByTerminal(treesByTabId), [treesByTabId]);
+
+  // ...and the SSH envelope, captured in the SAME render as `hostBoxes` and for the same reason:
+  // before `NodeTerminal` registers the host `term.element` is about to move into (plan 070
+  // §4.1 B). Cached per terminal, so a later tag change reads the frozen descriptor back.
+  const sshBoxes = useMemo(() => {
+    const out: Record<string, SshSurfaceBox> = {};
+    for (const n of model.nodes) {
+      const tag = sshTags[n.terminalId];
+      if (tag) out[n.terminalId] = measureSshSurfaceBox(n.terminalId, hostBoxes[n.terminalId], tag.browserCollapsed);
+    }
+    return out;
+  }, [model.nodes, sshTags, hostBoxes]);
+
   // Frozen boxes outlive their session otherwise, and the next one may open on a different
   // window size, split layout or font.
   useEffect(() => () => clearHostBoxes(), []);
@@ -627,12 +645,13 @@ export const CanvasMode: React.FC = () => {
   // "not smaller than an ordinary node" floor inside `overlayGeometry` stays meaningful.
   const overlay = useMemo(() => {
     if (!overlayId) return null;
-    const b = hostBoxes[overlayId];
+    // An SSH node's overlay is sized from its whole envelope, so browser and status come too.
+    const b = sshBoxes[overlayId]?.envelope ?? hostBoxes[overlayId];
     if (!b) return null;
     return overlayGeometry(vp, size.w, size.h, {
       hostW: b.w, hostH: b.h, surfaceScale: NODE_W / b.w,
     });
-  }, [overlayId, vp, size, hostBoxes]);
+  }, [overlayId, vp, size, hostBoxes, sshBoxes]);
 
   useCanvasRenderPolicy(policyTiers, focusedId, recent, hiddenNodeIds);
 
@@ -1466,6 +1485,7 @@ export const CanvasMode: React.FC = () => {
               nodeHidden={n.hidden}
               overlaid={isOverlaid}
               hostBox={hostBoxes[n.terminalId]}
+              sshEnvelope={sshBoxes[n.terminalId]?.envelope}
               onPointerDown={() => dispatch(selectNode(n.terminalId))}
               // The ORIGINAL rect, never the overlay's or display rect: a drag writes RAW
               // geometry and `useCanvasDrag` starts its raw render phase only after slop.
@@ -1495,10 +1515,18 @@ export const CanvasMode: React.FC = () => {
               <NodeTerminal terminalId={n.terminalId} focused={focusedId === n.terminalId}
                 overlaid={isOverlaid}
                 exitInfo={sessionExitByTerminalId[n.terminalId] ?? null}
-                fontSize={terminalFontSize} />
+                fontSize={terminalFontSize}
+                // SSH leaves only: the shared shell around the same single host, the frozen
+                // browser allocation for the tag's collapse state, and a terminal-slot snapshot.
+                sshTag={sshTags[n.terminalId]}
+                sshBrowserWidth={sshTags[n.terminalId] && sshBoxes[n.terminalId]
+                  ? sshBrowserAllocation(sshBoxes[n.terminalId], sshTags[n.terminalId].browserCollapsed) : undefined}
+                SshShell={sshTags[n.terminalId] ? SshCanvasPresentation : undefined}
+                Snapshot={sshTags[n.terminalId] && snapshotIds.has(n.terminalId) ? NodeSnapshot : undefined} />
               {/* The exact opposite rule, and for the exact opposite reason: this one is
-                  culled hard, because what it owns is a timer rather than a terminal. */}
-              {snapshotIds.has(n.terminalId) && <NodeSnapshot terminalId={n.terminalId} />}
+                  culled hard, because what it owns is a timer rather than a terminal. An SSH
+                  node draws it inside its terminal slot instead (above), never over the browser. */}
+              {snapshotIds.has(n.terminalId) && !sshTags[n.terminalId] && <NodeSnapshot terminalId={n.terminalId} />}
             </CanvasNode>
           );
         })}

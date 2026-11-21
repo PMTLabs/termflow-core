@@ -13,6 +13,7 @@ import {
   fitGroupFrame, seedNodePosition, groupBoxFor, PAD_TOP, GROUP_GAP, FRAME_ROW_MAX_W,
 } from './canvasLayout';
 import { readingOrder } from './readingOrder';
+import { readSshPaneTag, type SshPaneTag } from '../Ssh/ssh066Contract';
 import { isVirtualTab } from '../../services/tabKinds';
 import type { NodeInfoPayload } from '../../services/canvasGraph';
 
@@ -593,5 +594,28 @@ export function snapshotNodeIds(
     if (!isNodePainted(n, revealHidden)) continue;
     if (tiers[n.terminalId] === 'snapshot' && visible.has(n.terminalId)) out.add(n.terminalId);
   }
+  return out;
+}
+
+/**
+ * SSH tags of every terminal leaf, keyed by terminalId (plan 070 §4.1 D) — read-only.
+ *
+ * Returns each leaf's own tag object, so a reducer that leaves a leaf untouched leaves its tag
+ * reference untouched too: `NodeTerminal` is memoised on it, and pan/zoom must not churn it.
+ * Two leaves from the same connection keep two independent tags.
+ */
+export function sshTagsByTerminal(treesByTabId: Record<string, PaneNode | null>): Record<string, SshPaneTag> {
+  const out: Record<string, SshPaneTag> = {};
+  const visit = (node: PaneNode | null | undefined): void => {
+    if (!node) return;
+    if (node.type === 'terminal') {
+      // 066-rebase: readSshPaneTag reads the real PaneNode.ssh field once 066 lands.
+      const tag = node.terminalId ? readSshPaneTag(node) : undefined;
+      if (tag && node.terminalId) out[node.terminalId] = tag;
+      return;
+    }
+    for (const child of node.children ?? []) visit(child);
+  };
+  for (const tree of Object.values(treesByTabId)) visit(tree);
   return out;
 }
