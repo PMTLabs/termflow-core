@@ -20,7 +20,7 @@ test('create sends every input field and never an id or backend-only fields', as
   await act(async () => host.querySelector<HTMLInputElement>('input[name="bookmarked"]')!.click()); await submit(); expect(save.mock.calls).toEqual([[input]]); expect(save.mock.calls[0][0]).not.toHaveProperty('id');
 });
 test('update sends exactly the edited row id and same field set', async () => { render(true); await submit(); expect(save.mock.calls).toEqual([[{ ...input,id:'c-edited' }]]); });
-test('dirty row switch prompts and Cancel retains the original draft', async () => {
+test('dirty row switch prompts and Keep editing retains the original draft', async () => {
   window.electronAPI = { ssh:{ upsertConnection:save } } as any;
   const store = configureStore({ reducer:{ ssh:sshReducer } });
   const connections = ['c-first','c-second'].map((id,order) => ({ ...input,id,name:id,order,lastUsedAt:null,hasSavedSecret:false }));
@@ -30,7 +30,7 @@ test('dirty row switch prompts and Cancel retains the original draft', async () 
   await change('name','Keep my draft');
   await act(async () => host.querySelector<HTMLElement>('[data-row-id="c-second"] > .ssh-tree-row')!.click());
   expect(document.querySelector('.unsaved-dialog-overlay, .confirm-dialog-overlay')).not.toBeNull();
-  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.trim() === 'Cancel')!.click());
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.trim() === 'Keep editing')!.click());
   expect(host.querySelector<HTMLInputElement>('input[name="name"]')?.value).toBe('Keep my draft'); expect(save).not.toHaveBeenCalled();
 });
-test('structured host error renders under Host', async () => { save.mockRejectedValue({ field:'host',code:'leading-dash' }); render(); await submit(); expect(host.querySelector('input[name="host"]')?.closest('label')?.textContent).toContain('leading-dash'); });
+test('structured host error renders under Host', async () => { save.mockRejectedValue({ field:'host',code:'leading-dash' }); render(true); await submit(); const field = host.querySelector('input[name="host"]')!; expect(document.getElementById(field.getAttribute('aria-describedby')!)?.textContent).toBe("Host can't start with “-”."); });
