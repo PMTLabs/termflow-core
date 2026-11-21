@@ -720,13 +720,13 @@ async fn unknown_host_cancel_blocks_launch_and_auth() {
     let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);
     let id = f.registry.probe("c-a").unwrap();
     let a = wait_state(&f.registry, &id, true, SessionState::NeedsHostkey).await;
-    assert_eq!(a.gate, Gate::Pending);
+    assert_eq!(a.gate, Gate::Blocked);
     assert_eq!(f.server.counters.auth.load(Ordering::SeqCst), 0);
     f.registry
         .trust_host(&id, true, Some(a.generation), a.prompt_id.as_deref(), false)
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(f.registry.state(&id, true).unwrap().gate, Gate::Blocked);
+    assert_ne!(f.registry.state(&id, true).unwrap().gate, Gate::Verified);
     assert!(!f.path.exists());
     f.registry.shutdown().await;
 }

@@ -1,5 +1,5 @@
 //! T4 admission and dispatch. No SSH child or transport-lifecycle watcher here.
-use super::{AttemptReceipt, Gate, LaunchError, LaunchErrorCode as Code, LaunchRegistry, LaunchSnapshot, LaunchStage};
+use super::{refused, AttemptReceipt, Gate, LaunchError, LaunchErrorCode as Code, LaunchRegistry, LaunchSnapshot, LaunchStage};
 use crate::{
     pty_manager::{
         input_gate::{InputBackend, InputDispatch, InputFence, LaunchTicket, ReadyEpoch},
@@ -259,9 +259,12 @@ impl<P: LaunchPort> Driver<'_, P> {
             }
         };
         let possibly_written = Cell::new(false);
+        let admitted = Cell::new(false);
+        let waiting_trust = Cell::new(false);
         let bytes = payload.encoded.bytes();
         let result = self.keys().submit_ssh_input_fenced(&candidate.ticket, &candidate.ready,
-            &Fence { driver: self, candidate: &candidate }, |permit| {
+            &Fence { driver: self, candidate: &candidate, waiting_trust: &waiting_trust }, |permit| {
+                admitted.set(true);
                 if self.keys().mounted_launch_owner(self.terminal, &candidate.process)
                     != Some((candidate.owner, candidate.placement))
                 {
@@ -289,6 +292,12 @@ impl<P: LaunchPort> Driver<'_, P> {
             payload.finish_after_quiescence();
             None
         };
+        // A live trust wait discovered before admission has not consumed the
+        // ticket or prompt. At the local FIFO head it is already consumed:
+        // never replay that turn, even if no bytes reached the writer.
+        if waiting_trust.get() && !admitted.get() {
+            return true;
+        }
         self.finish(result, payload);
         false
     }
@@ -303,11 +312,14 @@ impl<P: LaunchPort> Driver<'_, P> {
                 return Step::Stop;
             }
             let mut next = entry.snapshot.clone();
-            if view.generation != self.generation || view.connection_id != next.connection_id {
+            if view.generation != self.generation {
+                return Self::end(keys, entry, next, LaunchStage::Blocked, Code::StaleAttempt);
+            }
+            if view.connection_id != next.connection_id {
                 return Self::end(keys, entry, next, LaunchStage::Error, Code::StaleAttempt);
             }
             next.attempt.attempt_receipt = view.into();
-            if cancelled || view.gate == Gate::Blocked {
+            if refused(view, cancelled) {
                 return Self::end(keys, entry, next, LaunchStage::Blocked, Code::TrustBlocked);
             }
             let process = next.attempt.process_incarnation.clone();
@@ -348,7 +360,7 @@ impl<P: LaunchPort> Driver<'_, P> {
                 definition: definition.clone(), shell, identity,
             }))
         }).unwrap_or_else(|| {
-            self.finish(Err(Code::StaleAttempt.into()), None);
+            self.finish(Err(Code::TrustBlocked.into()), None);
             Step::Stop
         })
     }
@@ -370,7 +382,11 @@ impl<P: LaunchPort> Driver<'_, P> {
         if now.saturating_duration_since(start) >= READY_TIMEOUT {
             return Self::end(keys, entry, next, LaunchStage::Error, Code::Timeout);
         }
-        next.stage = LaunchStage::WaitingReady;
+        next.stage = if next.attempt.attempt_receipt.gate == Gate::Blocked {
+            LaunchStage::WaitingTrust
+        } else {
+            LaunchStage::WaitingReady
+        };
         let _ = entry.update(next);
         Step::Wait
     }
@@ -415,9 +431,9 @@ impl<P: LaunchPort> Driver<'_, P> {
                 if view.generation == self.generation && !cancelled {
                     record(Ok(()))
                 } else {
-                    record(Err(Code::StaleAttempt.into()))
+                    record(Err(Code::TrustBlocked.into()))
                 }
-            }).unwrap_or_else(|| record(Err(Code::StaleAttempt.into()))),
+            }).unwrap_or_else(|| record(Err(Code::TrustBlocked.into()))),
         };
         if let Some(payload) = retiring { payload.retire(); }
         if let Some(payload) = payload { payload.retire(); }
@@ -432,6 +448,7 @@ impl<P: LaunchPort> Driver<'_, P> {
 struct Fence<'a, 'd, P> {
     driver: &'a Driver<'d, P>,
     candidate: &'a Candidate,
+    waiting_trust: &'a Cell<bool>,
 }
 impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
     fn qualify<T>(&self, work: impl FnOnce() -> Result<T, LaunchError>) -> Result<T, LaunchError> {
@@ -450,15 +467,21 @@ impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
                 return Err(Code::StaleAttempt.into());
             }
             d.sessions.with_launch_authority(d.terminal, |view, owner, cancelled, definition| {
-                if cancelled || view.gate == Gate::Blocked { return Err(Code::TrustBlocked.into()); }
-                if view.generation != d.generation || owner != Some(c.placement)
-                    || definition != Some(&c.definition) || !eligible(view.gate)
-                    || view.gate != c.receipt.gate || view.known_hosts_paths != c.receipt.known_hosts_paths
-                {
+                if view.generation != d.generation || refused(view, cancelled) {
+                    return Err(Code::TrustBlocked.into());
+                }
+                if owner != Some(c.placement) || definition != Some(&c.definition) {
+                    return Err(Code::StaleAttempt.into());
+                }
+                if !eligible(view.gate) {
+                    self.waiting_trust.set(true);
+                    return Err(Code::StaleAttempt.into());
+                }
+                if view.gate != c.receipt.gate || view.known_hosts_paths != c.receipt.known_hosts_paths {
                     return Err(Code::StaleAttempt.into());
                 }
                 work()
-            }).unwrap_or_else(|| Err(Code::StaleAttempt.into()))
+            }).unwrap_or_else(|| Err(Code::TrustBlocked.into()))
         }).map_err(|_| Code::StoreUnavailable)?
     }
 }

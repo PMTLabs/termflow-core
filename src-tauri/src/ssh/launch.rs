@@ -142,6 +142,14 @@ impl RegisteredAttempt {
 #[derive(Default)]
 pub(crate) struct LaunchRegistry(Mutex<HashMap<String, RegisteredAttempt>>);
 
+// 067 uses Blocked both for a live trust wait (including the trust write
+// after the prompt clears) and for refusals. The network exception is an
+// Error session with an explicitly different gate; it is not a refusal.
+fn refused(view: &SessionView, cancelled: bool) -> bool {
+    cancelled || (view.gate != Gate::NetworkError
+        && matches!(view.state, SessionState::Error | SessionState::Disconnected))
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Operation<'a> {
     Launch(&'a str),
@@ -229,7 +237,7 @@ impl LaunchRegistry {
             }
             let launch_seq = previous.map_or(0, |entry| entry.snapshot.launch_seq)
                 .checked_add(1).ok_or(StaleAttempt)?;
-            let blocked = view.gate == Gate::Blocked;
+            let blocked = refused(view, cancelled);
             let ticket = if blocked {
                 None
             } else {
@@ -241,7 +249,13 @@ impl LaunchRegistry {
                 attempt: authoritative,
                 revision: launch_seq,
                 launch_seq,
-                stage: if blocked { LaunchStage::Blocked } else { LaunchStage::Preparing },
+                stage: if blocked {
+                    LaunchStage::Blocked
+                } else if view.gate == Gate::Blocked {
+                    LaunchStage::WaitingTrust
+                } else {
+                    LaunchStage::Preparing
+                },
                 error: blocked.then(|| TrustBlocked.into()),
             };
             let entry = RegisteredAttempt {

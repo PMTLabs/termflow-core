@@ -1041,8 +1041,7 @@ impl ClientHandler {
             .verify(token.clone(), key.clone())
             .await?;
         if verdict == Verdict::Unknown {
-            // An unanswered unknown-key prompt is still pending. A refusal,
-            // unlike a prompt, is a terminal blocked gate.
+            self.entry.update(|s| s.view.gate = Gate::Blocked);
             let host_key = HostKey {
                 algorithm: key.algorithm().to_string(),
                 fingerprint_sha256: key.fingerprint(ssh_key::HashAlg::Sha256).to_string(),
@@ -1195,10 +1194,6 @@ async fn connect_engine(entry: Arc<Entry>, deps: Arc<Dependencies>) -> Result<()
             .cloned()
             .collect::<Vec<_>>()
             .into();
-        // See the certificate when a peer offers both a certificate and its
-        // plain signing key; verify_key rejects it rather than silently
-        // negotiating down to a previously pinned plain key.
-        config.preferred.host_key_certificates = config.preferred.key.clone();
         let handler = ClientHandler {
             entry: entry.clone(),
             deps: deps.clone(),

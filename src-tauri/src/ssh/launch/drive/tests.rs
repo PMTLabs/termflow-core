@@ -18,6 +18,8 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use termflow_pty_protocol::da1::StartupDrain;
 
+mod certificate_only;
+
 const LEAF: &str = "tm-launch";
 const PROCESS: &str = "pc-launch";
 const CONNECTION: &str = "c-launch";
@@ -113,6 +115,15 @@ fn pin(host: &str, server: &Server) -> String {
 }
 impl Fixture {
     fn new(server: Server, unreachable: bool) -> Self {
+        let streams: Arc<dyn StreamFactory> = if unreachable {
+            Arc::new(Unreachable)
+        } else {
+            Arc::new(MemoryStreams(server.clone()))
+        };
+        Self::with_streams(server, streams)
+    }
+
+    fn with_streams(server: Server, streams: Arc<dyn StreamFactory>) -> Self {
         let home = std::env::temp_dir().join(format!("tf-launch-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         // macOS temp paths can start at a symlink (e.g. /var -> /private/var).
@@ -128,7 +139,6 @@ impl Fixture {
         }, |_| {}).unwrap();
         let adapter = Arc::new(StoreAdapter::new(store.clone(), home.clone(), Arc::new(|_| {})));
         let session_events = Arc::new(Capture::default());
-        let streams: Arc<dyn StreamFactory> = if unreachable { Arc::new(Unreachable) } else { Arc::new(MemoryStreams(server.clone())) };
         let sessions = Arc::new(SessionRegistry::new(Dependencies {
             targets: adapter.clone(), streams, agents: Arc::new(NativeAgent), secrets: adapter,
             events: session_events.clone(), known_hosts: KnownHosts { path: trust_path.clone() }, home: home.clone(),
@@ -232,24 +242,35 @@ impl Fixture {
 
 #[tokio::test]
 async fn pending_gate_and_needs_hostkey_emit_zero_terminal_bytes() {
-    let f = Fixture::direct();
-    let mut attempt = f.open();
-    // Renderer forgeries cannot become a verifier receipt.
-    attempt.attempt_receipt.gate = Gate::Verified;
-    attempt.attempt_receipt.known_hosts_paths = Some(super::super::KnownHostsPaths { target: "forged".into(), jump: None });
-    f.register(&attempt);
-    f.ready(1);
-    assert!(f.tick(&attempt));
-    let prompt = f.phase(SessionState::NeedsHostkey).await;
-    assert_eq!(prompt.gate, Gate::Pending);
-    assert!(f.tick(&attempt));
-    assert_eq!(f.access(&attempt, Operation::Query).unwrap().stage, LaunchStage::WaitingTrust);
-    f.zero();
-    f.trust(&prompt, true).unwrap();
-    f.phase(SessionState::NeedsSecret).await;
-    assert!(!f.tick(&attempt));
-    assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
-    f.shutdown().await;
+    for late_registration in [false, true] {
+        let f = Fixture::direct();
+        let mut attempt = f.open();
+        // Renderer forgeries cannot become a verifier receipt.
+        attempt.attempt_receipt.gate = Gate::Verified;
+        attempt.attempt_receipt.known_hosts_paths = Some(super::super::KnownHostsPaths { target: "forged".into(), jump: None });
+        if !late_registration {
+            assert_eq!(f.register(&attempt).attempt.attempt_receipt.gate, Gate::Pending);
+            f.ready(1);
+            assert!(f.tick(&attempt));
+            f.zero();
+        }
+        let prompt = f.phase(SessionState::NeedsHostkey).await;
+        assert_eq!(prompt.gate, Gate::Blocked);
+        if late_registration {
+            assert_eq!(f.register(&attempt).stage, LaunchStage::WaitingTrust);
+            assert!(f.tick(&attempt));
+            f.zero();
+            f.ready(1);
+        }
+        assert!(f.tick(&attempt));
+        assert_eq!(f.access(&attempt, Operation::Query).unwrap().stage, LaunchStage::WaitingTrust);
+        f.zero();
+        f.trust(&prompt, true).unwrap();
+        f.phase(SessionState::NeedsSecret).await;
+        assert!(!f.tick(&attempt));
+        assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
+        f.shutdown().await;
+    }
 }
 
 #[tokio::test]
@@ -321,9 +342,12 @@ async fn trust_fsync_precedes_terminal_submit() {
     let hold = SyncHold::new(&f.trust_path);
     f.trust(&prompt, true).unwrap();
     SyncHold::wait(&hold.entered).await;
-    // Bytes are already visible on disk, but the transaction has not fsynced.
+    // The prompt already cleared and bytes are visible, but trust has not fsynced.
+    let writing_trust = f.sessions.state(LEAF, false).unwrap();
+    assert_eq!((writing_trust.state, writing_trust.gate), (SessionState::Connecting, Gate::Blocked));
     assert_eq!(std::fs::read_to_string(&f.trust_path).unwrap(), pin("target.test", &f.server));
     assert!(f.tick(&a));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingTrust);
     f.zero();
     hold.release();
     SyncHold::wait(&hold.synced).await;
@@ -341,18 +365,12 @@ async fn blocked_cancel_changed_key_type_certificate_revoked_and_policy_error_ne
     ).unwrap()), "fixture");
     for error in [SessionError::HostKeyChanged, SessionError::HostCertificateUnsupported,
         SessionError::HostKeyRevoked, SessionError::KnownHostsMalformed { line: 1 }, SessionError::Cancelled] {
-        let mut server = Server::new(1, "alice");
-        if error == SessionError::HostCertificateUnsupported {
-            let mut cert = Builder::new(vec![1; 16], server.host.public_key().clone(), 1, 4_000_000_000).unwrap();
-            cert.cert_type(CertType::Host).unwrap().key_id("fixture").unwrap().valid_principal("target.test").unwrap();
-            server.host_certificate = Some(cert.sign(&key(5)).unwrap());
-        }
-        let f = Fixture::new(server, false);
+        let f = Fixture::direct();
         match error {
             SessionError::HostKeyChanged => f.seed(&format!("target.test {}\n", other_type.to_openssh().unwrap())),
             SessionError::HostKeyRevoked => f.seed(&format!("@revoked {}", pin("target.test", &f.server))),
             SessionError::KnownHostsMalformed { .. } => f.seed("target.test ssh-ed25519 !!!\n"),
-            SessionError::HostCertificateUnsupported => f.seed(&pin("target.test", &f.server)),
+            SessionError::HostCertificateUnsupported => f.seed(&format!("@cert-authority {}", pin("target.test", &f.server))),
             _ => {}
         }
         let a = f.open();
@@ -361,7 +379,11 @@ async fn blocked_cancel_changed_key_type_certificate_revoked_and_policy_error_ne
         if error == SessionError::Cancelled {
             f.trust(&f.phase(SessionState::NeedsHostkey).await, false).unwrap();
         }
-        let view = f.gate(Gate::Blocked).await;
+        // The prompt and its in-flight decision are also Blocked; await a
+        // terminal state before asserting the final classification.
+        let state = if error == SessionError::Cancelled { SessionState::Disconnected } else { SessionState::Error };
+        let view = f.phase(state).await;
+        assert_eq!(view.gate, Gate::Blocked);
         assert_eq!(view.reason.as_deref(), Some(error.reason().as_str()));
         assert!(!f.tick(&a));
         let blocked = f.access(&a, Operation::Query).unwrap();
@@ -369,6 +391,41 @@ async fn blocked_cancel_changed_key_type_certificate_revoked_and_policy_error_ne
         f.zero();
         f.shutdown().await;
     }
+
+    let mut server = Server::new(1, "alice");
+    let mut cert = Builder::new(vec![1; 16], server.host.public_key().clone(), 1, 4_000_000_000).unwrap();
+    cert.cert_type(CertType::Host).unwrap().key_id("fixture").unwrap().valid_principal("target.test").unwrap();
+    server.host_certificate = Some(cert.sign(&key(5)).unwrap());
+
+    // Regression control: do not change the stock 067 client to seek a
+    // certificate when the peer also offers the plain key already pinned.
+    let dual = Fixture::new(server.clone(), false);
+    dual.seed(&pin("target.test", &dual.server));
+    let a = dual.open();
+    dual.register(&a);
+    dual.ready(1);
+    assert_eq!(dual.phase(SessionState::NeedsSecret).await.gate, Gate::Verified);
+    assert!(!dual.tick(&a));
+    assert_eq!(*dual.port.record.bytes.lock(), dual.typed_bytes());
+    dual.shutdown().await;
+
+    let advertised = Arc::new(AtomicBool::new(false));
+    let streams = Arc::new(certificate_only::CertificateOnly { server: server.clone(), advertised: advertised.clone() });
+    let only = Fixture::with_streams(server, streams);
+    only.seed(&pin("target.test", &only.server));
+    let a = only.open();
+    only.register(&a);
+    only.ready(1);
+    let view = only.gate(Gate::Blocked).await;
+    assert!(advertised.load(Ordering::SeqCst), "peer must actually offer the certificate-only KEXINIT");
+    assert!(matches!(view.state, SessionState::Error | SessionState::Disconnected));
+    assert!(view.prompt_id.is_none());
+    assert!(!only.tick(&a));
+    let blocked = only.access(&a, Operation::Query).unwrap();
+    assert_eq!((blocked.stage, blocked.error.unwrap().code), (LaunchStage::Blocked, Code::TrustBlocked));
+    assert_eq!(only.server.counters.auth.load(Ordering::SeqCst), 0);
+    only.zero();
+    only.shutdown().await;
 }
 
 #[tokio::test]
@@ -528,6 +585,10 @@ async fn jump_to_target_prompt_keeps_current_prompt_id() {
     let jump_trust = f.phase(SessionState::NeedsHostkey).await;
     f.trust(&jump_trust, true).unwrap();
     let jump_secret = f.phase(SessionState::NeedsSecret).await;
+    assert_eq!(jump_secret.gate, Gate::Blocked);
+    assert!(f.tick(&a));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::WaitingTrust);
+    f.zero();
     f.secret(&jump_secret, &f.server.password, false).unwrap();
     let target_trust = f.phase(SessionState::NeedsHostkey).await;
     assert_eq!(jump_trust.generation, target_trust.generation);

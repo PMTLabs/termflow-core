@@ -378,21 +378,17 @@ fn trust_transaction(
     };
     file.write_all(format!("{newline}{token} {public}\n").as_bytes())
         .map_err(|_| SessionError::TrustWriteFailed)?;
-    sync_trust_file(&file, path)?;
+    #[cfg(test)]
+    sync_probe::notify(path, false);
+    file.sync_all()
+        .map_err(|_| SessionError::TrustWriteFailed)?;
+    #[cfg(test)]
+    sync_probe::notify(path, true);
     drop(file);
     // Final verification detects external replacement; advisory locking cannot exclude it.
     if classify(&snapshot(path)?.0, token, key)? != Verdict::Verified {
         return Err(SessionError::TrustWriteFailed);
     }
-    Ok(())
-}
-
-fn sync_trust_file(file: &File, _path: &Path) -> Result<(), SessionError> {
-    #[cfg(test)]
-    sync_probe::notify(_path, false);
-    file.sync_all().map_err(|_| SessionError::TrustWriteFailed)?;
-    #[cfg(test)]
-    sync_probe::notify(_path, true);
     Ok(())
 }
 
