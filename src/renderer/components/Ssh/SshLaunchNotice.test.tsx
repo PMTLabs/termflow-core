@@ -87,3 +87,26 @@ test('jump trust and target secret preserve their exact prompt receipts without 
   act(() => root.render(<SshLaunchNotice {...callbacks} snapshot={base} view={{ ...target, generation: 2 }} />));
   expect(button('Continue')).toBeUndefined();
 });
+
+test.each([
+  ['the same launch code as the shown launch error is not repeated',
+    { stage: 'error' as const, error: { code: 'Timeout' as const, message: 'Backend timeout copy.' } }, undefined,
+    { code: 'Timeout', message: 'Reconnect timeout copy.' }, ['Backend timeout copy.']],
+  ['a different launch code is shown as its own alert',
+    { stage: 'error' as const, error: { code: 'Timeout' as const, message: 'Backend timeout copy.' } }, undefined,
+    { code: 'WriteFailed', message: 'Write failed copy.' }, ['Backend timeout copy.', 'Write failed copy.']],
+  ['the same session code as the receipt reason is not repeated',
+    { stage: 'blocked' as const }, { reason: 'Host key changed.', errorCode: 'host-key-changed' },
+    { code: 'host-key-changed', message: 'Host key changed (again).' }, ['Host key changed.']],
+  ['a failure next to a reason without a code is shown',
+    { stage: 'blocked' as const }, { reason: 'Free-text reason.' },
+    { code: 'LaunchFailed', message: 'Launch failed copy.' }, ['Free-text reason.', 'Launch failed copy.']],
+  ['a failure with no shown reason is shown',
+    { stage: 'error' as const }, undefined,
+    { code: 'Timeout', message: 'Only failure.' }, ['Only failure.']],
+])('failure alert dedupes by error code: %s', (_name, patch, receipt, failure, alerts) => {
+  const snapshot: LaunchSnapshot = { ...base, ...patch,
+    attempt: { ...base.attempt, attemptReceipt: { ...base.attempt.attemptReceipt, ...receipt } } };
+  act(() => root.render(<SshLaunchNotice {...props()} snapshot={snapshot} failure={failure} />));
+  expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual(alerts);
+});

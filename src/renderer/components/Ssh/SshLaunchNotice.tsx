@@ -22,7 +22,8 @@ const stageCopy: Record<LaunchSnapshot['stage'], string> = {
 export interface SshLaunchNoticeProps {
   snapshot?: LaunchSnapshot;
   view?: SshSessionView;
-  failure?: string;
+  /** A launch, cancel or reconnect call that failed; hidden when its code is the error already shown. */
+  failure?: { code: string; message: string };
   retrying?: boolean;
   canCancel?: boolean;
   onCancel(attempt: LaunchAttemptRef): void;
@@ -42,10 +43,14 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
   const promptWindow = waiting || stage === 'typed' || stage === 'running';
   const host = promptWindow && !!receipt && currentView?.state === 'needs-hostkey' && !!currentView.hostKey;
   const secret = promptWindow && !!receipt && currentView?.state === 'needs-secret';
-  const sessionReason = currentView?.reason ?? snapshot?.attempt.attemptReceipt.reason;
-  const reason = stage === 'blocked' && snapshot?.error?.code === 'TrustBlocked'
-    ? sessionReason || snapshot.error.message
-    : snapshot?.error?.message || (stage === 'blocked' || stage === 'error' ? sessionReason : undefined);
+  const receiptSource = currentView?.reason === undefined ? snapshot?.attempt.attemptReceipt : undefined;
+  const sessionReason = currentView?.reason ?? receiptSource?.reason;
+  const sessionCode = currentView?.reason === undefined ? receiptSource?.errorCode : currentView.errorCode;
+  const shown = stage === 'blocked' && snapshot?.error?.code === 'TrustBlocked'
+    ? (sessionReason ? { message: sessionReason, code: sessionCode } : snapshot.error)
+    : snapshot?.error?.message ? snapshot.error
+      : stage === 'blocked' || stage === 'error' ? { message: sessionReason, code: sessionCode } : undefined;
+  const reason = shown?.message;
   const cancel = () => { if (snapshot) props.onCancel(snapshot.attempt); };
   const reconnect = stage === 'ended' || ((stage === 'typed' || stage === 'running') && currentView?.state === 'disconnected');
   return <section className="ssh-launch-notice" aria-label="SSH launch">
@@ -58,7 +63,7 @@ export function SshLaunchNotice(props: SshLaunchNoticeProps) {
     </div>
     {snapshot?.error?.code === 'Timeout' && <div role="status">Return to the local shell prompt</div>}
     {reason && <div role="alert">{reason}</div>}
-    {failure && failure !== reason && <div role="alert">{failure}</div>}
+    {failure && !(reason && failure.code === shown?.code) && <div role="alert">{failure.message}</div>}
     {host && receipt && <SshHostKeyPrompt key={promptKey} view={currentView} onTrust={() => props.onTrust(receipt)} onCancel={cancel} />}
     {secret && receipt && <SshSecretPrompt key={promptKey} view={currentView} onSubmit={(value, remember) => props.onSecret(value, remember, receipt)} onCancel={cancel} />}
   </section>;

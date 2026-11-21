@@ -26,7 +26,7 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
   const surface = useSurfaceHost(terminalId);
   const [binding, setBinding] = useState<{ owner: PaneCapture; snapshot: LaunchSnapshot }>();
   const snapshot = binding?.owner === owner ? binding.snapshot : undefined;
-  const [failure, setFailure] = useState<string>();
+  const [failure, setFailure] = useState<{ code: string; message: string }>();
   const [retrying, setRetrying] = useState(false);
   const flight = useRef(false);
   const watch = useRef<ReturnType<typeof watchSshLaunch> | undefined>(undefined);
@@ -55,7 +55,7 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
         setBinding(old => !old || old.owner !== owner || newerSshLaunch(sshLaunchState(old.snapshot), sshLaunchState(next))
           ? { owner, snapshot: next } : old);
       },
-      failed: error => { if (current()) setFailure(sshLaunchFailure(error).message); },
+      failed: error => { if (current()) setFailure(sshLaunchFailure(error)); },
     });
     watch.current = observer;
     return () => { mounted = false; observer.stop(); };
@@ -72,7 +72,7 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
       await window.electronAPI.ssh?.cancelTerminalLaunch(terminalId, attempt);
       if (current()) watch.current?.refresh();
     } catch (error) {
-      if (current()) setFailure(sshLaunchFailure(error).message);
+      if (current()) setFailure(sshLaunchFailure(error));
     }
   };
 
@@ -85,7 +85,7 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
     try {
       const result = await reconnectSshTerminal(terminalId);
       if (!current()) return;
-      if (!result.ok) setFailure(result.error.message);
+      if (!result.ok) setFailure(result.error);
       watch.current?.refresh();
     } finally {
       if (current()) {
