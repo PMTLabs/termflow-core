@@ -8,9 +8,39 @@ pub fn valid_nonce(nonce: &str) -> bool {
     nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
+// Preserve the existing SshPrompt wire field; decimal counters cannot use this tag.
+const CMD_TIME_TAG: u64 = 1 << 63;
+
+/// Counters advance strictly. Cmd wall time can wrap or roll back; an equal
+/// stamp is ignored, including two prompts with the same centisecond value.
+/// A changed stamp is not proof of freshness: the live reader and gate still
+/// require a consistent current input-generation stamp.
+#[derive(Default)]
+pub struct PromptOrder {
+    counter: u64,
+    cmd_time: Option<u64>,
+}
+
+impl PromptOrder {
+    pub fn advance(&mut self, sequence: u64) -> bool {
+        if sequence & CMD_TIME_TAG != 0 {
+            if sequence - CMD_TIME_TAG >= 24 * 60 * 60 * 100 || self.cmd_time == Some(sequence) {
+                return false;
+            }
+            self.cmd_time = Some(sequence);
+        } else {
+            if sequence <= self.counter {
+                return false;
+            }
+            self.counter = sequence;
+        }
+        true
+    }
+}
+
 pub struct PromptParser {
     nonce: String,
-    last_sequence: u64,
+    order: PromptOrder,
     pending: Vec<u8>,
     start: Option<u64>,
     consistent: bool,
@@ -18,7 +48,7 @@ pub struct PromptParser {
 
 impl PromptParser {
     pub fn new(nonce: String) -> Self {
-        Self { nonce, last_sequence: 0, pending: Vec::new(), start: None, consistent: false }
+        Self { nonce, order: PromptOrder::default(), pending: Vec::new(), start: None, consistent: false }
     }
 
     /// `stamp` is live input provenance. Strip complete private OSCs even if
@@ -43,9 +73,8 @@ impl PromptParser {
                     if (st_pending && byte == b'\\') || (!st_pending && byte == 7) {
                         let end = if st_pending { len - 1 } else { len };
                         if let Some((nonce, sequence)) = parse_body(&self.pending[PREFIX.len()..end]) {
-                            if nonce == self.nonce && sequence > self.last_sequence {
+                            if nonce == self.nonce && self.order.advance(sequence) {
                                 // Retire even a prompt seen while startup/write is in flight.
-                                self.last_sequence = sequence;
                                 if let (true, Some(start)) = (self.consistent, self.start) {
                                     observe(nonce, sequence, start);
                                 }
@@ -97,10 +126,9 @@ fn parse_body(body: &[u8]) -> Option<(&str, u64)> {
         return None;
     }
     let sequence = if sequence.bytes().all(|b| b.is_ascii_digit()) {
-        sequence.parse::<u64>().ok()?
+        sequence.parse::<u64>().ok().filter(|&n| n < CMD_TIME_TAG)?
     } else {
-        // cmd PROMPT can supply $T without running a command. Treat its time
-        // as an ordered sequence, never wrapping at midnight or on rollback.
+        // cmd PROMPT supplies only a wall-clock token, not an ordered counter.
         return parse_cmd_time(nonce, sequence.as_bytes());
     };
     Some((nonce, sequence))
@@ -116,5 +144,5 @@ fn parse_cmd_time<'a>(nonce: &'a str, time: &[u8]) -> Option<(&'a str, u64)> {
     let sec = digit(6)? * 10 + digit(7)?;
     let fraction = digit(9)? * 10 + digit(10)?;
     (hour < 24 && min < 60 && sec < 60)
-        .then_some((nonce, 1 + ((hour * 60 + min) * 60 + sec) * 100 + fraction))
+        .then_some((nonce, CMD_TIME_TAG | (((hour * 60 + min) * 60 + sec) * 100 + fraction)))
 }

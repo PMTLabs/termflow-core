@@ -5,6 +5,9 @@ use crate::pty_manager::ssh_helpers::{Helper, HelperKind, HelperRoot, HelperUse,
 use std::{io, path::Path};
 use termflow_pty_protocol::{ssh_prompt::valid_nonce, SpawnSpec};
 
+#[path = "windows.rs"]
+mod windows;
+
 const BASH_BOOTSTRAP: &str = "__TERMFLOW_SSH_BOOTSTRAP";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +60,9 @@ pub(crate) fn instrument_posix(
     inherited: impl Fn(&str) -> Option<String>,
 ) -> io::Result<PosixAdapter> {
     if !valid_nonce(nonce) { return Err(adapter_error("invalid SSH readiness nonce")); }
+    if let Some(result) = windows::instrument(ordinary, nonce, root, &supervisor) {
+        return result;
+    }
     let (dialect, paths) = classify(&ordinary.shell)?;
     let args = inspect_args(dialect, &ordinary.args)?;
     let effective_env = |key: &str| {

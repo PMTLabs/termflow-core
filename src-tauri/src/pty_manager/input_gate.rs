@@ -201,7 +201,7 @@ struct Attempt {
 struct RegisteredPrompt {
     generation: u64,
     nonce: String,
-    last_sequence: u64,
+    prompt_order: termflow_pty_protocol::ssh_prompt::PromptOrder,
     stdin_writes: u64,
 }
 
@@ -413,7 +413,7 @@ impl crate::state::HostKeys {
         if state.ssh_prompt.is_some() || state.input_generation != 0 {
             return Err(Refusal::StaleAttempt);
         }
-        state.ssh_prompt = Some(RegisteredPrompt { generation, nonce: nonce.into(), last_sequence: 0, stdin_writes: 0 });
+        state.ssh_prompt = Some(RegisteredPrompt { generation, nonce: nonce.into(), prompt_order: Default::default(), stdin_writes: 0 });
         Ok(())
     }
 
@@ -447,10 +447,9 @@ impl crate::state::HostKeys {
         let owner = self.ssh_prompt_stamp(process).ok_or(Refusal::StaleAttempt)?;
         state.owner(&owner)?;
         let registration = state.ssh_prompt.as_mut().ok_or(Refusal::StaleAttempt)?;
-        if registration.generation != owner.generation || registration.nonce != nonce || sequence <= registration.last_sequence {
+        if registration.generation != owner.generation || registration.nonce != nonce || !registration.prompt_order.advance(sequence) {
             return Err(Refusal::StaleAttempt);
         }
-        registration.last_sequence = sequence;
         match proof {
             PromptProof::Local { drain, input_generation } => {
                 if !drain.is_drained() || input_generation != state.input_generation {

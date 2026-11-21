@@ -65,7 +65,7 @@ fn ready_nonce_split_at_every_byte_boundary() {
     let bytes = b"\x1b]633;TermFlowSshReady;0123456789abcdef0123456789abcdef; 9:12:33.04\x1b\\";
     let mut seen = Vec::new();
     assert!(cmd.filter(bytes.to_vec(), Some(0), |_, seq, _| seen.push(seq)).is_empty());
-    assert_eq!(seen, [1 + ((9 * 60 + 12) * 60 + 33) * 100 + 4]);
+    assert_eq!(seen, [(1_u64 << 63) | (((9 * 60 + 12) * 60 + 33) * 100 + 4)]);
 }
 
 #[test]
@@ -150,4 +150,43 @@ fn unregistered_terminal_output_is_byte_identical() {
         let output = filter_local_output(&mut parser, &keys, PROCESS, None, chunk.to_vec(), |_| panic!("ordinary terminal observed readiness"));
         assert_eq!(output, chunk);
     }
+}
+
+#[test]
+fn cmd_time_marker_across_midnight_and_rollback_becomes_ready() {
+    let (keys, generation) = fixture();
+    let mut parser = register(&keys, generation);
+    let drain = StartupDrain::default();
+    for stamp in ["23:59:59.99", " 0:00:00.00", " 0:00:00.42", " 0:00:00.07"] {
+        keys.admit_input(PROCESS, None, |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
+        let mut ready = None;
+        let visible = filter_local_output(&mut parser, &keys, PROCESS, Some(&drain),
+            marker(NONCE, stamp), |epoch| ready = Some(epoch));
+        assert!(visible.is_empty());
+        let ticket = keys.prepare_ssh_input(PROCESS).unwrap();
+        keys.submit_ssh_input(&ticket, &ready.expect(stamp),
+            |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
+    }
+}
+
+#[test]
+fn cmd_duplicate_time_marker_is_ignored() {
+    let (keys, generation) = fixture();
+    let mut parser = register(&keys, generation);
+    let drain = StartupDrain::default();
+    let mut count = 0;
+    let stamp = " 9:12:33.04";
+    filter_local_output(&mut parser, &keys, PROCESS, Some(&drain), marker(NONCE, stamp), |_| count += 1);
+    assert_eq!(count, 1);
+    keys.admit_input(PROCESS, None, |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
+    // Independently exercise the gate as if another live source delivered the duplicate.
+    let mut wire = PromptParser::new(NONCE.into());
+    wire.filter(marker(NONCE, stamp), Some(0), |nonce, sequence, _| {
+        assert!(matches!(keys.observe_shell_prompt(PROCESS, nonce, sequence,
+            PromptProof::Local { drain: &drain,
+                input_generation: keys.ssh_prompt_input_generation(PROCESS).unwrap() }),
+            Err(Refusal::StaleAttempt)));
+    });
+    assert!(filter_local_output(&mut parser, &keys, PROCESS, Some(&drain), marker(NONCE, stamp),
+        |_| panic!("same-centisecond marker created an epoch")).is_empty());
 }

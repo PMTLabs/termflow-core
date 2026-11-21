@@ -7,6 +7,10 @@ use termflow_pty_protocol::{da1::{StartupDa1, StartupDrain, StartupReplies}, pum
 #[path = "ordinary_baseline.rs"]
 mod baseline;
 
+#[cfg(windows)]
+#[path = "windows_tests.rs"]
+mod windows_tests;
+
 const NONCE: &str = "0123456789abcdef0123456789abcdef";
 const DEADLINE: Duration = Duration::from_secs(20);
 
@@ -182,6 +186,7 @@ fn ordinary_spawn_spec_is_unchanged() {
         (Some(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"), "Windows PowerShell", &[]),
         (Some("pwsh"), "PowerShell (PATH)", &["-Command", "custom"]),
         (Some("cmd.exe"), "Command Prompt", &[]),
+        (Some("cmd.exe"), "Command Prompt with flags", &["/D", "/V:ON", "/Q"]),
         (Some(r"C:\Program Files\Git\bin\bash.exe"), "Git Bash", &["--login", "-i"]),
         (Some(r"C:\cygwin64\bin\bash.exe"), "Cygwin", &["--login", "-i"]),
         (Some("wsl.exe"), "WSL", &["-d", "Test distro"]),

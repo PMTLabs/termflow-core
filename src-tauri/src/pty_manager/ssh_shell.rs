@@ -1,11 +1,14 @@
-//! SSH-only prompt readiness; this module does not install a shell hook.
+//! SSH-only prompt readiness and private startup adapters.
 //!
 //! Emit `ESC ] 633;TermFlowSshReady;<nonce>;<sequence> ST` (no spaces;
 //! `ST` = `ESC \\`, or use BEL). The nonce is 32 lowercase hex digits, unique
 //! to the registered process generation. Emit positive increasing decimal
 //! sequence numbers, or for cmd PROMPT use `$E]633;TermFlowSshReady;<nonce>;$T$E\`
-//! (24-hour `HH:MM:SS.hh`, including cmd's space-padded hour). Duplicates and
-//! clock rollback/wrap fail closed. No hook takes a command or a secret.
+//! (24-hour `HH:MM:SS.hh`, including cmd's space-padded hour). A changed cmd
+//! stamp may wrap or roll back; freshness still requires consistent live bytes
+//! after the latest admitted input. Same-centisecond duplicates are ignored;
+//! readiness waits for the next real prompt (Preparing still offers Cancel).
+//! No hook takes a command or a secret.
 //!
 //! Stage the fresh process, generate a nonce with `new_nonce`, and register it
 //! with `HostKeys::register_ssh_prompt` before starting its output reader. For a
