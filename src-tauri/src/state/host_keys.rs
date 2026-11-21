@@ -14,6 +14,7 @@ mod restore;
 mod effects;
 mod delivery;
 mod pages;
+mod ssh_metrics;
 pub(super) mod panes;
 pub(crate) use panes::{PaneIdentity, PaneRequest, PaneResult, PaneReply, TRANSFER_DEADLINE};
 pub(crate) use pages::{PageRegistration, WindowBuildGuard};

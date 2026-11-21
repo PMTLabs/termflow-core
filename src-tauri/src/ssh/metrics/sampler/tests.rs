@@ -276,6 +276,23 @@ fn assert_warming(value: &Value) { assert_rates(value, Value::Null, Value::Null,
 fn assert_advancing(value: &Value) { assert_rates(value, json!(25.0), json!(30.0), json!(15.0)); }
 
 #[tokio::test]
+async fn cached_visibility_cannot_admit_a_tick_without_a_current_census() {
+    let (f, wire, events, _) = rig([]);
+    connect(&f, A).await;
+    let terminal = Terminal::new(A);
+    terminal.set_eligible(true).unwrap();
+    let at = Instant::now();
+    assert!(matches!(terminal.plan_checked(&f.registry, &*events, at, false, wall_now_ms), Action::Wait(Some(_))));
+    assert_eq!(wire.count(), 0);
+    let Action::Collect(tick) = terminal.plan_checked(&f.registry, &*events, at, true, wall_now_ms) else {
+        panic!("fresh census must allow the eligible tick");
+    };
+    deliver(&terminal, &f, &events, &tick).await;
+    assert_eq!(wire.count(), 1);
+    f.registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn two_consumers_one_terminal_have_one_exec_worker() {
     let (f, wire, events, sampler) = rig([]);
     connect(&f, A).await;
@@ -323,7 +340,7 @@ async fn slow_exec_skips_ticks_never_bursts_or_overlaps() {
     let runner = {
         let (worker, sessions, events, active) = (worker.clone(), f.registry.clone(), events.clone(), active.clone());
         tokio::spawn(async move {
-            worker.run(&sessions, &*events, |_| {
+            worker.run(&sessions, &*events, None, |_| {
                 let (ms, error) = simulated.lock().pop_front().expect("unexpected catch-up exec");
                 let (active, started) = (active.clone(), started.clone());
                 async move {

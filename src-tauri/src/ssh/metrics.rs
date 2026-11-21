@@ -3,6 +3,7 @@ pub mod model;
 pub mod protocol;
 pub mod reduce;
 pub mod sampler;
+pub(crate) mod watch;
 
 const COLLECT: &str = include_str!("metrics/collect.sh");
 const UNAVAILABLE_EXIT: u32 = 125;

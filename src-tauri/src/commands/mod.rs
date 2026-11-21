@@ -4,6 +4,7 @@
 //! split needed no edits to `lib.rs`'s `tauri::generate_handler![...]` list.
 
 mod ssh_fs;
+pub mod ssh_metrics;
 pub mod ssh_session;
 pub(crate) mod ssh_launch;
 pub(crate) use ssh_launch::*;

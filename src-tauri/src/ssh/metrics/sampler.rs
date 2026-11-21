@@ -7,6 +7,7 @@ use super::{
     reduce::Reducer,
 };
 use crate::ssh::{
+    auth::BoxFuture,
     session::{engine_runtime, ExecOpts, ExecOutcome, SessionError, SessionRegistry, SshSession},
     sessions::with_session,
 };
@@ -71,6 +72,13 @@ pub struct SamplerRegistry {
     sessions: Arc<SessionRegistry>,
     events: Arc<dyn EventSink>,
     workers: Arc<Workers>,
+    observer: Option<Arc<dyn EligibilityObserver>>,
+}
+
+/// Refresh the authoritative watch/visibility decision outside sampler locks.
+/// Used at collection admission and again before offering telemetry.
+pub(crate) trait EligibilityObserver: Send + Sync {
+    fn refresh<'a>(&'a self, terminal_id: &'a str) -> BoxFuture<'a, ()>;
 }
 
 type Workers = Mutex<HashMap<String, Arc<Terminal>>>;
@@ -81,7 +89,40 @@ impl SamplerRegistry {
             sessions,
             events,
             workers: Arc::default(),
+            observer: None,
         }
+    }
+
+    pub(crate) fn observing(
+        sessions: Arc<SessionRegistry>,
+        events: Arc<dyn EventSink>,
+        observer: Arc<dyn EligibilityObserver>,
+    ) -> Self {
+        Self {
+            sessions,
+            events,
+            workers: Arc::default(),
+            observer: Some(observer),
+        }
+    }
+
+    /// Hidden owners need a cheap eligibility wake, but no remote work. With
+    /// no registered owners there is no periodic eligibility wake at all.
+    pub(crate) fn set_observed(&self, terminal_id: &str, observed: bool) {
+        if let Some(worker) = self.existing(terminal_id) {
+            let mut state = worker.state.lock();
+            if !state.retired && state.observed != observed {
+                state.observed = observed;
+                worker.wake.notify_one();
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn status(&self, id: &str) -> Option<(Option<u64>, bool, bool)> {
+        let worker = self.existing(id)?;
+        let state = worker.state.lock();
+        Some((state.generation, state.eligible && !state.retired, state.in_flight))
     }
 
     /// Apply the authoritative eligibility decision for this terminal. Callers
@@ -136,9 +177,10 @@ impl SamplerRegistry {
         let sessions = self.sessions.clone();
         let events = self.events.clone();
         let workers = Arc::downgrade(&self.workers);
+        let observer = self.observer.clone();
         engine_runtime().spawn(async move {
             running
-                .run(&sessions, &*events, |lease| collect(&sessions, &running.id, lease))
+                .run(&sessions, &*events, observer.as_deref(), |lease| collect(&sessions, &running.id, lease))
                 .await;
             if let Some(workers) = workers.upgrade() {
                 workers.lock().remove(&running.id);
@@ -160,6 +202,9 @@ impl Drop for SamplerRegistry {
 struct State {
     retired: bool,
     eligible: bool,
+    observed: bool,
+    #[cfg(test)]
+    in_flight: bool,
     disarmed: bool,
     generation: Option<u64>,
     pause_seq: u64,
@@ -308,11 +353,23 @@ impl Terminal {
         Ok(fence)
     }
 
+    #[cfg(test)]
     fn plan_tick(
         &self,
         sessions: &SessionRegistry,
         events: &dyn EventSink,
         not_before: Instant,
+        wall_ms: impl FnOnce() -> u64,
+    ) -> Action {
+        self.plan_checked(sessions, events, not_before, true, wall_ms)
+    }
+
+    fn plan_checked(
+        &self,
+        sessions: &SessionRegistry,
+        events: &dyn EventSink,
+        not_before: Instant,
+        visibility_checked: bool,
         wall_ms: impl FnOnce() -> u64,
     ) -> Action {
         let mut state = self.state.lock();
@@ -323,6 +380,7 @@ impl Terminal {
             state.sync_generation(&self.id, events, generation);
             let started = Instant::now();
             Ok((state.eligible
+                && visibility_checked
                 && !state.disarmed
                 && state.paused_reason.is_none()
                 && started >= not_before)
@@ -335,18 +393,33 @@ impl Terminal {
                 }))
         });
         let now = Instant::now();
+        let waking = state.eligible || state.observed;
         match result {
-            Ok(Some(tick)) => Action::Collect(tick),
-            Ok(None) if state.eligible && not_before > now => Action::Wait(Some(not_before)),
-            Ok(None) => Action::Wait(state.eligible.then(|| now + CADENCE)),
+            Ok(Some(tick)) => {
+                #[cfg(test)]
+                { state.in_flight = true; }
+                Action::Collect(tick)
+            }
+            Ok(None) if waking && (!visibility_checked || not_before > now) => {
+                Action::Wait(Some(not_before.max(now)))
+            }
+            Ok(None) => Action::Wait(waking.then(|| now + CADENCE)),
             Err(_) => {
                 state.forget_telemetry();
-                Action::Wait(state.eligible.then(|| now + CADENCE))
+                Action::Wait(waking.then(|| now + CADENCE))
             }
         }
     }
 
-    async fn run<F, Fut>(&self, sessions: &SessionRegistry, events: &dyn EventSink, collect: F)
+    fn observing(&self) -> bool {
+        let state = self.state.lock();
+        state.observed && !state.retired
+    }
+
+    async fn run<F, Fut>(
+        &self, sessions: &SessionRegistry, events: &dyn EventSink,
+        observer: Option<&dyn EligibilityObserver>, collect: F,
+    )
     where
         F: Fn(Arc<SshSession>) -> Fut,
         Fut: Future<Output = (ExecOutcome, String)>,
@@ -356,7 +429,19 @@ impl Terminal {
             // A receiver is tied to one 067 entry; reacquire on each wake so
             // replacement cannot leave us subscribed to a retired generation.
             let mut transition = sessions.subscribe_transitions(&self.id).ok();
-            match self.plan_tick(sessions, events, next, wall_now_ms) {
+            let visibility_checked = if let Some(observer) = observer {
+                if Instant::now() >= next && self.observing() {
+                    observer.refresh(&self.id).await;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
+            // Don't let the clock crossing a boundary between these two
+            // checks turn an unchecked window into an admitted collection.
+            match self.plan_checked(sessions, events, next, visibility_checked, wall_now_ms) {
                 Action::Stop => break,
                 Action::Wait(until) => {
                     tokio::select! {
@@ -381,6 +466,9 @@ impl Terminal {
                     // No select/drop here. Even when losing all owners, await
                     // the real reader and feed its outcome to the pause latch.
                     let (outcome, nonce) = collect(tick.lease.clone()).await;
+                    if let Some(observer) = observer.filter(|_| self.observing()) {
+                        observer.refresh(&self.id).await;
+                    }
                     let _ = self.finish(sessions, events, &tick, classify(&outcome, &nonce));
                     next = next_start(tick.started, Instant::now());
                 }
@@ -396,6 +484,8 @@ impl Terminal {
         result: Reading<'_>,
     ) -> Result<(), SessionError> {
         let mut state = self.state.lock();
+        #[cfg(test)]
+        { state.in_flight = false; }
         if state.retired {
             return Err(SessionError::OwnerRetired);
         }
