@@ -103,20 +103,17 @@ impl Backend {
             peer,
         )
     }
-    fn enqueue(&self, permit: &InputPermit<'_>, bytes: &[u8]) -> Result<(), String> {
+    fn enqueue<'io>(&'io self, permit: &InputPermit<'_>, bytes: &'io [u8]) -> Result<InputDispatch<'io, (), String>, String> {
         if self.enqueue_hosted(permit, bytes) {
-            return Ok(());
+            return Ok(InputDispatch::Complete(()));
         }
         if self.hosted(permit.process()) {
             return Err("host refused".into());
         }
-        self.local
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .write_all(bytes)
-            .map_err(|e| e.to_string())
+        Ok(InputDispatch::local(move || {
+            self.local.as_ref().unwrap().lock().unwrap().write_all(bytes)
+                .map_err(|e| e.to_string())
+        }))
     }
     async fn bytes(&self, peer: &mut Option<tokio::io::DuplexStream>) -> Vec<Vec<u8>> {
         let Some(peer) = peer else {
@@ -150,6 +147,216 @@ impl Backend {
         self.keys
             .observe_uninstrumented_test_prompt(PC, &termflow_pty_protocol::da1::StartupDrain::default())
             .unwrap()
+    }
+}
+
+// A short bounded negative observation, never a sleep used to order work.
+const STILL_WAITING: Duration = Duration::from_millis(100);
+
+struct BlockFirstWrite {
+    entered: Option<mpsc::Sender<()>>,
+    release: mpsc::Receiver<bool>,
+    recorded: Arc<Mutex<Vec<Vec<u8>>>>,
+}
+impl Write for BlockFirstWrite {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).unwrap();
+            if self.release.recv() != Ok(true) {
+                return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child closed"));
+            }
+        }
+        self.recorded.lock().push(bytes.into());
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+}
+
+fn staged_local(keys: &HostKeys, leaf: &str, process: &str) -> u64 {
+    let CreateAdmission::Run(cg) = keys.admit_create(leaf, CreateMode::Mount).unwrap() else {
+        panic!("expected fresh placement");
+    };
+    keys.stage_shell(leaf, cg, process, None).unwrap();
+    assert!(matches!(keys.complete_shell(leaf, cg, &StagedShell {
+        process: process.into(), stage: ShellStage::Local,
+    }), Completion::Registered));
+    cg
+}
+
+fn blocked_local() -> (Arc<Backend>, mpsc::Sender<bool>, std::thread::JoinHandle<Result<(), WriteFailure>>) {
+    let keys = HostKeys::default();
+    staged_local(&keys, LEAF, PC);
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let (entered, inside) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let writer: LocalWriter = Arc::new(std::sync::Mutex::new(Box::new(BlockFirstWrite {
+        entered: Some(entered), release: gate, recorded: recorded.clone(),
+    })));
+    let backend = Arc::new(Backend { keys, local: Some(writer), recorded, client: None });
+    let a = backend.clone();
+    let work = std::thread::spawn(move || write_input(&*a, PC, InputSource::Renderer, None, b"first"));
+    inside.recv_timeout(BOUND).unwrap();
+    (backend, release, work)
+}
+
+#[test]
+fn blocked_local_write_never_blocks_owner_changes_or_other_terminals() {
+    use crate::state::{CloseAction, CloseStorage, EndKind};
+
+    let (backend, release, first) = blocked_local();
+    let (progress, observed) = mpsc::channel();
+    let close = std::thread::spawn({
+        let backend = backend.clone();
+        move || {
+            // These effects determine whether AppState is allowed to kill the child.
+            assert!(matches!(backend.keys.close_process(PC, CloseStorage::Preserve), CloseAction::End { .. }));
+            assert!(backend.keys.end_process(PC, EndKind::Close(CloseStorage::Preserve), |_| {}).is_some());
+            progress.send("A closed").unwrap();
+        }
+    });
+    assert_eq!(observed.recv_timeout(BOUND).unwrap(), "A closed");
+    release.send(false).unwrap(); // model the kill breaking the in-flight WriteFile
+    let err = first.join().unwrap().unwrap_err();
+    assert_eq!(err.kind, FailureKind::Write);
+    assert_eq!(err.message, "child closed");
+    assert!(backend.recorded.lock().is_empty());
+    close.join().unwrap();
+
+    let (backend, release, first) = blocked_local();
+    let (selected, reserved) = mpsc::channel();
+    let (entered, writing) = mpsc::channel();
+    let second = std::thread::spawn({
+        let backend = backend.clone();
+        move || {
+            let writer = backend.local.as_ref().unwrap().clone();
+            backend.keys.admit_input(PC, None, |_| {
+                selected.send(()).unwrap();
+                Ok(InputDispatch::local(move || {
+                    entered.send(()).unwrap(); // witness before acquiring the actual writer mutex
+                    writer.lock().unwrap().write_all(b"second")
+                }))
+            })
+        }
+    });
+    reserved.recv_timeout(BOUND).unwrap();
+    let (progress, observed) = mpsc::channel();
+    let other = std::thread::spawn({
+        let backend = backend.clone();
+        move || {
+            const B: &str = "pc-unrelated-input";
+            staged_local(&backend.keys, "tm-unrelated-input", B);
+            progress.send(("B created", Vec::new())).unwrap();
+            let recorded = Arc::new(Mutex::new(Vec::new()));
+            let mut writer = Recording(recorded.clone());
+            backend.keys.admit_input(B, None, |_| Ok(InputDispatch::local(move || writer.write_all(b"B input")))).unwrap();
+            let bytes = recorded.lock().clone();
+            progress.send(("B wrote", bytes)).unwrap();
+        }
+    });
+    assert_eq!(observed.recv_timeout(BOUND).unwrap(), ("B created", vec![]));
+    assert_eq!(observed.recv_timeout(BOUND).unwrap(), ("B wrote", vec![b"B input".to_vec()]));
+    assert_eq!(writing.recv_timeout(STILL_WAITING), Err(mpsc::RecvTimeoutError::Timeout));
+    release.send(true).unwrap();
+    writing.recv_timeout(BOUND).unwrap();
+    first.join().unwrap().unwrap();
+    second.join().unwrap().unwrap();
+    other.join().unwrap();
+    assert_eq!(*backend.recorded.lock(), [b"first".to_vec(), b"second".to_vec()]);
+
+    let (backend, release, first) = blocked_local();
+    let (selected, reserved) = mpsc::channel();
+    let (takeover, ticket) = (backend.clone(), backend.keys.prepare_ssh_input(PC).unwrap());
+    let ready = backend.ready(); // fresh observation while the preceding write is still in flight
+    let launch = std::thread::spawn({
+        let backend = backend.clone();
+        move || backend.keys.submit_ssh_input(&ticket, &ready, |p| {
+            selected.send(()).unwrap();
+            backend.enqueue(p, LAUNCH)
+        })
+    });
+    reserved.recv_timeout(BOUND).unwrap();
+    let (selected, revoked) = mpsc::channel();
+    let human = std::thread::spawn(move || takeover.keys.takeover_input(PC, |p| {
+        selected.send(()).unwrap(); // the takeover has already revoked the queued launch
+        takeover.enqueue(p, b"human")
+    }));
+    revoked.recv_timeout(BOUND).unwrap();
+    release.send(true).unwrap();
+    first.join().unwrap().unwrap();
+    assert_eq!(launch.join().unwrap(), Err(Refusal::StaleAttempt.to_string()));
+    human.join().unwrap().unwrap();
+    assert_eq!(*backend.recorded.lock(), [b"first".to_vec(), b"human".to_vec()]);
+}
+
+#[test]
+fn prompt_observed_under_lock_contention_is_not_lost() {
+    use super::super::ssh_shell::filter_local_output;
+    use termflow_pty_protocol::{da1::StartupDrain, ssh_prompt::PromptParser};
+
+    fn during_contention<T: Send + 'static, G>(held: G, read: impl FnOnce() -> T + Send + 'static) -> T {
+        let (starting, started) = mpsc::sync_channel(0);
+        let (done, result) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            starting.send(()).unwrap();
+            let _ = done.send(read());
+        });
+        started.recv_timeout(BOUND).unwrap();
+        let early = result.recv_timeout(STILL_WAITING);
+        drop(held);
+        assert!(matches!(early, Err(mpsc::RecvTimeoutError::Timeout)), "prompt lookup must wait for metadata, not drop it");
+        let value = result.recv_timeout(BOUND).unwrap();
+        worker.join().unwrap();
+        value
+    }
+
+    let keys = HostKeys::default();
+    let cg = staged_local(&keys, LEAF, PC);
+    let nonce = "0123456789abcdef0123456789abcdef";
+    keys.register_ssh_prompt(PC, cg, nonce).unwrap();
+    let entry = keys.input.processes.lock().get(PC).unwrap().clone();
+    let actual_nonce = during_contention(entry.lock(), {
+        let keys = keys.clone();
+        move || keys.ssh_prompt_nonce(PC)
+    });
+    assert_eq!(actual_nonce.as_deref(), Some(nonce));
+    let mut parser = Some(PromptParser::new(actual_nonce.unwrap()));
+    for (seq, lock) in [(1, "map"), (2, "ownership"), (3, "entry")] {
+        let feed = {
+            let keys = keys.clone();
+            move || {
+                let drain = StartupDrain::default();
+                let marker = format!("\x1b]633;TermFlowSshReady;{nonce};{seq}\x07").into_bytes();
+                let mut count = 0;
+                let visible = filter_local_output(&mut parser, &keys, PC, Some(&drain), marker.clone(), |_| count += 1);
+                assert!(visible.is_empty());
+                assert_eq!(count, 1);
+                assert!(filter_local_output(&mut parser, &keys, PC, Some(&drain), marker, |_| count += 1).is_empty());
+                assert_eq!(count, 1);
+                parser
+            }
+        };
+        parser = match lock {
+            "map" => during_contention(keys.input.processes.lock(), feed),
+            "ownership" => during_contention(keys.input_owner_change(), feed),
+            _ => during_contention(entry.lock(), feed),
+        };
+    }
+
+    // Also exercise the observer's own locks, independent of the pre-parse snapshot.
+    let stamp = keys.ssh_prompt_input_generation(PC).unwrap();
+    for (seq, lock) in [(4, "map"), (5, "entry")] {
+        let observe = {
+            let keys = keys.clone();
+            move || keys.observe_shell_prompt(PC, nonce, seq, super::super::ssh_shell::PromptProof::Local {
+                drain: &StartupDrain::default(), input_generation: stamp,
+            })
+        };
+        let ready = if lock == "map" {
+            during_contention(keys.input.processes.lock(), observe)
+        } else {
+            during_contention(entry.lock(), observe)
+        };
+        assert!(ready.is_ok());
     }
 }
 
@@ -299,7 +506,7 @@ async fn every_input_sink_serializes_takeover_submit_and_transfer() {
             let process = backend.keys.input.processes.lock().get(PC).unwrap().clone();
             assert!(
                 process.try_lock().is_none(),
-                "enqueue must retain admission: {sink}"
+                "FIFO reservation/hosted enqueue must retain admission: {sink}"
             );
             assert!(
                 backend.keys.input.ownership.try_write().is_none(),
@@ -568,11 +775,9 @@ fn startup_replies_drain_before_ready() {
     let ready = observe(2).unwrap();
     let ticket = keys.prepare_ssh_input(PC).unwrap();
     keys.submit_ssh_input(&ticket, &ready, |_permit| {
-        writer
-            .lock()
-            .unwrap()
-            .write_all(LAUNCH)
-            .map_err(|e| e.to_string())
+        Ok(InputDispatch::local(move || {
+            writer.lock().unwrap().write_all(LAUNCH).map_err(|e| e.to_string())
+        }))
     })
     .unwrap();
     assert_eq!(
@@ -581,10 +786,10 @@ fn startup_replies_drain_before_ready() {
     );
     let next_ticket = keys.prepare_ssh_input(PC).unwrap();
     let next_ready = observe(3).unwrap();
-    keys.admit_protocol_input(PC, |_permit| Ok::<_, String>(()))
+    keys.admit_protocol_input(PC, |_permit| Ok::<_, String>(InputDispatch::Complete(())))
         .unwrap();
     assert_eq!(
-        keys.submit_ssh_input(&next_ticket, &next_ready, |_| Ok::<_, String>(()))
+        keys.submit_ssh_input(&next_ticket, &next_ready, |_| Ok::<_, String>(InputDispatch::Complete(())))
             .unwrap_err(),
         Refusal::NotReady.to_string(),
         "a later protocol reply invalidates an unconsumed prompt epoch"

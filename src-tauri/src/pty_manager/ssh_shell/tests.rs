@@ -1,5 +1,5 @@
 use super::*;
-use crate::pty_manager::input_gate::{LocalWriter, Refusal};
+use crate::pty_manager::input_gate::{InputDispatch, LocalWriter, Refusal};
 use crate::state::{CreateAdmission, CreateMode, ShellStage, StagedShell};
 use std::sync::{Arc, Mutex};
 use termflow_pty_protocol::da1::{StartupReplies, StartupReply, DA1_REPLY};
@@ -99,18 +99,18 @@ fn wrong_nonce_old_generation_and_replayed_marker_are_ignored() {
     let stale = feed(&mut parser, marker(NONCE, "2")).pop().unwrap();
     let split = marker(NONCE, "3");
     assert!(feed(&mut parser, split[..split.len() - 1].to_vec()).is_empty());
-    keys.admit_input(PROCESS, None, |_| Ok::<_, Refusal>(())).unwrap();
+    keys.admit_input(PROCESS, None, |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
     assert!(feed(&mut parser, split[split.len() - 1..].to_vec()).is_empty(), "marker spanned admitted input");
     for (label, seq) in [("same sequence after input", "2"), ("split marker replay", "3")] {
         assert!(feed(&mut parser, marker(NONCE, seq)).is_empty(), "{label}");
     }
     let ticket = keys.prepare_ssh_input(PROCESS).unwrap();
-    assert_eq!(keys.submit_ssh_input(&ticket, &stale, |_| Ok::<_, Refusal>(())), Err(Refusal::NotReady));
+    assert_eq!(keys.submit_ssh_input(&ticket, &stale, |_| Ok::<_, Refusal>(InputDispatch::Complete(()))), Err(Refusal::NotReady));
     let fresh = feed(&mut parser, marker(NONCE, "4"));
     assert_eq!(fresh.len(), 1);
     assert!(feed(&mut parser, marker(NONCE, "4")).is_empty());
-    keys.submit_ssh_input(&ticket, &fresh[0], |_| Ok::<_, Refusal>(())).unwrap();
-    assert_eq!(keys.submit_ssh_input(&ticket, &fresh[0], |_| Ok::<_, Refusal>(())), Err(Refusal::StaleAttempt));
+    keys.submit_ssh_input(&ticket, &fresh[0], |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
+    assert_eq!(keys.submit_ssh_input(&ticket, &fresh[0], |_| Ok::<_, Refusal>(InputDispatch::Complete(()))), Err(Refusal::StaleAttempt));
 }
 
 #[test]
@@ -133,7 +133,7 @@ fn hosted_prompt_requires_current_pipe_and_matching_stdin_generation() {
     // The live first prompt can arrive before the spawn response.
     assert!(observed(1, epoch, 0).is_ok());
     keys.complete_shell(LEAF, generation, &StagedShell { process: PROCESS.into(), stage: ShellStage::Hosted(stage) });
-    keys.admit_input(PROCESS, None, |_| Ok::<_, Refusal>(())).unwrap();
+    keys.admit_input(PROCESS, None, |_| Ok::<_, Refusal>(InputDispatch::Complete(()))).unwrap();
     assert!(matches!(observed(2, epoch, 0), Err(Refusal::NotReady)));
     assert!(matches!(observed(3, epoch - 1, 1), Err(Refusal::NotReady)));
     assert!(observed(4, epoch, 1).is_ok());

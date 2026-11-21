@@ -385,7 +385,9 @@ pub fn spawn_terminal(
         let mut replies = termflow_pty_protocol::da1::StartupReplies::new(writer.clone(), thread_id.clone())
             .with_admission(move |writer, bytes| {
                 reply_keys.admit_protocol_input(&reply_process, |_permit| {
-                    termflow_pty_protocol::da1::write_reply(writer, bytes)
+                    Ok(super::input_gate::InputDispatch::local(move || {
+                        termflow_pty_protocol::da1::write_reply(writer, bytes)
+                    }))
                 })
             });
         let drain = ssh_prompt.as_ref().map(|_| replies.drain());

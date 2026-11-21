@@ -1,8 +1,8 @@
-//! Process-qualified input admission. The ownership read barrier is retained through enqueue;
-//! ownership replacement/transfer takes its write side BEFORE taking HostKeys' mutex. A blocked
-//! PTY write never holds the ownership mutex and cannot stop output from draining. Independent
-//! terminals retain independent writer locks and may write concurrently.
-use parking_lot::{Mutex, RwLock, RwLockWriteGuard};
+//! Process-qualified admission: reserve a local FIFO turn or enqueue hosted input under
+//! the ownership barrier. A local turn is requalified at its head, then all admission
+//! guards are dropped before writer I/O. Close can therefore kill a blocked local child,
+//! and neither the reader nor other terminals wait on that child's writer.
+use parking_lot::{Condvar, Mutex, RwLock, RwLockWriteGuard};
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -128,24 +128,26 @@ pub fn write_input(
         // Automation historically selects its local writer first and ignores flush errors.
         let local_first = matches!(source, InputSource::Automation);
         if !local_first && backend.enqueue_hosted(permit, bytes) {
-            return Ok(());
+            return Ok(InputDispatch::Complete(()));
         }
         if !local_first && backend.hosted(process) {
             return Err(source.missing(process));
         }
         if let Some(writer) = backend.local_writer(process) {
-            let mut writer = writer.lock().map_err(|_| source.poisoned())?;
-            writer.write_all(bytes).map_err(|e| WriteFailure {
-                kind: FailureKind::Write,
-                message: e.to_string(),
-            })?;
-            if local_first {
-                let _ = writer.flush();
-            }
-            return Ok(());
+            return Ok(InputDispatch::local(move || {
+                let mut writer = writer.lock().map_err(|_| source.poisoned())?;
+                writer.write_all(bytes).map_err(|e| WriteFailure {
+                    kind: FailureKind::Write,
+                    message: e.to_string(),
+                })?;
+                if local_first {
+                    let _ = writer.flush();
+                }
+                Ok(())
+            }));
         }
         if local_first && backend.enqueue_hosted(permit, bytes) {
-            return Ok(());
+            return Ok(InputDispatch::Complete(()));
         }
         Err(source.missing(process))
     });
@@ -203,8 +205,46 @@ struct RegisteredPrompt {
     stdin_writes: u64,
 }
 
+/// Selection happens under admission. A hosted callback performs only its nonblocking
+/// FIFO send and returns Complete; all local writer acquisition/I/O belongs in Local.
+pub enum InputDispatch<'io, T, E> {
+    Complete(T),
+    Local(Box<dyn FnOnce() -> Result<T, E> + 'io>),
+}
+impl<'io, T, E> InputDispatch<'io, T, E> {
+    pub fn local(write: impl FnOnce() -> Result<T, E> + 'io) -> Self {
+        Self::Local(Box::new(write))
+    }
+}
+
+#[derive(Default)]
+struct LocalFifo {
+    head: Mutex<u64>,
+    advanced: Condvar,
+}
+impl LocalFifo {
+    fn wait(&self, turn: u64) -> LocalTurn<'_> {
+        let mut head = self.head.lock();
+        while *head != turn {
+            self.advanced.wait(&mut head);
+        }
+        LocalTurn(self)
+    }
+}
+
+// A refused head, an I/O error, or an unwinding writer still advances the FIFO.
+struct LocalTurn<'a>(&'a LocalFifo);
+impl Drop for LocalTurn<'_> {
+    fn drop(&mut self) {
+        *self.0.head.lock() += 1;
+        self.0.advanced.notify_all();
+    }
+}
+
 struct ProcessInput {
     owner: OwnerStamp,
+    local_fifo: Option<Arc<LocalFifo>>,
+    next_local_turn: u64,
     ssh_prompt: Option<RegisteredPrompt>,
     lease_epoch: u64,
     input_generation: u64,
@@ -216,6 +256,8 @@ impl ProcessInput {
     fn new(owner: OwnerStamp) -> Self {
         Self {
             owner,
+            local_fifo: None,
+            next_local_turn: 0,
             ssh_prompt: None,
             lease_epoch: 0,
             input_generation: 0,
@@ -377,18 +419,19 @@ impl crate::state::HostKeys {
 
     pub(crate) fn ssh_prompt_nonce(&self, process: &str) -> Option<String> {
         let entry = self.input.processes.lock().get(process)?.clone();
-        let state = entry.try_lock()?;
+        let state = entry.lock();
         Some(state.ssh_prompt.as_ref()?.nonce.clone())
     }
 
     pub(crate) fn ssh_prompt_input_generation(&self, process: &str) -> Option<u64> {
-        let entry = self.input.processes.try_lock()?.get(process)?.clone();
-        let state = entry.try_lock()?;
+        let entry = self.input.processes.lock().get(process)?.clone();
+        let state = entry.lock();
         state.ssh_prompt.as_ref()?;
         Some(state.input_generation)
     }
 
-    /// Reader-side observations never wait for the ownership barrier or the input writer.
+    /// Reader-side observations wait for short admission metadata locks, never for
+    /// a FIFO turn or a PTY writer. Contention alone does not consume a fresh prompt.
     /// Hosted observations have their real drain checked at the source (never a dummy drain).
     pub(crate) fn observe_shell_prompt(
         &self,
@@ -398,10 +441,9 @@ impl crate::state::HostKeys {
         proof: super::ssh_shell::PromptProof<'_>,
     ) -> Result<ReadyEpoch, Refusal> {
         use super::ssh_shell::PromptProof;
-        let _order = self.input.ownership.try_read().ok_or(Refusal::NotReady)?;
-        let entry = self.input.processes.try_lock().ok_or(Refusal::NotReady)?
-            .get(process).cloned().ok_or(Refusal::StaleAttempt)?;
-        let mut state = entry.try_lock().ok_or(Refusal::NotReady)?;
+        let _order = self.input.ownership.read();
+        let entry = self.input.processes.lock().get(process).cloned().ok_or(Refusal::StaleAttempt)?;
+        let mut state = entry.lock();
         let owner = self.ssh_prompt_stamp(process).ok_or(Refusal::StaleAttempt)?;
         state.owner(&owner)?;
         let registration = state.ssh_prompt.as_mut().ok_or(Refusal::StaleAttempt)?;
@@ -457,37 +499,37 @@ impl crate::state::HostKeys {
         Ok(ready)
     }
 
-    pub fn admit_input<T, E: From<Refusal>>(
+    pub fn admit_input<'io, T, E: From<Refusal>>(
         &self,
         process: &str,
         lease: Option<&InputLease>,
-        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<T, E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
         self.input_write(process, WriteKind::Ordinary(lease), enqueue)
     }
 
-    pub fn admit_protocol_input<T, E: From<Refusal>>(
+    pub fn admit_protocol_input<'io, T, E: From<Refusal>>(
         &self,
         process: &str,
-        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<T, E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
         self.input_write(process, WriteKind::Protocol, enqueue)
     }
 
-    pub fn takeover_input<T, E: From<Refusal>>(
+    pub fn takeover_input<'io, T, E: From<Refusal>>(
         &self,
         process: &str,
-        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<T, E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
         self.input_write(process, WriteKind::Takeover, enqueue)
     }
 
-    pub fn submit_ssh_input<T, E: From<Refusal>>(
+    pub fn submit_ssh_input<'io, T, E: From<Refusal>>(
         &self,
         ticket: &LaunchTicket,
         ready: &ReadyEpoch,
         // Lane B's final trust/target/owner check and COMPLETE command+Enter enqueue live here.
-        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<T, E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
         self.input_write(
             &ticket.lease.process,
@@ -496,24 +538,24 @@ impl crate::state::HostKeys {
         )
     }
 
-    fn input_write<T, E: From<Refusal>>(
+    fn input_write<'io, T, E: From<Refusal>>(
         &self,
         process: &str,
         kind: WriteKind<'_>,
-        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<T, E>,
+        enqueue: impl FnOnce(&InputPermit<'_>) -> Result<InputDispatch<'io, T, E>, E>,
     ) -> Result<T, E> {
-        let _order = self.input.ownership.read();
+        let order = self.input.ownership.read();
         let missing = if matches!(&kind, WriteKind::Launch(..) | WriteKind::Ordinary(Some(_))) {
             Refusal::StaleAttempt
         } else {
             Refusal::NotFound
         };
-        let owner = self.input_stamp(process).ok_or(missing)?;
+        let owner = self.input_stamp(process).ok_or_else(|| missing.clone())?;
         let entry = self.input.process(process, &owner);
         let mut state = entry.lock();
         state.owner(&owner)?;
         let is_protocol = matches!(&kind, WriteKind::Protocol);
-        match kind {
+        match &kind {
             WriteKind::Ordinary(lease) => {
                 if let Some(lease) = lease {
                     state.check_lease(process, lease)?;
@@ -556,9 +598,39 @@ impl crate::state::HostKeys {
                 prompt.stdin_writes = prompt.stdin_writes.checked_add(1).ok_or(Refusal::StaleAttempt)?;
             }
         }
-        // No HostKeys mutex is retained across local WriteFile. The ownership barrier and
-        // this process's admission mutex remain held until writer/host FIFO acceptance.
-        enqueue(&InputPermit { process })
+        let write = match enqueue(&InputPermit { process })? {
+            InputDispatch::Complete(result) => return Ok(result),
+            InputDispatch::Local(write) => write,
+        };
+        let turn = state.next_local_turn;
+        state.next_local_turn = turn.checked_add(1).ok_or(Refusal::StaleAttempt)?;
+        let fifo = state.local_fifo.get_or_insert_with(Default::default).clone();
+        drop(state);
+        drop(order);
+
+        let _turn = fifo.wait(turn);
+        {
+            let _start = self.input.ownership.read();
+            let current = self.input_stamp(process).ok_or(missing)?;
+            if current != owner {
+                return Err(Refusal::StaleAttempt.into());
+            }
+            let state = entry.lock();
+            match kind {
+                WriteKind::Ordinary(Some(lease)) => state.check_lease(process, lease)?,
+                WriteKind::Launch(ticket, _) => {
+                    state.check_lease(process, &ticket.lease)?;
+                    if !state.attempt.as_ref().is_some_and(|a| a.id == ticket.id && a.submitted) {
+                        return Err(Refusal::StaleAttempt.into());
+                    }
+                }
+                _ => {}
+            }
+            // Linearization point for starting this local write: a later takeover or
+            // close cannot retract it. It can revoke queued launches and close may
+            // interrupt the in-flight OS write. Keep only the FIFO turn across I/O.
+        }
+        write()
     }
 }
 

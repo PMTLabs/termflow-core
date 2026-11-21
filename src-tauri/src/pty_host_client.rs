@@ -341,7 +341,9 @@ impl PtyHostClient {
 
     pub(crate) fn write_registered(&self, keys: &crate::state::HostKeys, process: &str, channel: crate::elevated_host::HostChannel, key: &str, bytes: &[u8]) -> bool {
         keys.admit_input(process, None, |permit| {
-            Ok::<_, String>(self.write_registered_admitted(keys, permit, channel, key, bytes))
+            Ok::<_, String>(crate::pty_manager::input_gate::InputDispatch::Complete(
+                self.write_registered_admitted(keys, permit, channel, key, bytes),
+            ))
         }).unwrap_or(false)
     }
 
