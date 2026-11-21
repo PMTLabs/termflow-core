@@ -1140,12 +1140,17 @@ export const CanvasMode: React.FC = () => {
     // A port click on a node that vanished between press and release — its tab closed, its
     // pane was re-homed — has nowhere to fan from and nothing to connect to. Dropping the
     // spawn is right: half of what was asked for is a terminal wired to nothing.
-    if (menu.fromId && !source) return;
+    if (menu.fromId && !source) return undefined;
 
+    // `model` is deliberately the RAW (un-spaced) model: a spawn must avoid the terminals' true
+    // stored positions. For an SSH launch the render-time closure may be stale, so it is re-read.
+    const placeNear = (m: typeof model, fanned: number) => spawnRectNear(
+      source!.rect, m.nodes.map((n) => n.rect), fanned);
     const rect = source
-      ? spawnRectNear(source.rect, spawnModel.nodes.map((n) => n.rect),
-          ssh ? canvasStore.getState().canvas.edges.filter(e => e.from === source.terminalId).length
-            : edges.filter((e) => e.from === source.terminalId).length)
+      ? (ssh
+        ? placeNear(spawnModel, canvasStore.getState().canvas.edges.filter(e => e.from === source.terminalId).length)
+        : spawnRectNear(source.rect, model.nodes.map((n) => n.rect),
+          edges.filter((e) => e.from === source.terminalId).length))
       : spawnRectAt(menu.at!);
 
     let plan: CanvasSpawn;
@@ -1153,13 +1158,12 @@ export const CanvasMode: React.FC = () => {
       const result = launchSshConnection(ssh.id, { kind: 'canvas', rect, sourceTerminalId: source?.terminalId });
       if (!result.ok) return result.error.message;
       const state = canvasStore.getState();
-      const tab = state.tabs.tabs.find(t => t.id === result.tabId)!;
-      plan = {
-        tab: { ...tab, isActive: false }, leafId: result.terminalId, rect,
-        tree: state.panes.treesByTabId[result.tabId],
-      };
+      const tab = state.tabs.tabs.find(t => t.id === result.tabId);
+      const tree = state.panes.treesByTabId[result.tabId];
+      if (!tab || !tree) return 'The new SSH terminal could not be placed on Canvas.';
+      plan = { tab: { ...tab, isActive: false }, leafId: result.terminalId, rect, tree };
     } else {
-      if (!profile) return;
+      if (!profile) return undefined;
       plan = planCanvasSpawn(profile, tabs.map((t) => t.title), rect);
       dispatch(setNodeGeom({ id: plan.leafId, rect: plan.rect }));
       dispatch(addTab(plan.tab));
@@ -1234,6 +1238,7 @@ export const CanvasMode: React.FC = () => {
         if (edge && current()) dispatch(addEdge(edge));
       });
     }
+    return undefined;
   }, [spawnMenu, model, edges, tabs, paintedNodes, shownGroups, dispatch, vp, size, flyTo, metrics, targetRectAt, canvasStore]);
 
   // The popup retains the gesture, not the camera/model snapshot. Use the latest spawn handler.
