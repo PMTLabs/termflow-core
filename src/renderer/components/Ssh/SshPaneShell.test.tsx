@@ -131,9 +131,9 @@ test('startSshProbe keeps the bridge listener until the backend close settles, o
     sshTestState: async () => ({ ...view('connected'), terminalId: undefined, probeId: 'probe-a' }), sshTestClose: close } as unknown as SshAPI);
   // Probe created, then disposed (Close button, Escape and host-key Cancel all call this disposer).
   const dispose = startSshProbe(settled(async () => ({ probeId: 'probe-a' })), 'c-a', jest.fn(), jest.fn()); await flush();
-  dispose(); await flush();
+  dispose(); dispose(); await flush();
   expect(events).toEqual(['close-start']); expect(stop).not.toHaveBeenCalled();
-  settle(); await flush(); expect(events).toEqual(['close-start', 'close-done', 'unlisten']);
+  settle(); await flush(); expect(events).toEqual(['close-start', 'close-done', 'unlisten']); expect(close).toHaveBeenCalledTimes(1);
   // Disposed while creation is in flight: the returned probe is closed, then the listener goes.
   events.length = 0; let created: (v: { probeId: string }) => void = () => {};
   const racing = startSshProbe(settled(() => new Promise(r => { created = r; })), 'c-a', jest.fn(), jest.fn()); await flush();
