@@ -136,7 +136,7 @@ pub(crate) enum OpenMode<'a> {
 
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
-pub(crate) enum EditOpen {
+pub enum EditOpen {
     Opened {
         #[serde(rename = "editId")]
         edit_id: Uuid,
@@ -149,7 +149,7 @@ pub(crate) enum EditOpen {
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum OpenStatus {
+pub enum OpenStatus {
     NeedsEditor,
     Cancelled,
 }

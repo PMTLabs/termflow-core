@@ -12,6 +12,8 @@ pub(crate) mod watch;
 mod tests;
 
 pub use download::{DownloadOutcome, DownloadPicker, DownloadResult, FileDownloadOutcome};
+pub use edit::{EditNotice, EditRegistry, EditState, EditStatus, EditStop};
+pub use launch::{EditOpen, OpenStatus};
 pub use local_target::FileTarget;
 pub use types::*;
 

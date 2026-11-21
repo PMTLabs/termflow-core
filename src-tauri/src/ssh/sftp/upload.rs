@@ -86,7 +86,7 @@ impl SftpUploader {
             let closed = remote.reply(Request::Normal, closed);
             // A transport failure in CLOSE still makes the mutation outcome unknown.
             if matches!(closed, Err(UploadResult::Error(UNKNOWN))) {
-                closed?;
+                return Err(UploadResult::Error(UNKNOWN));
             }
             written?;
             closed?;

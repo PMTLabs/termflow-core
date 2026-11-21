@@ -37,7 +37,7 @@ pub(crate) struct Baseline {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum EditState {
+pub enum EditState {
     Watching,
     Uploading,
     Paused,
@@ -61,7 +61,7 @@ pub(crate) struct EditRecord {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct EditNotice {
+pub struct EditNotice {
     pub terminal_id: String,
     pub edit_id: Uuid,
     pub path: String,
@@ -97,14 +97,16 @@ impl EditEventSink for AppEditEvents {
     }
 }
 
+#[cfg(test)]
 struct NoEvents;
+#[cfg(test)]
 impl EditEventSink for NoEvents {
     fn emit(&self, _: EditNotice) {}
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct EditStatus {
+pub struct EditStatus {
     #[serde(flatten)]
     pub notice: EditNotice,
     pub retained: bool,
@@ -112,7 +114,7 @@ pub(crate) struct EditStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct EditStop {
+pub struct EditStop {
     pub retained: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local_path: Option<PathBuf>,
@@ -151,7 +153,7 @@ pub(super) struct JobData {
 
 type Key = (String, String);
 
-pub(crate) struct EditRegistry {
+pub struct EditRegistry {
     root: PathBuf,
     // Serialize baseline creation, not polling or shutdown. Recheck the shutdown
     // fence when publishing so a download underway cannot register late.
@@ -165,6 +167,7 @@ pub(crate) struct EditRegistry {
 }
 
 impl EditRegistry {
+    #[cfg(test)]
     pub(crate) fn new(root: PathBuf, clock: Arc<dyn PollClock>) -> Self {
         Self::with_sink(root, clock, Arc::new(NoEvents))
     }

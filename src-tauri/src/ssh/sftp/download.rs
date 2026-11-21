@@ -3,7 +3,7 @@ use super::{
     budget, child_path, error,
     local_target::{create_child_dir_exclusive, display_path, validate_local_name, FileTarget, LocalError, LocalNameError, PlannedNames, StagedFile},
     session_error, status, validate, wire_error, Admission, BoxFuture, FileAttributes, FsCode,
-    FsError, FsOutcome, OpenFlags, RemoteFs, SessionError, StatusCode, WireError, MAX_ENTRIES,
+    FsError, FsOutcome, OpenFlags, RemoteFs, StatusCode, WireError, MAX_ENTRIES,
 };
 use russh_sftp::protocol::FileType;
 use serde::Serialize;

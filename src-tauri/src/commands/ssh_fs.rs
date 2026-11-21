@@ -23,6 +23,7 @@ pub struct InsertPath {
 /// write below stay one synchronous section with no `.await`.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_insert_path<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -123,6 +124,7 @@ pub async fn ssh_fs_edit_list(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_list<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -135,6 +137,7 @@ pub async fn ssh_fs_list<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_stat<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -147,6 +150,7 @@ pub async fn ssh_fs_stat<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_mkdir<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -159,6 +163,7 @@ pub async fn ssh_fs_mkdir<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_create<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -171,6 +176,7 @@ pub async fn ssh_fs_create<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_rename<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -184,6 +190,7 @@ pub async fn ssh_fs_rename<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_delete<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -198,6 +205,7 @@ pub async fn ssh_fs_delete<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_chmod<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
@@ -211,6 +219,7 @@ pub async fn ssh_fs_chmod<R: Runtime>(
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_chown<R: Runtime>(
+    _app: tauri::AppHandle<R>,
     state: State<'_, AppState<R>>,
     terminal_id: String,
     path: String,
