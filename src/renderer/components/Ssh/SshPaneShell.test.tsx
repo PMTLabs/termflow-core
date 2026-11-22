@@ -221,3 +221,31 @@ test('Test dialog and prompt pick copy from errorCode, never from the reason tex
   act(() => root.render(<SshSecretPrompt view={prompt(undefined)} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
   expect(container.querySelector('[role=status]')).toBeNull(); expect(container.textContent).toContain(odd);
 });
+test('SshPaneShell inactiveSurface_closesChromePopover_withoutTakingFocusOrEscape (068 F5 x P068-7)', () => {
+  // The tab switch into Canvas commits before Canvas takes the host: `interactive` is still true but
+  // the surface is inactive. An open notice popover must close without moving focus, and its
+  // document Escape/click listeners must not act on the now-hidden pane.
+  const props = { terminal: <div className="terminal-pane-content" />, browser: <span />, status: <span />, browserCollapsed: false, onBrowserCollapsedChange: jest.fn(), onSecret: jest.fn(async () => {}), onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
+  const connecting = { ...view('connecting'), terminalId: '' };
+  const outside = document.createElement('button'); document.body.append(outside);
+  try {
+    act(() => root.render(<SshPaneShell {...props} view={connecting} surfaceActive />));
+    const details = container.querySelector<HTMLButtonElement>('.ssh-pane-chrome button')!;
+    expect(details.textContent).toBe('Details');
+    act(() => details.click());
+    expect(container.querySelector('.ssh-pane-popover')).not.toBeNull();
+    outside.focus();
+    act(() => root.render(<SshPaneShell {...props} view={connecting} surfaceActive={false} />));
+    expect(container.querySelector('.ssh-pane-popover')).toBeNull();
+    expect(container.querySelector('.ssh-pane-shell')!.getAttribute('data-ssh-interaction-owner')).toBe('false');
+    expect(document.activeElement).toBe(outside);
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    act(() => { outside.dispatchEvent(escape); });
+    expect(escape.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(outside);
+    // The row keeps its fixed height on the non-owning presentation: no notice, no Canvas markers.
+    const row = container.querySelector('.ssh-pane-chrome')!;
+    expect(row.hasAttribute('data-canvas-passthrough')).toBe(false);
+    expect(row.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
+  } finally { outside.remove(); }
+});
