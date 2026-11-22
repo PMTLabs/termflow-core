@@ -28,9 +28,7 @@ impl Identity {
     pub(crate) fn shell(identity: &ProcessIdentity) -> Option<Self> {
         let pid = Pid::from_u32(identity.pid);
         let before = Self::read(pid)?;
-        let mut system = System::new();
-        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-        (system.process(pid)?.start_time() == identity.start_time && Self::read(pid)? == before).then_some(before)
+        (identity.is_live() && Self::read(pid)? == before).then_some(before)
     }
 }
 
