@@ -3,12 +3,13 @@
  *
  * An SSH leaf has a terminal MEASURING box — the `.terminal-display` FitAddon reads, which stays
  * the meaning of `HostBox` — inside a larger content ENVELOPE: browser column + terminal slot +
- * bottom status row, no pane or node title. Canvas sizes the outer surface to the envelope and
+ * bottom status row, plus the launch strip's row reserved at the top of the terminal slot (066's
+ * strip sits above the shell in a pane, inside the slot here), no pane or node title. Canvas sizes the outer surface to the envelope and
  * gives the registered host the remainder, so the terminal keeps the exact box it had in its pane
  * and the relocation fit finds nothing to do.
  *
  *   envelope.w = terminal.w + browserAllocation + columnGap
- *   envelope.h = terminal.h + statusH
+ *   envelope.h = terminal.h + stripH + statusH
  *
  * The envelope is frozen for the Canvas mount. An explicit browser collapse/expand keeps it and
  * moves the difference into that one terminal's slot width; nothing else may change the slot.
@@ -28,6 +29,8 @@ export interface SshSurfaceBox {
   collapsedBrowserW: number;
   /** The single fixed status row, including its border. */
   statusH: number;
+  /** 066's launch strip row, reserved at the top of the terminal slot (`Canvas.css`). */
+  stripH: number;
   columnGap: number;
   /** `measured` from the rendered pane, or an honest `fallback` for a never-rendered leaf. */
   source: 'measured' | 'fallback';
@@ -42,11 +45,13 @@ export interface SshSurfaceBox {
  *   .ssh-browser            { flex:0 1 260px; width:260px; max-width:40%; box-sizing:border-box }
  *   .ssh-browser.collapsed  { width:30px; max-width:min(30px, 40%) }
  *   .ssh-status             { box-sizing:border-box; height:25px }
+ *   .ssh-launch-strip       { box-sizing:border-box; height:36px }   (Ssh/SshLaunchNotice.css)
  */
 export const SSH_CSS_BROWSER_W = 260;
 export const SSH_CSS_RAIL_W = 30;
 export const SSH_CSS_BROWSER_MAX_FRACTION = 0.4;
 export const SSH_CSS_STATUS_H = 25;
+export const SSH_CSS_LAUNCH_STRIP_H = 36;
 
 /** `min(cssW, 40% of the body)`: the CSS cap, with the body as wide as the envelope. */
 export function cappedBrowserW(cssW: number, bodyW: number): number {
@@ -61,7 +66,7 @@ export function sshBrowserAllocation(box: SshSurfaceBox, collapsed: boolean): nu
 export function sshTerminalBox(box: SshSurfaceBox, collapsed: boolean): Box {
   return {
     w: box.envelope.w - sshBrowserAllocation(box, collapsed) - box.columnGap,
-    h: box.envelope.h - box.statusH,
+    h: box.envelope.h - box.stripH - box.statusH,
   };
 }
 
@@ -69,13 +74,14 @@ export function sshTerminalBox(box: SshSurfaceBox, collapsed: boolean): Box {
 export function sshSurfaceBoxFrom(m: {
   terminal: Box; browserW: number; collapsed: boolean; statusH: number; columnGap: number;
 }): SshSurfaceBox {
-  const envelope = { w: m.terminal.w + m.browserW + m.columnGap, h: m.terminal.h + m.statusH };
+  const envelope = { w: m.terminal.w + m.browserW + m.columnGap, h: m.terminal.h + SSH_CSS_LAUNCH_STRIP_H + m.statusH };
   return {
     envelope,
     initialTerminal: { ...m.terminal },
     expandedBrowserW: m.collapsed ? cappedBrowserW(SSH_CSS_BROWSER_W, envelope.w) : m.browserW,
     collapsedBrowserW: m.collapsed ? m.browserW : cappedBrowserW(SSH_CSS_RAIL_W, envelope.w),
     statusH: m.statusH,
+    stripH: SSH_CSS_LAUNCH_STRIP_H,
     columnGap: m.columnGap,
     source: 'measured',
   };

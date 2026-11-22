@@ -9,6 +9,7 @@ import path from 'path';
 import { readSource } from '../../../utils/readSource';
 import { OWNED_NOTICE_PLACEMENT } from '../../../__testFixtures__/sshLaunchNoticeProbe';
 import { scrollRegionTakesWheel, sshOwnsKeyboard } from '../canvasGestures';
+import { SSH_CSS_LAUNCH_STRIP_H } from '../canvasSshGeometry';
 
 const squash = (text: string) => text.replace(/\s+/g, ' ');
 
@@ -33,6 +34,11 @@ it('sshNotice_canvasOverlay_neverTakesARowInTheTerminalSlot', () => {
   const wrapper = block('.canvas-ssh-surface .ssh-terminal-host > .terminal-display-wrapper');
   expect(wrapper).toMatch(/position:\s*relative/);
   expect(wrapper).not.toMatch(/z-index/);
+  // 066's strip row is reserved inside the slot (the envelope adds it), and the slot is the size
+  // container that bounds the prompt overlay's cqh max-height.
+  expect(wrapper).toMatch(new RegExp(`padding-top:\\s*${SSH_CSS_LAUNCH_STRIP_H}px`));
+  expect(wrapper).toMatch(/box-sizing:\s*border-box/);
+  expect(wrapper).toMatch(/container-type:\s*size/);
 });
 
 it('sshNotice_ownsCanvasKeysAndItsOwnWheel', () => {

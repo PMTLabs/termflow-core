@@ -102,7 +102,7 @@ function renderedSlot(id: string, box: SshSurfaceBox) {
   const aside = node.querySelector<HTMLElement>('.ssh-browser')!;
   return {
     w: parseFloat(node.style.getPropertyValue('--node-host-w')) - parseFloat(aside.style.width) - box.columnGap,
-    h: parseFloat(node.style.getPropertyValue('--node-host-h')) - box.statusH,
+    h: parseFloat(node.style.getPropertyValue('--node-host-h')) - box.stripH - box.statusH,
   };
 }
 

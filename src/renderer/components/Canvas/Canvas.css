@@ -358,17 +358,26 @@
   min-height: 0;
   /* The containing block for 066's launch notice below; no z-index, so no stacking context. */
   position: relative;
+  /* The launch strip's row, reserved whether or not a notice is showing. In a pane the strip sits
+     above the SSH shell; here it sits inside the slot, so the envelope adds the same row
+     (`SSH_CSS_LAUNCH_STRIP_H`, `canvasSshGeometry.ts`) and `.terminal-display` (height 100% of the
+     content box) keeps exactly the pane's measured box: no fit change on entry. */
+  box-sizing: border-box;
+  padding-top: 36px;
+  /* Bounds the prompt overlay (`.ssh-launch-overlay`, `max-height` in cqh) to this slot, as 066's
+     `.canvas-surface:has(> .ssh-launch-notice)` does for a plain node. */
+  container-type: size;
 }
-/* D51: 066's launch notice (prompts, Retry/Reconnect) is portalled to the surface host's parent,
-   which in an SSH node is this wrapper, not a `.canvas-surface` (T2 moved that class to the
-   envelope), so 066's own `.canvas-surface > .ssh-launch-notice` rule does not apply here. Overlay
-   the top of the terminal slot instead of taking a row: the registered host box never changes
-   (fit-safe, §4.1 B). Above the shell's chrome row (5), status row and slot snapshot. */
+/* D51: 066's launch notice (strip, prompts, Retry/Reconnect) is portalled to the surface host's
+   parent, which in an SSH node is this wrapper, not a `.canvas-surface` (T2 moved that class to
+   the envelope), so 066's own rules for `.canvas-surface > .ssh-launch-notice` do not apply here.
+   The strip fills the reserved row; its prompt overlay (z7 inside this stacking context) drops over
+   the terminal below without resizing it. The notice sits above the shell's chrome row (5), the
+   status row and the slot snapshot. */
 .canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice {
   position: absolute;
   z-index: 6;
   inset: 0 0 auto;
-  max-height: 100%;
 }
 
 /* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are
