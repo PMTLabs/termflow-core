@@ -376,6 +376,11 @@ pub fn hop(connection: &str, user: &str) -> SessionHop {
     }
 }
 impl Fixture {
+    #[cfg(all(feature = "integration-tests", not(windows)))]
+    pub(super) fn integration_streams(&self) -> Arc<dyn StreamFactory> {
+        self.streams.clone()
+    }
+
     pub fn with_sftp_root(path: PathBuf) -> Self {
         let mut server = Server::new(1, "alice");
         Arc::get_mut(&mut server.sftp_storage).unwrap().root = Some(path);

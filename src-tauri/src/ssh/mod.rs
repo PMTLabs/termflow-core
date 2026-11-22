@@ -29,5 +29,8 @@ pub mod sftp;
 mod sftp_test_server;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(all(test, feature = "integration-tests", not(windows)))]
+#[path = "integration_tests.rs"]
+mod integration_tests;
 #[cfg(test)]
 mod trust_engine_tests;

@@ -1068,6 +1068,25 @@ impl SessionRegistry {
         )
     }
 
+    #[cfg(all(test, feature = "integration-tests", not(windows)))]
+    pub(super) fn integration_snapshot(
+        &self,
+        probe: bool,
+    ) -> HashMap<String, (String, SessionState, u64, Option<bool>)> {
+        let registry = self.inner.lock();
+        let entries = if probe { &registry.probes } else { &registry.panes };
+        entries.iter().map(|(id, entry)| {
+            let view = entry.view();
+            let finished = entry.task.lock().as_ref().map(|task| task.is_finished());
+            (id.clone(), (view.connection_id, view.state, view.generation, finished))
+        }).collect()
+    }
+
+    #[cfg(all(test, feature = "integration-tests", not(windows)))]
+    pub(super) fn integration_retired_tasks(&self) -> Vec<bool> {
+        self.retired.lock().iter().map(|task| task.is_finished()).collect()
+    }
+
     pub fn owner_map(&self) -> HashMap<String, (String, SessionState)> {
         self.inner
             .lock()
