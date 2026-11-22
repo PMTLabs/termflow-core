@@ -31,5 +31,8 @@ test.each([
   for (const message of ['SSH did not start', 'different details']) {
     expect(sshLaunchEndReason({ code, message })).toBe(copy);
   }
-  expect(sshLaunchEndReason()).toBeUndefined();
+});
+
+test('an end with no reason code points at the terminal output and Reconnect', () => {
+  expect(sshLaunchEndReason()).toBe('The reason, if any, is in the terminal output above. Reconnect to try again.');
 });

@@ -23,7 +23,9 @@ export function sshLaunchEndReason(error?: LaunchSnapshot['error']): string | un
   switch (error?.code) {
     case 'SshExitedBeforeConnecting': return 'SSH exited before connecting. Check the terminal output above for the reason.';
     case 'TransportClosed': return 'The local terminal connection closed. Reconnect to try again.';
-    default: return error?.message;
+    // No reason code (an ordinary ssh exit carries no status yet, backlog 023): point at the terminal.
+    case undefined: return 'The reason, if any, is in the terminal output above. Reconnect to try again.';
+    default: return error.message;
   }
 }
 
