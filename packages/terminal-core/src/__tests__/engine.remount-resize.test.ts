@@ -60,6 +60,42 @@ function makeContainer(width = 800, height = 600): HTMLElement {
   return el;
 }
 
+test.each(['hidden', 'canvas', 'visible'] as const)('cached reattach measures only eligible geometry (%s)', async mode => {
+  jest.useFakeTimers();
+  const resize = jest.fn();
+  const bridge = makeFakeBridge({ resize, getSnapshot: async () => ({ snapshot: '', cols: 80, rows: 24 }) });
+  const cacheKey = 'cached-eligibility';
+  const first = new TerminalEngine(bridge, { cacheKey, active: false });
+  const next = new TerminalEngine(bridge, { cacheKey, active: mode === 'visible' });
+  try {
+    first.mount(makeContainer());
+    const fit = terminalCache.get(cacheKey)!.fitAddon as unknown as MockFitAddon;
+    expect(fit.fitCount).toBeGreaterThan(0); // a cache miss still fits, even inactive
+    first.attach('pid-1');
+    await jest.advanceTimersByTimeAsync(300);
+    first.unmount();
+    resize.mockClear();
+    const baseline = fit.fitCount;
+    fit.setNextFit(143, 31);
+    if (mode === 'canvas') next.setSurfaceDisplayed(true);
+    next.mount(makeContainer());
+    expect(fit.fitCount - baseline).toBe(mode === 'hidden' ? 0 : 1);
+    next.attach('pid-1');
+    await jest.advanceTimersByTimeAsync(300);
+    if (mode === 'hidden') {
+      expect(fit.fitCount - baseline).toBe(0); // includes the rAF settle callback
+      expect(resize).not.toHaveBeenCalled();
+      next.setActive(true);
+      await jest.advanceTimersByTimeAsync(300);
+      expect(fit.fitCount - baseline).toBe(1);
+    }
+    expect(resize.mock.calls).toEqual([['pid-1', 143, 31]]);
+  } finally {
+    next.unmount();
+    first.unmount();
+  }
+});
+
 interface FakeBridgeOptions {
   resize?: (processId: string, cols: number, rows: number) => void | Promise<void>;
   getSnapshot?: (
