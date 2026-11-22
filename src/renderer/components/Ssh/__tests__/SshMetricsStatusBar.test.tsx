@@ -230,7 +230,6 @@ test('F3 resumes via the verified lease, starts with a fresh baseline, and never
   expect(bar().textContent).not.toContain(reason);
 });
 
-const RESTORED = 'n/a (Not available for a session restored from before TermFlow restarted)';
 const visibleValues = () => [...bar().querySelectorAll<HTMLElement>('.ssh-metrics-value')];
 test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', () => {
   const h = setup();
@@ -243,7 +242,7 @@ test('restored_reattached_pane_reports_metrics_unavailable_not_disconnected', ()
   expect(shown.length).toBeGreaterThan(1);
   expect(visibleValues().map(v => [v.dataset.metric, v.textContent, v.title])).toEqual(shown.map(k => [k,
     k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved · n/a` : `${SSH_METRIC_LABELS[k]}: n/a`,
-    k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved (configured) · ${RESTORED}` : `${SSH_METRIC_LABELS[k]}: ${RESTORED}`]));
+    k === 'host' ? `${SSH_METRIC_LABELS[k]}: saved (configured) · n/a` : `${SSH_METRIC_LABELS[k]}: n/a`]));
   expect(bar().textContent).not.toMatch(/…|—|Collecting first sample|Disconnected/);
   open();
   expect(row('Copy all metrics').disabled).toBe(true);

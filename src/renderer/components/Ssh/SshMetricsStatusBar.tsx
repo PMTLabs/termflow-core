@@ -76,7 +76,8 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
         {visible.map(key => {
           const value = sample ? formatSshMetric(sample.metrics, key)
             : unavailable && connected && !canResume ? { text: 'n/a', detail: `n/a (${unavailable})` }
-            : restored ? { text: 'n/a', detail: `n/a (${RESTORED_REASON})` }
+            // The status tooltip states the reason once; repeating it on every field is noise.
+            : restored ? { text: 'n/a', detail: 'n/a' }
             : { text: waiting ? '…' : '—', detail: status };
           const label = SSH_METRIC_LABELS[key];
           const identityOnly = key === 'host' && !sample;
