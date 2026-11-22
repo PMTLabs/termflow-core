@@ -64,17 +64,20 @@ case "$*" in
         printf '%s' "$NFS"
         if [ "$TIMEOUT_MODE" = expire124 ] || [ "$TIMEOUT_MODE" = expire137 ]; then
             # Model a child outside channel/watchdog cleanup. It publishes
-            # readiness, then lives until the test releases it (bounded).
+            # readiness, then lives until the test releases it (bounded at
+            # 20 s, far beyond a collector run even on a loaded CI host).
             (
                 : > child-ready
-                for attempt in 1 2 3 4 5 6 7 8 9 10; do
-                    [ ! -f child-release ] || break
+                attempt=0
+                while [ "$attempt" -lt 100 ] && [ ! -f child-release ]; do
+                    attempt=$((attempt + 1))
                     nap 0.2
                 done
                 : > child-exited
             ) </dev/null >/dev/null 2>&1 &
-            for attempt in 1 2 3 4 5 6 7 8 9 10; do
-                [ ! -f child-ready ] || break
+            attempt=0
+            while [ "$attempt" -lt 100 ] && [ ! -f child-ready ]; do
+                attempt=$((attempt + 1))
                 nap 0.05
             done
         fi
@@ -358,7 +361,9 @@ fn inner_nfs_watchdog_is_indeterminate_with_local_rows_and_surviving_child() {
         host.install_timeout();
         let start = Instant::now();
         let (stdout, nonce, trace) = host.run(&[("TIMEOUT_MODE", mode)]);
-        assert!(start.elapsed() < Duration::from_secs(5));
+        // The run returned while the surviving child (alive up to 20 s) still
+        // runs: the collector never waits for it.
+        assert!(start.elapsed() < Duration::from_secs(15));
         assert!(host.0.join("child-ready").exists());
         assert!(!host.0.join("child-exited").exists());
         let s = parse(stdout.as_bytes(), &nonce).unwrap();

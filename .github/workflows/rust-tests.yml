@@ -89,6 +89,13 @@ jobs:
           fi
           zsh -fc 'autoload -Uz compaudit; compaudit'
 
+      # The SSH metrics collector test runs the collector under every login
+      # shell it supports (collector_runs_identically_under_each_login_shell).
+      # macOS ships sh/bash/dash/zsh/tcsh but not fish.
+      - name: Install fish for the login-shell matrix (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
+
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
