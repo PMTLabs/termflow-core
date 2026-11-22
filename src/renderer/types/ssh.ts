@@ -91,6 +91,8 @@ export interface SshSessionView {
   reason?: string;
   /** Kebab-case code for `reason` (a backend SessionError code or `saved-credential-unavailable`); read this, never the text. */
   errorCode?: string;
+  /** Malformed known_hosts line (1-based), or 0 for invalid file encoding. */
+  errorLine?: number;
   knownHostsPaths?: { jump?: string; target: string };
   promptId?: string; promptTarget?: SshPromptTarget; secretKind?: 'password' | 'passphrase';
   hostKey?: { algorithm: string; fingerprintSha256: string; changed: boolean };

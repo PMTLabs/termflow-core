@@ -14,7 +14,7 @@ import type { SshAPI, SshSessionView } from '../../types/ssh';
 const session = readSource(path.resolve(__dirname, '..', '..', '..', '..', 'src-tauri', 'src', 'ssh', 'session.rs'));
 const body = session.slice(session.indexOf('pub fn reason(&self) -> String {'));
 const backendReasons = [...body.slice(0, body.indexOf('\n    }\n')).matchAll(/Self::(\w+)(?: \{[^}]*\})? => (?:"([^"]*)"\.into\(\)|format!\("([^"]*)"\))/g)]
-  .map(([, variant, plain, formatted]) => ({ code: variant.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase(), text: (plain ?? formatted).replace('{line}', '12') }));
+  .map(([, variant, plain, formatted]) => ({ code: variant.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase(), text: (plain ?? formatted).replace('{line}', '7') }));
 const saved = 'Saved credential unavailable. Enter it again; Remember may be unavailable.';
 const base: SshSessionView = { probeId: 'probe-a', connectionId: 'c-a', state: 'error', generation: 1, revision: 1, gate: 'blocked',
   promptId: 'p-a', secretKind: 'password', promptTarget: { connectionId: 'c-a', host: 'target.test', port: 22, user: 'alice', hop: 'target' } };
@@ -36,9 +36,15 @@ async function renderCases(): Promise<Record<string, string>> {
     act(() => root.unmount()); root = createRoot(host);
   };
   for (const { code, text } of backendReasons) {
-    await dialog(`error ${code}`, { ...base, state: 'error', reason: text, errorCode: code, promptId: undefined, promptTarget: undefined, secretKind: undefined });
-    await dialog(`disconnected ${code}`, { ...base, state: 'disconnected', reason: text, errorCode: code, promptId: undefined, promptTarget: undefined, secretKind: undefined });
+    const errorLine = code === 'known-hosts-malformed' ? 7 : undefined;
+    await dialog(`error ${code}`, { ...base, state: 'error', reason: text, errorCode: code, errorLine, promptId: undefined, promptTarget: undefined, secretKind: undefined });
+    await dialog(`disconnected ${code}`, { ...base, state: 'disconnected', reason: text, errorCode: code, errorLine, promptId: undefined, promptTarget: undefined, secretKind: undefined });
   }
+  const malformed = { ...base, errorCode: 'known-hosts-malformed', promptId: undefined, promptTarget: undefined };
+  await dialog('error known-hosts-malformed encoding', { ...malformed, errorLine: 0 });
+  await dialog('error known-hosts-malformed no line', malformed);
+  // No reason text: the line must come from errorLine, not from echoing the backend reason.
+  await dialog('error known-hosts-malformed line without reason', { ...malformed, errorLine: 7 });
   await dialog('disconnected free text', { ...base, state: 'disconnected', reason: 'SSH transport closed', promptId: undefined, promptTarget: undefined });
   const rejected = backendReasons.find(r => r.code === 'auth-rejected')!.text, notSaved = backendReasons.find(r => r.code === 'remember-unavailable')!.text;
   for (const kind of ['password', 'passphrase'] as const) {
@@ -58,11 +64,11 @@ async function renderCases(): Promise<Record<string, string>> {
 const fixture = path.join(__dirname, '__fixtures__', 'sshCopyParity.json');
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 
-test('reading errorCode renders exactly the copy the text-decoding renderer rendered', async () => {
+test('structured errors preserve dialog copy and include known_hosts line details', async () => {
   const now = await renderCases();
   if (process.env.SSH_COPY_PARITY_RECORD) fs.writeFileSync(fixture, JSON.stringify(now, null, 1) + '\n');
   const before = JSON.parse(fs.readFileSync(fixture, 'utf8')) as Record<string, string>;
   expect(backendReasons.length).toBeGreaterThanOrEqual(25);
-  expect(Object.keys(before).length).toBe(2 * backendReasons.length + 11);
+  expect(Object.keys(before).length).toBe(2 * backendReasons.length + 14);
   expect(now).toEqual(before);
 });

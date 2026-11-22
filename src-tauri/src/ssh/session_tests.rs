@@ -353,6 +353,13 @@ async fn every_failure_snapshot_carries_its_error_code() {
             (&error, Some(error.code()))
         );
     }
+    let mut malformed = e.inner.lock().view.clone();
+    for line in [0, 12] {
+        set_error_reason(&mut malformed, Some(&SessionError::KnownHostsMalformed { line }));
+        assert_eq!(serde_json::to_value(&malformed).unwrap()["errorLine"].as_u64(), Some(line as u64));
+        set_error_reason(&mut malformed, None);
+        assert!(serde_json::to_value(&malformed).unwrap().get("errorLine").is_none());
+    }
     // A free-text reason clears a stale code, and no reason serializes no code.
     let mut view = e.inner.lock().view.clone();
     set_reason(&mut view, Some("Local shell ended".into()), None);
@@ -425,14 +432,16 @@ fn view_reason_has_one_writer() {
         writes,
         vec![
             "session.rs: view.error_code = reason.as_ref().and(code).map(str::to_string);",
-            "session.rs: view.reason = reason;"
+            "session.rs: view.error_line = None;",
+            "session.rs: view.reason = reason;",
+            "session.rs: view.error_line = Some(*line);"
         ]
     );
     assert_eq!(literals, 1, "only the registry builds a SessionView");
 }
 /// A whitespace-free source line that writes a view's `reason` or `error_code`.
 fn writes_reason(c: &str) -> bool {
-    ["view.reason", "view.error_code"].iter().any(|field| {
+    ["view.reason", "view.error_code", "view.error_line"].iter().any(|field| {
         c.match_indices(field).any(|(at, _)| {
             let rest = &c[at + field.len()..];
             (rest.starts_with('=') && !rest.starts_with("=="))
@@ -453,6 +462,7 @@ fn the_reason_writer_detector_catches_each_spelling() {
     for bad in [
         "s.view.reason=Some(x);",
         "s.view.error_code=None;",
+        "s.view.error_line=None;",
         "s.view.error_code.take();",
         "s.view.reason.replace(x);",
         "s.view.reason.insert(x);",
