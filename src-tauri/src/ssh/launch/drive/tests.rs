@@ -611,6 +611,18 @@ async fn retry_after_submission(path: &str) {
         // Even a prompt observed between submission and cancellation is discarded.
         f.ready(2);
         assert_eq!(f.access(&a, Operation::Cancel).unwrap().stage, LaunchStage::Cancelled);
+    } else if path == "replacement" {
+        f.ready(2);
+        // A blocked replacement has no successor ticket to overwrite the old one:
+        // registration must cancel the submitted ticket and invalidate this prompt.
+        f.seed("target.test ssh-ed25519 !!!
+");
+        let blocked = f.reference(&reconnect_core(f.keys(), &f.sessions, LEAF).unwrap());
+        f.phase(SessionState::Error).await;
+        assert!(f.launches.0.lock()[LEAF].ticket.is_some());
+        assert_eq!(f.register(&blocked).error.unwrap().code, Code::TrustBlocked);
+        assert!(f.launches.0.lock()[LEAF].ticket.is_none());
+        f.seed(&pin("target.test", &f.server));
     } else if path == "partial" {
         assert_eq!(f.register(&a).error.unwrap().code, Code::WriteFailed);
         f.port.record.partial.store(false, Ordering::SeqCst);
