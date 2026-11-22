@@ -510,10 +510,15 @@ describe('sshContractInventory', () => {
     expect(sorted(flatHits.map(m => m[1]))).toEqual(flat.filter(name => !BROWSER_ABSENT.includes(name)));
     const notice = rendererFile('src/renderer/components/Ssh/OwnedSshLaunchNotice.tsx');
     for (const name of BROWSER_ABSENT) expect(notice.text).toContain(`if (!window.electronAPI?.${name}) return null;`);
-    flatHits.forEach((m, k) => {
-      const end = k + 1 < flatHits.length ? flatHits[k + 1].index! : m.index! + 400;
-      expect(`${m[1]}: ${/\bthrow\b/.test(browser.text.slice(m.index!, end)) ? 'rejects' : 'DOES NOT REJECT'}`).toBe(`${m[1]}: rejects`);
-    });
+    // Each flat stub is ONE line and must throw on its own line: a window reaching the next member
+    // (or a fixed span) would let a neighbour's `throw` vouch for a stub that resolves (review 347 F5).
+    for (const m of flatHits) {
+      // From the member's own name: the match prefix may span blank lines before it.
+      const start = m.index! + m[0].lastIndexOf(m[1]);
+      const lineEnd = browser.text.indexOf('\n', start);
+      const line = browser.text.slice(start, lineEnd < 0 ? undefined : lineEnd);
+      expect(`${m[1]}: ${/\bthrow\b/.test(line) ? 'rejects' : 'DOES NOT REJECT (one-line stub)'}`).toBe(`${m[1]}: rejects`);
+    }
     const browserRef = /\bssh\s*=\s*([A-Za-z_$][\w$]*)/.exec(browser.text);
     expect(browserRef).not.toBeNull();
     const stubFile = renderer.find(f => new RegExp(`\\b(?:const|let)\\s+${browserRef![1]}\\b[^=]*=\\s*\\{`).test(f.text))!;
@@ -544,9 +549,18 @@ describe('sshContractInventory', () => {
       !f.rel.startsWith('src/renderer/api/') && !f.rel.startsWith('src/renderer/types/') && carriesBridge.test(f.text)
       && !new RegExp(`\\binterface\\s+${nestedType}\\b`).test(f.text) && !/\binterface\s+Ssh(?:File|Store)Api\b/.test(f.text));
     expect(consumerFiles.length).toBeGreaterThan(0);
+    // A call, including `api.member!(…)` and `api.member?.(…)` on an optional member.
+    const callOf = (member: string, receiver = '') =>
+      new RegExp(`${receiver}\\.\\s*${member}\\s*!?\\s*(?:\\?\\.)?\\s*\\(`);
+    // A GENERIC name (`get`, `move`, `reload`, or any member also called in a file that never
+    // touches the bridge) would be "consumed" by `map.get(` or `location.reload(`. Those must be
+    // called on an SSH bridge receiver (review 347 F5): `api.get(`, `ssh.move(`, `electronAPI.ssh.get(`.
+    const bridgeReceiver = String.raw`\b(?:api|ssh|sshApi|electronAPI\s*\??\.\s*ssh)\s*!?\s*\??`;
+    const generic = new Set([...flat, ...nested].filter(member => ['get', 'move', 'reload'].includes(member)
+      || renderer.some(f => !carriesBridge.test(f.text) && callOf(member).test(f.text))));
+    expect([...generic]).toEqual(expect.arrayContaining(['get', 'move', 'reload']));
     const unconsumed = [...flat, ...nested].filter(member =>
-      // A call, including `api.member!(…)` and `api.member?.(…)` on an optional member.
-      !consumerFiles.some(f => new RegExp(`\\.\\s*${member}\\s*!?\\s*(?:\\?\\.)?\\s*\\(`).test(f.text)));
+      !consumerFiles.some(f => callOf(member, generic.has(member) ? bridgeReceiver : '').test(f.text)));
     expect(sorted(unconsumed)).toEqual(sorted(CONSUMER_EXCEPTIONS));
   });
 

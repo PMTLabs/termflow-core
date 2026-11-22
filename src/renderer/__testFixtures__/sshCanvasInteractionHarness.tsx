@@ -136,7 +136,7 @@ const nodeModel = (terminalId: string): CanvasNodeModel => ({
 });
 
 /** `CanvasMode`'s SSH node wiring, with spies for the callbacks it would dispatch. */
-function SshCanvasNode({ id, spies, focused }: { id: string; spies: NodeSpies; focused: boolean }) {
+function SshCanvasNode({ id, spies, focused, visible }: { id: string; spies: NodeSpies; focused: boolean; visible: boolean }) {
   const tag = useSelector((s: RootState) => sshTagsByTerminal(s.panes.treesByTabId)[id]);
   return <CanvasNode node={nodeModel(id)} tier="live" zoom={1} selected={false} focused={focused}
     dimmed={false} hidden={false} nodeHidden={false} busyCue="pulse" overlaid={false} combos={COMBOS}
@@ -145,17 +145,18 @@ function SshCanvasNode({ id, spies, focused }: { id: string; spies: NodeSpies; f
     onDoubleClick={() => spies.enlarge(id)}
     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); spies.nodeMenu(id); }}>
     <NodeTerminal terminalId={id} focused={focused}
-      sshTag={tag} sshBrowserWidth={tag ? sshBrowserAllocation(BOX, tag.browserCollapsed) : undefined}
+      sshTag={tag} sshBrowserWidth={tag ? sshBrowserAllocation(BOX, tag.browserCollapsed) : undefined} sshVisible={visible}
       SshShell={tag ? SshCanvasPresentation : undefined} />
   </CanvasNode>;
 }
 
 /**
  * Pane owners for `ids` (always mounted, one stable tree) and, when `canvas`, the Canvas viewport
- * with one SSH node per id and the overlay backdrop.
+ * with one SSH node per id and the overlay backdrop. `hiddenIds` are nodes `CanvasMode` would pass
+ * `sshVisible={false}` (culled, chip/group tier, or hidden; `isOverlaid || !isHidden(id)`).
  */
-export function SshScene({ ids, canvas, spies, focusedId = null }: {
-  ids: string[]; canvas: boolean; spies: NodeSpies; focusedId?: string | null;
+export function SshScene({ ids, canvas, spies, focusedId = null, hiddenIds = [] }: {
+  ids: string[]; canvas: boolean; spies: NodeSpies; focusedId?: string | null; hiddenIds?: string[];
 }) {
   return <>
     {ids.map(id => <div key={id} className="pane-probe" data-pane={id}>
@@ -167,7 +168,7 @@ export function SshScene({ ids, canvas, spies, focusedId = null }: {
       onBackgroundPointerDown={spies.background} onBackgroundContextMenu={spies.backgroundMenu}>
       {/* `CanvasMode`'s overlay backdrop: a world-space SIBLING with its own pointer handler. */}
       <div className="canvas-overlay-backdrop" onPointerDown={(e) => { e.stopPropagation(); spies.dismissOverlay(); }} />
-      {ids.map(id => <SshCanvasNode key={id} id={id} spies={spies} focused={focusedId === id} />)}
+      {ids.map(id => <SshCanvasNode key={id} id={id} spies={spies} focused={focusedId === id} visible={!hiddenIds.includes(id)} />)}
     </CanvasViewport> : null}
   </>;
 }

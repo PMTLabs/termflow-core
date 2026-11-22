@@ -359,4 +359,51 @@ describe('068 F5 focus restore', () => {
     await clickAsync([...dialog.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent === 'Close')!);
     expect(document.activeElement).toBe(rowButton(node, '/srv/a/click.txt'));
   });
+
+  it('sshDialog_nodeGoesHidden_closesItsDialogWithoutMovingFocus', async () => {
+    // A culled / chip-tier / hidden Canvas node is not the visible surface either (review 347 F1).
+    const spies = nodeSpies();
+    await liveScene(spies, true, [A]);
+    const node = canvasNode(A);
+    const shell = node.querySelector('.ssh-pane-shell')!;
+    expect(shell.getAttribute('data-ssh-interaction-owner')).toBe('true');
+    await openRowMenu(node, '/srv/a/click.txt');
+    await clickAsync(menuItem('Properties'));
+    const dialog = document.querySelector<HTMLElement>('[role=dialog]')!;
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    const trigger = rowButton(node, '/srv/a/click.txt');
+
+    await h.render(<SshScene ids={[A]} canvas spies={spies} hiddenIds={[A]} />);
+    expect(document.querySelector('[role=dialog]')).toBeNull();
+    expect(shell.getAttribute('data-ssh-interaction-owner')).toBe('false');
+    expect(trigger.isConnected).toBe(true);
+    expect(node.contains(document.activeElement)).toBe(false);
+    // No menu can open on the hidden node either.
+    await openRowMenu(node, '/srv/a/click.txt');
+    expect(document.querySelector('.context-menu')).toBeNull();
+
+    // Visible again: positive control for the menu probe above.
+    await h.render(<SshScene ids={[A]} canvas spies={spies} />);
+    await openRowMenu(node, '/srv/a/click.txt');
+    expect(document.querySelector('.context-menu')).not.toBeNull();
+    // Visible again: it owns interaction and its dialogs restore focus to it.
+    await h.render(<SshScene ids={[A]} canvas spies={spies} />);
+    expect(shell.getAttribute('data-ssh-interaction-owner')).toBe('true');
+  });
+
+  it('sshCreateDialog_paneToCanvasHandOver_closesThePaneDialog', async () => {
+    // The one controller stays live across the hand-over (070 grace), so the pane's Create dialog
+    // must close on loss of the surface, not on loss of liveness (review 347 F2).
+    const spies = nodeSpies();
+    await liveScene(spies, false, [A]);
+    const pane = paneShell(A);
+    const newFolder = [...pane.querySelectorAll<HTMLButtonElement>('.ssh-file-toolbar button')].find(b => b.textContent === 'New folder')!;
+    expect(newFolder.disabled).toBe(false);
+    await clickAsync(newFolder);
+    expect(document.querySelector('[role=dialog]')).not.toBeNull();
+
+    await h.render(<SshScene ids={[A]} canvas spies={spies} />);
+    expect(document.querySelector('[role=dialog]')).toBeNull();
+    expect(pane.contains(document.activeElement)).toBe(false);
+  });
 });

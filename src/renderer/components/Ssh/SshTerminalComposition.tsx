@@ -131,7 +131,10 @@ export function SshCanvasPresentation({ terminalId, sshTag, visible = true, brow
   const actions = useSshShellActions(terminalId, view);
   // `null` controller: with no pane owner there is nothing to show, and building one here would
   // be the second controller this composition exists to prevent.
-  return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive
+  // `surfaceActive={visible}`: a culled, chip/group-tier or hidden node is not the visible surface,
+  // so its menus, dialogs and chrome popover close and a dialog closing then never restores focus
+  // into it (068 F5), exactly as for a pane whose tab is in the background.
+  return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive={visible}
     onPatchTag={presentation?.onPatchTag ?? NOOP_PATCH} browserController={presentation?.browser ?? null}
     view={view} browserWidth={browserWidth} terminal={terminal}
     // D51: 066's SshLaunchNotice, portalled into this node's terminal slot, owns the host-key and

@@ -54,8 +54,10 @@ const canvasVisible = new Map<string, symbol>();
 
 export function publishSshCanvasVisible(terminalId: string, visible: boolean): () => void {
   const token = Symbol(terminalId);
-  if (visible) canvasVisible.set(terminalId, token);
-  else if (canvasVisible.has(terminalId)) canvasVisible.delete(terminalId);
+  // A hidden publisher claims nothing and clears nothing: its own earlier token was already
+  // retracted by that effect's cleanup, and any entry present now belongs to another node.
+  if (!visible) return () => {};
+  canvasVisible.set(terminalId, token);
   notify();
   return () => {
     if (canvasVisible.get(terminalId) !== token) return;

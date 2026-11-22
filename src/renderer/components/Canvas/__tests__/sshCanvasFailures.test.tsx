@@ -209,6 +209,9 @@ describe('metrics status row', () => {
       await h.render(shell(state, ended));
       expect(h.container.querySelector('.ssh-status')!.textContent).toBe('—');
       expect(h.container.querySelector('.ssh-browser')!.classList.contains('offline')).toBe(true);
+      // Not just dimmed: the live browser slot is replaced, including on an ended launch.
+      expect(h.container.textContent).not.toContain('Live files');
+      expect(h.container.querySelector('.ssh-browser-unavailable')!.textContent).toBe('Remote files unavailable');
     }
 
     // The same rule on Canvas, through the real presentation: disconnected reads "—".

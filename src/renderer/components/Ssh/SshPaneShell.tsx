@@ -144,7 +144,7 @@ export function SshPaneShell(props: SshPaneShellProps) {
         style={browserStyle} data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
         <button type="button" className="au-btn ssh-browser-toggle" title={props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser'} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>
         {props.browserHandlesOffline ? <div hidden={props.browserCollapsed}>{props.browser}</div>
-          : !props.browserCollapsed && (connected ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
+          : !props.browserCollapsed && (live ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
       </aside>
       <div className="ssh-terminal-host">{props.terminal}</div>
     </div>
