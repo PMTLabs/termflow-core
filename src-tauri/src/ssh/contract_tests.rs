@@ -23,13 +23,12 @@ const LEDGER_EVENTS: &[&str] = &[
     "ssh-fs:cwd",        // 068 output_pipeline.rs -> sshBridge onFsCwd
     "ssh-fs:edit-state", // 068 ssh/sftp/edit.rs AppEditEvents -> sshBridge onFsEditState
     "ssh-launch:state",  // 066 ssh/launch/drive.rs -> tauri-bridge onSshLaunchState
+    "ssh-metrics:control", // 069 ssh/metrics/sampler.rs CONTROL -> tauri-bridge onSshMetricsControl
+    "ssh-metrics:sample",  // 069 ssh/metrics/sampler.rs SAMPLE -> tauri-bridge onSshMetricsSample
     "ssh-session:state", // 067 ssh/session.rs publish_locked -> tauri-bridge onSshSessionState
     "ssh-store:changed", // 065 commands/ssh_store.rs CHANGED -> sshBridge onChanged
     "ssh-test:state",    // 067 ssh/session.rs publish_locked (probe) -> tauri-bridge onSshTestState
 ];
-// 070-rebase: PENDING after the sibling rebases, not asserted yet; move into LEDGER_EVENTS then.
-//   "ssh-metrics:sample"  (069 ssh/metrics/sampler.rs SAMPLE)
-//   "ssh-metrics:control" (069 ssh/metrics/sampler.rs CONTROL)
 
 fn crate_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

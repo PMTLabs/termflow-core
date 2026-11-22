@@ -490,7 +490,7 @@ async fn ssh_integration_registered_commands_round_trip_wire_payloads() {
 }
 
 fn fs_error(code: &str, op: &str, path: &str, detail: &str) -> Value {
-    json!({"code":code,"operation":op,"path":path,"outcome":"unchanged","message":format!("{op} on {path}: {detail}")})
+    json!({"code":code,"operation":op,"path":path,"outcome":"unchanged","message":detail})
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
