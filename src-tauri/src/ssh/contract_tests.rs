@@ -22,12 +22,12 @@ use std::path::{Path, PathBuf};
 const LEDGER_EVENTS: &[&str] = &[
     "ssh-fs:cwd",        // 068 output_pipeline.rs -> sshBridge onFsCwd
     "ssh-fs:edit-state", // 068 ssh/sftp/edit.rs AppEditEvents -> sshBridge onFsEditState
+    "ssh-launch:state",  // 066 ssh/launch/drive.rs -> tauri-bridge onSshLaunchState
     "ssh-session:state", // 067 ssh/session.rs publish_locked -> tauri-bridge onSshSessionState
     "ssh-store:changed", // 065 commands/ssh_store.rs CHANGED -> sshBridge onChanged
     "ssh-test:state",    // 067 ssh/session.rs publish_locked (probe) -> tauri-bridge onSshTestState
 ];
 // 070-rebase: PENDING after the sibling rebases, not asserted yet; move into LEDGER_EVENTS then.
-//   "ssh-launch:state"    (066 ssh/launch/drive.rs)
 //   "ssh-metrics:sample"  (069 ssh/metrics/sampler.rs SAMPLE)
 //   "ssh-metrics:control" (069 ssh/metrics/sampler.rs CONTROL)
 
@@ -206,7 +206,8 @@ fn test_only_cfg(cfg: &str) -> bool {
 /// `#[cfg(test)]` (or `all(test, ..)`) modules and functions cut out of comment-free text.
 fn without_test_items(src: &str) -> String {
     let item = Regex::new(
-        r"#\[cfg\(([^\]]*)\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(mod|(?:async\s+)?fn)\s+\w+",
+        // `#[cfg(<pred>)]` items, and bare `#[test]` / `#[tokio::test]` fns in production files.
+        r"#\[(?:cfg\(([^\]]*)\)|((?:tokio::)?test\b[^\]]*))\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(mod|(?:async\s+)?fn)\s+\w+",
     )
     .unwrap();
     let mut text = src.to_owned();
@@ -216,11 +217,11 @@ fn without_test_items(src: &str) -> String {
         let step: Result<(usize, usize), usize> = {
             let Some(found) = item.captures_at(&text, from) else { break };
             let whole = found.get(0).unwrap();
-            if test_only_cfg(&found[1]) {
+            if found.get(2).is_some() || found.get(1).is_some_and(|cfg| test_only_cfg(cfg.as_str())) {
                 let rest = &text[whole.end()..];
                 let brace = rest.find('{').map(|at| whole.end() + at);
                 let semi = rest.find(';').map(|at| whole.end() + at);
-                let end = match (&found[2] == "mod", semi, brace) {
+                let end = match (&found[3] == "mod", semi, brace) {
                     (true, Some(s), Some(b)) if s < b => s + 1,
                     (true, Some(s), None) => s + 1,
                     (_, _, Some(b)) => closing(&text, b) + 1,
@@ -354,9 +355,13 @@ fn ssh_contract_no_ssh_handler_on_rest_or_mcp() {
     let routes: usize = rest.iter().map(|(_, text)| router.find_iter(text).count()).sum();
     assert!(rest.iter().any(|(relative, _)| relative == "api_server/mod.rs"), "positive control: REST router found");
     assert!(routes > 10, "positive control: REST routes found ({routes})");
+    // A REST/fleet create passes the explicit non-SSH launch field (066 `TerminalCreateOptions`);
+    // that literal is the guarantee this test wants, so it is the one accepted spelling.
+    let explicit_none = Regex::new(r"\bssh_launch_connection_id\s*:\s*None\b").unwrap();
     for (relative, text) in &rest {
-        if let Some(found) = ssh.find(text) {
-            panic!("{relative}:{} reaches SSH from REST: {:?}", line_of(text, found.start()), excerpt(text, found.start()));
+        let text = explicit_none.replace_all(text, "");
+        if let Some(found) = ssh.find(&text) {
+            panic!("{relative}:{} reaches SSH from REST: {:?}", line_of(&text, found.start()), excerpt(&text, found.start()));
         }
     }
 
@@ -372,8 +377,12 @@ fn ssh_contract_no_ssh_handler_on_rest_or_mcp() {
     );
     let block = Regex::new(r"(?s)/\*.*?\*/").unwrap();
     let line = Regex::new(r"(?m)^\s*//.*$").unwrap();
+    // String literal contents are user text (066's "InputLocked: SSH launch is preparing" error
+    // message), not a tool, import or call; identifiers and code are what must stay SSH-free.
+    let strings = Regex::new(r#""(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`(?:[^`\\]|\\.)*`"#).unwrap();
     for (relative, text) in &mcp {
         let code = line.replace_all(&block.replace_all(text, ""), "").into_owned();
+        let code = strings.replace_all(&code, "\"\"").into_owned();
         if let Some(found) = ssh.find(&code) {
             panic!("mcp-server/src/{relative} reaches SSH: {:?}", excerpt(&code, found.start()));
         }

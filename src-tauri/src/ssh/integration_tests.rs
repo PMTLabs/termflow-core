@@ -63,6 +63,8 @@ async fn isolated(name: &str) -> bool {
     if std::env::var(GUARD).ok().as_deref() == Some(name) {
         return true;
     }
+    // Serialises with every other child-spawning test (child_process_gate_census_tests).
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
     let home = Temp::new();
     let (_, module) = module_path!().split_once("::").unwrap();
     let stdout = home.0.join("libtest-output");
@@ -78,14 +80,15 @@ async fn isolated(name: &str) -> bool {
         .stdout(Stdio::from(fs::File::create(&stdout).unwrap()))
         .current_dir(&home.0)
         .spawn().unwrap();
-    let status = timeout(Duration::from_secs(90), async {
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    // Polled synchronously: the gate is a std MutexGuard and must not be held across an await.
+    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
         }
-    }).await.expect("isolated test did not exit");
+        assert!(std::time::Instant::now() < deadline, "isolated test did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    };
     let output = fs::read_to_string(stdout).unwrap();
     assert!(status.success() && output.contains("1 passed"), "isolated test {name}: {status}\n{output}");
     false
@@ -101,7 +104,7 @@ impl AgentFactory for NoAgent {
 type Wire = Result<Value, Value>;
 type Log = Arc<Mutex<Vec<Value>>>;
 
-struct Rig {
+struct IpcRig {
     app: tauri::App<MockRuntime>,
     source: WebviewWindow<MockRuntime>,
     dest: WebviewWindow<MockRuntime>,
@@ -113,7 +116,7 @@ struct Rig {
     received: mpsc::UnboundedReceiver<(&'static str, Value)>,
     _temp: Temp,
 }
-impl Rig {
+impl IpcRig {
     fn new(server: Server, pinned: bool, use_store: bool) -> Self {
         let temp = Temp::new();
         let store_path = temp.0.join("ssh.json");
@@ -354,7 +357,7 @@ fn preview(home: &Path, revision: u64) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_integration_registered_commands_round_trip_wire_payloads() {
     if !isolated("ssh_integration_registered_commands_round_trip_wire_payloads").await { return; }
-    let mut r = Rig::new(Server::new(1, "alice"), true, true);
+    let mut r = IpcRig::new(Server::new(1, "alice"), true, true);
     assert_eq!(r.ok("ssh_store_get", json!({})).await, view(0, json!([]), json!([])));
     let folder = r.ok("ssh_folder_upsert", json!({"input":{
         "parentId":null,"name":"Wire folder","icon":"server","color":"amber"
@@ -496,7 +499,7 @@ async fn ssh_integration_store_revision_lock_and_redaction() {
     let secret = format!("t7-password-sentinel-{}", Uuid::new_v4());
     let mut server = Server::new(1, "alice");
     server.password = secret.clone();
-    let mut r = Rig::new(server, true, true);
+    let mut r = IpcRig::new(server, true, true);
 
     // Independent store caches on the same ConfigLock/file. A's mark-used must
     // re-read B's commit, not overwrite it with the last view A served.
@@ -574,12 +577,12 @@ async fn ssh_integration_store_revision_lock_and_redaction() {
 fn exec_opts(cancel: tokio_util::sync::CancellationToken) -> ExecOpts {
     ExecOpts { deadline: Duration::from_secs(5), stdout_cap: 1024 * 1024, stderr_cap: 16 * 1024, cancel }
 }
-async fn exec(r: &Rig, command: &str) -> Result<ExecOutput, SessionError> {
+async fn exec(r: &IpcRig, command: &str) -> Result<ExecOutput, SessionError> {
     timeout(WAIT, with_session(&r.fixture.registry, T, |session| async move {
         session.exec_with(command, exec_opts(session.cancellation())).await
     })).await.unwrap()
 }
-fn check_login(r: &Rig, principals: &[&str], handshakes: usize) {
+fn check_login(r: &IpcRig, principals: &[&str], handshakes: usize) {
     assert_eq!(r.fixture.server.counters.principals.lock().iter().map(String::as_str).collect::<Vec<_>>(), principals);
     assert_eq!(r.fixture.server.counters.auth.load(SeqCst), principals.len());
     assert_eq!(r.fixture.server.counters.handshakes.load(SeqCst), handshakes);
@@ -588,7 +591,7 @@ fn check_login(r: &Rig, principals: &[&str], handshakes: usize) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_integration_files_and_metrics_share_session_and_stop_on_drop() {
     if !isolated("ssh_integration_files_and_metrics_share_session_and_stop_on_drop").await { return; }
-    let mut r = Rig::new(Server::new(1, "alice"), true, false);
+    let mut r = IpcRig::new(Server::new(1, "alice"), true, false);
     let pi = r.mount(C);
     let g = r.open(C).await;
     r.connect(g, C, false).await;
@@ -617,7 +620,7 @@ async fn ssh_integration_files_and_metrics_share_session_and_stop_on_drop() {
     check_login(&r, &["alice"], 1);
 }
 
-async fn trust_prompt(r: &mut Rig, id: &str, connection: &str, generation: u64, probe: bool) -> Value {
+async fn trust_prompt(r: &mut IpcRig, id: &str, connection: &str, generation: u64, probe: bool) -> Value {
     let (event, cmd, id_key) = if probe { (PROBE_EVENT, "ssh_test_state", "probeId") }
         else { (SESSION_EVENT, "ssh_session_state", "terminalId") };
     let v = r.event(event, id, generation, "needs-hostkey").await;
@@ -636,7 +639,7 @@ async fn trust_prompt(r: &mut Rig, id: &str, connection: &str, generation: u64, 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_integration_trust_cancel_changed_and_pane_less_test_cleanup() {
     if !isolated("ssh_integration_trust_cancel_changed_and_pane_less_test_cleanup").await { return; }
-    let mut r = Rig::new(Server::new(1, "alice"), false, false);
+    let mut r = IpcRig::new(Server::new(1, "alice"), false, false);
     let pi = r.mount(C);
     let first = r.open(C).await;
     let prompt = trust_prompt(&mut r, T, C, first, false).await;
@@ -712,7 +715,7 @@ async fn ssh_integration_trust_cancel_changed_and_pane_less_test_cleanup() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ssh_integration_duplicate_open_transfer_reconnect_close_exact_map() {
     if !isolated("ssh_integration_duplicate_open_transfer_reconnect_close_exact_map").await { return; }
-    let mut r = Rig::new(Server::new(1, "alice"), true, false);
+    let mut r = IpcRig::new(Server::new(1, "alice"), true, false);
     let source = r.mount(C);
     let first = r.open(C).await;
     let connected = r.connect(first, C, false).await;

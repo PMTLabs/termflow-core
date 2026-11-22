@@ -989,7 +989,9 @@ impl SessionRegistry {
         }
     }
     pub fn lease(&self, id: &str) -> Result<Arc<SshSession>, SessionError> {
-        let e = self.entry(id, false)?;
+        // Same as `lease_at`: a pane with no live entry (closed, retired) is not connected. NotFound
+        // would tell the user their SAVED connection was deleted, which is false here.
+        let e = self.entry(id, false).map_err(|_| SessionError::NotConnected)?;
         let s = e.inner.lock();
         if e.cancel.is_cancelled() || s.view.state != SessionState::Connected {
             return Err(SessionError::NotConnected);
