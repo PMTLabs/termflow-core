@@ -31,6 +31,7 @@ import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwne
 import type { HostWaitState } from '../../services/TerminalService';
 import { addToast } from '../../store/slices/uiSlice';
 import { OwnedSshLaunchNotice } from '../Ssh/OwnedSshLaunchNotice';
+import { SshLaunchStrip } from '../Ssh/SshLaunchNotice';
 import { isAdminUacCancelled, takeOptimisticAdminTab } from '../../services/adminTabActions';
 import { takeProvisionalRecovery } from '../../services/provisionalRecovery';
 import { AutomationArmedForTerminal } from '../Automation/AutomationArmedBadge';
@@ -954,12 +955,15 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           </div>
           {isBroadcastMember && <span className="broadcast-chip">⇉ broadcast</span>}
         </div>
-        {sshIssue && <div role="status" className="terminal-startup-status">
-          {sshIssue.message}{'settings' in sshIssue && <> <button type="button" onClick={() => openSettingsTab('ssh')}>Open SSH Connections</button></>}
-        </div>}
-        {terminalId && processId && incarnation && processBinding?.owner === incarnation && sshConnectionId && !sshUnavailable &&
-          <OwnedSshLaunchNotice key={processId} terminalId={terminalId} paneId={paneId}
-            processId={processId} owner={incarnation} connectionId={sshConnectionId} />}
+        {sshConnectionId && (sshUnavailable || (terminalId && processId)) && (
+          terminalId && processId && incarnation && processBinding?.owner === incarnation && !sshIssue
+            ? <OwnedSshLaunchNotice key={processId} terminalId={terminalId} paneId={paneId}
+                processId={processId} owner={incarnation} connectionId={sshConnectionId} />
+            : <SshLaunchStrip status={sshIssue?.message}>
+                {sshIssue && 'settings' in sshIssue &&
+                  <button type="button" className="au-btn" onClick={() => openSettingsTab('ssh')}>Open SSH Connections</button>}
+              </SshLaunchStrip>
+        )}
         {/* SSH leaves (plan 070 T2, gap G1) wrap this content in the shared SSH shell; every other
             leaf renders it unchanged. Resolved by terminalId inside the slot, never by pane id. */}
         <SshPaneSlot terminalId={terminalId} isTabActive={isTabActive}>
