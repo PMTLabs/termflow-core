@@ -7,7 +7,7 @@
  */
 import path from 'path';
 import {
-  SSH_CSS_BROWSER_MAX_FRACTION, SSH_CSS_BROWSER_W, SSH_CSS_LAUNCH_STRIP_H, SSH_CSS_RAIL_W, SSH_CSS_STATUS_H,
+  SSH_CSS_BROWSER_MAX_FRACTION, SSH_CSS_BROWSER_W, SSH_CSS_CHROME_H, SSH_CSS_LAUNCH_STRIP_H, SSH_CSS_RAIL_W, SSH_CSS_STATUS_H,
   sshBrowserAllocation, sshContain, sshFallbackSurfaceBox, sshSurfaceBoxFrom, sshTerminalBox,
 } from '../canvasSshGeometry';
 import {
@@ -15,6 +15,7 @@ import {
 } from '../canvasGeometry';
 import { rasterStyle, worldStyle } from '../viewportStyles';
 import { readSource } from '../../../utils/readSource';
+import { SSH_PANE_CHROME_H } from '../../Ssh/SshPaneShell';
 
 const close = (a: number, b: number) => expect(Math.abs(a - b)).toBeLessThan(1e-9);
 
@@ -28,10 +29,11 @@ function corners(env: { w: number; h: number }, fit: { scale: number; shift: num
 }
 
 describe('SSH envelope and terminal remainder', () => {
-  it('envelope = terminal + browser + gap by strip + terminal + status, with distinct unequal parts', () => {
+  it('envelope = terminal + browser + gap by strip + chrome + terminal + status, with distinct unequal parts', () => {
     expect(BOX.envelope.w).toBe(TERMINAL.w + 259.75 + 6.5);
-    // 066's launch strip row (36) is reserved in the slot; the terminal keeps its measured box.
-    expect(BOX.envelope.h).toBe(TERMINAL.h + 36 + 25);
+    // 066's launch strip row (36) is reserved in the slot and the shell's P068-7 chrome row (36)
+    // sits in flow above the body; the terminal keeps its measured box.
+    expect(BOX.envelope.h).toBe(TERMINAL.h + 36 + 36 + 25);
     expect(BOX.initialTerminal).toEqual(TERMINAL);
     expect(BOX.expandedBrowserW).toBe(259.75);
     expect(BOX.collapsedBrowserW).toBe(SSH_CSS_RAIL_W); // 30 < 40% of a 1267 px body
@@ -68,7 +70,7 @@ describe('SSH envelope and terminal remainder', () => {
   it('the never-rendered fallback is self-consistent under the cap', () => {
     const wide = sshFallbackSurfaceBox({ w: 1600, h: 680 }, false);
     expect(wide.source).toBe('fallback');
-    expect(wide.envelope).toEqual({ w: 1600 + SSH_CSS_BROWSER_W, h: 680 + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_STATUS_H });
+    expect(wide.envelope).toEqual({ w: 1600 + SSH_CSS_BROWSER_W, h: 680 + SSH_CSS_LAUNCH_STRIP_H + SSH_CSS_CHROME_H + SSH_CSS_STATUS_H });
     const tight = sshFallbackSurfaceBox({ w: 300, h: 200 }, false);
     // a = min(260, 0.4 * (300 + a)) -> a = 200, and 200 is exactly 40% of the 500 px envelope.
     close(tight.expandedBrowserW, 200);
@@ -98,8 +100,16 @@ describe('SSH envelope and terminal remainder', () => {
     // 066's launch strip has one fixed height; Canvas reserves exactly that row (Canvas.css).
     const strip = readSource(path.resolve(__dirname, '../../Ssh/SshLaunchNotice.css')).replace(/\s+/g, '');
     expect(strip).toMatch(new RegExp(`\\.ssh-launch-strip\\{[^}]*height:${SSH_CSS_LAUNCH_STRIP_H}px`));
-    // Session chrome is an overlay, so connect/disconnect cannot add a row.
-    expect(rule('.ssh-pane-chrome')).toContain('position:absolute');
+    // P068-7: the shell's chrome row is always rendered, in flow, at one fixed height, so
+    // connect/disconnect and notices cannot change the row; the envelope reserves exactly it.
+    expect(SSH_CSS_CHROME_H).toBe(SSH_PANE_CHROME_H);
+    const chrome = rule('.ssh-pane-chrome');
+    expect(chrome).toContain(`height:${SSH_CSS_CHROME_H}px`);
+    expect(chrome).toContain('box-sizing:border-box');
+    expect(chrome).toContain('flex:none');
+    expect(chrome).not.toContain('position:absolute');
+    expect(chrome).not.toContain('min-height');
+    expect(chrome).not.toContain('max-height');
   });
 });
 

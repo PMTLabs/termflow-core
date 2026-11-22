@@ -9,7 +9,7 @@ import path from 'path';
 import { readSource } from '../../../utils/readSource';
 import { OWNED_NOTICE_PLACEMENT } from '../../../__testFixtures__/sshLaunchNoticeProbe';
 import { scrollRegionTakesWheel, sshOwnsKeyboard } from '../canvasGestures';
-import { SSH_CSS_LAUNCH_STRIP_H, SSH_CSS_STATUS_H } from '../canvasSshGeometry';
+import { SSH_CSS_CHROME_H, SSH_CSS_LAUNCH_STRIP_H, SSH_CSS_STATUS_H } from '../canvasSshGeometry';
 
 const squash = (text: string) => text.replace(/\s+/g, ' ');
 
@@ -42,7 +42,7 @@ it('sshNotice_canvasOverlay_neverTakesARowInTheTerminalSlot', () => {
   // The prompt overlay is bounded by the terminal below the strip, not by viewport cqh fallback.
   const overlay = block('.canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice > .ssh-launch-overlay');
   expect(overlay.replace(/\s+/g, '')).toContain(
-    `max-height:calc((var(--node-host-h)-${SSH_CSS_STATUS_H}px-${SSH_CSS_LAUNCH_STRIP_H}px)*0.65)`);
+    `max-height:calc((var(--node-host-h)-${SSH_CSS_STATUS_H}px-${SSH_CSS_CHROME_H}px-${SSH_CSS_LAUNCH_STRIP_H}px)*0.65)`);
 });
 
 it('sshNotice_ownsCanvasKeysAndItsOwnWheel', () => {

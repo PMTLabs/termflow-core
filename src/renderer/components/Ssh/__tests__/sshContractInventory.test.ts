@@ -73,6 +73,8 @@ const BINDING: Readonly<Record<string, string>> = {
   fsInsertPath: 'ssh_fs_insert_path',
   fsEditStop: 'ssh_fs_edit_stop',
   fsEditList: 'ssh_fs_edit_list',
+  // P068-7 (#189): dismiss a retained (ended) edit row.
+  fsEditDismiss: 'ssh_fs_edit_dismiss',
   onFsEditState: 'ssh-fs:edit-state',
   onFsCwd: 'ssh-fs:cwd',
   // 066 launch coordinator and store additions (landed on develop with #182; moved from PENDING).

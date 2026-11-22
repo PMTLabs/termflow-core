@@ -380,10 +380,11 @@
 }
 /* 066 bounds the overlay with `cqh` of a size container that an SSH node slot does not have (see
    above). Here the terminal below the strip is the envelope height (`--node-host-h`, from
-   CanvasNode) minus the status row (25px) and the strip (36px), `canvasSshGeometry.ts`. Same 65%
+   CanvasNode) minus the status row (25px), the shell's chrome row (36px) and the strip (36px),
+   `canvasSshGeometry.ts`. Same 65%
    cap as 066; the overlay never runs past the slot. */
 .canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice > .ssh-launch-overlay {
-  max-height: calc((var(--node-host-h) - 25px - 36px) * 0.65);
+  max-height: calc((var(--node-host-h) - 25px - 36px - 36px) * 0.65);
 }
 
 /* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are
