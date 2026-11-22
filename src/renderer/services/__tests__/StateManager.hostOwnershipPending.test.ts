@@ -361,7 +361,7 @@ test('persisted tree installer census requires registration before every install
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       const filename = path.join(directory, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name !== '__tests__') scan(filename);
+        if (!['__tests__', '__testFixtures__'].includes(entry.name)) scan(filename);
       } else if (/\.tsx?$/.test(filename) && !filename.endsWith('StateManager.ts')) {
         const ast = ts.createSourceFile(filename, fs.readFileSync(filename, 'utf8'), ts.ScriptTarget.Latest, true);
         let installs = 0;

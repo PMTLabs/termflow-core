@@ -361,7 +361,7 @@ describe('two presentations, one owner', () => {
     });
     const prompts = container.querySelectorAll('.ssh-prompt');
     expect(prompts).toHaveLength(1);
-    expect(prompts[0].closest('.ssh-pane-shell')).toBeNull();
+    // Owned by the notice (portalled into the slot wrapper inside the shell), not by the shell.
     expect(prompts[0].closest('.ssh-launch-notice')!.parentElement)
       .toBe(container.querySelector('.canvas-ssh-surface .ssh-terminal-host > .terminal-display-wrapper'));
     const trust = [...prompts[0].querySelectorAll('button')].find(b => b.textContent === 'Trust')!;

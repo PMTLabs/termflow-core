@@ -1,4 +1,7 @@
 /** @jest-environment jsdom */
+/** `tauri-bridge` registers listeners at module load and dies outside a Tauri WebView; the tests
+ * install their own `window.electronAPI`. TerminalDisplay reads only the Windows build number. */
+jest.mock('../../../api/tauri-bridge', () => ({ __esModule: true, default: {}, getWindowsBuildNumber: () => 0 }));
 import React, { act, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider, useSelector } from 'react-redux';

@@ -163,7 +163,7 @@ function walk(dir: string, extensions: readonly string[], out: SourceFile[]): So
 }
 
 const isRendererTest = (rel: string): boolean =>
-  /\/__tests__\//.test(rel) || /\.(test|spec)\.[tj]sx?$/.test(rel) || rel.startsWith('src/renderer/test/');
+  /\/__tests__\//.test(rel) || /\/__testFixtures__\//.test(rel) || /\.(test|spec)\.[tj]sx?$/.test(rel) || rel.startsWith('src/renderer/test/');
 const isRustTestFile = (rel: string): boolean => /(_tests|\/tests|test_server)\.rs$/.test(rel) || /\/tests\//.test(rel);
 /** SSH-owned renderer files, by path rather than by a list: components/Ssh, Settings/SshConnections, ssh*.ts. */
 const isSshOwned = (rel: string): boolean => /ssh/i.test(rel);
@@ -374,11 +374,12 @@ function membersOf(name: string): Set<string> {
   return names;
 }
 
-/** The type named by `ssh?: <type>` in an ElectronAPI declaration. */
+/** The type(s) named by `ssh?: <type>` in an ElectronAPI declaration: every part of an
+ * intersection (`import('./ssh').A & import('./ssh').B`), joined as `A & B`. */
 function nestedSshType(decl: Decl): string {
   const m = /(?:^|[;,\n{])\s*ssh\s*\??\s*:\s*([^;\n]+)/.exec(depthZero(decl.body));
   if (!m) throw new Error(`ElectronAPI in ${decl.rel} has no ssh member`);
-  return /([A-Za-z_$][\w$]*)\s*$/.exec(m[1].trim())![1];
+  return m[1].split('&').map(part => /([A-Za-z_$][\w$]*)\s*$/.exec(part.trim())![1]).join(' & ');
 }
 
 const FLAT_SSH_MEMBER = /^(ssh|onSsh)[A-Z]/;
@@ -473,7 +474,7 @@ describe('sshContractInventory', () => {
     expect(contract).toBeDefined();
     const flat = sorted([...membersOfDecl(contract!)].filter(n => FLAT_SSH_MEMBER.test(n)));
     const nestedType = nestedSshType(contract!);
-    const nested = sorted(membersOf(nestedType));
+    const nested = sorted(nestedType.split(' & ').flatMap(part => [...membersOf(part)]));
     expect(flat.length).toBeGreaterThan(0);
     expect(nested.length).toBeGreaterThan(0);
     // Every other ElectronAPI declaration (the tauri bridge keeps a local copy) agrees.
@@ -497,9 +498,16 @@ describe('sshContractInventory', () => {
 
     // (e2) browser bridge implementations: present for every member, and every one REJECTS.
     // EXCEPTION (documented): browser stubs exist only to reject desktop-only actions; none may fake success.
+    // EXCEPTION (066): `onSshLaunchState` is optional and ABSENT in the browser bridge on purpose;
+    // its consumer feature-detects it and renders no launch notice. A rejecting stub would turn
+    // "no notice" into a failed subscription. Pin both the absence and the feature check.
+    const BROWSER_ABSENT = ['onSshLaunchState'];
     const browser = rendererFile('src/renderer/api/browser-bridge.ts');
     const flatHits = [...browser.text.matchAll(/(?:^|[,{\n;])\s*(?:async\s+)?((?:ssh|onSsh)[A-Z][\w$]*)\s*[:(=<]/g)];
-    expect(sorted(flatHits.map(m => m[1]))).toEqual(flat);
+    expect(BROWSER_ABSENT.every(name => flat.includes(name))).toBe(true);
+    expect(sorted(flatHits.map(m => m[1]))).toEqual(flat.filter(name => !BROWSER_ABSENT.includes(name)));
+    const notice = rendererFile('src/renderer/components/Ssh/OwnedSshLaunchNotice.tsx');
+    for (const name of BROWSER_ABSENT) expect(notice.text).toContain(`if (!window.electronAPI?.${name}) return null;`);
     flatHits.forEach((m, k) => {
       const end = k + 1 < flatHits.length ? flatHits[k + 1].index! : m.index! + 400;
       expect(`${m[1]}: ${/\bthrow\b/.test(browser.text.slice(m.index!, end)) ? 'rejects' : 'DOES NOT REJECT'}`).toBe(`${m[1]}: rejects`);
@@ -535,7 +543,8 @@ describe('sshContractInventory', () => {
       && !new RegExp(`\\binterface\\s+${nestedType}\\b`).test(f.text) && !/\binterface\s+Ssh(?:File|Store)Api\b/.test(f.text));
     expect(consumerFiles.length).toBeGreaterThan(0);
     const unconsumed = [...flat, ...nested].filter(member =>
-      !consumerFiles.some(f => new RegExp(`\\.\\s*${member}\\s*\\(`).test(f.text)));
+      // A call, including `api.member!(…)` and `api.member?.(…)` on an optional member.
+      !consumerFiles.some(f => new RegExp(`\\.\\s*${member}\\s*!?\\s*(?:\\?\\.)?\\s*\\(`).test(f.text)));
     expect(sorted(unconsumed)).toEqual(sorted(CONSUMER_EXCEPTIONS));
   });
 

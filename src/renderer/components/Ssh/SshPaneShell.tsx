@@ -23,6 +23,10 @@ export interface SshPaneShellProps {
    *  this one stays laid out but renders no prompt, banner action or edit notice, so there is
    *  never a second visible or focusable challenge. Defaults to true. */
   interactive?: boolean;
+  /** False while this presentation's surface is not the visible, active one (its tab is in the
+   *  background, or Canvas is taking the terminal over). Its browser's menus and dialogs close
+   *  then, and a dialog closing that way must not pull focus back here (068 F5). Defaults to true. */
+  surfaceActive?: boolean;
   /** False where 066's `SshLaunchNotice` already renders this terminal's host-key and secret
    *  prompts and its Reconnect (the pane): the shell then shows no second copy of either, so a
    *  dropped session never offers two Reconnect buttons. Defaults to true. */
@@ -100,6 +104,9 @@ export function SshPaneShell(props: SshPaneShellProps) {
   const showDisconnected = (connected && props.launchDisconnected) || view.state === 'disconnected'
     || (view.state === 'error' && !view.hostKey?.changed);
   const interactive = props.interactive ?? true;
+  // Read by `sshShellOwnsFocusRestore`: the tab switch into Canvas commits BEFORE Canvas takes the
+  // host, so `interactive` alone is still true when the pane's dialog closes on deactivation.
+  const owner = interactive && (props.surfaceActive ?? true);
   const prompts = props.sessionPrompts ?? true;
   const browserStyle: React.CSSProperties | undefined = props.browserWidth === undefined ? undefined
     : { flex: `0 0 ${props.browserWidth}px`, width: props.browserWidth, maxWidth: 'none' };
@@ -112,8 +119,10 @@ export function SshPaneShell(props: SshPaneShellProps) {
     ? view.hostKey?.changed ? 'SSH host key refused' : 'Verify SSH host key'
     : disconnected ? 'SSH disconnected' : undefined;
   const status = view.state === 'connecting' ? 'Connecting…' : connected ? view.reason : undefined;
+  // The chrome follows `owner`, not `interactive`: an inactive surface closes its popover without
+  // moving focus and drops its document Escape/click listeners, so they never act on the hidden pane.
   const renderChrome = (summaries: string[], details: React.ReactNode) => <SshPaneChrome
-    interactive={interactive} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
+    interactive={owner} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
     {secret && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {hostKey && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {disconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
@@ -124,7 +133,7 @@ export function SshPaneShell(props: SshPaneShellProps) {
   // scroll this content instead of the canvas, `data-ssh-keyboard-owner` keeps Canvas shortcuts
   // out of its controls, `data-ssh-interaction-owner` gates dialog focus restore (068 F5).
   // Inert in a pane, where nothing reads them.
-  return <section className="ssh-pane-shell" aria-label="SSH session" data-ssh-interaction-owner={interactive ? 'true' : 'false'}>
+  return <section className="ssh-pane-shell" aria-label="SSH session" data-ssh-interaction-owner={owner ? 'true' : 'false'}>
     {interactive && view.terminalId
       ? <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult}>
           {(summaries, details) => renderChrome(summaries, details)}

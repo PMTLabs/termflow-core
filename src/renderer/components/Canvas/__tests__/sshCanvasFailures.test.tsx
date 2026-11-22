@@ -66,7 +66,8 @@ describe('host-key trust on the Canvas surface', () => {
     expect(document.querySelectorAll('.ssh-prompt')).toHaveLength(1);
     const prompt = node.querySelector('.ssh-launch-notice .ssh-prompt')!;
     expect(prompt).not.toBeNull();
-    expect(document.querySelector('.ssh-pane-shell .ssh-prompt')).toBeNull();
+    // The notice is portalled into the slot wrapper (inside the shell); no shell renders its own.
+    expect([...document.querySelectorAll('.ssh-pane-shell .ssh-prompt')].filter(p => !p.closest('.ssh-launch-notice'))).toEqual([]);
     expect(paneShell(A).querySelector('.ssh-prompt')).toBeNull();
     // Canvas shortcuts and wheel leave the notice alone (D51 item 3).
     expect(sshOwnsKeyboard(prompt.querySelector('button'))).toBe(true);

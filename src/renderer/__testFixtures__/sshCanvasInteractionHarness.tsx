@@ -37,7 +37,8 @@ import type { RemoteEntry, RemoteListing } from '../components/Ssh/sshFileTypes'
 import { sshTag, sshTree } from './sshCanvasFixture';
 
 export const TAB = 'tb-ssh';
-export const COMBOS = { enlarge: 'Q', openTab: 'G', leaveTerminal: 'Ctrl+Alt+Q', openTabFromOverlay: 'Ctrl+Alt+G' };
+export const COMBOS = { enlarge: 'Q', openTab: 'G', leaveTerminal: 'Ctrl+Alt+Q', openTabFromOverlay: 'Ctrl+Alt+G',
+  arrange: 'A', toggleList: 'L' };
 export const BOX = sshSurfaceBoxFrom({ terminal: { w: 1001.53125, h: 603.40625 }, browserW: 260, collapsed: false, statusH: SSH_CSS_STATUS_H, columnGap: 0 });
 
 export const flush = async () => { for (let i = 0; i < 25; i++) await Promise.resolve(); };

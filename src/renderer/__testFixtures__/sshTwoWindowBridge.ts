@@ -197,7 +197,7 @@ export function sshTwoWindowBridge(initial: SshReply, isTagged: (id: string, con
     drive(id, next);
     endpoints.B.emit('ssh-session:state', next);
   }
-  return { ...endpoints, held, invokes, mutations, writes, admitted, order, sessions, serverEdges, transition,
+  return { ...endpoints, held, invokes, mutations, writes, admitted, order, sessions, snapshots, serverEdges, transition,
     opening: (view: Partial<SshSessionView>) => { opening = view; },
     holdEdgeReplies: () => { holdEdges = true; }, holdCreateReplies: () => { holdCreate = true; },
   };
