@@ -609,7 +609,7 @@ export function sshTagsByTerminal(treesByTabId: Record<string, PaneNode | null>)
   const visit = (node: PaneNode | null | undefined): void => {
     if (!node) return;
     if (node.type === 'terminal') {
-      // 066-rebase: readSshPaneTag reads the real PaneNode.ssh field once 066 lands.
+      // readSshPaneTag reads 066's PaneNode.ssh field (the 068 seam).
       const tag = node.terminalId ? readSshPaneTag(node) : undefined;
       if (tag && node.terminalId) out[node.terminalId] = tag;
       return;

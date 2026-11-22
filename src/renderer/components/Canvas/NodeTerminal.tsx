@@ -79,13 +79,16 @@ const NodeTerminalImpl: React.FC<{
   sshTag?: SshPaneTag;
   /** The frozen browser allocation for the tag's current collapse state (`canvasSshGeometry`). */
   sshBrowserWidth?: number;
+  /** False while this node is culled or below the chip tier (D51: the SSH browser controller is
+   *  active only while some surface showing it is visible). Defaults to true. */
+  sshVisible?: boolean;
   /** The shared SSH presentation. A component TYPE, not an element, so the memo below holds:
    *  passed in rather than imported so this module stays free of the store. */
   SshShell?: React.ComponentType<SshCanvasShellProps>;
   /** SSH snapshot tier only: drawn inside the terminal slot, covering only live terminal pixels.
    *  Local nodes keep their sibling snapshot in `CanvasMode`. A type for the same memo reason. */
   Snapshot?: React.ComponentType<{ terminalId: string }>;
-}> = ({ terminalId, focused, overlaid = false, exitInfo = null, fontSize, sshTag, sshBrowserWidth, SshShell, Snapshot }) => {
+}> = ({ terminalId, focused, overlaid = false, exitInfo = null, fontSize, sshTag, sshBrowserWidth, sshVisible = true, SshShell, Snapshot }) => {
   // The ref identity MUST be stable across renders (012 D5). A fresh arrow every render
   // makes React detach and re-attach on every commit — clear + re-register churn, and
   // each churn is a relocation of a live terminal.
@@ -226,7 +229,7 @@ const NodeTerminalImpl: React.FC<{
   return (
     <div className="canvas-surface canvas-ssh-surface" onPointerDown={isolateSshGesture}
       onMouseDown={isolateSshGesture} onDoubleClick={isolateSshGesture} onContextMenu={isolateSshGesture}>
-      <SshShell terminalId={terminalId} sshTag={ssh} browserWidth={sshBrowserWidth} terminal={surface} />
+      <SshShell terminalId={terminalId} sshTag={ssh} visible={sshVisible} browserWidth={sshBrowserWidth} terminal={surface} />
     </div>
   );
 };

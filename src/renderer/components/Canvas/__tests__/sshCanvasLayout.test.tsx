@@ -38,7 +38,8 @@ import { CanvasMetricsContext } from '../canvasMetricsContext';
 import { DEFAULT_METRICS, HEAD_H, NODE_H, NODE_W, type LodTier, type Rect } from '../canvasGeometry';
 import { sshTagsByTerminal, type CanvasNodeModel } from '../canvasSelectors';
 import { SSH_CSS_RAIL_W, SSH_CSS_STATUS_H, sshBrowserAllocation, sshSurfaceBoxFrom, type SshSurfaceBox } from '../canvasSshGeometry';
-import { SshCanvasPresentation, SshPaneSlot } from '../../Ssh/SshTerminalComposition';
+import { SSH_SURFACE_HIDE_GRACE_MS, SshCanvasPresentation, SshPaneSlot } from '../../Ssh/SshTerminalComposition';
+import { LaunchNoticeProbe } from '../../../__testFixtures__/sshLaunchNoticeProbe';
 import { readSshLaunchState } from '../../Ssh/ssh066Contract';
 import { __resetSshPresentationsForTest } from '../../Ssh/sshPresentations';
 import {
@@ -78,6 +79,7 @@ function SshNode({ id, box, tier = 'live', hidden = false, overlaid = false, sna
     hostBox={box.initialTerminal} sshEnvelope={tag ? box.envelope : undefined}>
     <NodeTerminal terminalId={id} focused={false} overlaid={overlaid}
       sshTag={tag} sshBrowserWidth={tag ? sshBrowserAllocation(box, tag.browserCollapsed) : undefined}
+      sshVisible={overlaid || !hidden}
       SshShell={tag ? SshCanvasPresentation : undefined} Snapshot={tag && snapshot ? FakeSnapshot : undefined} />
   </CanvasNode>;
 }
@@ -326,6 +328,8 @@ describe('two presentations, one owner', () => {
         <div className="terminal-pane-content"><div className="terminal-display" data-probe="pane-host" /></div>
       </SshPaneSlot>
       {canvas ? <SshNode id={id} box={BOX_A} /> : null}
+      {/* 066's notice, placed as TerminalPane's OwnedSshLaunchNotice places it (D51). */}
+      <LaunchNoticeProbe terminalId={id} onTrust={receipt => bridge.sshSessionTrustHost(id, true, receipt)} />
     </>;
 
     // Positive control: the pane owner alone lists once and subscribes Follow-cd once.
@@ -346,7 +350,8 @@ describe('two presentations, one owner', () => {
     await act(async () => { cwd!({ terminalId: id, path: '/srv', host: 'h', sessionGeneration: 1 }); await new Promise(r => setTimeout(r, 120)); await flush(); });
     expect(ssh.fsList.mock.calls.map(([request]) => request.path)).toEqual(['/home', '/srv']);
 
-    // A host-key challenge appears ONCE, on the surface that owns interaction (Canvas).
+    // D51: a host-key challenge appears ONCE, from 066's notice, inside the Canvas node's terminal
+    // slot while Canvas hosts the terminal. Neither SSH shell renders a second copy.
     await act(async () => {
       store.dispatch(sshSessionObserved({
         terminalId: id, connectionId: 'conn-shared', state: 'needs-hostkey', generation: 1, revision: 2, gate: 'pending',
@@ -356,7 +361,9 @@ describe('two presentations, one owner', () => {
     });
     const prompts = container.querySelectorAll('.ssh-prompt');
     expect(prompts).toHaveLength(1);
-    expect(prompts[0].closest('.canvas-ssh-surface')).not.toBeNull();
+    expect(prompts[0].closest('.ssh-pane-shell')).toBeNull();
+    expect(prompts[0].closest('.ssh-launch-notice')!.parentElement)
+      .toBe(container.querySelector('.canvas-ssh-surface .ssh-terminal-host > .terminal-display-wrapper'));
     const trust = [...prompts[0].querySelectorAll('button')].find(b => b.textContent === 'Trust')!;
     await act(async () => { trust.click(); await flush(); });
     expect(bridge.sshSessionTrustHost.mock.calls).toEqual([[id, true, { generation: 1, promptId: 'p-1' }]]);
@@ -368,5 +375,66 @@ describe('two presentations, one owner', () => {
     expect(bridge.sshSessionOpen).not.toHaveBeenCalled();
     expect(container.querySelectorAll('.ssh-prompt')).toHaveLength(1);
     expect(container.querySelector('.ssh-prompt')!.closest('.canvas-ssh-surface')).toBeNull();
+    expect(container.querySelector('.ssh-prompt')!.closest('.ssh-pane-shell')).toBeNull();
+  });
+});
+
+describe('D51: the one controller is active while any surface showing it is visible', () => {
+  const id = 'tm-visible';
+  const settle = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
+  const pastGrace = () => act(async () => { await new Promise(r => setTimeout(r, SSH_SURFACE_HIDE_GRACE_MS + 60)); await settle(); });
+  const setup = () => {
+    setTree(sshTree([{ terminalId: id, ssh: sshTag({ browserPath: '/home' }) }]));
+    const ssh = {
+      fsList: jest.fn(async ({ path: p }: { path: string }) => ({ path: p, entries: [], sessionGeneration: 1 })),
+      fsEditList: jest.fn(async () => []),
+      onFsEditState: jest.fn(async () => () => {}),
+      onFsCwd: jest.fn(async () => () => {}),
+    };
+    Object.defineProperty(window, 'electronAPI', { value: { ssh }, configurable: true });
+    jest.mocked(readSshLaunchState).mockReturnValue({ sessionGeneration: 1, stage: 'running', launchSeq: 1, revision: 1 });
+    store.dispatch(sshOwnersChanged({ [id]: 'conn-v' }));
+    store.dispatch(sshSessionObserved({ terminalId: id, connectionId: 'conn-v', state: 'connected', generation: 1, revision: 1, gate: 'verified' }));
+    return ssh;
+  };
+  const ui = ({ tab, canvas = false, culled = false }: { tab: boolean; canvas?: boolean; culled?: boolean }) => <>
+    <SshPaneSlot terminalId={id} isTabActive={tab}>
+      <div className="terminal-pane-content"><div className="terminal-display" data-probe="pane-host" /></div>
+    </SshPaneSlot>
+    {canvas ? <SshNode id={id} box={BOX_A} hidden={culled} /> : null}
+  </>;
+
+  it('sshBrowser_hiddenTabWithNoCanvasView_dropsAndRelistsOnReturn', async () => {
+    const ssh = setup();
+    await act(async () => { render(ui({ tab: true })); await settle(); });
+    expect(ssh.fsList).toHaveBeenCalledTimes(1);
+    // A flip shorter than the grace is not "no visible surface": no re-list.
+    await act(async () => { render(ui({ tab: false })); await settle(); });
+    await act(async () => { render(ui({ tab: true })); await settle(); });
+    await pastGrace();
+    expect(ssh.fsList).toHaveBeenCalledTimes(1);
+    // Hidden past the grace with no Canvas view: dropped, and the return re-lists (068 C1).
+    await act(async () => { render(ui({ tab: false })); await settle(); });
+    await pastGrace();
+    expect(ssh.fsList).toHaveBeenCalledTimes(1);
+    await act(async () => { render(ui({ tab: true })); await settle(); });
+    expect(ssh.fsList).toHaveBeenCalledTimes(2);
+  });
+
+  it('sshBrowser_visibleCanvasNodeKeepsHiddenTabLive_culledNodeDoesNot', async () => {
+    const ssh = setup();
+    await act(async () => { render(ui({ tab: true })); await settle(); });
+    expect(ssh.fsList).toHaveBeenCalledTimes(1);
+    // Entering Canvas hides the tab but shows a node: one hand-over, no re-list, still live.
+    await act(async () => { render(ui({ tab: false, canvas: true })); await settle(); });
+    await pastGrace();
+    expect(ssh.fsList).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('.canvas-ssh-surface .ssh-file-browser')).not.toBeNull();
+    // The node is culled: no visible surface remains, so it drops; showing it again re-lists.
+    await act(async () => { render(ui({ tab: false, canvas: true, culled: true })); await settle(); });
+    await pastGrace();
+    expect(ssh.fsList).toHaveBeenCalledTimes(1);
+    await act(async () => { render(ui({ tab: false, canvas: true })); await settle(); });
+    expect(ssh.fsList).toHaveBeenCalledTimes(2);
   });
 });

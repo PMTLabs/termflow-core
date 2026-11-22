@@ -1,4 +1,4 @@
-import React, { useCallback, useLayoutEffect, useMemo } from 'react';
+import React, { useCallback, useLayoutEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { patchSshPaneTag, type PaneNode } from '../../store/slices/panesSlice';
@@ -7,7 +7,7 @@ import { useSurfaceHost } from '../../services/surfaceHosts';
 import type { SshPromptReceipt, SshSessionView } from '../../types/ssh';
 import { SshBrowserPaneShell } from './SshBrowserPaneShell';
 import { readSshPaneTag, type SshBrowserTagPatch, type SshPaneTag } from './ssh066Contract';
-import { publishSshPresentation, useSshPresentation } from './sshPresentations';
+import { publishSshCanvasVisible, publishSshPresentation, useSshCanvasVisible, useSshPresentation } from './sshPresentations';
 import { useSshFileBrowser } from './useSshFileBrowser';
 
 /**
@@ -82,10 +82,13 @@ function SshPaneOwner({ terminalId, sshTag, isTabActive, children }: {
   const dispatch = useDispatch();
   // The canonical tag on the leaf, by terminalId (066 patchSshPaneTag).
   const onPatchTag = useCallback((patch: SshBrowserTagPatch) => { dispatch(patchSshPaneTag({ terminalId, patch })); }, [dispatch, terminalId]);
-  // The ONE controller, live for the owner's whole mount. Not gated on the tab or on Canvas: a
-  // tab switch into Canvas would otherwise drop and re-list it on every entry. It never polls;
-  // it lists on navigation, toggle and Follow-cd reports only. Canvas reads it below.
-  const browser = useSshFileBrowser({ terminalId, sshTag, surfaceActive: true, onPatchTag });
+  // The ONE controller (D51): active while ANY surface showing this terminal is visible (its
+  // pane's tab, or a visible Canvas node), and re-listed when it goes from no visible surface to
+  // a visible one. A hidden tab with no Canvas view still drops and re-lists on return (068 C1).
+  // The grace absorbs the hand-over between the two surfaces, so entering Canvas never re-lists.
+  const canvasVisible = useSshCanvasVisible(terminalId);
+  const browserActive = useSurfaceVisibleWithGrace(isTabActive || canvasVisible);
+  const browser = useSshFileBrowser({ terminalId, sshTag, surfaceActive: browserActive, onPatchTag });
   useLayoutEffect(() => publishSshPresentation(terminalId, { browser, onPatchTag }), [terminalId, browser, onPatchTag]);
   const view = useSshView(terminalId, sshTag.connectionId);
   const actions = useSshShellActions(terminalId, view);
@@ -96,17 +99,34 @@ function SshPaneOwner({ terminalId, sshTag, isTabActive, children }: {
     onSecret={actions.onSecret} onTrust={actions.onTrust} onCancel={actions.onCancel} />;
 }
 
+/** How long the owner keeps its controller active after the last visible surface goes away. */
+export const SSH_SURFACE_HIDE_GRACE_MS = 250;
+
+/** True at once when `visible`; false only once `visible` has stayed false for the grace. */
+function useSurfaceVisibleWithGrace(visible: boolean): boolean {
+  const [held, setHeld] = useState(visible);
+  useLayoutEffect(() => {
+    if (visible) { setHeld(true); return undefined; }
+    const timer = setTimeout(() => setHeld(false), SSH_SURFACE_HIDE_GRACE_MS);
+    return () => clearTimeout(timer);
+  }, [visible]);
+  return visible || held;
+}
+
 /** The slot `NodeTerminal` renders for an SSH leaf; `terminal` is its `.terminal-display` wrapper. */
 export interface SshCanvasShellProps {
   terminalId: string;
   sshTag: SshPaneTag;
+  /** False while the node is culled or below the chip tier. Defaults to true. */
+  visible?: boolean;
   /** The frozen browser allocation for the current collapse state, in CSS px. */
   browserWidth?: number;
   terminal: React.ReactNode;
 }
 
-export function SshCanvasPresentation({ terminalId, sshTag, browserWidth, terminal }: SshCanvasShellProps) {
+export function SshCanvasPresentation({ terminalId, sshTag, visible = true, browserWidth, terminal }: SshCanvasShellProps) {
   const presentation = useSshPresentation(terminalId);
+  useLayoutEffect(() => publishSshCanvasVisible(terminalId, visible), [terminalId, visible]);
   const view = useSshView(terminalId, sshTag.connectionId);
   const actions = useSshShellActions(terminalId, view);
   // `null` controller: with no pane owner there is nothing to show, and building one here would
@@ -114,5 +134,8 @@ export function SshCanvasPresentation({ terminalId, sshTag, browserWidth, termin
   return <SshBrowserPaneShell terminalId={terminalId} sshTag={sshTag} surfaceActive
     onPatchTag={presentation?.onPatchTag ?? NOOP_PATCH} browserController={presentation?.browser ?? null}
     view={view} browserWidth={browserWidth} terminal={terminal}
+    // D51: 066's SshLaunchNotice, portalled into this node's terminal slot, owns the host-key and
+    // secret prompts and Reconnect here too (Canvas.css overlays it), exactly as in the pane.
+    sessionPrompts={false}
     onSecret={actions.onSecret} onTrust={actions.onTrust} onCancel={actions.onCancel} />;
 }

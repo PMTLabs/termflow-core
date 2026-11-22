@@ -607,7 +607,8 @@ export function shouldDisarmSpacePan(e: Pick<SpacePanKey, 'key' | 'code'>): bool
  */
 export const CANVAS_PASSTHROUGH_ATTR = 'data-canvas-passthrough';
 export const CANVAS_PASSTHROUGH_SCROLL = 'scroll';
-const SCROLL_REGION = `[${CANVAS_PASSTHROUGH_ATTR}="${CANVAS_PASSTHROUGH_SCROLL}"]`;
+// D51: 066's launch notice (`overflow:auto`, capped height) is a declared scroller in a node too.
+const SCROLL_REGION = `[${CANVAS_PASSTHROUGH_ATTR}="${CANVAS_PASSTHROUGH_SCROLL}"], .ssh-launch-notice`;
 
 /** The parts of an element the scroll decision reads. */
 interface ScrollBox {
@@ -691,7 +692,11 @@ export function sshSurfaceOwnsGesture(target: EventTarget | null, surface: Eleme
  */
 export const SSH_KEYBOARD_OWNER_ATTR = 'data-ssh-keyboard-owner';
 export const SSH_KEYBOARD_OWNER_CLASS = 'ssh-keyboard-owner';
-const SSH_KEYBOARD_OWNER = `[${SSH_KEYBOARD_OWNER_ATTR}], .${SSH_KEYBOARD_OWNER_CLASS}`;
+/** 066's launch notice (host-key and secret prompts, Retry/Reconnect), portalled into an SSH node's
+ *  terminal slot (D51). Matched by class so the guard holds whether or not the notice root also
+ *  carries the attribute. */
+export const SSH_LAUNCH_NOTICE_CLASS = 'ssh-launch-notice';
+const SSH_KEYBOARD_OWNER = `[${SSH_KEYBOARD_OWNER_ATTR}], .${SSH_KEYBOARD_OWNER_CLASS}, .${SSH_LAUNCH_NOTICE_CLASS}`;
 
 export function sshOwnsKeyboard(target: EventTarget | null): boolean {
   return !!elementOf(target)?.closest(SSH_KEYBOARD_OWNER);

@@ -1526,6 +1526,8 @@ export const CanvasMode: React.FC = () => {
                 sshTag={sshTags[n.terminalId]}
                 sshBrowserWidth={sshTags[n.terminalId] && sshBoxes[n.terminalId]
                   ? sshBrowserAllocation(sshBoxes[n.terminalId], sshTags[n.terminalId].browserCollapsed) : undefined}
+                // Same culling rule as `hidden` above: a culled SSH node is not a visible surface.
+                sshVisible={isOverlaid || !isHidden(n.terminalId)}
                 SshShell={sshTags[n.terminalId] ? SshCanvasPresentation : undefined}
                 Snapshot={sshTags[n.terminalId] && snapshotIds.has(n.terminalId) ? NodeSnapshot : undefined} />
               {/* The exact opposite rule, and for the exact opposite reason: this one is

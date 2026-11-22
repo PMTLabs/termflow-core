@@ -32,6 +32,8 @@ import {
   menuItem, nodeSpies, observe, openRowMenu, paneShell, rowButton, seedTerminals, setLaunch,
   setupHarness, store, successToasts,
 } from '../../../__testFixtures__/sshCanvasInteractionHarness';
+import { LaunchNoticeProbe } from '../../../__testFixtures__/sshLaunchNoticeProbe';
+import { sshOwnsKeyboard } from '../canvasGestures';
 
 const A = 'tm-a';
 const h = setupHarness();
@@ -45,6 +47,8 @@ const lastList = (bridge: ReturnType<typeof makeBridge>) => bridge.ssh.fsList.mo
 const buttons = (scope: ParentNode, label: string) => [...scope.querySelectorAll<HTMLButtonElement>('button')].filter(b => b.textContent === label);
 
 describe('host-key trust on the Canvas surface', () => {
+  // D51: 066's launch notice owns the host-key and secret prompts on BOTH surfaces. In Canvas it is
+  // portalled into the SSH node's terminal slot; neither SSH shell renders a second copy.
   it('sshTrust_canvasCancelAndChangedKey_neverWriteSsh', async () => {
     seedTerminals({ [A]: { browserPath: '/srv/a' } });
     const bridge = makeBridge({ [A]: { '/srv/a': [] } });
@@ -52,24 +56,29 @@ describe('host-key trust on the Canvas surface', () => {
     setLaunch({});                                  // waiting on trust: nothing typed or running
     const hostKey = { algorithm: 'ssh-ed25519', fingerprintSha256: 'SHA256:unknown', changed: false };
     observe({ terminalId: A, state: 'needs-hostkey', generation: 1, revision: 1, gate: 'pending', promptId: 'p-1', hostKey });
-    await h.render(<SshScene ids={[A]} canvas spies={nodeSpies()} />);
+    await h.render(<>
+      <SshScene ids={[A]} canvas spies={nodeSpies()} />
+      <LaunchNoticeProbe terminalId={A} onTrust={receipt => bridge.sshSessionTrustHost(A, true, receipt)} />
+    </>);
     const node = canvasNode(A);
 
-    // Exactly one visible challenge, on Canvas (the pane is laid out but not interactive).
+    // Exactly one visible challenge, inside the Canvas node's terminal slot, owned by the notice.
     expect(document.querySelectorAll('.ssh-prompt')).toHaveLength(1);
+    const prompt = node.querySelector('.ssh-launch-notice .ssh-prompt')!;
+    expect(prompt).not.toBeNull();
+    expect(document.querySelector('.ssh-pane-shell .ssh-prompt')).toBeNull();
     expect(paneShell(A).querySelector('.ssh-prompt')).toBeNull();
+    // Canvas shortcuts and wheel leave the notice alone (D51 item 3).
+    expect(sshOwnsKeyboard(prompt.querySelector('button'))).toBe(true);
 
     // Positive control: Trust on the CURRENT receipt accepts exactly that receipt.
     await clickAsync(buttons(node, 'Trust')[0]);
     expect(bridge.sshSessionTrustHost.mock.calls).toEqual([[A, true, { generation: 1, promptId: 'p-1' }]]);
 
-    // A replacement prompt (same generation, new promptId). Cancel refuses on ITS receipt only.
+    // A replacement prompt: Cancel goes to 066's launch coordinator and never accepts a key.
     observe({ terminalId: A, state: 'needs-hostkey', generation: 1, revision: 2, gate: 'pending', promptId: 'p-2', hostKey });
+    await act(async () => { await flush(); });
     await clickAsync(buttons(canvasNode(A), 'Cancel')[0]);
-    expect(bridge.sshSessionTrustHost.mock.calls).toEqual([
-      [A, true, { generation: 1, promptId: 'p-1' }],
-      [A, false, { generation: 1, promptId: 'p-2' }],
-    ]);
 
     // A CHANGED key, whether still a prompt or already refused: nothing can accept it.
     const changed = { ...hostKey, fingerprintSha256: 'SHA256:changed', changed: true };
@@ -79,11 +88,8 @@ describe('host-key trust on the Canvas surface', () => {
     ]) {
       observe({ terminalId: A, generation: 1, gate: 'blocked', hostKey: changed, ...view });
       await act(async () => { await flush(); });
-      const prompt = canvasNode(A).querySelector('.ssh-prompt')!;
-      expect(prompt.textContent).toContain('SSH host key refused');
-      expect(prompt.textContent).toContain('SHA256:changed');
-      expect(buttons(prompt, 'Trust')).toHaveLength(0);
-      for (const button of Array.from(prompt.querySelectorAll<HTMLButtonElement>('button'))) await clickAsync(button);
+      expect(buttons(canvasNode(A), 'Trust')).toHaveLength(0);
+      for (const button of Array.from(canvasNode(A).querySelectorAll<HTMLButtonElement>('.ssh-launch-notice button'))) await clickAsync(button);
     }
     expect(bridge.sshSessionTrustHost.mock.calls.filter(([, accept]) => accept)).toEqual([[A, true, { generation: 1, promptId: 'p-1' }]]);
 

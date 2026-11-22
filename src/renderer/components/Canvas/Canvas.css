@@ -356,6 +356,19 @@
   height: auto;
   min-width: 0;
   min-height: 0;
+  /* The containing block for 066's launch notice below; no z-index, so no stacking context. */
+  position: relative;
+}
+/* D51: 066's launch notice (prompts, Retry/Reconnect) is portalled to the surface host's parent,
+   which in an SSH node is this wrapper, not a `.canvas-surface` (T2 moved that class to the
+   envelope), so 066's own `.canvas-surface > .ssh-launch-notice` rule does not apply here. Overlay
+   the top of the terminal slot instead of taking a row: the registered host box never changes
+   (fit-safe, §4.1 B). Above the shell's chrome row (5), status row and slot snapshot. */
+.canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice {
+  position: absolute;
+  z-index: 6;
+  inset: 0 0 auto;
+  max-height: 100%;
 }
 
 /* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are

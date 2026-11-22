@@ -75,6 +75,14 @@ const BINDING: Readonly<Record<string, string>> = {
   fsEditList: 'ssh_fs_edit_list',
   onFsEditState: 'ssh-fs:edit-state',
   onFsCwd: 'ssh-fs:cwd',
+  // 066 launch coordinator and store additions (landed on develop with #182; moved from PENDING).
+  previewConnection: 'ssh_connection_preview',
+  markUsed: 'ssh_connection_mark_used',
+  forgetSecret: 'ssh_forget_secret', // not in the 070 ledger; landed by 066, see ledger GAP list
+  launchTerminal: 'ssh_terminal_launch',
+  cancelTerminalLaunch: 'ssh_terminal_cancel_launch',
+  terminalLaunchState: 'ssh_terminal_launch_state',
+  onSshLaunchState: 'ssh-launch:state',
 };
 
 // 070-rebase: PENDING-066 / PENDING-069 contracts (ledger 123). NOT asserted yet. After each sibling
@@ -82,13 +90,6 @@ const BINDING: Readonly<Record<string, string>> = {
 // (and its CSS/event into the pins below), then delete it from here. A row still listed here after
 // its owner merged is itself a ledger defect.
 const PENDING_AFTER_REBASE: ReadonlyArray<readonly [member: string, name: string, owner: string]> = [
-  ['previewConnection', 'ssh_connection_preview', '066'],
-  ['markUsed', 'ssh_connection_mark_used', '066'],
-  ['forgetSecret', 'ssh_forget_secret', '066'], // not in the 070 ledger; landed by 066, see ledger GAP list
-  ['launchTerminal', 'ssh_terminal_launch', '066'],
-  ['cancelTerminalLaunch', 'ssh_terminal_cancel_launch', '066'],
-  ['terminalLaunchState', 'ssh_terminal_launch_state', '066'],
-  ['onSshLaunchState', 'ssh-launch:state', '066'],
   ['sshMetricsWatch', 'ssh_metrics_watch', '069'],
   ['sshMetricsUnwatch', 'ssh_metrics_unwatch', '069'],
   ['sshMetricsResume', 'ssh_metrics_resume', '069'],
@@ -100,29 +101,27 @@ void PENDING_AFTER_REBASE;
 /**
  * EXCEPTIONS (documented, not orphans):
  * Bridge members with no production renderer caller on this branch. Each is a ledger row:
- *  - sshSessionOpen / sshSessionReconnect: PENDING-066, the 066 launch coordinator
- *    (services/sshLaunchAttempt.ts, OwnedSshLaunchNotice.tsx) calls them. sshSessionSubmitSecret and
- *    sshSessionTrustHost left this list with 070 T2: the shared SSH composition's visible prompt
- *    (components/Ssh/SshTerminalComposition.tsx) now calls them (gap G1).
+ *  - sshSessionOpen / sshSessionReconnect / sshSessionSubmitSecret / sshSessionTrustHost left this
+ *    list when 066 landed: its launch coordinator (services/sshLaunchAttempt.ts) and launch notice
+ *    (OwnedSshLaunchNotice.tsx, the single prompt owner on both surfaces under D51) call them.
  *  - sshSessionClose: GAP in every branch. Pane disposal closes the session in Rust through pane_op
  *    `ssh_retired` -> SessionRegistry::retire_owner; the bridge method has no renderer caller at all.
  * The comparison is two-way: when 066 lands a caller, this list must shrink with it.
  */
 const CONSUMER_EXCEPTIONS: readonly string[] = [
   'sshSessionClose',
-  'sshSessionOpen',
-  'sshSessionReconnect',
 ];
 
 /** Events the Rust side emits and the renderer listens to (065 store, 067 session/probe, 068 files). */
 const LANDED_EVENTS: readonly string[] = [
   'ssh-fs:cwd',
   'ssh-fs:edit-state',
+  'ssh-launch:state',
   'ssh-session:state',
   'ssh-store:changed',
   'ssh-test:state',
 ];
-// 070-rebase: 'ssh-launch:state' (066), 'ssh-metrics:sample' and 'ssh-metrics:control' (069).
+// 070-rebase: 'ssh-metrics:sample' and 'ssh-metrics:control' (069).
 
 /** Custom properties defined in SSH-owned files (Settings folder colours, 065). */
 const LEDGER_SSH_CSS_DEFINED: readonly string[] = [

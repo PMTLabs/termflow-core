@@ -44,8 +44,34 @@ export function useSshPresentation(terminalId: string): SshPresentation | undefi
   return useSyncExternalStore(watchPresentations, read, read);
 }
 
+/**
+ * Whether a Canvas node currently SHOWS this terminal (D51): mounted, not culled and not below
+ * the chip tier. Written by the Canvas presentation, read by the pane owner to decide whether
+ * the one controller is active. Canvas unmounts with its tab, which retracts the entry.
+ * Each publisher holds a unique token, so an outgoing node cannot clear its successor.
+ */
+const canvasVisible = new Map<string, symbol>();
+
+export function publishSshCanvasVisible(terminalId: string, visible: boolean): () => void {
+  const token = Symbol(terminalId);
+  if (visible) canvasVisible.set(terminalId, token);
+  else if (canvasVisible.has(terminalId)) canvasVisible.delete(terminalId);
+  notify();
+  return () => {
+    if (canvasVisible.get(terminalId) !== token) return;
+    canvasVisible.delete(terminalId);
+    notify();
+  };
+}
+
+export function useSshCanvasVisible(terminalId: string): boolean {
+  const read = useCallback(() => canvasVisible.has(terminalId), [terminalId]);
+  return useSyncExternalStore(watchPresentations, read, read);
+}
+
 /** Test seam only. */
 export function __resetSshPresentationsForTest(): void {
   entries.clear();
+  canvasVisible.clear();
   listeners.clear();
 }
