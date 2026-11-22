@@ -12,12 +12,15 @@ async fn host_key_policy_table_blocks_auth_and_direct_trust() {
         format!("@cert-authority target.test {key}\n"),
         format!("@unknown target.test {key}\n"),
         "target.test ssh-ed25519 !!!\n".into(),
+        // D81: a valid pattern in a list with a bad one still names this host, so it fails closed.
+        format!("target.test,,bad {key}\n"),
+        format!("@revoked target.test,,bad {key}\n"),
     ];
-    // D81: a line whose host field cannot be parsed can't name this host, so it is skipped as
-    // OpenSSH does. The host stays unknown: the probe asks for trust, never auths or writes.
+    // D81: a line whose host field cannot name this host is skipped as OpenSSH does. The host
+    // stays unknown: the probe asks for trust, never auths or writes.
     for bytes in [
         format!("|1|broken|broken {key}\n"),
-        format!("target.test,,bad {key}\n"),
+        format!("other.test,,bad {key}\n"),
         format!("|2|unsupported|bad {key}\n"),
     ] {
         let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);

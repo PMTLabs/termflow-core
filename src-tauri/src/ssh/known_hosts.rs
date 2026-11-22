@@ -167,7 +167,16 @@ pub fn classify(bytes: &[u8], token: &str, key: &PublicKey) -> Result<Verdict, S
         let n = index + 1;
         let fields: Vec<_> = line.split_whitespace().collect();
         let host_index = usize::from(fields[0].starts_with('@'));
-        let Some(patterns) = fields.get(host_index).and_then(|host| parse_host_field(host)) else {
+        let host = fields.get(host_index).copied();
+        let Some(patterns) = host.and_then(parse_host_field) else {
+            // OpenSSH still matches the valid patterns of a plain list, so a line that could name
+            // this host must fail closed: skipping it would drop a revocation or a pin.
+            if let Some(host) = host.filter(|h| !h.starts_with('|')) {
+                let valid = host.split(',').filter(|p| valid_host_pattern(p)).map(str::to_owned);
+                if matches(&HostPatterns::Patterns(valid.collect()), token) {
+                    return Err(SessionError::KnownHostsMalformed { line: n });
+                }
+            }
             log::warn!("known_hosts line {n} skipped: host field could not be parsed");
             continue;
         };
@@ -496,9 +505,13 @@ mod tests {
                 Err(SessionError::KnownHostsMalformed { line: 1 }),
             ),
             (format!("@unknown other {k}"), Ok(Verdict::Unknown)),
-            // D81: skip entries whose host field cannot be parsed.
+            // D81: an unknown hash scheme can't name any host, so it is skipped.
             (format!("|2|bad|bad {k}"), Ok(Verdict::Unknown)),
-            (format!("host,,else {k}"), Ok(Verdict::Unknown)),
+            // D81: a plain list with an invalid pattern fails closed when a valid pattern matches.
+            (
+                format!("host,,else {k}"),
+                Err(SessionError::KnownHostsMalformed { line: 1 }),
+            ),
             (String::new(), Ok(Verdict::Unknown)),
         ];
         for (bytes, expected) in rows {
@@ -514,6 +527,25 @@ mod tests {
                 assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
                 fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
             }
+        }
+    }
+    #[test]
+    fn invalid_pattern_list_fails_closed_only_for_hosts_its_valid_patterns_match() {
+        // OpenSSH honours the valid patterns of a list with a bad one; skipping the line would
+        // lose a revocation or turn a changed pin into a trust prompt.
+        let (key, other) = (key(1), key(2));
+        let (k, o) = (key.to_openssh().unwrap(), other.to_openssh().unwrap());
+        let malformed = Err(SessionError::KnownHostsMalformed { line: 2 });
+        for (bytes, token, expected) in [
+            (format!("# c\n@revoked host,,other {k}"), "host", malformed.clone()),
+            (format!("# c\n@revoked host,,other {k}"), "other", malformed.clone()),
+            (format!("# c\n@revoked host,,other {k}"), "else", Ok(Verdict::Unknown)),
+            (format!("# c\nhost,bad/x {o}"), "host", malformed.clone()),
+            (format!("# c\nhost,bad/x {o}"), "else", Ok(Verdict::Unknown)),
+            (format!("# c\n!host,*,bad/x {o}"), "host", Ok(Verdict::Unknown)),
+            (format!("# c\n!host,*,bad/x {o}"), "else", malformed.clone()),
+        ] {
+            assert_eq!(classify(bytes.as_bytes(), token, &key), expected, "{token}: {bytes}");
         }
     }
     #[test]
