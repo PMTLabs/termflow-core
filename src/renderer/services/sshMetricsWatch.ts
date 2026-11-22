@@ -173,9 +173,11 @@ class MetricsWatch {
       if (!this.current(mount) || mount.epoch !== epoch) return false;
       const now = clock();
       if (this.checkSuspension(now)) return false;
-      if (metricsClockChanged(start, now) || now.mono - start.mono >= SSH_METRICS_MAX_AGE || document.hidden) {
+      const late = metricsClockChanged(start, now) || now.mono - start.mono >= SSH_METRICS_MAX_AGE;
+      if (late || document.hidden) {
         mount.trustWall = false;
-        this.invalidate(mount, true);
+        // A receipt that lands after the page hid is a pause, like refence(); only a late one is a delay.
+        this.invalidate(mount, true, !late);
         return false;
       }
       const pane = this.pane(terminalId);

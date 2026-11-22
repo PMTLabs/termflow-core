@@ -244,3 +244,39 @@ test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', asyn
     jest.useRealTimers();
   }
 });
+
+test('renewal_landing_after_the_page_hides_but_before_visibilitychange_is_still_a_pause', async () => {
+  jest.useFakeTimers({ doNotFake: ['performance', 'Date'] });
+  try {
+    const [baseline, rates] = snapshots();
+    const store = await setup();
+    const status = () => host.querySelector('.ssh-metrics-state')!.textContent;
+    const run = async (ms: number) => {
+      for (let left = ms; left > 0; left -= 50) await act(async () => { advance(50); jest.advanceTimersByTime(50); });
+    };
+    await run(50);
+    await act(async () => { publish({ ...baseline, sampledAt: wall - 10 }); });
+    await run(2000);
+    await act(async () => { publish({ ...rates, sampledAt: wall - 10 }); });
+    expect(status()).toContain('Connected');
+    // Hold the next renewal receipt so it is in flight when the page hides.
+    const original = mockInvoke.getMockImplementation()!;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let renewals = 0;
+    mockInvoke.mockImplementation(async (cmd, ...rest) => {
+      if (cmd === 'ssh_metrics_watch') { renewals++; await held; }
+      return original(cmd, ...rest);
+    });
+    for (let i = 0; i < 40 && renewals === 0; i++) await run(50);
+    expect(renewals).toBe(1);
+    // The page is already hidden when the receipt lands; visibilitychange has not been delivered yet.
+    jest.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    await act(async () => { release(); });
+    expect(selectSshMetricsSample(store.getState().sshSession, terminalId)).toBeUndefined();
+    expect(store.getState().sshSession.byTerminal[terminalId].metricsDelayed).toBeUndefined();
+    expect(status()).not.toContain('Metrics delayed');
+  } finally {
+    jest.useRealTimers();
+  }
+});

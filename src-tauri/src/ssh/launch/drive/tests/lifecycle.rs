@@ -324,6 +324,7 @@ async fn ssh_terminal_ended_with_local_shell_alive_stops_metrics() {
     let sample = events.sample(0).await;
     assert_eq!(sample["terminalId"], LEAF);
     assert!(sample["sampledAt"].as_u64().unwrap() > first.sample_floor);
+    let before = sample["sampledAt"].as_u64().unwrap();
     assert_eq!(metrics.ownership_for_test(), owners);
     assert_eq!(f.sessions.owner_map(), sessions(SessionState::Connected));
 
@@ -357,7 +358,8 @@ async fn ssh_terminal_ended_with_local_shell_alive_stops_metrics() {
     let sample = events.sample(quiet.1).await;
     assert_eq!(sample["terminalId"], LEAF);
     assert_eq!(fresh.generation, b.session_generation);
-    assert!(sample["sampledAt"].as_u64().unwrap() > first.sample_floor);
+    // A new collection after reconnect, not a replay of the pre-disconnect snapshot.
+    assert!(sample["sampledAt"].as_u64().unwrap() > before);
     assert_eq!(metrics.ownership_for_test(), owners);
     assert_eq!(f.sessions.owner_map(), sessions(SessionState::Connected));
     f.shutdown().await;
