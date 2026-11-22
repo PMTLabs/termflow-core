@@ -1,5 +1,6 @@
 //! Descriptor-relative Unix operations: no pathname traversal after root admission.
-use super::{component, denied, MAX_FILE};
+use super::{component, denied, path_error, root_error, MAX_FILE, PATH_MODE};
+use std::borrow::Cow;
 use std::ffi::{CStr, CString, OsString};
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -45,6 +46,71 @@ fn private(file: &File, directory: bool) -> io::Result<()> {
     Ok(())
 }
 
+fn trusted_ancestor(meta: &std::fs::Metadata, uid: u32) -> bool {
+    (meta.uid() == uid || meta.uid() == 0)
+        && (meta.mode() & 0o022 == 0 || meta.mode() & STICKY_BIT != 0)
+}
+
+/// Resolve trusted app-data links before the strict walk. A link substituted
+/// after resolution is still rejected by the descriptor-relative O_NOFOLLOW walk.
+pub(super) fn resolve_app_data(path: &Path) -> io::Result<Cow<'_, Path>> {
+    use std::fs::{canonicalize, metadata, symlink_metadata};
+
+    if !path.is_absolute()
+        || path.components().any(|part| !matches!(part, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(path_error(path, denied(), PATH_MODE));
+    }
+
+    let uid = unsafe { libc::geteuid() };
+    let mut prefix = PathBuf::from("/");
+    let mut parts = path.components().skip(1).peekable();
+    let mut tail = PathBuf::new();
+    let mut linked = false;
+    let mut unsafe_dir = None;
+    while let Some(part) = parts.next() {
+        let next = prefix.join(part);
+        match symlink_metadata(&next) {
+            Ok(meta) if meta.is_symlink() => {
+                let parent = metadata(&prefix).map_err(|error| path_error(&prefix, error, PATH_MODE))?;
+                if (meta.uid() != uid && meta.uid() != 0) || !trusted_ancestor(&parent, uid) {
+                    return Err(root_error(
+                        &next,
+                        io::Error::new(io::ErrorKind::InvalidData, "untrusted app-data link"),
+                        "a folder in its path is a link TermFlow can't trust",
+                    ));
+                }
+                linked = true;
+            }
+            Ok(meta) if !trusted_ancestor(&meta, uid) && meta.is_dir() => {
+                if unsafe_dir.is_none() {
+                    unsafe_dir = Some(next.clone());
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tail.push(part);
+                tail.extend(parts);
+                break;
+            }
+            Err(error) => return Err(path_error(&next, error, PATH_MODE)),
+        }
+        prefix = next;
+    }
+    if !linked {
+        return Ok(Cow::Borrowed(path));
+    }
+    // The canonical path must not hide an unsafe directory on the original walk.
+    if let Some(dir) = unsafe_dir {
+        return Err(path_error(&dir, denied(), PATH_MODE));
+    }
+    let mut resolved = canonicalize(&prefix).map_err(|error| path_error(&prefix, error, PATH_MODE))?;
+    if !tail.as_os_str().is_empty() {
+        resolved.push(tail);
+    }
+    Ok(Cow::Owned(resolved))
+}
+
 impl Dir {
     pub(super) fn path(&self) -> &Path {
         &self.path
@@ -52,7 +118,7 @@ impl Dir {
 
     pub(super) fn open_tree(path: &Path) -> io::Result<Self> {
         if !path.is_absolute() {
-            return Err(denied());
+            return Err(path_error(path, denied(), PATH_MODE));
         }
         let mut dir = Self {
             path: PathBuf::from("/"),
@@ -61,19 +127,21 @@ impl Dir {
                     c"/".as_ptr(),
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
                 )
-            })?,
+            }).map_err(|error| path_error(Path::new("/"), error, PATH_MODE))?,
         };
         for part in path.components() {
             match part {
                 Component::RootDir => {}
                 Component::Normal(name) => {
-                    let name = name.to_str().ok_or_else(denied)?;
+                    let full = dir.path.join(name);
+                    let reject = |error| path_error(&full, error, PATH_MODE);
+                    let name = name.to_str().ok_or_else(denied).map_err(reject)?;
                     // App-data ancestors may contain spaces/Unicode, unlike generated names.
-                    let raw = CString::new(name).map_err(|_| denied())?;
+                    let raw = CString::new(name).map_err(|_| reject(denied()))?;
                     match unsafe { libc::mkdirat(dir.file.as_raw_fd(), raw.as_ptr(), 0o700) } {
                         0 => {}
                         _ if io::Error::last_os_error().kind() == io::ErrorKind::AlreadyExists => {}
-                        _ => return Err(io::Error::last_os_error()),
+                        _ => return Err(reject(io::Error::last_os_error())),
                     }
                     let file = fd_file(unsafe {
                         libc::openat(
@@ -81,23 +149,18 @@ impl Dir {
                             raw.as_ptr(),
                             libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
                         )
-                    })?;
-                    let meta = file.metadata()?;
+                    }).map_err(reject)?;
+                    let meta = file.metadata().map_err(reject)?;
                     // System-owned ancestors are fine, but a foreign-writable component can
                     // replace our app-data path. Sticky system temp dirs are allowed in tests;
                     // all generated data still lives below the explicitly supplied app-data dir.
                     let uid = unsafe { libc::geteuid() };
-                    if (meta.uid() != uid && meta.uid() != 0)
-                        || (meta.mode() & 0o022 != 0 && meta.mode() & STICKY_BIT == 0)
-                    {
-                        return Err(denied());
+                    if !trusted_ancestor(&meta, uid) {
+                        return Err(reject(denied()));
                     }
-                    dir = Self {
-                        path: dir.path.join(name),
-                        file,
-                    };
+                    dir = Self { path: full, file };
                 }
-                _ => return Err(denied()),
+                _ => return Err(path_error(path, denied(), PATH_MODE)),
             }
         }
         Ok(dir)

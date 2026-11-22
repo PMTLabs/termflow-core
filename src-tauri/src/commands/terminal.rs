@@ -173,7 +173,11 @@ pub async fn create_terminal(
         cursor_row,
         None,
         ssh_launch_connection_id.as_deref(),
-    )?;
+    ).inspect_err(|error| {
+        if ssh_launch_connection_id.is_some() {
+            log::warn!("SSH in-process terminal create rejected: {error}");
+        }
+    })?;
 
     if let Some(prefix) = staged {
         state.replay_prefix.insert(id.clone(), prefix);
@@ -540,7 +544,8 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
         // Use the profile's raw arguments, not the ordinary name-based PowerShell injection.
         // The selected executable's adapter installs the appropriate integration.
         spec.args = shell_args.clone().unwrap_or_default();
-        Some(ssh_shell::PreparedShell::register(&state.app_handle, state.host_table.keys(), &process_id, cg, &mut spec, true, connection_id)?)
+        Some(ssh_shell::PreparedShell::register(&state.app_handle, state.host_table.keys(), &process_id, cg, &mut spec, true, connection_id)
+            .inspect_err(|error| log::warn!("SSH hosted terminal create rejected: {error}"))?)
     } else { None };
     let prompt_hook = if ssh_opt_in { ssh_shell::has_cwd_hook(&spec.shell) } else { prompt_hook };
     register_host_terminal(state, &ident, 0, &shell_name, name.as_deref(), cols, rows, prompt_hook, channel);
@@ -845,7 +850,11 @@ fn host_fallback(
         cursor_row,
         Some(cg),
         ssh_launch_connection_id,
-    )?;
+    ).inspect_err(|error| {
+        if ssh_launch_connection_id.is_some() {
+            log::warn!("SSH in-process terminal fallback rejected: {error}");
+        }
+    })?;
     if let Some(prefix) = staged {
         state.replay_prefix.insert(fallback_id.clone(), prefix);
     }

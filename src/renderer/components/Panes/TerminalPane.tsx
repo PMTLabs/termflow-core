@@ -25,7 +25,7 @@ import { reattachPromptGate, takeArmProbePending } from '../../services/reattach
 import { usePaneDrag } from './dnd/usePaneDrag';
 import { openSettingsTab } from '../../services/openSettings';
 import { savedSshConnectionIssue } from '../../services/savedSshConnectionIssue';
-import { getPaneStartupStatus, paneStartupFailureCode } from '../../services/paneStartupStatus';
+import { getPaneStartupStatus, paneStartupFailureCode, type PaneStartupFailed } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
@@ -104,7 +104,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // Set when the most recent create/restart attempt's promise rejected. Drives
   // the top-row "Failed to start shell" status (P0: never leave a silent blank
   // while startup is in flight or has failed).
-  const [startupFailed, setStartupFailed] = useState<boolean | 'PtyHostOutdated'>(false);
+  const [startupFailed, setStartupFailed] = useState<PaneStartupFailed>(false);
   const [waitingForHost, setWaitingForHost] = useState<HostWaitState>();
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [elevationRequired, setElevationRequired] = useState(false);
