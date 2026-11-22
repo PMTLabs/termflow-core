@@ -47,6 +47,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "jest",
     "test:workspace": "bun --filter @termflow/terminal-core test",
+    "test:ssh-canvas-layout": "playwright test -c playwright.ssh-canvas.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
     "test:e2e:debug": "playwright test --debug",
