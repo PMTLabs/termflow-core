@@ -247,5 +247,7 @@ test('SshPaneShell inactiveSurface_closesChromePopover_withoutTakingFocusOrEscap
     const row = container.querySelector('.ssh-pane-chrome')!;
     expect(row.hasAttribute('data-canvas-passthrough')).toBe(false);
     expect(row.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
+    // The status row (069's focusable bar, D66) follows the same rule (review 349 F6).
+    expect(container.querySelector('.ssh-status')!.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
   } finally { outside.remove(); }
 });

@@ -88,7 +88,8 @@ export function SshMetricsStatusBar({ terminalId, isTabActive = true }: { termin
         })}
       </>}
       {canResume && !!visible.length && <button type="button" onClick={resume}>Resume metrics (F3)</button>}
-      {menuOpen && <ContextMenu x={menu.x} y={menu.y} items={items} onClose={closeMenu} />}
+      {/* Portalled to body, so it carries the Canvas keyboard-owner marker itself (review 349 F6). */}
+      {menuOpen && <ContextMenu x={menu.x} y={menu.y} className="ssh-keyboard-owner" items={items} onClose={closeMenu} />}
     </div>
   );
 }

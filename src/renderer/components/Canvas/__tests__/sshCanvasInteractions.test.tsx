@@ -295,6 +295,15 @@ describe('keyboard', () => {
     for (const owner of [pathInput, row, dialogButton]) expect(sshOwnsKeyboard(owner)).toBe(true);
     expect(sshOwnsKeyboard(sshMenu)).toBe(true);
     for (const free of [document.body, node, node.querySelector('.terminal-display-wrapper')!]) expect(sshOwnsKeyboard(free)).toBe(false);
+    // D66 put 069's focusable metrics bar and its body-portalled menu into the node (review 349 F6).
+    const bar = node.querySelector<HTMLElement>('.ssh-status > .ssh-metrics-status-bar')!;
+    expect(sshOwnsKeyboard(bar)).toBe(true);
+    act(() => { bar.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })); });
+    const barMenu = [...document.querySelectorAll<HTMLElement>('.context-menu')]
+      .filter(m => m.textContent?.includes('Copy all metrics'));
+    expect(barMenu).toHaveLength(1);
+    expect(sshOwnsKeyboard(barMenu[0])).toBe(true);
+    act(() => { barMenu[0].dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); });
 
     // Positive control for the rule itself: with a node selected, the enlarge key on a focused SSH
     // ROW resolves to a Canvas action, so without the guard it would open the overlay.

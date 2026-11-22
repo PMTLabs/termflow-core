@@ -150,8 +150,9 @@ export function SshPaneShell(props: SshPaneShellProps) {
     </div>
     {/* D66: the ONE bottom row. The shell's truthful marker on the left ("—" whenever not live),
         and the `status` slot (069's SshMetricsStatusBar, which owns its own unavailable/ended states,
-        D57) on the right. The row height is fixed in CSS. */}
-    <div className="ssh-status" aria-label="SSH status">
+        D57) on the right. The row height is fixed in CSS. The bar is focusable and has its own menu,
+        so on the interactive presentation the row owns its keys like the chrome row (review 349 F6). */}
+    <div className="ssh-status" aria-label="SSH status" data-ssh-keyboard-owner={owner ? '' : undefined}>
       {!live && <span className="ssh-status-text">—</span>}
       {props.status}
     </div>
