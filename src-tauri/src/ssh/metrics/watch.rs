@@ -100,6 +100,26 @@ impl WatchRegistry {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_visible_test(keys: HostKeys, sessions: Arc<SessionRegistry>, events: Arc<dyn EventSink>) -> Arc<Self> {
+        struct Visible;
+        impl Visibility for Visible {
+            fn visible(&self, windows: Vec<WindowKey>) -> BoxFuture<'_, HashSet<WindowKey>> {
+                Box::pin(async move { windows.into_iter().collect() })
+            }
+        }
+        Self::new(keys, sessions, events, Arc::new(Visible))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ownership_for_test(&self) -> HashMap<String, HashSet<(String, u64, u64, Uuid)>> {
+        self.slots.lock().clone().iter().map(|(terminal, slot)| {
+            let consumers = slot.lock().consumers.iter()
+                .map(|c| (c.window.label.clone(), c.window.wi, c.pg, c.id)).collect();
+            (terminal.clone(), consumers)
+        }).collect()
+    }
+
     fn consumer(label: &str, wi: u64, pg: u64, id: Uuid) -> Consumer {
         Consumer { window: WindowKey { label: label.into(), wi }, pg, id }
     }

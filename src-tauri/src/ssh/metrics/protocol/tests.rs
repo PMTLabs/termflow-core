@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn captured_protocol_accepts_lf_and_crlf_without_altering_values() {
+    let lf = linux(&[]);
+    let crlf = lf.replace('\n', "\r\n");
+    let a = parse(lf.as_bytes(), NONCE).unwrap();
+    let b = parse(crlf.as_bytes(), NONCE).unwrap();
+    assert_eq!(a.sections, b.sections);
+    assert_eq!((a.hostname, a.os, a.local, a.nfs), (b.hostname, b.os, b.local, b.nfs));
+
+    // A CR inside a value is NOT a framing byte; stripping all CRs would turn
+    // this malformed value into a plausible hostname.
+    let invalid = lf.replace("derived-host", "derived-\rhost").replace('\n', "\r\n");
+    assert_eq!(parse(invalid.as_bytes(), NONCE).unwrap().hostname,
+        Err("Metrics section contains invalid or oversized fields"));
+}
+
 const NONCE: &str = "06900000000000000000000000000001";
 const LOCAL: &str = "Filesystem Type 1024-blocks Used Available Capacity Mounted on\n/dev/vda ext4 100 30 60 34% /\n";
 const NFS: &str = "Filesystem 1024-blocks Used Available Capacity Mounted on\nserver:/vol 200 36 150 20% /srv/nfs\n";

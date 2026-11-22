@@ -1,0 +1,150 @@
+[
+  {
+    "metrics": {
+      "cpu": {
+        "available": true,
+        "cores": {
+          "available": true,
+          "count": 4
+        },
+        "load1": {
+          "available": true,
+          "value": 1.25
+        },
+        "percent": null
+      },
+      "host": {
+        "architecture": {
+          "available": true,
+          "name": "arm64"
+        },
+        "available": true,
+        "hostname": "sample-host",
+        "os": {
+          "available": true,
+          "name": "Test Linux 12"
+        }
+      },
+      "netDown": {
+        "available": true,
+        "bytesPerSecond": null
+      },
+      "netUp": {
+        "available": true,
+        "bytesPerSecond": null
+      },
+      "nfs": {
+        "available": true,
+        "mounts": []
+      },
+      "partitions": {
+        "available": true,
+        "mounts": [
+          {
+            "availableBytes": 76800,
+            "fsType": "ext4",
+            "mountPoint": "/",
+            "source": "/dev/test",
+            "totalBytes": 102400,
+            "usedBytes": 20480,
+            "usedPercent": 22
+          }
+        ]
+      },
+      "ram": {
+        "available": true,
+        "percent": 25.0,
+        "totalBytes": 1024000,
+        "usedBytes": 256000
+      },
+      "uptime": {
+        "available": true,
+        "seconds": 10.0
+      },
+      "users": {
+        "available": true,
+        "count": 3,
+        "names": [
+          "alex",
+          "zoe"
+        ]
+      }
+    },
+    "sampledAt": 123456,
+    "terminalId": "tm-a"
+  },
+  {
+    "metrics": {
+      "cpu": {
+        "available": true,
+        "cores": {
+          "available": true,
+          "count": 4
+        },
+        "load1": {
+          "available": true,
+          "value": 1.25
+        },
+        "percent": 25.0
+      },
+      "host": {
+        "architecture": {
+          "available": true,
+          "name": "arm64"
+        },
+        "available": true,
+        "hostname": "sample-host",
+        "os": {
+          "available": true,
+          "name": "Test Linux 12"
+        }
+      },
+      "netDown": {
+        "available": true,
+        "bytesPerSecond": 15.0
+      },
+      "netUp": {
+        "available": true,
+        "bytesPerSecond": 30.0
+      },
+      "nfs": {
+        "available": true,
+        "mounts": []
+      },
+      "partitions": {
+        "available": true,
+        "mounts": [
+          {
+            "availableBytes": 76800,
+            "fsType": "ext4",
+            "mountPoint": "/",
+            "source": "/dev/test",
+            "totalBytes": 102400,
+            "usedBytes": 20480,
+            "usedPercent": 22
+          }
+        ]
+      },
+      "ram": {
+        "available": true,
+        "percent": 25.0,
+        "totalBytes": 1024000,
+        "usedBytes": 256000
+      },
+      "uptime": {
+        "available": true,
+        "seconds": 12.0
+      },
+      "users": {
+        "available": true,
+        "count": 3,
+        "names": [
+          "alex",
+          "zoe"
+        ]
+      }
+    },
+    "sampledAt": 123457,
+    "terminalId": "tm-a"
+  }
+]

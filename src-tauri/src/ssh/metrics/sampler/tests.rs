@@ -504,6 +504,42 @@ async fn metrics_emit_name_and_complete_payload_are_exact() {
     f.registry.shutdown().await;
 }
 
+fn renderer_fixture_path() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../src/renderer/components/Ssh/__tests__/fixtures/sshMetricsSnapshots.json")
+}
+
+async fn renderer_snapshots() -> Vec<Value> {
+    let (f, wire, events, _) = rig([Reply::Good, Reply::Good]);
+    connect(&f, A).await;
+    let worker = Terminal::new(A);
+    worker.set_eligible(true).unwrap();
+    for wall in [123_456, 123_457] {
+        let tick = admit(&worker, &f, &events, wall);
+        deliver(&worker, &f, &events, &tick).await;
+    }
+    assert_eq!(wire.count(), 2);
+    let snapshots = events.events.lock().iter().map(|(name, value)| {
+        assert_eq!(*name, SAMPLE);
+        value.clone()
+    }).collect();
+    f.registry.shutdown().await;
+    snapshots
+}
+
+#[tokio::test]
+#[ignore = "regenerates the checked-in renderer fixture"]
+async fn generate_ssh_metrics_renderer_snapshots() {
+    let snapshots = renderer_snapshots().await;
+    std::fs::write(renderer_fixture_path(), serde_json::to_string_pretty(&snapshots).unwrap() + "\n").unwrap();
+}
+
+#[tokio::test]
+async fn memory_server_emits_renderer_fixture_snapshots() {
+    let expected: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(renderer_fixture_path()).unwrap()).unwrap();
+    assert_eq!(renderer_snapshots().await, expected);
+}
+
 fn assert_unavailable(sample: &Value, reason: &str) {
     let metrics = sample["metrics"].as_object().unwrap();
     let keys = ["host", "cpu", "ram", "netUp", "netDown", "uptime", "users", "partitions", "nfs"];

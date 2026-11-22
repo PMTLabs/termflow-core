@@ -1,4 +1,7 @@
 /** @jest-environment jsdom */
+import path from 'path';
+import { readSource } from '../../../utils/readSource';
+import { SSH_LAUNCH_STRIP_HEIGHT_PX, SSH_METRICS_BAR_HEIGHT_PX } from '../../Ssh/sshPaneLayout';
 import { act, createElement as h, Profiler } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Provider } from 'react-redux';
@@ -40,6 +43,10 @@ jest.mock('../../../services/AgentSchemeTracker', () => ({ agentSchemeTracker: {
 } }));
 beforeAll(() => { (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true; });
 
+const HOST_HEIGHT = 600, ROW_HEIGHT = 20;
+const STRIP_HEIGHT = SSH_LAUNCH_STRIP_HEIGHT_PX, BAR_HEIGHT = SSH_METRICS_BAR_HEIGHT_PX;
+const measuredRows = (height: number) => Math.floor(height / ROW_HEIGHT);
+
 test('hidden_pane_defers_refit_until_activation (bar insertion then removal)', async () => {
   jest.useFakeTimers();
   let observer!: ResizeObserverCallback;
@@ -52,7 +59,7 @@ test('hidden_pane_defers_refit_until_activation (bar insertion then removal)', a
   };
   const host = document.createElement('div');
   Object.defineProperties(host, {
-    offsetWidth: { value: 800 }, offsetHeight: { value: 600 }, offsetParent: { value: document.body },
+    offsetWidth: { value: 800 }, offsetHeight: { value: HOST_HEIGHT }, offsetParent: { value: document.body },
   });
   document.body.append(host);
   const resize = jest.fn();
@@ -70,16 +77,16 @@ test('hidden_pane_defers_refit_until_activation (bar insertion then removal)', a
     const fit = fitAddon as typeof fitAddon & { setNextFit(cols: number, rows: number): void };
     // Hypothetical measurements exercise the actual engine's observer and
     // activation contract, not pixel geometry (the separate T8 oracle).
-    fit.setNextFit(80, 28);
+    fit.setNextFit(80, measuredRows(HOST_HEIGHT - STRIP_HEIGHT));
     observe(); await settle();
     expect(terminal.rows).toBe(28);
     resize.mockClear();
     const fitSpy = jest.spyOn(fit, 'fit');
 
     engine.setActive(false);
-    fit.setNextFit(80, 26); // bar inserted
+    fit.setNextFit(80, measuredRows(HOST_HEIGHT - STRIP_HEIGHT - BAR_HEIGHT)); // bar inserted
     observe(); await settle();
-    fit.setNextFit(80, 30); // bar removed and host grew while still hidden
+    fit.setNextFit(80, measuredRows(HOST_HEIGHT)); // chrome removed and host grew while still hidden
     observe(); await settle();
     expect(terminal.rows).toBe(28);
     expect(fitSpy).not.toHaveBeenCalled();
@@ -103,7 +110,18 @@ test('hidden_pane_defers_refit_until_activation (bar insertion then removal)', a
 
 const terminalId = 'tm-grid', paneId = 'pn-grid', processId = 'pc-1';
 const COLS = 80, FULL = 30, TAGGED = 26;
-const HOST_HEIGHT = 600, ROW_HEIGHT = 20, STRIP_HEIGHT = 36, BAR_HEIGHT = 26;
+
+test('SSH row CSS reserves the exported layout heights', () => {
+  const rule = (file: string, selector: string) =>
+    readSource(path.resolve(__dirname, '../../Ssh', file)).split(`${selector} {`)[1]?.split('}')[0];
+  const bar = rule('SshMetricsStatusBar.css', '.ssh-metrics-status-bar');
+  expect(bar).toContain(`height: ${BAR_HEIGHT}px;`);
+  expect(bar).toContain(`flex: 0 0 ${BAR_HEIGHT}px;`);
+  const strip = rule('SshLaunchNotice.css', '.ssh-launch-strip');
+  expect(strip).toContain(`height: ${STRIP_HEIGHT}px;`);
+  // The strip is inside a non-flexing notice wrapper, not itself a flex item.
+  expect(rule('SshLaunchNotice.css', '.ssh-launch-notice')).toContain('flex: none;');
+});
 type HarnessFit = FitAddon & { setNextFit(cols: number, rows: number): void };
 
 /** Drive real TerminalPane DOM, the production engine and MainBridge. The test
@@ -136,7 +154,7 @@ async function withGrid(tagged: boolean, run: (grid: {
   const bar = () => element.querySelector('.terminal-pane > [aria-label="Remote host metrics"]');
   const strip = () => element.querySelector('.terminal-pane > .ssh-launch-notice > .ssh-launch-strip');
   const height = () => HOST_HEIGHT - (strip() ? STRIP_HEIGHT : 0) - (bar() ? BAR_HEIGHT : 0);
-  const rows = () => Math.floor(height() / ROW_HEIGHT);
+  const rows = () => measuredRows(height());
   const chromeCommits: Array<{ actual: boolean[]; expected: boolean[] }> = [];
   const dispatch = store.dispatch;
   let hasTag = tagged;

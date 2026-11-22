@@ -7,12 +7,16 @@ use serde_json::{json, Value};
 use tauri::{Manager, test::MockRuntime};
 
 fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, page: Option<&str>, id: Uuid) -> Result<Value, Value> {
+    invoke_body(window, cmd, page, json!({"terminalId":"tm-a","consumerId":id}))
+}
+
+fn invoke_body(window: &WebviewWindow<MockRuntime>, cmd: &str, page: Option<&str>, body: Value) -> Result<Value, Value> {
     let mut headers = tauri::http::HeaderMap::new();
     if let Some(page) = page { headers.insert(PAGE_HEADER, page.parse().unwrap()); }
     tauri::test::get_ipc_response(window, tauri::webview::InvokeRequest {
         cmd: cmd.into(), callback: tauri::ipc::CallbackFn(0), error: tauri::ipc::CallbackFn(1),
         url: "tauri://localhost".parse().unwrap(),
-        body: tauri::ipc::InvokeBody::Json(json!({"terminalId":"tm-a","consumerId":id})),
+        body: tauri::ipc::InvokeBody::Json(body),
         headers, invoke_key: tauri::test::INVOKE_KEY.into(),
     }).map(|body| body.deserialize::<Value>().unwrap())
 }
@@ -20,11 +24,7 @@ fn invoke(window: &WebviewWindow<MockRuntime>, cmd: &str, page: Option<&str>, id
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retired_page_cannot_watch_or_keep_worker() {
     let app = tauri::test::mock_builder()
-        .invoke_handler(crate::ssh_handlers![
-            crate::commands::ssh_metrics::ssh_metrics_watch,
-            crate::commands::ssh_metrics::ssh_metrics_unwatch,
-            crate::commands::ssh_metrics::ssh_metrics_resume,
-        ])
+        .invoke_handler(crate::ssh_handlers![])
         .build(tauri::test::mock_context(tauri::test::noop_assets())).unwrap();
     let label = "metrics-owner";
     let window = tauri::WebviewWindowBuilder::new(&app, label, Default::default()).build().unwrap();
@@ -69,6 +69,19 @@ async fn retired_page_cannot_watch_or_keep_worker() {
     keys.complete_shell("tm-a", cg, &StagedShell { process: "pc-a".into(), stage: ShellStage::Local });
     let old_header = old.to_string();
     let reused_id = Uuid::new_v4();
+    for cmd in ["ssh_metrics_watch", "ssh_metrics_unwatch", "ssh_metrics_resume"] {
+        // A registered handler accepts the bridge's camelCase arguments and reaches
+        // the application-level page validation. Snake case must fail in Tauri.
+        assert_eq!(invoke(&window, cmd, None, reused_id).unwrap_err(), json!({"code":"invalid-page"}));
+        for (body, missing) in [
+            (json!({"terminal_id":"tm-a","consumerId":reused_id}), "terminalId"),
+            (json!({"terminalId":"tm-a","consumer_id":reused_id}), "consumerId"),
+        ] {
+            let error = invoke_body(&window, cmd, Some(&old_header), body).unwrap_err();
+            assert!(error.as_str().is_some_and(|text| text.contains("missing required key") && text.contains(missing)),
+                "{cmd}: expected a Tauri argument error for {missing}, got {error}");
+        }
+    }
     for invalid in [None, Some(""), Some("not-a-page"), Some("0"), Some("+1"), Some("18446744073709551616")] {
         assert_eq!(invoke(&window, "ssh_metrics_watch", invalid, reused_id).unwrap_err()["code"], "invalid-page");
     }

@@ -1,6 +1,7 @@
 /** @jest-environment jsdom */
 import fs from 'fs';
 import path from 'path';
+import { readSource } from '../../utils/readSource';
 import { configureStore } from '@reduxjs/toolkit';
 import type { SshMetricsSample, SshSessionView } from '../../types/ssh';
 import { PaneIncarnations } from '../../services/paneIncarnations';
@@ -72,9 +73,40 @@ test('bridge_invokes_exact_metric_commands_and_camelcase_args', async () => {
   expect(invokeMock.mock.calls).toEqual([
     ['ssh_metrics_watch', args, options], ['ssh_metrics_resume', args, options], ['ssh_metrics_unwatch', args, options],
   ]);
-  const source = fs.readFileSync(path.resolve(__dirname, '../../../../src-tauri/src/lib.rs'), 'utf8');
-  const production = source.match(/\.invoke_handler\(crate::ssh_handlers!\[([\s\S]*?)\]\)/)?.[1];
-  for (const [command] of invokeMock.mock.calls) expect(production).toContain(`commands::ssh_metrics::${command},`);
+  const [production, shared] = sshRegistration();
+  for (const [command] of invokeMock.mock.calls) expect(production + shared).toContain(`commands::ssh_metrics::${command},`);
+});
+
+const rust = (...parts: string[]) => readSource(path.resolve(__dirname, '../../../../src-tauri/src', ...parts));
+function sshRegistration() {
+  const prod = rust('lib.rs').match(/\.invoke_handler\(crate::ssh_handlers!\[([\s\S]*?)\]\)/)?.[1];
+  expect(prod).toBeDefined();
+  const shared = rust('commands', 'ssh_store.rs').match(/tauri::generate_handler!\[([\s\S]*?)\]/)?.[1];
+  expect(shared).toBeDefined();
+  return [prod!, shared!] as const;
+}
+
+test('ssh_metrics_command_registry_and_renderer_names_match', async () => {
+  const [prod, shared] = sshRegistration();
+  const registered = [...(prod + shared).matchAll(/commands::ssh_metrics::(ssh_metrics_\w+),/g)]
+    .map(match => match[1]).sort();
+  const commandSource = rust('commands', 'ssh_metrics.rs');
+  const commands = [...commandSource.matchAll(/#\[tauri::command\]\s+pub\(crate\) fn (ssh_metrics_\w+)<[^>]+>\(([\s\S]*?)\) ->/g)];
+  expect(commands).toHaveLength(3);
+  expect(registered).toEqual(commands.map(match => match[1]).sort());
+  const api = readSource(path.resolve(__dirname, '../tauri-bridge.ts'));
+  const bindings = [...api.matchAll(/\b(sshMetrics\w+):[^\n]*=> invokeSshMetrics[^']*'(ssh_metrics_\w+)'/g)];
+  expect(bindings.map(match => match[2]).sort()).toEqual(registered);
+  for (const [, method, command] of bindings) {
+    const signature = commands.find(match => match[1] === command)![2];
+    const camelCase = [...signature.matchAll(/(\w+): String/g)]
+      .map(match => match[1].replace(/_([a-z])/g, (_, letter) => letter.toUpperCase()));
+    expect(camelCase).toEqual(['terminalId', 'consumerId']);
+    const call = bridge[method as 'sshMetricsWatch' | 'sshMetricsResume' | 'sshMetricsUnwatch'];
+    await call(terminalId, consumerId, 17);
+    expect(invokeMock).toHaveBeenLastCalledWith(command, { terminalId, consumerId },
+      { headers: { 'x-termflow-page': '17' } });
+  }
 });
 
 // Mutation: listenSsh's active flag or payload forwarding; startup idempotence/disposal.

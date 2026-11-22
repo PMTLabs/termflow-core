@@ -129,14 +129,21 @@ impl Write for Tee {
 }
 
 fn configured(port: u16) -> Fixture {
-    let f = keyed(port);
+    configured_with(port, Server::new(1, "alice"))
+}
+
+fn configured_with(port: u16, server: Server) -> Fixture {
+    let f = keyed_with(port, server);
     f.seed(&format!("{} {}\n", lookup_token("127.0.0.1", port), f.server.host.public_key().to_openssh().unwrap()));
     f
 }
 
 /// The saved loopback key-file row with nothing pinned in its trust file yet.
 fn keyed(port: u16) -> Fixture {
-    let server = Server::new(1, "alice");
+    keyed_with(port, Server::new(1, "alice"))
+}
+
+fn keyed_with(port: u16, server: Server) -> Fixture {
     let mut f = Fixture::unplaced(server.clone(), Arc::new(MemoryStreams(server.clone())));
     Arc::get_mut(&mut f.port).unwrap().native_bare = true;
     // The fake server accepts just this key. No user config, default identities,
@@ -156,7 +163,10 @@ fn keyed(port: u16) -> Fixture {
 }
 
 async fn local(port: u16) -> (Fixture, NativeShell) {
-    let mut f = configured(port);
+    local_with(configured(port)).await
+}
+
+async fn local_with(mut f: Fixture) -> (Fixture, NativeShell) {
     let (cg, staged) = f.stage();
     let mut shell = NativeShell::spawn(instrument(&f));
     shell.bind(&f, cg, &staged);
@@ -251,6 +261,104 @@ async fn healthy_app_channel_cannot_mask_terminal_ssh_end() {
     assert_eq!(f.sessions.owner_map(), std::collections::HashMap::from([(LEAF.into(), (CONNECTION.into(), SessionState::Disconnected))]));
     assert!(matches!(f.sessions.lease(LEAF), Err(SessionError::NotConnected)));
     assert!(lease.exec("fixture").await.is_err());
+    f.shutdown().await;
+}
+
+#[tokio::test]
+async fn ssh_terminal_ended_with_local_shell_alive_stops_metrics() {
+    use crate::ssh::metrics::{sampler::{EventSink, MetricsEvent}, watch::WatchRegistry};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::Ordering::SeqCst;
+    use uuid::Uuid;
+
+    #[derive(Default)]
+    struct Metrics(Mutex<Vec<(&'static str, Value)>>);
+    impl EventSink for Metrics {
+        fn emit(&self, name: &'static str, event: MetricsEvent<'_>) {
+            self.0.lock().push((name, serde_json::to_value(event).unwrap()));
+        }
+    }
+    impl Metrics {
+        async fn sample(&self, index: usize) -> Value {
+            tokio::time::timeout(DEADLINE, async {
+                loop {
+                    if let Some((_, sample)) = self.0.lock().iter().skip(index)
+                        .find(|(name, _)| *name == "ssh-metrics:sample") {
+                        return sample.clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.expect("metrics sample")
+        }
+    }
+
+    let _gate = crate::pty_host_client::test_dirs::child_process_gate();
+    let (tcp, port) = listener().await;
+    let starts = Arc::new(AtomicU64::new(0));
+    let execs = starts.clone();
+    let mut server = Server::new(1, "alice");
+    server.exec_fixture = Some(Arc::new(move |channel, _, session| {
+        execs.fetch_add(1, SeqCst);
+        session.channel_success(channel)?;
+        session.exit_status_request(channel, 7)?;
+        session.eof(channel)?;
+        session.close(channel)
+    }));
+    let (f, mut shell) = local_with(configured_with(port, server)).await;
+    let identity = ProcessIdentity::capture(shell.pid()).unwrap();
+    let events = Arc::new(Metrics::default());
+    let metrics = WatchRegistry::for_visible_test(f.keys().clone(), f.sessions.clone(), events.clone());
+    let owner = Uuid::new_v4();
+    let window = f.keys().metrics_sender(SOURCE, f.owner.pg).expect("live source page");
+    let owners = HashMap::from([(LEAF.into(), HashSet::from([(SOURCE.into(), window, f.owner.pg, owner)]))]);
+    let sessions = |state| HashMap::from([(LEAF.into(), (CONNECTION.into(), state))]);
+    let a = f.open();
+    f.accepted(&a).await;
+    let remote = incoming(&tcp).await;
+    f.observe_until(&a, LaunchStage::Running).await;
+    f.phase(SessionState::Connected).await;
+    let lease = f.sessions.lease(LEAF).unwrap();
+    assert_eq!(lease.exec("fixture").await.unwrap().exit, 7);
+    let first = metrics.watch(SOURCE, f.owner.pg, LEAF, owner).unwrap();
+    let sample = events.sample(0).await;
+    assert_eq!(sample["terminalId"], LEAF);
+    assert!(sample["sampledAt"].as_u64().unwrap() > first.sample_floor);
+    assert_eq!(metrics.ownership_for_test(), owners);
+    assert_eq!(f.sessions.owner_map(), sessions(SessionState::Connected));
+
+    drop(remote); // only the native ssh child; the app's SSH connection was healthy
+    shell.prompt(f.keys(), true).await;
+    f.observe_until(&a, LaunchStage::Ended).await;
+    assert_eq!(f.sessions.owner_map(), sessions(SessionState::Disconnected));
+    assert_eq!(metrics.ownership_for_test(), owners); // mounted consumer remains, but cannot exec
+    assert!(matches!(f.sessions.lease(LEAF), Err(SessionError::NotConnected)));
+    let quiet = (starts.load(SeqCst), events.0.lock().len());
+    shell.assert_shell_usable(&f, &identity).await;
+    tokio::time::sleep(Duration::from_millis(2200)).await; // exceeds the two-second cadence
+    assert_eq!((starts.load(SeqCst), events.0.lock().len()), quiet);
+
+    let b = f.reference(&reconnect_core(f.keys(), &f.sessions, LEAF).unwrap());
+    assert!(b.session_generation > a.session_generation);
+    f.register(&b);
+    f.gate(Gate::Verified).await;
+    // Drive the same bounded readiness poll the app uses; a native child may
+    // take another scheduling turn to leave the local process tree.
+    tokio::time::timeout(DEADLINE, async {
+        while f.tick(&b) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("reconnect launch becomes ready");
+    assert_eq!(f.access(&b, Operation::Query).unwrap().stage, LaunchStage::Typed);
+    let _remote = incoming(&tcp).await;
+    f.observe_until(&b, LaunchStage::Running).await;
+    f.phase(SessionState::Connected).await;
+    let fresh = metrics.watch(SOURCE, f.owner.pg, LEAF, owner).unwrap();
+    let sample = events.sample(quiet.1).await;
+    assert_eq!(sample["terminalId"], LEAF);
+    assert_eq!(fresh.generation, b.session_generation);
+    assert!(sample["sampledAt"].as_u64().unwrap() > first.sample_floor);
+    assert_eq!(metrics.ownership_for_test(), owners);
+    assert_eq!(f.sessions.owner_map(), sessions(SessionState::Connected));
     f.shutdown().await;
 }
 
