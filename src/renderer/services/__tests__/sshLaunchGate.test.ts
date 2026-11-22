@@ -58,3 +58,22 @@ test('polls silent waiting-stage transitions and stops on disposal', async () =>
     expect(query).toHaveBeenCalledTimes(2);
   } finally { gate.stop(); jest.useRealTimers(); }
 });
+
+test.each([true, false])('no-snapshot polling with settled=%s', async settled => {
+  jest.useFakeTimers();
+  let receive!: (event: SshLaunchEvent) => void;
+  const query = jest.fn().mockResolvedValue(undefined);
+  const gate = watchSshLaunch({ terminalId: 'tm-a', subscribe: async listener => { receive = listener; return () => {}; }, query, observed: jest.fn(), failed: jest.fn(), settled: () => settled });
+  try {
+    await flush();
+    for (let i = 0; i < 120; i++) { jest.advanceTimersByTime(250); await flush(); }
+    if (settled) {
+      expect(query.mock.calls.length).toBeGreaterThanOrEqual(1);
+      expect(query.mock.calls.length).toBeLessThanOrEqual(2);
+      const before = query.mock.calls.length;
+      receive({ terminalId: 'tm-a', state: 'running' });
+      await flush();
+      expect(query).toHaveBeenCalledTimes(before + 1);
+    } else expect(query.mock.calls.length).toBeGreaterThan(10);
+  } finally { gate.stop(); jest.useRealTimers(); }
+});

@@ -5,6 +5,7 @@ interface Gate {
   terminalId: string;
   subscribe(listener: (event: SshLaunchEvent) => void): Promise<SshUnlisten>;
   query(): Promise<SshLaunchObservation | undefined>;
+  settled?: () => boolean;
   observed(result: SshLaunchObservation): void;
   failed(error: unknown): void;
 }
@@ -29,7 +30,7 @@ export function watchSshLaunch(gate: Gate) {
           const result = await gate.query();
           if (disposed) return;
           if (result) gate.observed(result);
-          poll = !result?.snapshot || isWaitingForSshLaunch(result.snapshot.stage);
+          poll = result?.snapshot ? isWaitingForSshLaunch(result.snapshot.stage) : !gate.settled?.();
         } catch (error) {
           if (disposed) return;
           gate.failed(error);

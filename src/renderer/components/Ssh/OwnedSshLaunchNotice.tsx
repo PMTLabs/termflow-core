@@ -30,6 +30,11 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
   const surface = useSurfaceHost(terminalId);
   const [binding, setBinding] = useState<{ owner: PaneCapture; snapshot: LaunchSnapshot }>();
   const snapshot = binding?.owner === owner ? binding.snapshot : undefined;
+  const settled = useRef(false);
+  // D63: a reattached pane with no session and no launch in this run has nothing to wait for,
+  // so the launch watch stops re-reading it. Once a session exists (a reconnect started outside
+  // this notice), poll again until its launch registers: not every launch stage emits an event.
+  settled.current = reattached && !snapshot && !view;
   const [failure, setFailure] = useState<{ code: string; message: string }>();
   const [retrying, setRetrying] = useState(false);
   const flight = useRef(false);
@@ -48,6 +53,7 @@ export function OwnedSshLaunchNotice({ terminalId, paneId, owner, processId, con
     flight.current = false;
     const observer = watchSshLaunch({
       terminalId,
+      settled: () => settled.current,
       subscribe: listener => api.onSshLaunchState!(listener),
       query: () => terminalService.querySshLaunch(terminalId, paneId, owner, processId, connectionId, current),
       observed: result => {
