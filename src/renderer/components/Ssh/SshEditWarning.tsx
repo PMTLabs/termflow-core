@@ -11,18 +11,27 @@ import '../Settings/Automations/AutomationsPanel.css';
 const sshSessions = (): SshSessionsState =>
   (window as any).__REDUX_STORE__?.getState().sshSession ?? { byTerminal: {} };
 
+/** The backend canonicalizes the edit root, so Windows copies carry a verbatim prefix
+ *  (`\\?\C:\…` or `\\?\UNC\server\share\…`). Valid, but noise to a reader: strip it for display
+ *  only; the path the backend uses is unchanged (P068-6). */
+export function displayLocalPath(path: string): string {
+  if (path.startsWith('\\\\?\\UNC\\')) return '\\\\' + path.slice(8);
+  return path.startsWith('\\\\?\\') ? path.slice(4) : path;
+}
+
 interface Props {
   terminalId: string;
   openResult?: EditOpen;
   api?: SshFileApi;
+  children?: (summaries: string[], details: React.ReactNode) => React.ReactNode;
 }
 
 // Mount once per owning pane, outside any collapsed/disconnected browser slot.
-export function SshEditWarning({ terminalId, openResult, api = window.electronAPI?.ssh }: Props) {
-  return <EditWarnings key={terminalId} terminalId={terminalId} openResult={openResult} api={api} />;
+export function SshEditWarning({ terminalId, openResult, children, api = window.electronAPI?.ssh }: Props) {
+  return <EditWarnings key={terminalId} terminalId={terminalId} openResult={openResult} api={api} children={children} />;
 }
 
-function EditWarnings({ terminalId, openResult, api }: Props) {
+function EditWarnings({ terminalId, openResult, api, children }: Props) {
   const [edits, setEdits] = useState<EditStatus[]>([]);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const [failure, setFailure] = useState<string>();
@@ -73,14 +82,17 @@ function EditWarnings({ terminalId, openResult, api }: Props) {
     return () => { owner.current = undefined; registration.unregister(); };
   }, [api, terminalId]);
 
-  const stop = async (edit: EditStatus) => {
+  const finish = async (edit: EditStatus) => {
     const ownership = owner.current;
     if (!api || !ownership || ownership.stopping.has(edit.editId)) return;
     ownership.stopping.add(edit.editId);
     setPending(new Set(ownership.stopping));
     setFailure(undefined);
     try {
-      const result = await api.fsEditStop({ terminalId, path: edit.path, editId: edit.editId });
+      const target = { terminalId, path: edit.path, editId: edit.editId };
+      const result = edit.retained
+        ? (await api.fsEditDismiss(target), { retained: false, localPath: undefined })
+        : await api.fsEditStop(target);
       if (owner.current !== ownership) return;
       ownership.stopped.add(edit.editId);
       setEdits(rows => result.retained
@@ -90,7 +102,7 @@ function EditWarnings({ terminalId, openResult, api }: Props) {
         } : row)
         : rows.filter(row => row.editId !== edit.editId));
     } catch {
-      if (owner.current === ownership) setFailure('Could not stop the SSH edit.');
+      if (owner.current === ownership) setFailure(edit.retained ? 'Could not dismiss the SSH edit.' : 'Could not stop the SSH edit.');
     } finally {
       ownership.stopping.delete(edit.editId);
       if (owner.current === ownership) setPending(new Set(ownership.stopping));
@@ -98,8 +110,13 @@ function EditWarnings({ terminalId, openResult, api }: Props) {
   };
 
   const needsEditor = openResult?.state === 'needsEditor';
-  if (!needsEditor && !edits.length && !failure) return null;
-  return <section className="ssh-edit-warning" aria-label="Remote file edits">
+  const editState = (edit: EditStatus) => edit.state === 'error' && edit.error === 'The server does not support atomic replacement.'
+    ? 'unsupported' : edit.state;
+  const summary = (edit: EditStatus) => `${edit.path} — ${editState(edit)}${edit.retained ? ' (retained)' : ''}`;
+  const summaries = [...edits].reverse().map(summary);
+  if (needsEditor) summaries.unshift('Configure a default editor to open remote files.');
+  if (failure) summaries.unshift(failure);
+  const details = summaries.length > 0 ? <section className="ssh-edit-warning" aria-label="Remote file edits">
     {needsEditor && <div>
       Configure a default editor to open remote files.
       <button type="button" className="au-btn" onClick={() => void import('../../services/openSettings').then(({ openSettingsTab }) => openSettingsTab('terminal'))}>Open editor settings</button>
@@ -108,17 +125,20 @@ function EditWarnings({ terminalId, openResult, api }: Props) {
     {edits.length > 0 && <ul>
       {edits.map(edit => {
         // Rust currently reports unsupported atomic replacement as an error with this detail.
-        const state = edit.state === 'error' && edit.error === 'The server does not support atomic replacement.'
-          ? 'unsupported' : edit.state;
+        const state = editState(edit);
         const showCopy = edit.retained || ['paused', 'conflict', 'error', 'unsupported'].includes(state);
         return <li key={edit.editId}>
-          <span role="status">{edit.path} — {state}{edit.retained && ' (retained)'}</span>
+          <span role="status">{summary(edit)}</span>
           {edit.error && <div>{edit.error}</div>}
-          {showCopy && edit.localPath && <div>Local copy: <code>{edit.localPath}</code></div>}
-          {!edit.retained && <button type="button" className="au-btn" aria-label={`Stop editing ${edit.path}`}
-            disabled={pending.has(edit.editId)} onClick={() => void stop(edit)}>Stop</button>}
+          {showCopy && edit.localPath && <div>Local copy: <code>{displayLocalPath(edit.localPath)}</code></div>}
+          <button type="button" className="au-btn"
+            aria-label={edit.retained ? `Dismiss ${edit.path} (keeps the local copy)` : `Stop editing ${edit.path}`}
+            disabled={pending.has(edit.editId)} onClick={() => void finish(edit)}>
+            {edit.retained ? 'Dismiss (keeps the local copy)' : 'Stop'}
+          </button>
         </li>;
       })}
     </ul>}
-  </section>;
+  </section> : null;
+  return <>{children ? children(summaries, details) : details}</>;
 }

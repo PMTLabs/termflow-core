@@ -322,6 +322,19 @@ pub(super) async fn poll_job(
         let mut data = job.data.lock().await;
         data.in_flight = false;
         if let UploadResult::Uploaded(baseline) = result {
+            // A late acknowledgement must not rewrite job.json after a retained edit
+            // was dismissed. Serialize the check and write with dismiss_retained.
+            let owner = registry.upgrade();
+            let retained = owner.as_ref().map(|owner| owner.retained.lock().unwrap());
+            if data.stopped.is_some() && !retained.as_ref()
+                .is_some_and(|notices| notices.contains_key(&job.edit_id))
+            {
+                drop(retained);
+                if let Some(owner) = owner {
+                    owner.forget(&job);
+                }
+                return;
+            }
             data.record.baseline = baseline;
             data.record.last_uploaded_digest = hash;
             if data.stopped.is_none() {

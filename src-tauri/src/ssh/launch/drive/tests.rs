@@ -70,6 +70,7 @@ struct Port {
     host: Option<crate::pty_host_client::PtyHostClient>,
     at_emit: Option<Arc<SessionRegistry>>,
     ingressed: Mutex<Vec<Option<LaunchState>>>,
+    child_samples: Mutex<usize>,
 }
 impl InputBackend for Port {
     fn input_keys(&self) -> &HostKeys { &self.keys }
@@ -86,6 +87,7 @@ impl InputBackend for Port {
     }
 }
 impl LaunchPort for Port {
+    fn record_child_sample(&self) { *self.child_samples.lock() += 1; }
     fn helper_root(&self) -> Result<HelperRoot, LaunchError> {
         HelperRoot::open_app_data(&self.home).map_err(|_| Code::UnsupportedContext.into())
     }
@@ -176,7 +178,7 @@ impl Fixture {
         let port = Arc::new(Port {
             keys: HostKeys::default(), home, writer, record, events: Mutex::default(),
             bare: AtomicBool::new(true), native_bare: false, ssh: None, before_encode: Mutex::default(),
-            host: None, at_emit: Some(sessions.clone()), ingressed: Mutex::default(),
+            host: None, at_emit: Some(sessions.clone()), ingressed: Mutex::default(), child_samples: Mutex::default(),
         });
         let owner = Self::page(&port.keys, SOURCE);
         Self { port, sessions, launches: Arc::default(), session_events, store, trust_path, owner, server }
@@ -700,6 +702,27 @@ async fn stale_ready_or_connection_edit_requires_new_verification() {
         assert_eq!(*f.port.record.bytes.lock(), f.typed_bytes());
         f.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn returned_before_first_child_sample_after_accepted_write() {
+    let f = Fixture::direct();
+    f.seed(&pin("target.test", &f.server));
+    let a = f.open();
+    f.register(&a);
+    f.ready(1);
+    f.phase(SessionState::NeedsSecret).await;
+    assert!(!f.tick(&a));
+    assert_eq!(f.access(&a, Operation::Query).unwrap().stage, LaunchStage::Typed);
+    assert_eq!(*f.port.record.calls.lock(), 1);
+    assert_eq!(*f.port.child_samples.lock(), 0);
+    f.ready(2);
+    assert_eq!(*f.port.child_samples.lock(), 0, "the shell returned before the first child sample");
+    f.driver(&a).observe(Instant::now());
+    assert_eq!(*f.port.child_samples.lock(), 1);
+    let ended = f.access(&a, Operation::Query).unwrap();
+    assert_eq!((ended.stage, ended.error.unwrap().code), (LaunchStage::Ended, Code::SshExitedBeforeConnecting));
+    f.shutdown().await;
 }
 
 #[tokio::test]

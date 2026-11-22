@@ -84,6 +84,7 @@ export interface SshFileApi {
   fsOpen(input: FsRequest): Promise<EditOpen>;
   fsOpenWith(input: FsRequest): Promise<EditOpen>;
   fsInsertPath(input: FsRequest): Promise<InsertPath>;
+  fsEditDismiss(input: FsTarget & { editId: string }): Promise<void>;
   fsEditStop(input: FsTarget & { editId: string }): Promise<EditStop>;
   fsEditList(input: FsTarget): Promise<EditStatus[]>;
   onFsEditState(listener: (notice: EditNotice) => void): Promise<() => void>;

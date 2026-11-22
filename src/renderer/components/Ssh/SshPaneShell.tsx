@@ -7,6 +7,8 @@ import { SshEditWarning } from './SshEditWarning';
 import type { EditOpen } from './sshFileTypes';
 import './SshPaneShell.css';
 import '../Settings/Automations/AutomationsPanel.css'; // house .au-btn styles for prompt and banner buttons
+export const SSH_PANE_CHROME_H = 36;
+
 export interface SshPaneShellProps {
   view: SshSessionView; terminal: React.ReactNode; browser?: React.ReactNode; status?: React.ReactNode;
   editOpenResult?: EditOpen;
@@ -29,6 +31,65 @@ export interface SshPaneShellProps {
    *  terminal slot is the exact remainder of its envelope; panes omit it and keep the CSS sizing. */
   browserWidth?: number;
 }
+function SshPaneChrome({ interactive, summaries, children }: {
+  interactive: boolean; summaries: string[]; children: React.ReactNode;
+}) {
+  const [requested, setRequested] = React.useState(false);
+  const dialogId = React.useId();
+  const row = React.useRef<HTMLDivElement>(null);
+  const invoker = React.useRef<HTMLButtonElement>(null);
+  const dialog = React.useRef<HTMLDivElement>(null);
+  const open = interactive && requested;
+  const hasItems = summaries.length > 0;
+  // Escape and the Close button return focus to the invoker. An outside click does not: the
+  // user just put focus where they clicked (the terminal, the path box) and it stays there.
+  const close = React.useCallback((restoreFocus = true) => {
+    setRequested(false);
+    if (restoreFocus) (hasItems ? invoker.current : row.current)?.focus();
+  }, [hasItems]);
+  React.useEffect(() => {
+    if (!interactive) setRequested(false);
+  }, [interactive]);
+  React.useEffect(() => {
+    // Children's effects run first: a prompt that focused its own field keeps that focus.
+    if (open && !dialog.current?.contains(document.activeElement)) dialog.current?.focus();
+  }, [open]);
+  React.useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    };
+    const onClick = (event: MouseEvent) => {
+      if (!dialog.current?.contains(event.target as Node) && !invoker.current?.contains(event.target as Node)) close(false);
+    };
+    document.addEventListener('keydown', onKey, true);
+    document.addEventListener('click', onClick, true);
+    return () => {
+      document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('click', onClick, true);
+    };
+  }, [open, close]);
+
+  // Always reserve this height, even before the initial snapshot and on the non-owning
+  // presentation. Neither notice changes nor ownership transfers should trigger a fit.
+  return <div className="ssh-pane-chrome" ref={row} tabIndex={interactive ? -1 : undefined}>
+    {interactive && hasItems && <span role="status" title={summaries[0]}>{summaries[0]}</span>}
+    {interactive && (hasItems || open) && <button ref={invoker} type="button" className="au-btn"
+      aria-label={summaries.length > 1 ? `SSH notice details (+${summaries.length - 1} more)` : "SSH notice details"} aria-haspopup="dialog" aria-expanded={open}
+      aria-controls={open ? dialogId : undefined} onClick={() => open ? close() : setRequested(true)}>
+      {summaries.length > 1 ? `+${summaries.length - 1} more` : 'Details'}
+    </button>}
+    {open && <div id={dialogId} ref={dialog} className="ssh-pane-popover" role="dialog" aria-label="SSH notices" tabIndex={-1}>
+      <button type="button" className="au-btn" onClick={() => close()}>Close SSH notices</button>
+      {!hasItems && <p>No SSH notices.</p>}
+      {children}
+    </div>}
+  </div>;
+}
+
 export function SshPaneShell(props: SshPaneShellProps) {
   const { view } = props, connected = view.state === 'connected';
   const showDisconnected = (connected && props.launchDisconnected) || view.state === 'disconnected'
@@ -37,15 +98,29 @@ export function SshPaneShell(props: SshPaneShellProps) {
   const prompts = props.sessionPrompts ?? true;
   const browserStyle: React.CSSProperties | undefined = props.browserWidth === undefined ? undefined
     : { flex: `0 0 ${props.browserWidth}px`, width: props.browserWidth, maxWidth: 'none' };
+  const secret = prompts && view.state === 'needs-secret';
+  const hostKey = prompts && (view.state === 'needs-hostkey' || (view.state === 'error' && view.hostKey?.changed));
+  const disconnected = prompts && showDisconnected;
+  // Challenges and reconnect take priority over edit notices. The strip is text-only;
+  // full prompts, reasons and controls live in the explicitly opened details dialog.
+  const challenge = secret ? 'SSH credentials required' : hostKey
+    ? view.hostKey?.changed ? 'SSH host key refused' : 'Verify SSH host key'
+    : disconnected ? 'SSH disconnected' : undefined;
+  const status = view.state === 'connecting' ? 'Connecting…' : connected ? view.reason : undefined;
+  const renderChrome = (summaries: string[], details: React.ReactNode) => <SshPaneChrome
+    interactive={interactive} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
+    {secret && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
+    {hostKey && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
+    {disconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
+    {status && <div>{status}</div>}
+    {details}
+  </SshPaneChrome>;
   return <section className="ssh-pane-shell" aria-label="SSH session">
-    {interactive && <div className="ssh-pane-chrome">
-      {prompts && view.state === 'needs-secret' && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
-      {prompts && (view.state === 'needs-hostkey' || (view.state === 'error' && view.hostKey?.changed)) && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
-      {prompts && showDisconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
-      {view.state === 'connecting' && <span role="status">Connecting…</span>}
-      {connected && view.reason && <span role="status">{view.reason}</span>}
-      {view.terminalId && <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult} />}
-    </div>}
+    {interactive && view.terminalId
+      ? <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult}>
+          {(summaries, details) => renderChrome(summaries, details)}
+        </SshEditWarning>
+      : renderChrome([], null)}
     <div className="ssh-pane-body">
       <aside className={props.browserCollapsed ? 'ssh-browser collapsed' : 'ssh-browser'} aria-label="Remote browser" style={browserStyle}>
         <button type="button" className="au-btn ssh-browser-toggle" title={props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser'} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>

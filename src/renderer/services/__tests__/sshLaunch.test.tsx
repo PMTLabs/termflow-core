@@ -36,6 +36,7 @@ import { expectPaneTags, pane, split, sentinel, other } from '../../__testFixtur
 import { key } from '../../__testFixtures__/sshPickerFixture';
 import { AllSshConnectionsDialog } from '../../components/Ssh/AllSshConnectionsDialog';
 import { launchSshInTab } from '../sshPicker';
+import * as sshPicker from '../sshPicker';
 import { connectAllInTabs, connectSavedInTab } from '../sshConnectAll';
 
 const tag = { connectionId: 'saved', browserCollapsed: false, followCd: false, hiddenMetrics: [] };
@@ -416,6 +417,48 @@ test.each<[PaneResult, boolean, boolean]>([
   expect(h.api.sshSessionState).toHaveBeenCalledTimes(1);
   expect(h.api.sshSessionOpen).not.toHaveBeenCalled();
   expect(h.api.ssh.launchTerminal).not.toHaveBeenCalled();
+});
+
+test('reattached SSH without a snapshot offers a new tab, not a reconnect', async () => {
+  const h = harness({ status: 'Existing', pc: 'pc-existing' });
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
+  await act(async () => {
+    const { terminalId } = launch();
+    store.dispatch(sshOwnersChanged({ [terminalId]: 'saved' }));
+    render();
+    await flush();
+  });
+  const strip = element.querySelector('.ssh-launch-notice')!;
+  expect(strip.querySelector('[role="status"]')?.textContent).toBe(
+    "This SSH session continued from before TermFlow restarted. The terminal still works; files and status aren't available for it.",
+  );
+  expect(strip.textContent).not.toMatch(/Preparing SSH…|Reconnect/);
+  const buttons = strip.querySelectorAll('button');
+  expect(Array.from(buttons, button => button.textContent)).toEqual(['Open a new SSH tab']);
+  const open = jest.spyOn(sshPicker, 'launchSshInTab').mockReturnValue(null);
+  try {
+    await act(async () => buttons[0].click());
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith('saved');
+  } finally { open.mockRestore(); }
+  expect(strip.tagName).toBe('SECTION');
+  expect(strip.className).toBe('ssh-launch-notice');
+  expect(strip.firstElementChild?.className).toBe('ssh-launch-strip');
+});
+
+test('fresh SSH without a snapshot keeps the preparing strip and starts the launch', async () => {
+  const h = harness();
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
+  h.api.ssh.launchTerminal.mockImplementation(() => new Promise(() => {}));
+  await act(async () => { render(); launch(); await flush(); });
+  expect(h.api.sshSessionOpen).toHaveBeenCalledTimes(1);
+  expect(h.api.ssh.launchTerminal).toHaveBeenCalledTimes(1);
+  expect(h.snapshots.size).toBe(0);
+  const strip = element.querySelector('.ssh-launch-notice')!;
+  expect(strip.querySelector('[role="status"]')?.textContent).toBe('Preparing SSH…');
+  expect(strip.tagName).toBe('SECTION');
+  expect(strip.className).toBe('ssh-launch-notice');
+  expect(strip.firstElementChild?.className).toBe('ssh-launch-strip');
 });
 
 test('fresh_restart_carries_tag_but_no_stale_ticket', async () => {

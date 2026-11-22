@@ -80,7 +80,8 @@ async fn folder_partial_download_names_failed_path() {
     let err = browser(&f).download_dir("/folder", &parent, &CancellationToken::new()).await.unwrap_err();
     assert_eq!((err.code, err.outcome), (FsCode::PermissionDenied, FsOutcome::Partial));
     assert_eq!(err.path, "/folder/b-sub/denied");
-    assert!(err.message.contains("/folder/b-sub/denied"));
+    // The failed path is named by err.path (the renderer prefixes it), never repeated in the message.
+    assert!(!err.message.contains("/folder/b-sub/denied"));
     assert_eq!(err.completed_paths, Some(vec![display_path(parent.join("folder").join("a")).to_string_lossy().into_owned()]));
     assert_eq!(fs::read(local.path("folder/a")).unwrap(), b"committed");
     assert_eq!(fs::read_dir(local.path("folder/b-sub")).unwrap().count(), 0);

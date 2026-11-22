@@ -67,10 +67,13 @@ fn budget(operation: &'static str, path: &str) -> FsError {
 
 pub(super) fn error(operation: &'static str, path: &str, code: FsCode, outcome: FsOutcome, detail: &str) -> FsError {
     let message = match outcome {
-        FsOutcome::Unknown => format!("Could not confirm {operation} on {path}; reconnect and refresh."),
-        FsOutcome::Partial => format!("Partially completed {operation} on {path}. {detail} Refresh to reconcile."),
-        FsOutcome::Unchanged if code == FsCode::PermissionDenied => format!("Permission denied on {path}. Nothing was changed."),
-        FsOutcome::Unchanged => format!("{operation} on {path}: {detail}"),
+        FsOutcome::Unknown => "Could not confirm the change; reconnect and refresh.".to_string(),
+        FsOutcome::Partial => format!("Partially completed. {detail} Refresh to reconcile."),
+        FsOutcome::Unchanged if code == FsCode::PermissionDenied => "Permission denied. Nothing was changed.".to_string(),
+        // No arm repeats `path` or names `operation` (P068-2): `path` is its own field and every
+        // renderer surface prefixes it, so "list on /x: …" showed the path twice plus an internal
+        // operation name. Callers pass a full-sentence `detail`.
+        FsOutcome::Unchanged => detail.to_string(),
     };
     FsError { code, operation, path: path.into(), message, outcome, completed_paths: None, retained_local_path: None }
 }

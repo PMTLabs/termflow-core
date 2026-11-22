@@ -36,6 +36,8 @@ pub(super) trait LaunchPort: InputBackend {
     fn open_ssh(&self) -> Result<String, LaunchError>;
     fn bare_shell(&self, shell: &str, identity: &ProcessIdentity) -> bool;
     fn launch_state(&self, terminal: &str, state: &'static str);
+    #[cfg(test)]
+    fn record_child_sample(&self) {}
 }
 
 impl<R: Runtime> LaunchPort for AppState<R> {
@@ -486,6 +488,8 @@ impl<P: LaunchPort> Driver<'_, P> {
             let running = (entry.snapshot.stage == LaunchStage::Running).then(|| watch.child.running()).flatten();
             (entry.payload.clone().expect("watcher pins an accepted payload"), running)
         };
+        #[cfg(test)]
+        self.port.record_child_sample();
         let sample = match running {
             Some(child) => payload.command.sample_running(child),
             None => payload.command.sample(),
@@ -522,7 +526,7 @@ impl<P: LaunchPort> Driver<'_, P> {
                 LaunchStage::Typed if boundary.returned || now.saturating_duration_since(watch.accepted_at) >= NO_START => {
                     // Works with old hosts and with partial host-side writes:
                     // the queue has no delivery feedback and must not replay.
-                    Some((LaunchStage::Ended, LaunchState::Ended, Some(typed_end_error(boundary.returned, watch.child.observed_start()))))
+                    Some((LaunchStage::Ended, LaunchState::Ended, Some(typed_end_error(boundary.returned))))
                 }
                 LaunchStage::Running if boundary.returned => Some((LaunchStage::Ended, LaunchState::Ended, None)),
                 LaunchStage::Typed | LaunchStage::Running => match watch.child.sample(&sample, now, !boundary.extra_input) {
@@ -630,8 +634,10 @@ impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
     }
 }
 
-fn typed_end_error(returned: bool, observed_start: bool) -> LaunchError {
-    if returned && observed_start {
+// A returned shell after an accepted write means SSH ran and exited,
+// regardless of whether the process sampler observed it.
+fn typed_end_error(returned: bool) -> LaunchError {
+    if returned {
         Code::SshExitedBeforeConnecting.into()
     } else {
         LaunchError {
@@ -643,12 +649,11 @@ fn typed_end_error(returned: bool, observed_start: bool) -> LaunchError {
 
 #[cfg(test)]
 #[test]
-fn returned_launch_distinguishes_an_observed_child_from_no_start() {
-    assert_eq!(typed_end_error(true, false).code, Code::WriteFailed);
-    assert_eq!(typed_end_error(true, true).code, Code::SshExitedBeforeConnecting);
-    assert_eq!(typed_end_error(false, false).code, Code::WriteFailed);
+fn returned_after_accepted_write_does_not_depend_on_sampling() {
+    // Typed is reached only after writer acceptance; no PID sample is required.
+    assert_eq!(typed_end_error(true).code, Code::SshExitedBeforeConnecting);
     // A NO_START timeout with no shell return is not evidence ssh exited.
-    assert_eq!(typed_end_error(false, true).code, Code::WriteFailed);
+    assert_eq!(typed_end_error(false).code, Code::WriteFailed);
 }
 
 #[cfg(test)]

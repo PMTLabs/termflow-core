@@ -120,6 +120,30 @@ export function matchMnemonic(
   return null;
 }
 
+/**
+ * Pull focus back into an open modal when it has been stranded on the page body.
+ *
+ * Focus is stranded when the focused control is disabled or unmounted while the dialog stays open:
+ * a submit that disables its fields while pending, then reports an error and re-enables them (the
+ * SSH Permissions dialog did exactly this). The browser moves focus to <body>, and because the key
+ * handling is bound to the container, Escape and the Tab trap stop working with no visible cause.
+ *
+ * Only a stranded focus is moved: anything focused, inside or outside the dialog, is left alone, so
+ * this never steals focus from another surface. Returns the element focused, or null.
+ */
+export function recoverStrandedFocus(
+  container: HTMLElement | null,
+  active: Element | null = document.activeElement,
+): HTMLElement | null {
+  if (!container || !container.isConnected) return null;
+  if (active && active !== document.body && active !== document.documentElement) return null;
+  // The container itself is the steadiest target: it holds the key handlers, and it stays
+  // focusable while every field inside is disabled. Fall back to the first focusable control.
+  const target = container.hasAttribute('tabindex') ? container : getFocusable(container)[0] ?? null;
+  target?.focus();
+  return target && document.activeElement === target ? target : null;
+}
+
 function resolveInitialFocus(
   container: HTMLElement,
   initialFocus: InitialFocus,
@@ -179,6 +203,14 @@ export function useDialogA11y(
       }
     };
   }, [isOpen, containerRef]);
+
+  // After every commit of an open modal: a re-render that disabled or removed the focused control
+  // leaves focus on <body>, outside the container's key handlers (see recoverStrandedFocus).
+  // Non-modal surfaces are skipped: the user may legitimately leave them.
+  useEffect(() => {
+    if (!isOpen || optsRef.current.trapFocus === false) return;
+    recoverStrandedFocus(containerRef.current);
+  });
 
   // Focus trap + Esc + Enter + mnemonics, scoped to the dialog container.
   useEffect(() => {

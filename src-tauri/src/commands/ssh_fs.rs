@@ -115,6 +115,16 @@ pub async fn ssh_fs_edit_stop(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn ssh_fs_edit_dismiss(
+    edits: State<'_, Arc<EditRegistry>>,
+    terminal_id: String,
+    path: String,
+    edit_id: uuid::Uuid,
+) -> Result<(), FsError> {
+    edits.dismiss_retained(&terminal_id, &path, edit_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn ssh_fs_edit_list(
     edits: State<'_, Arc<EditRegistry>>,
     terminal_id: String,

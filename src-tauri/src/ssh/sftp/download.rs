@@ -410,7 +410,7 @@ fn local_error(path: &str, destination: &std::path::Path, err: LocalError) -> Fs
     };
     let mut err = failure(path, code, detail);
     let destination = display_path(destination.to_owned());
-    err.message = format!("{OP} on {path}: {detail} ({}). Destination unchanged.", destination.display());
+    err.message = format!("{detail} ({}). Destination unchanged.", destination.display());
     err
 }
 

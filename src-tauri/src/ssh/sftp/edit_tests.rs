@@ -67,6 +67,33 @@ async fn torn_snapshot_download_retries_then_conflicts() {
 }
 
 #[tokio::test]
+async fn dismiss_retained_preserves_copy_and_removes_it_from_restart_snapshot() {
+    let remote = Tree::new();
+    let local = Tree::new();
+    fs::write(remote.path("a"), b"keep").unwrap();
+    let fixture = remote.fixture();
+    fixture.connected().await;
+    let root = local.path("edits");
+    let registry = EditRegistry::new(root.clone(), Arc::new(TokioClock));
+    let mut record = registry.begin_edit(&browser(&fixture), "/a").await.unwrap().record().await;
+    assert!(registry.dismiss_retained(&record.terminal_id, "/a", record.edit_id).is_err());
+    record.state = EditState::Conflict;
+    write_record(&record).unwrap();
+
+    let recovered = EditRegistry::new(root.clone(), Arc::new(TokioClock));
+    recovered.load_recovered().unwrap();
+    assert!(recovered.list(&record.terminal_id, ".").await.unwrap()[0].retained);
+    assert!(recovered.dismiss_retained("other-terminal", "/a", record.edit_id).is_err());
+    recovered.dismiss_retained(&record.terminal_id, "/a", record.edit_id).unwrap();
+    assert!(recovered.list(&record.terminal_id, ".").await.unwrap().is_empty());
+    let restarted = EditRegistry::new(root, Arc::new(TokioClock));
+    restarted.load_recovered().unwrap();
+    assert!(restarted.list(&record.terminal_id, ".").await.unwrap().is_empty());
+    assert_eq!(fs::read(&record.local_path).unwrap(), b"keep");
+    fixture.registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn recover_surfaces_retained_jobs_and_drops_missing() {
     let remote = Tree::new();
     let local = Tree::new();

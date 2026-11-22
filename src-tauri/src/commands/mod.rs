@@ -13,6 +13,7 @@ pub use ssh_fs::{
     ssh_fs_open, __cmd__ssh_fs_open, __tauri_command_name_ssh_fs_open,
     ssh_fs_open_with, __cmd__ssh_fs_open_with, __tauri_command_name_ssh_fs_open_with,
     ssh_fs_edit_stop, __cmd__ssh_fs_edit_stop, __tauri_command_name_ssh_fs_edit_stop,
+    ssh_fs_edit_dismiss, __cmd__ssh_fs_edit_dismiss, __tauri_command_name_ssh_fs_edit_dismiss,
     ssh_fs_edit_list, __cmd__ssh_fs_edit_list, __tauri_command_name_ssh_fs_edit_list,
 };
 pub use ssh_fs::*;
