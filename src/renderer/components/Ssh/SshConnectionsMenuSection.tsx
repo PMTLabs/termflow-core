@@ -40,9 +40,9 @@ export function SshConnectionsMenuSection({ variant, capture, onClose }: {
   const row = (key: string, label: string, detail: string | undefined, onClick: () => void, disabled = false) => {
     const name = <span className="ssh-menu-label"><span>{label}</span>{detail && <small>{detail}</small>}</span>;
     return canvas
-      ? <CanvasMenuItem key={key} icon="↗" onClick={onClick} disabled={disabled}>{name}</CanvasMenuItem>
+      ? <CanvasMenuItem key={key} icon="⌁" onClick={onClick} disabled={disabled}>{name}</CanvasMenuItem>
       : <button key={key} type="button" className={`dropdown-item ssh-menu-item${disabled ? ' disabled' : ''}`}
-          onClick={onClick} disabled={disabled}><span className="profile-icon" aria-hidden="true">↗</span>{name}</button>;
+          onClick={onClick} disabled={disabled}><span className="profile-icon" aria-hidden="true">⌁</span>{name}</button>;
   };
 
   return <>
