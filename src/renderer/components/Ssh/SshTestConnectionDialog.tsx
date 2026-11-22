@@ -141,7 +141,10 @@ export function SshTestConnectionDialog({ connectionId, api, onClose }: { connec
   const destination = failedHop ? `${failedHop.hop === 'jump' ? 'jump host ' : ''}${endpoint(failedHop)}`
     : target ? `${endpoint(target)}${jump ? ' through jump host ' + endpoint(jump) : ''}` : undefined;
   const auth = failedHop?.hop === 'jump' ? jump?.auth : target?.auth;
-  const message = code === 'auth-rejected' ? authCopy(credential?.secretKind, auth, true) : testDialogCopy.get(code ?? '') ?? failureCopy.get(code ?? '') ?? fallback;
+  const line = !failure && code === 'known-hosts-malformed' ? view?.errorLine : undefined;
+  const message = line === 0 ? 'known_hosts is not UTF-8 text (it may be saved as UTF-16). Save it as UTF-8 before connecting.'
+    : line !== undefined && line > 0 ? `An entry in known_hosts could not be read at line ${line}. Repair the file before connecting.`
+    : code === 'auth-rejected' ? authCopy(credential?.secretKind, auth, true) : testDialogCopy.get(code ?? '') ?? failureCopy.get(code ?? '') ?? fallback;
   return createPortal(<div className="ssh-test-backdrop"><div className="ssh-test-dialog" ref={root} role="dialog" aria-modal="true" aria-label="Test SSH connection">
     <h2>Test SSH connection</h2>
     {secretPrompt && view ? <SshSecretPrompt key={view.promptId} view={{

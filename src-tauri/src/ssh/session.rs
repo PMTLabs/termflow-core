@@ -106,6 +106,7 @@ impl SessionError {
             Self::HostKeyChanged => "The host key changed. Confirm the new fingerprint with the server's administrator before updating ~/.ssh/known_hosts. There is no override.".into(),
             Self::HostKeyRevoked => "The host key has been revoked. Contact the server's administrator before trying again.".into(),
             Self::HostCertificateUnsupported => "This app does not support host certificate trust. Ask the server's administrator about a supported host key.".into(),
+            Self::KnownHostsMalformed { line } if *line == 0 => "known_hosts is not UTF-8 text (it may be saved as UTF-16). Save it as UTF-8 before connecting.".into(),
             Self::KnownHostsMalformed { line } => format!("An entry in known_hosts could not be read at line {line}. Repair the file before connecting."),
             Self::KnownHostsUnreadable => "Could not read known_hosts. Check that the file is accessible.".into(),
             Self::TrustWriteFailed => "Could not save host trust safely. Check access to known_hosts before retrying.".into(),
@@ -299,6 +300,8 @@ pub struct SessionView {
     /// as they did before codes existed. Written only through `set_reason`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_line: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub known_hosts_paths: Option<KnownHostsPaths>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -539,15 +542,19 @@ pub(crate) const SAVED_CREDENTIAL_UNAVAILABLE: &str = "saved-credential-unavaila
 /// The only writer of `view.reason`: the code travels with the text it names.
 fn set_reason(view: &mut SessionView, reason: Option<String>, code: Option<&str>) {
     view.error_code = reason.as_ref().and(code).map(str::to_string);
+    view.error_line = None;
     view.reason = reason;
 }
-/// Sets `reason` and `errorCode` from one error.
+/// Sets the reason, code and optional line from one error.
 fn set_error_reason(view: &mut SessionView, error: Option<&SessionError>) {
     set_reason(
         view,
         error.map(SessionError::reason),
         error.map(SessionError::code),
     );
+    if let Some(SessionError::KnownHostsMalformed { line }) = error {
+        view.error_line = Some(*line);
+    }
 }
 fn clear_prompt(view: &mut SessionView) {
     view.prompt_id = None;
@@ -706,6 +713,7 @@ impl SessionRegistry {
             gate: Gate::Pending,
             reason: None,
             error_code: None,
+            error_line: None,
             known_hosts_paths: None,
             secret_kind: None,
             host_key: None,

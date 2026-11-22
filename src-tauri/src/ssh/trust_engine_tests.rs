@@ -12,10 +12,27 @@ async fn host_key_policy_table_blocks_auth_and_direct_trust() {
         format!("@cert-authority target.test {key}\n"),
         format!("@unknown target.test {key}\n"),
         "target.test ssh-ed25519 !!!\n".into(),
-        format!("|1|broken|broken {key}\n"),
+        // D81: a valid pattern in a list with a bad one still names this host, so it fails closed.
         format!("target.test,,bad {key}\n"),
-        format!("|2|unsupported|bad {key}\n"),
+        format!("@revoked target.test,,bad {key}\n"),
     ];
+    // D81: a line whose host field cannot name this host is skipped as OpenSSH does. The host
+    // stays unknown: the probe asks for trust, never auths or writes.
+    for bytes in [
+        format!("|1|broken|broken {key}\n"),
+        format!("other.test,,bad {key}\n"),
+        format!("|2|unsupported|bad {key}\n"),
+    ] {
+        let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);
+        std::fs::write(&f.path, &bytes).unwrap();
+        let id = f.registry.probe("c-a").unwrap();
+        let v = wait_state(&f.registry, &id, true, SessionState::NeedsHostkey).await;
+        assert!(v.host_key.is_some(), "{bytes}");
+        assert_eq!(f.server.counters.auth.load(Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read_to_string(&f.path).unwrap(), bytes);
+        assert!(!f.events.0.lock().iter().any(|v| v.gate == Gate::Verified));
+        f.registry.shutdown().await;
+    }
     for unreadable in ["directory", "oversized"] {
         let f = Fixture::new(Server::new(1, "alice"), vec![hop("c-a", "alice")], false);
         if unreadable == "directory" {

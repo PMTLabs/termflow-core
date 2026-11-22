@@ -1,5 +1,6 @@
 //! Conservative native OpenSSH trust policy. No ambient paths in tests.
 use super::session::SessionError;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use ssh_key::{
@@ -140,7 +141,21 @@ fn matches(patterns: &HostPatterns, token: &str) -> bool {
         }
     }
 }
+fn parse_host_field(host: &str) -> Option<HostPatterns> {
+    if host.starts_with('|') {
+        let (salt, hash) = host.strip_prefix("|1|")?.split_once('|')?;
+        let salt = STANDARD.decode(salt).ok()?;
+        let hash = STANDARD.decode(hash).ok()?.try_into().ok()?;
+        return (salt.len() == 20).then_some(HostPatterns::HashedName { salt, hash });
+    }
+    host.split(',').all(valid_host_pattern)
+        .then(|| HostPatterns::Patterns(host.split(',').map(str::to_owned).collect()))
+}
 pub fn classify(bytes: &[u8], token: &str, key: &PublicKey) -> Result<Verdict, SessionError> {
+    if bytes.contains(&0) {
+        return Err(SessionError::KnownHostsMalformed { line: 0 });
+    }
+    let bytes = bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes);
     let text =
         std::str::from_utf8(bytes).map_err(|_| SessionError::KnownHostsMalformed { line: 0 })?;
     let (mut pinned, mut exact, mut ca, mut revoked) = (false, false, false, false);
@@ -149,28 +164,32 @@ pub fn classify(bytes: &[u8], token: &str, key: &PublicKey) -> Result<Verdict, S
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let invalid = || SessionError::KnownHostsMalformed { line: index + 1 };
-        // Normalize field whitespace, without ever interpreting comments as host tokens.
+        let n = index + 1;
         let fields: Vec<_> = line.split_whitespace().collect();
         let host_index = usize::from(fields[0].starts_with('@'));
-        let host = *fields.get(host_index).ok_or_else(invalid)?;
-        if host.starts_with('|') && !host.starts_with("|1|") {
-            return Err(invalid());
-        }
-        if !host.starts_with('|') && host.split(',').any(|p| !valid_host_pattern(p)) {
-            return Err(invalid());
-        }
-        let normalized = fields.join(" ");
-        // Fail closed for all unclassifiable non-comment lines, even apparently unrelated ones.
-        let entry: Entry = normalized.parse().map_err(|_| invalid())?;
-        if let HostPatterns::HashedName { salt, .. } = entry.host_patterns() {
-            if salt.len() != 20 {
-                return Err(invalid());
+        let host = fields.get(host_index).copied();
+        let Some(patterns) = host.and_then(parse_host_field) else {
+            // OpenSSH still matches the valid patterns of a plain list, so a line that could name
+            // this host must fail closed: skipping it would drop a revocation or a pin.
+            if let Some(host) = host.filter(|h| !h.starts_with('|')) {
+                let valid = host.split(',').filter(|p| valid_host_pattern(p)).map(str::to_owned);
+                if matches(&HostPatterns::Patterns(valid.collect()), token) {
+                    return Err(SessionError::KnownHostsMalformed { line: n });
+                }
             }
-        }
-        if !matches(entry.host_patterns(), token) {
+            log::warn!("known_hosts line {n} skipped: host field could not be parsed");
+            continue;
+        };
+        let matched = matches(&patterns, token);
+        let parsed = fields.join(" ").parse::<Entry>();
+        if !matched {
+            // Parsing unrelated entries is diagnostic only.
+            if parsed.is_err() {
+                log::warn!("known_hosts line {n} skipped: entry could not be parsed");
+            }
             continue;
         }
+        let entry = parsed.map_err(|_| SessionError::KnownHostsMalformed { line: n })?;
         match entry.marker() {
             Some(Marker::Revoked) => {
                 // Revocation denies this key; it does not pin an unrelated key.
@@ -485,10 +504,10 @@ mod tests {
                 "host ssh-ed25519 !!!".into(),
                 Err(SessionError::KnownHostsMalformed { line: 1 }),
             ),
-            (
-                format!("|2|bad|bad {k}"),
-                Err(SessionError::KnownHostsMalformed { line: 1 }),
-            ),
+            (format!("@unknown other {k}"), Ok(Verdict::Unknown)),
+            // D81: an unknown hash scheme can't name any host, so it is skipped.
+            (format!("|2|bad|bad {k}"), Ok(Verdict::Unknown)),
+            // D81: a plain list with an invalid pattern fails closed when a valid pattern matches.
             (
                 format!("host,,else {k}"),
                 Err(SessionError::KnownHostsMalformed { line: 1 }),
@@ -508,6 +527,25 @@ mod tests {
                 assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
                 fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
             }
+        }
+    }
+    #[test]
+    fn invalid_pattern_list_fails_closed_only_for_hosts_its_valid_patterns_match() {
+        // OpenSSH honours the valid patterns of a list with a bad one; skipping the line would
+        // lose a revocation or turn a changed pin into a trust prompt.
+        let (key, other) = (key(1), key(2));
+        let (k, o) = (key.to_openssh().unwrap(), other.to_openssh().unwrap());
+        let malformed = Err(SessionError::KnownHostsMalformed { line: 2 });
+        for (bytes, token, expected) in [
+            (format!("# c\n@revoked host,,other {k}"), "host", malformed.clone()),
+            (format!("# c\n@revoked host,,other {k}"), "other", malformed.clone()),
+            (format!("# c\n@revoked host,,other {k}"), "else", Ok(Verdict::Unknown)),
+            (format!("# c\nhost,bad/x {o}"), "host", malformed.clone()),
+            (format!("# c\nhost,bad/x {o}"), "else", Ok(Verdict::Unknown)),
+            (format!("# c\n!host,*,bad/x {o}"), "host", Ok(Verdict::Unknown)),
+            (format!("# c\n!host,*,bad/x {o}"), "else", malformed.clone()),
+        ] {
+            assert_eq!(classify(bytes.as_bytes(), token, &key), expected, "{token}: {bytes}");
         }
     }
     #[test]
@@ -533,6 +571,54 @@ mod tests {
                 classify(bytes.as_bytes(), &lookup_token(host, 22), &key),
                 Ok(Verdict::Unknown)
             );
+        }
+    }
+    #[test]
+    fn unrelated_broken_keys_do_not_block_verification_or_trust() {
+        let key = key(1);
+        let k = key.to_openssh().unwrap();
+        let (_, blob) = k.split_once(' ').unwrap();
+        let initial = format!("other ssh-ed25519 !!!\nother {blob}\nhost {k}\n");
+        assert_eq!(classify(initial.as_bytes(), "host", &key), Ok(Verdict::Verified));
+
+        let path = temporary();
+        private_parent(&path).unwrap();
+        fs::write(&path, &initial).unwrap();
+        trust_transaction(&path, "new-host", &key, &CancellationToken::new(), || {}).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), format!("{initial}new-host {k}\n"));
+        fs::remove_dir_all(path.parent().unwrap().parent().unwrap()).unwrap();
+    }
+    #[test]
+    fn matching_broken_keys_fail_even_after_a_verified_key() {
+        let key = key(1);
+        let k = key.to_openssh().unwrap();
+        let (_, blob) = k.split_once(' ').unwrap();
+        for broken in [blob, "ssh-ed25519 !!!"] {
+            let text = format!("host {k}\n# comment\nhost {broken}");
+            assert_eq!(classify(text.as_bytes(), "host", &key), Err(SessionError::KnownHostsMalformed { line: 3 }));
+        }
+    }
+    #[test]
+    fn broken_hashed_entry_fails_only_for_its_host() {
+        let key = key(1);
+        let bytes = b"# comment\n|1|AAECAwQFBgcICQoLDA0ODxAREhM=|DnpHtKjaC+vTmgwkAZCf9SqxJN8= ssh-ed25519 !!!";
+        assert_eq!(classify(bytes, "[host.example]:2222", &key), Err(SessionError::KnownHostsMalformed { line: 2 }));
+        assert_eq!(classify(bytes, "[host.example]:22", &key), Ok(Verdict::Unknown));
+    }
+    #[test]
+    fn accepts_utf8_bom() {
+        let key = key(1);
+        let text = format!("\u{feff}host {}", key.to_openssh().unwrap());
+        assert_eq!(classify(text.as_bytes(), "host", &key), Ok(Verdict::Verified));
+    }
+    #[test]
+    fn rejects_non_utf8_text() {
+        let key = key(1);
+        let text = format!("host {}", key.to_openssh().unwrap());
+        let utf16: Vec<_> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let with_bom = [&[0xff, 0xfe][..], &utf16].concat();
+        for bytes in [utf16.as_slice(), with_bom.as_slice(), &[0xff]] {
+            assert_eq!(classify(bytes, "host", &key), Err(SessionError::KnownHostsMalformed { line: 0 }));
         }
     }
     #[test]
