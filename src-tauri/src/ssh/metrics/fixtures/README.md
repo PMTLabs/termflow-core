@@ -1,15 +1,21 @@
 # SSH metrics: collector capture provenance
 
-These are placeholders, not recordings. None were captured during T1.
-The capture-based tests intentionally fail until all four are replaced and
-their exact independent oracles are recorded in `../protocol/tests.rs`.
+Captured 2026-11-21 (T8b). Each capture is one exec of the production
+`collector_command()` with its own fresh nonce, stdout only. Literal oracles in
+`../protocol/tests.rs` were read from the sanitized bytes, not from parser output.
+`.gitattributes` keeps these files byte-exact (no CRLF conversion on checkout).
 
-| Fixture | Disposable SSH target alias | OS/kernel/BusyBox provenance |
+| Fixture | Alias | Provenance |
 |---|---|---|
-| `ubuntu.txt` | `tf-metrics-ubuntu` | PENDING CAPTURE (orchestrator, final pass) |
-| `alpine.txt` | `tf-metrics-alpine` | PENDING CAPTURE (orchestrator, final pass) |
-| `nfs.txt` | `tf-metrics-nfs` | PENDING CAPTURE (orchestrator, final pass) |
-| `non-linux.txt` | `tf-metrics-darwin` | PENDING CAPTURE (orchestrator, final pass) |
+| `ubuntu.txt` | `tf-metrics-ubuntu` | **Captured.** Ubuntu 24.04.3 LTS on WSL2, kernel 6.18.33.2-microsoft-standard-WSL2, GNU coreutils `who`/`df`, `sh` = dash. One `ssh -T` exec against a throwaway loopback sshd (127.0.0.1:2470, throwaway host and client keys, `UsePAM no`); sshd log shows one accepted publickey session. 75,439 bytes. A docker/snap host, so it carries real stacked mounts, `rootfs`, `9p`, WSL `overlay` and `fuse.snapfuse` rows. |
+| `alpine.txt` | `tf-metrics-alpine` | See the Alpine row note below (captured after the BusyBox collector fix). |
+| `nfs.txt` | `tf-metrics-nfs` | **DERIVED, NOT CAPTURED** (no NFS host; privileged containers/kernel modules ruled out, leader ruling D55; real NFS capture deferred). The real `ubuntu.txt` envelope, with only `mounts`, `dfLocal` and `dfNfs` replaced by this modeled table: `/dev/sda1 /` ext4; `proc`; `tmpfs /run`, `/dev/shm`; `/dev/sdb1 /data\040disk` xfs; `nas.example:/export/home /mnt/home` nfs4 (vers=4.2); `nas.example:/export/old /mnt/old` nfs (vers=3); `//nas.example/share /mnt/smb` cifs. dfLocal models GNU `df -l -P -T` (cifs and NFS absent), dfNfs models GNU `df -P -t nfs -t nfs4` (no Type column, blank separator line). |
+| `non-linux.txt` | `tf-metrics-darwin` | **Captured.** macOS host, `uname -s` Darwin, `uname -m` arm64; zsh login shell. One read-only `ssh -T` exec (BatchMode, existing known_hosts entry via HostKeyAlias). macOS version not recorded: the grant was exactly one exec. 519 bytes. |
+
+Sanitization: hostnames become the alias (`ubuntu.txt`, `nfs.txt`, `non-linux.txt`);
+in `ubuntu.txt` the runner mount `/srv/<name>` became `/srv/runner-data` in both
+`mounts` and `dfLocal` (join preserved). Nothing else changed: numbers, framing,
+statuses, whitespace and escapes are byte-identical to the raw capture.
 
 From the core worktree root, in a POSIX terminal on the capture controller,
 define the following helper (Python 3 and Cargo are controller-side only).

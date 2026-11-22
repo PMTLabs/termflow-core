@@ -16,6 +16,7 @@ pub type Reading<T> = Result<T, &'static str>;
 #[derive(Debug, PartialEq, Eq)]
 pub struct Section<'a> {
     pub exit: u8,
+    key: &'a str,
     rows: Reading<Vec<&'a str>>,
 }
 
@@ -23,6 +24,7 @@ impl<'a> Section<'a> {
     pub fn rows(&self) -> Reading<&[&'a str]> {
         match self.exit {
             0 => self.rows.as_deref().map_err(|reason| *reason),
+            123 if self.key == "who" => Err("Login records unavailable"),
             126 => Err("Permission denied"),
             127 => Err("Required utility unavailable"),
             _ => Err("Collection command failed"),
@@ -136,7 +138,7 @@ pub fn parse<'a>(bytes: &'a [u8], nonce: &str) -> Reading<RawSample<'a>> {
         } else {
             Ok(rows)
         };
-        if sections.insert(key, Section { exit, rows }).is_some() {
+        if sections.insert(key, Section { exit, key, rows }).is_some() {
             return Err(FRAME);
         }
     }
@@ -253,16 +255,22 @@ enum Fs {
     Unknown,
 }
 
-fn fs_kind(fs: &str) -> Fs {
+const LOCAL_TYPES: &[&str] = &[
+    "ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "overlay", "f2fs", "jfs", "reiserfs",
+    "vfat", "exfat", "ntfs", "ntfs3", "bcachefs", "udf", "fuseblk",
+];
+
+fn fs_kind(fs: &str, mount_point: &str) -> Fs {
     match fs {
         "nfs" | "nfs4" => Fs::Nfs,
-        "ext2" | "ext3" | "ext4" | "xfs" | "btrfs" | "zfs" | "overlay" | "f2fs"
-        | "jfs" | "reiserfs" | "vfat" | "exfat" | "ntfs" | "ntfs3" | "bcachefs" | "erofs"
-        | "squashfs" | "iso9660" | "udf" => Fs::Local,
+        "overlay" if mount_point != "/" => Fs::Excluded,
+        local if LOCAL_TYPES.contains(&local) => Fs::Local,
         "tmpfs" | "devtmpfs" | "ramfs" | "proc" | "sysfs" | "cgroup" | "cgroup2" | "devpts"
         | "securityfs" | "debugfs" | "tracefs" | "pstore" | "mqueue" | "hugetlbfs" | "configfs"
         | "autofs" | "fusectl" | "binfmt_misc" | "bpf" | "nsfs" | "rpc_pipefs" | "selinuxfs"
-        | "cifs" | "smb3" | "smbfs" | "sshfs" | "fuse.sshfs" | "9p" => Fs::Excluded,
+        | "cifs" | "smb3" | "smbfs" | "sshfs" | "9p" | "rootfs" | "fuse"
+        | "squashfs" | "erofs" | "iso9660" => Fs::Excluded,
+        subtype if subtype.starts_with("fuse.") => Fs::Excluded,
         _ => Fs::Unknown,
     }
 }
@@ -284,7 +292,11 @@ fn mount_inventory<'a>(rows: &[&'a str]) -> Reading<Inventory<'a>> {
         if !key.1.starts_with('/') {
             return Err(BAD_MOUNTS);
         }
-        mounts.entry(key).and_modify(|ty| *ty = None).or_insert(Some(*fs));
+        mounts.entry(key).and_modify(|ty| {
+            if *ty != Some(*fs) {
+                *ty = None;
+            }
+        }).or_insert(Some(*fs));
     }
     Ok(mounts)
 }
@@ -346,7 +358,7 @@ fn df(rows: &[&str], inventory: &Reading<Inventory<'_>>, nfs: bool) -> Reading<V
             (Some(typed), None) if !nfs => typed,
             _ => return Err(if inventory.is_err() { BAD_MOUNTS } else { BAD_TYPE }),
         };
-        match (nfs, fs_kind(fs)) {
+        match (nfs, fs_kind(fs, &key.1)) {
             (false, Fs::Local) | (true, Fs::Nfs) => out.push(MountUsage {
                 source: key.0,
                 mount_point: key.1,
@@ -365,7 +377,7 @@ fn df(rows: &[&str], inventory: &Reading<Inventory<'_>>, nfs: bool) -> Reading<V
         // Don't fabricate an empty or partial NFS list if df didn't account
         // for an inventoried mount (e.g. hidden or duplicate mount records).
         if mounts.iter().any(|(key, ty)| match ty {
-            Some(fs) => fs_kind(fs) == Fs::Nfs && !seen.contains(key),
+            Some(fs) => fs_kind(fs, &key.1) == Fs::Nfs && !seen.contains(key),
             None => true,
         }) {
             return Err(BAD_MOUNTS);

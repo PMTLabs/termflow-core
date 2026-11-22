@@ -48,15 +48,17 @@ case "$1" in
     *) exit 90 ;;
 esac"#);
         host.utility("nproc", "printf '1\\n'");
-        host.utility("who", "exit \"$WHO_STATUS\"");
+        host.utility("who", "printf '%s' \"$WHO_ROWS\"; exit \"$WHO_STATUS\"");
         host.utility("sentinel", "printf 'executed' > sentinel-ran");
         host.utility("df", r#"
 [ "$LC_ALL:$LANG:$TZ:$DF_BLOCK_SIZE:$BLOCK_SIZE:$BLOCKSIZE" = C:C:UTC:1024:1024:1024 ] || exit 91
 case "$*" in
     '-l -P -T')
         if [ "$FALLBACK" = no ]; then printf '%s' "$LOCAL"; else printf 'failed typed stdout\n'; exit 1; fi ;;
-    '-l -P') [ "$FALLBACK" != unsupported ] || exit 1
+    '-l -P') [ "$FALLBACK" = yes ] || exit 1
         printf 'Filesystem 1K-blocks Used Available Use%% Mounted on\n/dev/vda\n   100 30 60 34%% /\n' ;;
+    '-P -T -t ext4') printf '%s' "$LOCAL"; [ "$FALLBACK" != unsupported ] ;;
+    '-P -T -t xfs') printf 'Filesystem Type 1024-blocks Used Available Capacity Mounted on\n/dev/data xfs 100 30 60 34%% /data\n'; [ "$FALLBACK" != fail-second ] ;;
     '-P -t nfs -t nfs4')
         [ "$GUARDED" = yes ] || exit 92
         printf '%s' "$NFS"
@@ -136,7 +138,22 @@ esac"#);
         for &(key, value) in env {
             cmd.env(key, value);
         }
-        self.script("sh", "printf 'collector-entry\\n' >> \"$TRACE\"\n[ \"$1\" = -c ] || exit 90\nprintf '%s' \"$2\" > collector-input || exit 91\nexec /bin/sh -x \"$@\"");
+        self.script("sh", r#"printf 'collector-entry\n' >> "$TRACE"
+[ "$1" = -c ] || exit 90
+printf '%s' "$2" > collector-input || exit 91
+if [ -n "$FAKE_UTMP" ]; then
+    # Intercept only the production existence probes; do not depend on host utmp.
+    probe='test() {
+        case "$*" in
+            "-e /var/run/utmp") [ "$FAKE_UTMP" = yes ] ;;
+            "-e /run/utmp") return 1 ;;
+            *) command test "$@" ;;
+        esac
+    }'
+    exec /bin/sh -x -c "$probe
+$2" "$3" "$4"
+fi
+exec /bin/sh -x "$@""#);
         // Don't put general host utilities (including ssh) on the fake PATH.
         self.utility("nap", "exec /bin/sleep \"$@\"");
         fs::write(self.0.join("trace"), "").unwrap();
@@ -276,11 +293,37 @@ fn df_busybox_fallback_stays_in_one_exec() {
     assert_eq!(s.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
     assert_eq!(df_trace(&trace), ["df -l -P -T", "df -l -P", "timeout -s KILL 2 df -P -t nfs -t nfs4", "df -P -t nfs -t nfs4"]);
     assert_eq!(trace.iter().filter(|t| t.as_str() == "cat /proc/mounts").count(), 1);
+    let mounts = format!("{MOUNTS}/dev/data /data xfs rw 0 0\n//host/share /smb cifs rw 0 0\nportal /portal fuse.portal rw 0 0\n");
+    let (stdout, nonce, trace) = host.run(&[("FALLBACK", "busybox"), ("MOUNTS", &mounts)]);
+    let s = parse(stdout.as_bytes(), &nonce).unwrap();
+    assert_eq!(s.local.unwrap().iter().map(row).collect::<Vec<_>>(), [LOCAL_ROW, ("/dev/data", "/data", "xfs", 102400, 30720, 61440, 34)]);
+    assert_eq!(df_trace(&trace), ["df -l -P -T", "df -l -P", "df -P -T -t ext4", "df -P -T -t xfs", "timeout -s KILL 2 df -P -t nfs -t nfs4", "df -P -t nfs -t nfs4"]);
+    let (stdout, nonce, _) = host.run(&[("FALLBACK", "fail-second"), ("MOUNTS", &mounts)]);
+    assert!(parse(stdout.as_bytes(), &nonce).unwrap().local.is_err());
+    assert!(!stdout.contains("/dev/data xfs 100") && !stdout.contains(LOCAL.lines().nth(1).unwrap()));
+    let stacked = format!("{MOUNTS}server:/root / nfs4 rw 0 0\n");
+    let (stdout, nonce, trace) = host.run(&[("FALLBACK", "busybox"), ("MOUNTS", &stacked)]);
+    assert!(parse(stdout.as_bytes(), &nonce).unwrap().local.is_err());
+    assert_eq!(df_trace(&trace), ["df -l -P -T", "df -l -P", "timeout -s KILL 2 df -P -t nfs -t nfs4", "df -P -t nfs -t nfs4"]);
     let (stdout, nonce, trace) = host.run(&[("FALLBACK", "unsupported")]);
     let s = parse(stdout.as_bytes(), &nonce).unwrap();
     assert!(s.local.is_err());
     assert_eq!(s.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
-    assert_eq!(df_trace(&trace), ["df -l -P -T", "df -l -P", "timeout -s KILL 2 df -P -t nfs -t nfs4", "df -P -t nfs -t nfs4"]);
+    assert_eq!(df_trace(&trace), ["df -l -P -T", "df -l -P", "df -P -T -t ext4", "timeout -s KILL 2 df -P -t nfs -t nfs4", "df -P -t nfs -t nfs4"]);
+}
+
+#[test]
+fn who_requires_login_records_only_when_empty() {
+    let host = Host::new();
+    for (utmp, body, expected) in [
+        ("no", "", Err("Login records unavailable")),
+        ("yes", "", Ok(0)),
+        ("no", "alice pts/0\n", Ok(1)),
+    ] {
+        let (stdout, nonce, _) = host.run(&[("FAKE_UTMP", utmp), ("WHO_ROWS", body)]);
+        let sample = parse(stdout.as_bytes(), &nonce).unwrap();
+        assert_eq!(sample.section("who").unwrap().rows().map(|rows| rows.len()), expected);
+    }
 }
 
 fn df_trace(trace: &[String]) -> Vec<&str> {

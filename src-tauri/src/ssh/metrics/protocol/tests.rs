@@ -70,10 +70,26 @@ fn capture(label: &str, bytes: &'static str) -> RawSample<'static> {
 
 // Orchestrator: fill these literal oracles from independently inspected captures,
 // never by running this parser to generate expected values.
-const UBUNTU_FIELDS: Option<[&str; 7]> = None;
+const UBUNTU_FIELDS: Option<[&str; 7]> = Some([
+    "tf-metrics-ubuntu",
+    "x86_64",
+    "Ubuntu 24.04",
+    "cpu  72525712 139 12419141 1658499522 8448405 0 7167439 0 1085468 0",
+    "MemTotal:       49327760 kB",
+    "732604.51 16584995.26",
+    "3.98 3.72 3.35 1/3221 2139206",
+]);
 const ALPINE_MEM_TOTAL: Option<&str> = None;
-const NFS_LOCAL_IDENTITIES: &[(&str, &str, &str)] = &[];
-const NFS_REMOTE_IDENTITIES: &[(&str, &str, &str)] = &[];
+// nfs.txt is DERIVED, NOT CAPTURED (leader ruling D55): the real Ubuntu envelope
+// with a modeled mount table; see fixtures/README.md.
+const NFS_LOCAL_IDENTITIES: &[(&str, &str, &str)] = &[
+    ("/dev/sda1", "/", "ext4"),
+    ("/dev/sdb1", "/data disk", "xfs"),
+];
+const NFS_REMOTE_IDENTITIES: &[(&str, &str, &str)] = &[
+    ("nas.example:/export/home", "/mnt/home", "nfs4"),
+    ("nas.example:/export/old", "/mnt/old", "nfs"),
+];
 
 #[test]
 fn ubuntu_capture_preserves_all_sections_and_statuses() {
@@ -92,7 +108,10 @@ fn ubuntu_capture_preserves_all_sections_and_statuses() {
         s.section("uptime").unwrap().rows().unwrap()[0],
         s.section("loadavg").unwrap().rows().unwrap()[0],
     ], expected);
-    assert!(!s.local.unwrap().is_empty());
+    let local = s.local.unwrap();
+    assert!(!local.is_empty());
+    assert_eq!(local.iter().map(|m| (m.source.as_str(), m.mount_point.as_str(), m.fs_type.as_str())).collect::<Vec<_>>(),
+        [("/dev/sdd", "/", "ext4"), ("/dev/sde", "/srv/runner-data", "ext4")]);
     assert!(s.nfs.unwrap().is_empty());
 }
 
@@ -132,7 +151,7 @@ fn nfs_capture_separates_nfs4_and_local_not_tmpfs_or_cifs() {
     let local = s.local.unwrap();
     assert_eq!(local.iter().map(row).collect::<Vec<_>>(), [LOCAL_ROW, ("/dev/data", "/data with spaces", "xfs", 20480, 10240, 10240, 50)]);
     assert_eq!(row(&s.nfs.unwrap()[0]), NFS_ROW);
-    assert_eq!(fs_kind("exotic"), Fs::Unknown);
+    assert_eq!(fs_kind("exotic", "/"), Fs::Unknown);
     let ambiguous = extra.replace(" tmpfs ", " exotic ");
     assert_eq!(parsed(&linux(&[("dfLocal", &ambiguous, 0)])).local, Err(BAD_TYPE));
 }
@@ -215,10 +234,37 @@ fn ambiguous_mount_type_never_claimed_local() {
     for inventory in ["", "/dev/vda / mystery rw 0 0\n", "/dev/vda / ext4 rw 0 0\n/dev/vda / cifs rw 0 0\n"] {
         assert_eq!(parsed(&linux(&[("dfLocal", fallback, 0), ("mounts", inventory, 0)])).local, Err(BAD_TYPE));
     }
+    let stacked = "/dev/vda / ext4 rw 0 0\n/dev/vda / ext4 rw 0 0\n";
+    assert_eq!(parsed(&linux(&[("dfLocal", fallback, 0), ("mounts", stacked, 0)]))
+        .local.unwrap().iter().map(row).collect::<Vec<_>>(), [LOCAL_ROW]);
     let recovered = linux(&[("dfLocal", fallback, 0)]);
     let s = parsed(&recovered);
     assert_eq!(s.local.unwrap().iter().map(row).collect::<Vec<_>>(), [LOCAL_ROW]);
     assert_eq!(s.nfs.unwrap().iter().map(row).collect::<Vec<_>>(), [NFS_ROW]);
+}
+
+#[test]
+fn collector_local_type_census_matches_parser() {
+    let list = include_str!("../collect.sh").lines()
+        .find_map(|line| line.trim().strip_prefix("local_types='")?.strip_suffix('\''))
+        .expect("collector local type list");
+    assert_eq!(list.split_ascii_whitespace().collect::<Vec<_>>(), LOCAL_TYPES);
+    assert!(LOCAL_TYPES.iter().all(|ty| fs_kind(ty, "/") == Fs::Local));
+}
+
+#[test]
+fn real_host_filesystem_policy() {
+    for (ty, point, expected) in [
+        ("overlay", "/", Ok(1)), ("overlay", "/other", Ok(0)),
+        ("rootfs", "/", Ok(0)), ("fuse", "/", Ok(0)),
+        ("fuse.anything", "/", Ok(0)), ("fuse.sshfs", "/", Ok(0)),
+        ("fuseblk", "/", Ok(1)), ("squashfs", "/", Ok(0)),
+        ("erofs", "/", Ok(0)), ("iso9660", "/", Ok(0)),
+        ("mystery", "/", Err(BAD_TYPE)),
+    ] {
+        let body = format!("Filesystem Type 1K-blocks Used Available Use% Mounted on\ndisk {ty} 100 30 60 34% {point}\n");
+        assert_eq!(parsed(&linux(&[("dfLocal", &body, 0)])).local.map(|rows| rows.len()), expected, "{ty} {point}");
+    }
 }
 
 #[test]

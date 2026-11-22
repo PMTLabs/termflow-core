@@ -13,6 +13,51 @@ section() {
     section_end "$section_key" "$?"
 }
 
+local_df_by_type() {
+    # BusyBox 1.36 df filters by type before statvfs. Keep this list in
+    # sync with protocol.rs; the parser decides which overlay rows to keep.
+    local_types='ext2 ext3 ext4 xfs btrfs zfs overlay f2fs jfs reiserfs vfat exfat ntfs ntfs3 bcachefs udf fuseblk'
+    # A local record can be hidden by a different filesystem at the same
+    # path. Fail closed rather than let df stat the visible foreign mount.
+    types=$(awk -v local_types="$local_types" '
+        BEGIN { n = split(local_types, types, " ") }
+        NF != 6 || $2 !~ /^\// { invalid = 1; next }
+        {
+            if ($2 in mounted && mounted[$2] != $3) stacked[$2] = 1
+            mounted[$2] = $3
+            present[$3] = 1
+            if (index(" " local_types " ", " " $3 " ")) local_path[$2] = 1
+        }
+        END {
+            for (point in stacked) if (point in local_path) invalid = 1
+            if (invalid) exit 1
+            for (i = 1; i <= n; i++) if (types[i] in present) print types[i]
+        }
+    ' <<EOF
+$inventory
+EOF
+    ) || return "$?"
+    unset POSIXLY_CORRECT
+    header=
+    for fs_type in $types; do
+        output=$(df -P -T -t "$fs_type") || return "$?"
+        current_header=${output%%"$newline"*}
+        case "$current_header" in Filesystem*) ;; *) return 1 ;; esac
+        if [ -z "$header" ]; then
+            header=$current_header
+            printf '%s\n' "$header"
+        elif [ "$header" != "$current_header" ]; then
+            return 1
+        fi
+        case "$output" in *"$newline"*) printf '%s\n' "${output#*"$newline"}" ;; esac
+    done
+    if [ -z "$header" ]; then
+        printf 'Filesystem Type 1024-blocks Used Available Capacity Mounted on\n'
+    fi
+}
+
+newline='
+'
 printf '%sV1_BEGIN__\n' "$prefix"
 platform=$(uname -s)
 status=$?
@@ -30,7 +75,15 @@ if [ "$status" -eq 0 ] && [ "$platform" = Linux ]; then
     section cpuinfo cat /proc/cpuinfo
     section nproc nproc
     section loadavg cat /proc/loadavg
-    section who who
+    who_rows=$(who)
+    who_status=$?
+    if [ "$who_status" -eq 0 ] && [ -z "$who_rows" ] &&
+       ! test -e /var/run/utmp && ! test -e /run/utmp; then
+        who_status=123
+    fi
+    section_begin who
+    printf '%s' "$who_rows"
+    section_end who "$who_status"
     section osRelease cat /etc/os-release
 
     # Keep the inventory and the presence check tied to the same proc read.
@@ -53,8 +106,12 @@ EOF
         local_df=$(df -l -P)
         local_status=$?
     fi
+    if [ "$local_status" -ne 0 ] && [ "$inventory_status" -eq 0 ]; then
+        local_df=$(local_df_by_type)
+        local_status=$?
+    fi
     section_begin dfLocal
-    printf '%s' "$local_df"
+    if [ "$local_status" -eq 0 ]; then printf '%s' "$local_df"; fi
     section_end dfLocal "$local_status"
 
     section_begin dfNfs
