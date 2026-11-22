@@ -114,7 +114,7 @@ impl StreamFactory for Streams {
     }
 }
 
-struct Rig {
+struct WatchRig {
     f: Fixture,
     keys: HostKeys,
     registry: Arc<WatchRegistry>,
@@ -127,7 +127,7 @@ fn connection(leaf: &str) -> &'static str {
     match leaf { A => "c-a", B => "c-b", C => "c-c", _ => panic!("unexpected leaf: {leaf}") }
 }
 
-impl Rig {
+impl WatchRig {
     fn new() -> Self {
         let (sa, a) = server("fixture-a");
         let (sb, b) = server("fixture-b");
@@ -186,12 +186,12 @@ impl Rig {
 
 struct Page { label: &'static str, wi: u64, pg: u64, seq: u64, pane_seq: u64 }
 impl Page {
-    fn new(rig: &Rig, label: &'static str) -> Self {
+    fn new(rig: &WatchRig, label: &'static str) -> Self {
         rig.keys.reserve_window(label).unwrap().commit().unwrap();
         rig.windows.set(label, Some(true), Some(false), false);
         Self::register(rig, label)
     }
-    fn register(rig: &Rig, label: &'static str) -> Self {
+    fn register(rig: &WatchRig, label: &'static str) -> Self {
         let crate::state::PageRegistration::Registered { wi, pg } = rig.keys.register_page(label).unwrap() else { panic!("page") };
         Self { label, wi, pg, seq: 1, pane_seq: 1 }
     }
@@ -200,7 +200,7 @@ impl Page {
         self.pane_seq += 1;
         json!({"pi":{"pg":self.pg,"seq":seq},"paneId":format!("pane-{leaf}-{seq}"),"leaf":leaf,"restore":false})
     }
-    fn op(&mut self, rig: &Rig, op: Value) -> PaneResult {
+    fn op(&mut self, rig: &WatchRig, op: Value) -> PaneResult {
         let request = serde_json::from_value(json!({"pg":self.pg,"seq":self.seq,"op":op})).unwrap();
         let (reply, effects) = rig.keys.pane_op(self.label, request).unwrap();
         self.seq += 1;
@@ -209,17 +209,17 @@ impl Page {
         let PaneReply::Ack { result } = reply else { panic!("expected page ack") };
         result
     }
-    fn enter(&mut self, rig: &Rig, leaf: &str) -> Value {
+    fn enter(&mut self, rig: &WatchRig, leaf: &str) -> Value {
         let entry = self.entry(leaf);
         assert_eq!(self.op(rig, json!({"kind":"enter","panes":[entry]})), PaneResult::Ok);
         entry
     }
-    fn install_restored(&mut self, rig: &Rig, leaf: &str) -> Value {
+    fn install_restored(&mut self, rig: &WatchRig, leaf: &str) -> Value {
         let pane = self.enter(rig, leaf);
         assert!(matches!(self.op(rig, json!({"kind":"admit_create","mode":"Mount","pi":pane["pi"]})), PaneResult::Existing { .. }));
         pane
     }
-    fn destroy(&self, rig: &Rig) {
+    fn destroy(&self, rig: &WatchRig) {
         rig.keys.destroy_window(self.label, self.wi);
         rig.reconcile();
     }
@@ -234,7 +234,7 @@ async fn until(mut check: impl FnMut() -> bool) {
 
 type SlotSnapshot = (Option<u64>, bool, HashSet<(String, u64, u64, Uuid)>, bool);
 type Slots = HashMap<String, SlotSnapshot>;
-fn snapshot(rig: &Rig) -> Slots {
+fn snapshot(rig: &WatchRig) -> Slots {
     let slots = rig.registry.slots.lock().clone();
     slots.into_iter().filter_map(|(leaf, entry)| {
         let slot = entry.lock();
@@ -247,7 +247,7 @@ fn expected(leaf: &str, generation: u64, eligible: bool, owners: &[(&Page, Uuid)
     -> (String, SlotSnapshot) {
     (leaf.into(), (Some(generation), eligible, owners.iter().map(|(page, id)| (page.label.into(), page.wi, page.pg, *id)).collect(), in_flight))
 }
-fn sessions(rig: &Rig, leaves: &[&str]) {
+fn sessions(rig: &WatchRig, leaves: &[&str]) {
     assert_eq!(rig.f.registry.owner_map(), leaves.iter().map(|leaf| (
         (*leaf).to_owned(), (connection(leaf).to_owned(), SessionState::Connected)
     )).collect::<HashMap<_, _>>());
@@ -255,7 +255,7 @@ fn sessions(rig: &Rig, leaves: &[&str]) {
 
 #[tokio::test]
 async fn watch_registers_exact_terminal_consumer_and_returns_floor() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut page = Page::new(&rig, "owner");
     let (pane, generation) = rig.connected(&mut page, A).await;
     let id = Uuid::new_v4();
@@ -275,7 +275,7 @@ async fn watch_registers_exact_terminal_consumer_and_returns_floor() {
 
 #[tokio::test]
 async fn two_consumers_one_terminal_have_one_exec_worker() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut left = Page::new(&rig, "left");
     let mut right = Page::new(&rig, "right");
     let (_, ga) = rig.connected(&mut left, A).await;
@@ -305,7 +305,7 @@ async fn two_consumers_one_terminal_have_one_exec_worker() {
 
 #[tokio::test]
 async fn hidden_or_minimized_owner_exec_count_stops_visible_unfocused_continues() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut a = Page::new(&rig, "a");
     let mut b = Page::new(&rig, "b");
     rig.connected(&mut a, A).await;
@@ -333,7 +333,7 @@ async fn hidden_or_minimized_owner_exec_count_stops_visible_unfocused_continues(
 
 #[tokio::test]
 async fn second_visible_owner_keeps_only_its_terminal_sampling() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut a = Page::new(&rig, "a");
     let mut b = Page::new(&rig, "b");
     let (_, ga) = rig.connected(&mut a, A).await;
@@ -355,7 +355,7 @@ async fn second_visible_owner_keeps_only_its_terminal_sampling() {
 
 #[tokio::test]
 async fn destroyed_window_and_last_unwatch_remove_exact_owners() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut left = Page::new(&rig, "left");
     let mut right = Page::new(&rig, "right");
     rig.connected(&mut left, A).await;
@@ -387,7 +387,7 @@ async fn destroyed_window_and_last_unwatch_remove_exact_owners() {
 
 #[tokio::test]
 async fn old_consumer_cleanup_cannot_kill_replacement() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut page = Page::new(&rig, "owner");
     let (_, generation) = rig.connected(&mut page, A).await;
     let (old, new) = (Uuid::new_v4(), Uuid::new_v4());

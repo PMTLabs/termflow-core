@@ -1,12 +1,12 @@
 use super::*;
 
-fn stash(from: &mut Page, rig: &Rig, pane: &Value, tx: &str) {
+fn stash(from: &mut Page, rig: &WatchRig, pane: &Value, tx: &str) {
     assert_eq!(from.op(rig, json!({"kind":"stash","tx":tx,"pairs":[pane]})), PaneResult::Ok);
 }
-fn take(into: &mut Page, rig: &Rig, tx: &str) {
+fn take(into: &mut Page, rig: &WatchRig, tx: &str) {
     assert!(matches!(into.op(rig, json!({"kind":"take","tx":tx})), PaneResult::Taken { .. }));
 }
-fn adopt(into: &mut Page, rig: &Rig, tx: &str, leaf: &str) -> Value {
+fn adopt(into: &mut Page, rig: &WatchRig, tx: &str, leaf: &str) -> Value {
     let entry = into.entry(leaf);
     assert_eq!(into.op(rig, json!({"kind":"adopt","tx":tx,"pairs":[entry]})), PaneResult::Ok);
     entry
@@ -14,7 +14,7 @@ fn adopt(into: &mut Page, rig: &Rig, tx: &str, leaf: &str) -> Value {
 
 #[tokio::test]
 async fn reconnect_and_transfer_preserve_exact_session_map() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut left = Page::new(&rig, "left");
     let mut right = Page::new(&rig, "right");
     let (pane, ga) = rig.connected(&mut left, A).await;
@@ -66,7 +66,7 @@ async fn reconnect_and_transfer_preserve_exact_session_map() {
 
 #[tokio::test]
 async fn exact_metrics_registry_matches_authority() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut left = Page::new(&rig, "left");
     let mut right = Page::new(&rig, "right");
     let (pane_a, ga) = rig.connected(&mut left, A).await;
@@ -132,7 +132,7 @@ async fn exact_metrics_registry_matches_authority() {
 #[tokio::test]
 async fn hide_unwatch_and_page_retirement_drain_before_discarding_telemetry() {
     for action in ["hide", "unwatch", "replace"] {
-        let rig = Rig::new();
+        let rig = WatchRig::new();
         let mut page = Page::new(&rig, "window");
         let (_, generation) = rig.connected(&mut page, A).await;
         let id = Uuid::new_v4();
@@ -180,7 +180,7 @@ async fn hide_unwatch_and_page_retirement_drain_before_discarding_telemetry() {
 #[tokio::test]
 async fn hide_unwatch_and_page_retirement_during_timeout_keep_ordered_pause() {
     for action in ["hide", "unwatch", "replace"] {
-        let rig = Rig::new();
+        let rig = WatchRig::new();
         let mut page = Page::new(&rig, "window");
         let (_, generation) = rig.connected(&mut page, A).await;
         let old_id = Uuid::new_v4();
@@ -225,7 +225,7 @@ async fn hide_unwatch_and_page_retirement_during_timeout_keep_ordered_pause() {
 
 #[tokio::test]
 async fn retired_native_incarnation_cannot_reclaim_moved_terminal() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut old = Page::new(&rig, "reused-label");
     let mut target = Page::new(&rig, "target");
     let (pane, ga) = rig.connected(&mut old, A).await;
@@ -256,7 +256,7 @@ async fn retired_native_incarnation_cannot_reclaim_moved_terminal() {
 
 #[tokio::test]
 async fn sync_watch_starts_worker_from_std_thread_without_runtime() {
-    let rig = Rig::new();
+    let rig = WatchRig::new();
     let mut page = Page::new(&rig, "sync-window");
     rig.connected(&mut page, A).await;
     let registry = rig.registry.clone();
