@@ -364,9 +364,8 @@
      content box) keeps exactly the pane's measured box: no fit change on entry. */
   box-sizing: border-box;
   padding-top: 36px;
-  /* Bounds the prompt overlay (`.ssh-launch-overlay`, `max-height` in cqh) to this slot, as 066's
-     `.canvas-surface:has(> .ssh-launch-notice)` does for a plain node. */
-  container-type: size;
+  /* No `container-type` here: containment could make this wrapper a stacking context and trap the
+     notice's z6 under the shell's chrome row (z5). The overlay is bounded from the envelope below. */
 }
 /* D51: 066's launch notice (strip, prompts, Retry/Reconnect) is portalled to the surface host's
    parent, which in an SSH node is this wrapper, not a `.canvas-surface` (T2 moved that class to
@@ -378,6 +377,13 @@
   position: absolute;
   z-index: 6;
   inset: 0 0 auto;
+}
+/* 066 bounds the overlay with `cqh` of a size container that an SSH node slot does not have (see
+   above). Here the terminal below the strip is the envelope height (`--node-host-h`, from
+   CanvasNode) minus the status row (25px) and the strip (36px), `canvasSshGeometry.ts`. Same 65%
+   cap as 066; the overlay never runs past the slot. */
+.canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice > .ssh-launch-overlay {
+  max-height: calc((var(--node-host-h) - 25px - 36px) * 0.65);
 }
 
 /* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are
