@@ -209,3 +209,38 @@ test.each([8, 7])('exec_inflight_disconnect_reconnect_flow_never_resurrects_snap
   expect(reading('netUp')).toBe('Network upload: 30B/s');
   expect(reading('netDown')).toBe('Network download: 15B/s');
 });
+
+test('page_hide_is_a_pause_not_a_delay_and_restore_shows_a_fresh_baseline', async () => {
+  jest.useFakeTimers({ doNotFake: ['performance', 'Date'] });
+  try {
+    const [baseline, rates] = snapshots();
+    const store = await setup();
+    const status = () => host.querySelector('.ssh-metrics-state')!.textContent;
+    // Step the heartbeat like real time; one big jump would look like a suspension.
+    const run = async (ms: number) => {
+      for (let left = ms; left > 0; left -= 50) await act(async () => { advance(50); jest.advanceTimersByTime(50); });
+    };
+    await run(50);
+    await act(async () => { publish({ ...baseline, sampledAt: wall - 10 }); });
+    await run(2000);
+    await act(async () => { publish({ ...rates, sampledAt: wall - 10 }); });
+    expect(status()).toContain('Connected');
+    const hidden = jest.spyOn(document, 'hidden', 'get').mockReturnValue(true);
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(selectSshMetricsSample(store.getState().sshSession, terminalId)).toBeUndefined();
+    expect(store.getState().sshSession.byTerminal[terminalId].metricsDelayed).toBeUndefined();
+    expect(status()).not.toContain('Metrics delayed');
+    await run(15_000);
+    expect(status()).not.toContain('Metrics delayed');
+    hidden.mockReturnValue(false);
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    // The first visible frame after a restore is a fresh baseline, never a stale "delayed".
+    expect(status()).toContain('Collecting first sample');
+    expect(host.querySelector('.ssh-metrics-status-bar')!.textContent).not.toContain('Metrics delayed');
+    await run(100);
+    await act(async () => { publish({ ...baseline, sampledAt: wall - 10 }); });
+    expect(status()).toContain('Connected');
+  } finally {
+    jest.useRealTimers();
+  }
+});

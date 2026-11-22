@@ -69,6 +69,14 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
     if (pane?.session?.state !== 'connected' || pane.session.generation !== action.payload.generation) return;
     pane.metrics = action.payload.metrics; pane.files = action.payload.files;
   },
+  /** A page hide is a deliberate pause, not a late sample: clear values without "delayed". */
+  sshMetricsHidden(state, { payload: id }: PayloadAction<string>) {
+    const pane = state.byTerminal[id];
+    if (pane) {
+      disarmMetrics(pane);
+      delete pane.metricsDelayed;
+    }
+  },
   sshMetricsDisarmed(state, { payload: id }: PayloadAction<string>) {
     const pane = state.byTerminal[id];
     if (pane) {
@@ -132,7 +140,7 @@ const slice = createSlice({ name: 'sshSession', initialState, reducers: {
     }
   },
 } });
-export const { sshOwnersChanged, sshAttachmentResolved, sshSessionObserved, sshLiveData, sshMetricsDisarmed, sshMetricsUnavailable,
+export const { sshOwnersChanged, sshAttachmentResolved, sshSessionObserved, sshLiveData, sshMetricsDisarmed, sshMetricsHidden, sshMetricsUnavailable,
   sshMetricsControlled, sshMetricsArmed, sshMetricsSampled, sshMetricsExpired } = slice.actions;
 
 /** Pass a current clock at action time (Copy), not a snapshot captured by a render. */

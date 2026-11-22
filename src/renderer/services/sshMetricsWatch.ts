@@ -3,11 +3,11 @@ import type { SshMetricsAPI, SshMetricsControl, SshMetricsSample, SshSessionView
 import { paneIncarnations, type PaneIncarnations } from './paneIncarnations';
 import {
   compareMetricsControl, metricsClockChanged, SSH_METRICS_MAX_AGE, SSH_METRICS_CLOCK_SKEW,
-  sshMetricsArmed, sshMetricsControlled, sshMetricsDisarmed, sshMetricsExpired, sshMetricsSampled, sshMetricsUnavailable,
+  sshMetricsArmed, sshMetricsControlled, sshMetricsDisarmed, sshMetricsExpired, sshMetricsHidden, sshMetricsSampled, sshMetricsUnavailable,
   type MetricsClock, type SshSessionsState,
 } from '../store/slices/sshSessionSlice';
 
-type MetricsAction = ReturnType<typeof sshMetricsArmed | typeof sshMetricsControlled | typeof sshMetricsDisarmed
+type MetricsAction = ReturnType<typeof sshMetricsArmed | typeof sshMetricsControlled | typeof sshMetricsDisarmed | typeof sshMetricsHidden
   | typeof sshMetricsExpired | typeof sshMetricsSampled | typeof sshMetricsUnavailable>;
 interface MetricsStore {
   getState(): { sshSession: SshSessionsState };
@@ -124,10 +124,10 @@ class MetricsWatch {
     this.updateTimer();
   };
 
-  private invalidate(mount: Mount, renew: boolean) {
+  private invalidate(mount: Mount, renew: boolean, hidden = false) {
     mount.epoch++;
     mount.needsFence = renew;
-    this.store.dispatch(sshMetricsDisarmed(mount.terminalId));
+    this.store.dispatch((hidden ? sshMetricsHidden : sshMetricsDisarmed)(mount.terminalId));
   }
 
   private kick(mount: Mount) {
@@ -240,7 +240,8 @@ class MetricsWatch {
     if (this.disposed) return;
     for (const mount of this.mounts.values()) {
       if (!mount.connected) continue;
-      this.invalidate(mount, true);
+      // Suspension and system resume really are late; a page going hidden is a pause.
+      this.invalidate(mount, true, document.hidden);
       this.kick(mount);
     }
   };
