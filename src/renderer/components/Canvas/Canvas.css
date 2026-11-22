@@ -342,6 +342,58 @@
 .canvas-node[data-lod="chip"] .canvas-surface,
 .canvas-node[data-lod="group"] .canvas-surface { visibility: hidden; content-visibility: hidden; }
 
+/* ---- SSH nodes (plan 070 §4.1 A-C) ---------------------------------------
+   An SSH node's `.canvas-surface` is the frozen CONTENT ENVELOPE — browser column, terminal slot
+   and status row — sized by `--node-host-w/h` (the envelope, from `CanvasNode`) and carrying the
+   raster-zoom cancellation above, so the browser and bar get the same `R * 1/R = 1` layout zoom
+   and `s * z` screen scale as the terminal. They are content, not counter-scaled chrome.
+   The registered host is the inner `.terminal-display`, sized by the shell's remainder: never a
+   percentage of the node body (which collapses at the chip tier). */
+.canvas-ssh-surface > .ssh-pane-shell { box-sizing: border-box; width: 100%; height: 100%; }
+.canvas-ssh-surface .ssh-terminal-host > .terminal-display-wrapper {
+  flex: 1 1 0;
+  width: auto;
+  height: auto;
+  min-width: 0;
+  min-height: 0;
+  /* The containing block for 066's launch notice below; no z-index, so no stacking context. */
+  position: relative;
+  /* The launch strip's row, reserved whether or not a notice is showing. In a pane the strip sits
+     above the SSH shell; here it sits inside the slot, so the envelope adds the same row
+     (`SSH_CSS_LAUNCH_STRIP_H`, `canvasSshGeometry.ts`) and `.terminal-display` (height 100% of the
+     content box) keeps exactly the pane's measured box: no fit change on entry. */
+  box-sizing: border-box;
+  padding-top: 36px;
+  /* No `container-type` here: containment could make this wrapper a stacking context and trap the
+     notice's z6 under the shell's chrome row (z5). The overlay is bounded from the envelope below. */
+}
+/* D51: 066's launch notice (strip, prompts, Retry/Reconnect) is portalled to the surface host's
+   parent, which in an SSH node is this wrapper, not a `.canvas-surface` (T2 moved that class to
+   the envelope), so 066's own rules for `.canvas-surface > .ssh-launch-notice` do not apply here.
+   The strip fills the reserved row; its prompt overlay (z7 inside this stacking context) drops over
+   the terminal below without resizing it. The notice sits above the shell's chrome row (5), the
+   status row and the slot snapshot. */
+.canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice {
+  position: absolute;
+  z-index: 6;
+  inset: 0 0 auto;
+}
+/* 066 bounds the overlay with `cqh` of a size container that an SSH node slot does not have (see
+   above). Here the terminal below the strip is the envelope height (`--node-host-h`, from
+   CanvasNode) minus the status row (26px), the shell's chrome row (36px) and the strip (36px),
+   `canvasSshGeometry.ts`. Same 65%
+   cap as 066; the overlay never runs past the slot. */
+.canvas-ssh-surface .terminal-display-wrapper > .ssh-launch-notice > .ssh-launch-overlay {
+  max-height: calc((var(--node-host-h) - 26px - 36px - 36px) * 0.65);
+}
+
+/* Snapshot tier: the browser and the status row stay visible; only the live terminal pixels are
+   hidden, under the snapshot drawn INSIDE the terminal slot. `inherit`, never `visible`, so a
+   culled or collapsed node (hidden on `.canvas-node` itself) still hides everything. */
+.canvas-node[data-lod="snapshot"] .canvas-surface.canvas-ssh-surface { visibility: inherit; content-visibility: visible; }
+.canvas-node[data-lod="snapshot"] .canvas-ssh-surface .terminal-display { visibility: hidden; content-visibility: hidden; }
+/* Chip and group tiers keep the rule above: the whole SSH surface is hidden, never removed. */
+
 /* Chip tier: the head fills the node and the body collapses to nothing — collapsed,
    not removed, so the terminal host inside it keeps a resolvable layout box. */
 .canvas-node[data-lod="chip"] .canvas-node-head { height: 100%; border-bottom: 0; border-radius: var(--node-radius); cursor: zoom-in; }

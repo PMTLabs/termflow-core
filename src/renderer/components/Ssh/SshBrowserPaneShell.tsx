@@ -29,7 +29,7 @@ export function SshBrowserPaneShell({ terminalId, sshTag, surfaceActive, onPatch
     onEditOpen?.(result);
   };
   const browserProps = { terminalId, sshTag, surfaceActive, onPatchTag, onEntryContextMenu };
-  return <SshPaneShell {...shell} editOpenResult={opened?.terminalId === terminalId ? opened.result : shell.editOpenResult}
+  return <SshPaneShell {...shell} surfaceActive={surfaceActive} editOpenResult={opened?.terminalId === terminalId ? opened.result : shell.editOpenResult}
     browserCollapsed={sshTag.browserCollapsed} browserHandlesOffline={browserController !== null}
     launchDisconnected={launchDisconnected}
     onBrowserCollapsedChange={browserCollapsed => onPatchTag({ browserCollapsed })}

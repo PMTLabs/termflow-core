@@ -41,7 +41,7 @@ test('SshPaneShell disconnected_never_renders_live_slots; terminal DOM identity 
   const props = { terminal: <div className="terminal-pane-content" data-terminal="stable" />, browser: <button>Live file</button>, status: <span>Live metrics</span>, browserCollapsed: false, onBrowserCollapsedChange: jest.fn(), onSecret: jest.fn(async () => {}), onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
   act(() => root.render(<SshPaneShell {...props} view={view('connected')} />)); const terminal = container.querySelector('[data-terminal]'); expect(container.textContent).toContain('Live file');
   act(() => root.render(<SshPaneShell {...props} view={view('disconnected')} />)); expect(container.querySelector('[data-terminal]')).toBe(terminal);
-  expect(container.textContent).not.toContain('Live file'); expect(container.textContent).not.toContain('Live metrics'); expect(container.querySelector('.ssh-status')!.textContent).toBe('—');
+  expect(container.textContent).not.toContain('Live file'); expect(container.textContent).toContain('Live metrics'); expect(container.querySelector('.ssh-status-text')!.textContent).toBe('—');
 });
 test('inline prompts do not steal or restore sibling focus and refusals render once', () => {
   const sibling = document.createElement('button'); document.body.append(sibling); sibling.focus();
@@ -220,4 +220,34 @@ test('Test dialog and prompt pick copy from errorCode, never from the reason tex
   expect(container.querySelector('[role=status]')?.textContent).toBe(odd);
   act(() => root.render(<SshSecretPrompt view={prompt(undefined)} onSubmit={jest.fn(async () => {})} onCancel={jest.fn()} />));
   expect(container.querySelector('[role=status]')).toBeNull(); expect(container.textContent).toContain(odd);
+});
+test('SshPaneShell inactiveSurface_closesChromePopover_withoutTakingFocusOrEscape (068 F5 x P068-7)', () => {
+  // The tab switch into Canvas commits before Canvas takes the host: `interactive` is still true but
+  // the surface is inactive. An open notice popover must close without moving focus, and its
+  // document Escape/click listeners must not act on the now-hidden pane.
+  const props = { terminal: <div className="terminal-pane-content" />, browser: <span />, status: <span />, browserCollapsed: false, onBrowserCollapsedChange: jest.fn(), onSecret: jest.fn(async () => {}), onTrust: jest.fn(async () => {}), onCancel: jest.fn() };
+  const connecting = { ...view('connecting'), terminalId: '' };
+  const outside = document.createElement('button'); document.body.append(outside);
+  try {
+    act(() => root.render(<SshPaneShell {...props} view={connecting} surfaceActive />));
+    const details = container.querySelector<HTMLButtonElement>('.ssh-pane-chrome button')!;
+    expect(details.textContent).toBe('Details');
+    act(() => details.click());
+    expect(container.querySelector('.ssh-pane-popover')).not.toBeNull();
+    outside.focus();
+    act(() => root.render(<SshPaneShell {...props} view={connecting} surfaceActive={false} />));
+    expect(container.querySelector('.ssh-pane-popover')).toBeNull();
+    expect(container.querySelector('.ssh-pane-shell')!.getAttribute('data-ssh-interaction-owner')).toBe('false');
+    expect(document.activeElement).toBe(outside);
+    const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    act(() => { outside.dispatchEvent(escape); });
+    expect(escape.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(outside);
+    // The row keeps its fixed height on the non-owning presentation: no notice, no Canvas markers.
+    const row = container.querySelector('.ssh-pane-chrome')!;
+    expect(row.hasAttribute('data-canvas-passthrough')).toBe(false);
+    expect(row.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
+    // The status row (069's focusable bar, D66) follows the same rule (review 349 F6).
+    expect(container.querySelector('.ssh-status')!.hasAttribute('data-ssh-keyboard-owner')).toBe(false);
+  } finally { outside.remove(); }
 });

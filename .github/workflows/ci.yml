@@ -40,6 +40,27 @@ jobs:
     - name: Unit tests
       run: npm test
 
+  ssh-canvas-layout:
+    name: SSH Canvas Layout (Chromium)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@v2
+
+    - name: Install dependencies
+      run: bun install --frozen-lockfile
+
+    - name: Build terminal-core
+      run: bun run build:terminal-core
+
+    - name: Install Playwright Chromium
+      run: bunx playwright install --with-deps chromium
+
+    - name: Test SSH Canvas layout
+      run: bun run test:ssh-canvas-layout
+
   build:
     name: Build
     needs: test

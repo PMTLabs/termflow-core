@@ -4,6 +4,7 @@ import { operationError, sshFileToast } from './sshFileFeedback';
 import type { FsError } from './sshFileTypes';
 import type { SshRowScope } from './useSshFileBrowser';
 import { staleTarget } from './useSshTargetStat';
+import { sshShellOwnsFocusRestore } from './SshFileDialog';
 
 export function SshDeleteDialog({ scope, recursive, onClose }: {
   scope: SshRowScope; recursive: boolean; onClose(): void;
@@ -38,7 +39,9 @@ export function SshDeleteDialog({ scope, recursive, onClose }: {
       busy.current = false; setPending(false);
     }
   };
+  // Same Canvas keyboard ownership and focus-restore veto as the other SSH dialogs (plan 070 T4).
   return <ConfirmDialog isOpen destructive title="Delete remote entry?" confirmText="Delete"
+    sshKeyboardOwner restoreFocusIf={sshShellOwnsFocusRestore}
     cancelText={done ? 'Close' : 'Cancel'}
     confirmDisabled={done || pending || !scope.isLive()} cancelDisabled={pending}
     onCancel={() => { if (!busy.current) onClose(); }} onConfirm={() => void confirm()}

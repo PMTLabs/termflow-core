@@ -91,8 +91,10 @@ function Browser(props: SshFileBrowserProps & { browser: SshBrowserController })
     : browser.creating ? 'Creating remote entry…'
     : !browser.live && browser.loading ? 'Waiting for the remote listing.' : undefined;
 
-  // Unmount dialog on loss of ownership; an old dialog must never reopen on reconnect.
-  const dialogVisible = browser.live && dialog?.path === browser.path;
+  // Unmount dialog on loss of ownership; an old dialog must never reopen on reconnect. `active` too:
+  // the one controller stays live across a pane→Canvas hand-over (070 grace), so liveness alone
+  // would leave the pane's Create dialog open over Canvas or over a hidden node.
+  const dialogVisible = active && browser.live && dialog?.path === browser.path;
   React.useLayoutEffect(() => {
     if (!dialogVisible) setDialog(undefined);
   }, [dialogVisible]);
@@ -149,7 +151,9 @@ function Browser(props: SshFileBrowserProps & { browser: SshBrowserController })
         }} />}
     </div>
     {active && menu && <div onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }}>
-      <ContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}
+      {/* Client coordinates, never scaled by Canvas zoom: the menu portals to <body>. The class is
+          the Canvas keyboard-owner marker (`canvasGestures.sshOwnsKeyboard`). */}
+      <ContextMenu x={menu.x} y={menu.y} className="ssh-keyboard-owner" onClose={() => setMenu(undefined)}
         items={sshFileMenu(menu.entry, !!menu.scope?.isLive(), action => run(action, menu))} />
     </div>}
     {active && rowDialog && (() => {

@@ -175,6 +175,116 @@ mod openssh {
         }
     }
 
+    #[tokio::test]
+    async fn ssh_target_terminal_and_session_use_same_resolved_hop() {
+        use crate::ssh::{
+            session::{AuthMethod, SessionHop, SessionTarget, TargetSource},
+            store::{ConnectionInput, Store},
+            store_adapter::StoreAdapter,
+            target,
+        };
+        use std::sync::Arc;
+
+        let temp = Temp::new("shared-resolver");
+        let store = Store::new(temp.0.join("connections.json"));
+        let jump = ConnectionInput {
+            id: None, folder_id: None, name: "Bastion".into(), host: "bastion.test".into(),
+            port: 2221, user: "relay".into(), auth: Auth::KeyFile,
+            identity_file: Some("~/relay key".into()), jump_connection_id: None,
+            extra_options: vec![], bookmarked: false,
+        };
+        let mut destination = ConnectionInput {
+            name: "Destination".into(), host: "destination.test".into(), port: 2207,
+            user: "deploy".into(), auth: Auth::Password, identity_file: None,
+            extra_options: vec![("serveraliveinterval".into(), "37".into())], ..jump.clone()
+        };
+        store.transact(|data| {
+            data.upsert_connection(jump)?;
+            destination.jump_connection_id = Some(data.connections[0].id.clone());
+            data.upsert_connection(destination)
+        }, |_| {}).unwrap();
+        let saved = store.snapshot().unwrap();
+        let jump_id = &saved.connections[0].id;
+        let target_id = &saved.connections[1].id;
+        let adapter = StoreAdapter::new(store, temp.0.clone(), Arc::new(|_| {}));
+        // Production resolve_launch runs target::resolve once and pairs the session
+        // projection with the very same definition that feeds terminal argv.
+        let (session, definition) = adapter.resolve_launch(target_id).await.unwrap();
+        let definition = definition.unwrap();
+        assert_eq!(session, SessionTarget { hops: vec![
+            SessionHop { connection_id: jump_id.clone(), host: "bastion.test".into(), port: 2221,
+                user: "relay".into(), auth: AuthMethod::Key, identity_file: Some("~/relay key".into()) },
+            SessionHop { connection_id: target_id.clone(), host: "destination.test".into(), port: 2207,
+                user: "deploy".into(), auth: AuthMethod::Password, identity_file: None },
+        ] });
+        let trust = KnownHostsPaths {
+            jump: Some("/receipts/bastion keys".into()), target: "/receipts/destination keys".into(),
+        };
+        let build = |target: &ResolvedTarget| build_launch_argv(target, &trust, "/fixed/ssh", &temp.0);
+        let plan = build(&definition.target).unwrap();
+        let home = temp.0.to_str().unwrap();
+        #[cfg(windows)]
+        let home = home.replace('\\', "/");
+        let identity = format!("IdentityFile=\"{}/relay key\"", home.replace('%', "%%").replace('\\', "\\\\").replace('"', "\\\""));
+        let expected_child = [
+            "/fixed/ssh", "-F", "none", "-o", "StrictHostKeyChecking=yes", "-o",
+            "UserKnownHostsFile=\"/receipts/bastion keys\"", "-o", "GlobalKnownHostsFile=none",
+            "-p", "2221", "-l", "relay", "-o", &identity, "-o", "IdentitiesOnly=yes", "-o",
+            "PreferredAuthentications=publickey", "-W", "destination.test:2207", "--", "bastion.test",
+        ];
+        let child = plan.proxy.as_ref().unwrap();
+        assert_eq!(child.as_slice(), expected_child);
+        // Render an actual isolated proxy command without locating or running a system SSH.
+        let proxy = native_proxy_command(child).unwrap();
+        let expected_proxy = format!(concat!(
+            r#""/fixed/ssh" "-F" "none" "-o" "StrictHostKeyChecking=yes" "-o" "UserKnownHostsFile=\"/receipts/bastion keys\"" "-o" "GlobalKnownHostsFile=none" "-p" "2221" "-l" "relay" "-o" "{}" "-o" "IdentitiesOnly=yes" "-o" "PreferredAuthentications=publickey" "-W" "destination.test:2207" "--" "bastion.test""#,
+        ), identity.replace('"', "\\\"").replace('%', "%%"));
+        let option = format!("ProxyCommand={expected_proxy}");
+        let expected_outer = [
+            "/fixed/ssh", "-F", "none", "-o", "StrictHostKeyChecking=yes", "-o",
+            "UserKnownHostsFile=\"/receipts/destination keys\"", "-o", "GlobalKnownHostsFile=none",
+            "-p", "2207", "-l", "deploy", "-o", "PreferredAuthentications=password", "-o",
+            "ServerAliveInterval=37", "-o", &option, "--", "destination.test",
+        ].map(str::to_owned);
+        assert_eq!(plan.render(Some(&proxy)), expected_outer);
+        #[cfg(unix)]
+        {
+            let root = HelperRoot::open_app_data(&temp.0).unwrap();
+            let launch = plan.publish(
+                &root, ProcessIdentity::capture(std::process::id()).unwrap(), ProxyRuntime::PosixOrFish,
+                |_| Ok("/private/runtime proxy".into()),
+            ).unwrap();
+            let mut expected_posix = expected_outer;
+            expected_posix[18] = "ProxyCommand=/bin/sh '/private/runtime proxy'".into();
+            assert_eq!(launch.argv(), expected_posix.as_slice());
+            let (helper, _) = launch.payload.as_ref().unwrap();
+            let identity = shell_literal(&identity);
+            let script = format!(concat!(
+                "exec '/fixed/ssh' '-F' 'none' '-o' 'StrictHostKeyChecking=yes' '-o' ",
+                "'UserKnownHostsFile=\"/receipts/bastion keys\"' '-o' 'GlobalKnownHostsFile=none' ",
+                "'-p' '2221' '-l' 'relay' '-o' {} '-o' 'IdentitiesOnly=yes' '-o' ",
+                "'PreferredAuthentications=publickey' '-W' 'destination.test:2207' '--' 'bastion.test'\n",
+            ), identity);
+            assert_eq!(fs::read_to_string(helper.path()).unwrap(), script);
+            launch.finish_after_quiescence().unwrap();
+        }
+
+        // Two distinct auth methods cannot both have identityFile in a valid store.
+        let mut invalid = saved.clone();
+        invalid.connections[1].identity_file = Some("~/different target key".into());
+        let err = target::resolve(&invalid, target_id).unwrap_err();
+        assert_eq!((err.field.as_deref(), err.code.as_str()), (Some("identityFile"), "not-applicable"));
+        for key in ["HostName", "Port", "ProxyCommand", "StrictHostKeyChecking", "UserKnownHostsFile",
+                    "LocalCommand", "PermitLocalCommand", "RemoteCommand"] {
+            let mut invalid = saved.clone();
+            invalid.connections[1].extra_options.push((key.into(), "override".into()));
+            assert_eq!(target::resolve(&invalid, target_id).unwrap_err().code, "option-not-allowed", "{key}");
+            let mut bypass = definition.target.clone();
+            bypass.extra_options.push((key.into(), "override".into()));
+            assert_eq!(build(&bypass).err().unwrap().code, "option-not-allowed", "{key}");
+        }
+    }
+
     async fn listen(server: Server) -> (u16, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();

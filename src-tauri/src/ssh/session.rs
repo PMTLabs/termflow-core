@@ -989,7 +989,9 @@ impl SessionRegistry {
         }
     }
     pub fn lease(&self, id: &str) -> Result<Arc<SshSession>, SessionError> {
-        let e = self.entry(id, false)?;
+        // Same as `lease_at`: a pane with no live entry (closed, retired) is not connected. NotFound
+        // would tell the user their SAVED connection was deleted, which is false here.
+        let e = self.entry(id, false).map_err(|_| SessionError::NotConnected)?;
         let s = e.inner.lock();
         if e.cancel.is_cancelled() || s.view.state != SessionState::Connected {
             return Err(SessionError::NotConnected);
@@ -1066,6 +1068,25 @@ impl SessionRegistry {
             state.view.generation,
             state.transport.as_ref().ok_or(SessionError::NotConnected)?,
         )
+    }
+
+    #[cfg(all(test, feature = "integration-tests", not(windows)))]
+    pub(super) fn integration_snapshot(
+        &self,
+        probe: bool,
+    ) -> HashMap<String, (String, SessionState, u64, Option<bool>)> {
+        let registry = self.inner.lock();
+        let entries = if probe { &registry.probes } else { &registry.panes };
+        entries.iter().map(|(id, entry)| {
+            let view = entry.view();
+            let finished = entry.task.lock().as_ref().map(|task| task.is_finished());
+            (id.clone(), (view.connection_id, view.state, view.generation, finished))
+        }).collect()
+    }
+
+    #[cfg(all(test, feature = "integration-tests", not(windows)))]
+    pub(super) fn integration_retired_tasks(&self) -> Vec<bool> {
+        self.retired.lock().iter().map(|task| task.is_finished()).collect()
     }
 
     pub fn owner_map(&self) -> HashMap<String, (String, SessionState)> {

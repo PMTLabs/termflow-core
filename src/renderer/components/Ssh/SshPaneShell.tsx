@@ -23,6 +23,10 @@ export interface SshPaneShellProps {
    *  this one stays laid out but renders no prompt, banner action or edit notice, so there is
    *  never a second visible or focusable challenge. Defaults to true. */
   interactive?: boolean;
+  /** False while this presentation's surface is not the visible, active one (its tab is in the
+   *  background, or Canvas is taking the terminal over). Its browser's menus and dialogs close
+   *  then, and a dialog closing that way must not pull focus back here (068 F5). Defaults to true. */
+  surfaceActive?: boolean;
   /** False where 066's `SshLaunchNotice` already renders this terminal's host-key and secret
    *  prompts and its Reconnect (the pane): the shell then shows no second copy of either, so a
    *  dropped session never offers two Reconnect buttons. Defaults to true. */
@@ -75,7 +79,8 @@ function SshPaneChrome({ interactive, summaries, children }: {
 
   // Always reserve this height, even before the initial snapshot and on the non-owning
   // presentation. Neither notice changes nor ownership transfers should trigger a fit.
-  return <div className="ssh-pane-chrome" ref={row} tabIndex={interactive ? -1 : undefined}>
+  return <div className="ssh-pane-chrome" ref={row} tabIndex={interactive ? -1 : undefined}
+    data-canvas-passthrough={interactive ? 'scroll' : undefined} data-ssh-keyboard-owner={interactive ? '' : undefined}>
     {interactive && hasItems && <span role="status" title={summaries[0]}>{summaries[0]}</span>}
     {interactive && (hasItems || open) && <button ref={invoker} type="button" className="au-btn"
       aria-label={summaries.length > 1 ? `SSH notice details (+${summaries.length - 1} more)` : "SSH notice details"} aria-haspopup="dialog" aria-expanded={open}
@@ -92,9 +97,16 @@ function SshPaneChrome({ interactive, summaries, children }: {
 
 export function SshPaneShell(props: SshPaneShellProps) {
   const { view } = props, connected = view.state === 'connected';
+  // Truthful failure (plan 070 §4.1 C): live data only while the app channel is connected AND the
+  // launch seam has not ended/blocked/cancelled/failed. Every other state dims the browser and
+  // shows "—", in the pane and on Canvas alike, because both render this one shell.
+  const live = connected && !props.launchDisconnected;
   const showDisconnected = (connected && props.launchDisconnected) || view.state === 'disconnected'
     || (view.state === 'error' && !view.hostKey?.changed);
   const interactive = props.interactive ?? true;
+  // Read by `sshShellOwnsFocusRestore`: the tab switch into Canvas commits BEFORE Canvas takes the
+  // host, so `interactive` alone is still true when the pane's dialog closes on deactivation.
+  const owner = interactive && (props.surfaceActive ?? true);
   const prompts = props.sessionPrompts ?? true;
   const browserStyle: React.CSSProperties | undefined = props.browserWidth === undefined ? undefined
     : { flex: `0 0 ${props.browserWidth}px`, width: props.browserWidth, maxWidth: 'none' };
@@ -107,29 +119,42 @@ export function SshPaneShell(props: SshPaneShellProps) {
     ? view.hostKey?.changed ? 'SSH host key refused' : 'Verify SSH host key'
     : disconnected ? 'SSH disconnected' : undefined;
   const status = view.state === 'connecting' ? 'Connecting…' : connected ? view.reason : undefined;
+  // The chrome follows `owner`, not `interactive`: an inactive surface closes its popover without
+  // moving focus and drops its document Escape/click listeners, so they never act on the hidden pane.
   const renderChrome = (summaries: string[], details: React.ReactNode) => <SshPaneChrome
-    interactive={interactive} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
+    interactive={owner} summaries={[challenge, status, ...summaries].filter((item): item is string => !!item)}>
     {secret && <SshSecretPrompt key={view.promptId} view={view} onSubmit={(secret, remember) => props.onSecret(secret, remember, { generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {hostKey && <SshHostKeyPrompt key={view.promptId} view={view} onTrust={() => props.onTrust({ generation: view.generation, promptId: view.promptId })} onCancel={props.onCancel} />}
     {disconnected && <SshDisconnectedBanner reason={view.reason} onReconnect={props.onReconnect} />}
     {status && <div>{status}</div>}
     {details}
   </SshPaneChrome>;
-  return <section className="ssh-pane-shell" aria-label="SSH session">
+  // Markers read by Canvas (`canvasGestures.ts`): `data-canvas-passthrough="scroll"` lets a wheel
+  // scroll this content instead of the canvas, `data-ssh-keyboard-owner` keeps Canvas shortcuts
+  // out of its controls, `data-ssh-interaction-owner` gates dialog focus restore (068 F5).
+  // Inert in a pane, where nothing reads them.
+  return <section className="ssh-pane-shell" aria-label="SSH session" data-ssh-interaction-owner={owner ? 'true' : 'false'}>
     {interactive && view.terminalId
       ? <SshEditWarning terminalId={view.terminalId} openResult={props.editOpenResult}>
           {(summaries, details) => renderChrome(summaries, details)}
         </SshEditWarning>
       : renderChrome([], null)}
     <div className="ssh-pane-body">
-      <aside className={props.browserCollapsed ? 'ssh-browser collapsed' : 'ssh-browser'} aria-label="Remote browser" style={browserStyle}>
+      <aside className={`ssh-browser${props.browserCollapsed ? ' collapsed' : ''}${live ? '' : ' offline'}`} aria-label="Remote browser"
+        style={browserStyle} data-canvas-passthrough="scroll" data-ssh-keyboard-owner="">
         <button type="button" className="au-btn ssh-browser-toggle" title={props.browserCollapsed ? 'Expand file browser' : 'Collapse file browser'} onClick={() => props.onBrowserCollapsedChange(!props.browserCollapsed)} aria-expanded={!props.browserCollapsed}>{props.browserCollapsed ? 'Expand' : 'Collapse'}</button>
         {props.browserHandlesOffline ? <div hidden={props.browserCollapsed}>{props.browser}</div>
-          : !props.browserCollapsed && (connected ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
+          : !props.browserCollapsed && (live ? props.browser : <div className="ssh-browser-unavailable">Remote files unavailable</div>)}
       </aside>
       <div className="ssh-terminal-host">{props.terminal}</div>
     </div>
-    {/* 069-rebase: SshMetricsStatusBar plugs into the `status` slot; the row height is fixed in CSS. */}
-    <div className="ssh-status" aria-label="SSH status">{connected ? props.status : '—'}</div>
+    {/* D66: the ONE bottom row. The shell's truthful marker on the left ("—" whenever not live),
+        and the `status` slot (069's SshMetricsStatusBar, which owns its own unavailable/ended states,
+        D57) on the right. The row height is fixed in CSS. The bar is focusable and has its own menu,
+        so on the interactive presentation the row owns its keys like the chrome row (review 349 F6). */}
+    <div className="ssh-status" aria-label="SSH status" data-ssh-keyboard-owner={owner ? '' : undefined}>
+      {!live && <span className="ssh-status-text">—</span>}
+      {props.status}
+    </div>
   </section>;
 }

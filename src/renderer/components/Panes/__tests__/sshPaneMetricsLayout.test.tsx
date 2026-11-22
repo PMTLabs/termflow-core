@@ -116,10 +116,15 @@ test('local_split_never_mounts_metrics_or_watches', async () => {
     const bars = container.querySelectorAll('[aria-label="Remote host metrics"]');
     expect(bars).toHaveLength(tagged.length);
     const column = bars[0].closest('.terminal-pane')!;
-    expect(bars[0].parentElement).toBe(column);
+    expect(container.querySelectorAll('.ssh-status')).toHaveLength(tagged.length);
+    for (const bar of bars) {
+      expect(bar.parentElement?.matches('.ssh-status')).toBe(true);
+      const pane = bar.closest('.terminal-pane')!;
+      expect(pane.querySelectorAll('.ssh-status, .ssh-metrics-status-bar')).toHaveLength(2);
+    }
     const body = column.querySelector(':scope > .terminal-pane-body')!;
     expect(body.previousElementSibling?.matches('.ssh-launch-notice')).toBe(true);
-    expect(body.nextElementSibling).toBe(bars[0]);
+    expect(body.nextElementSibling).toBeNull();
     expect(body.querySelector(':scope > .ssh-pane-shell .terminal-pane-content [data-engine-active="false"]')).not.toBeNull();
     expect(watch.mock.calls.map(([id]) => id).sort()).toEqual(tagged);
     await act(async () => { render(true, maximizedLocalId); await flush(); });

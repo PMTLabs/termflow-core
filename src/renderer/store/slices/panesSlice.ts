@@ -871,8 +871,14 @@ const panesSlice = createSlice({
     builder.addCase(splitPaneWithTab.fulfilled, (state, action) => {
       const { paneId, direction, position, shellType, newTerminalId, uniqueTitle, uniqueOriginalTitle } = action.payload;
       
-      if (!state.paneTree) return;
-      
+      // The tab context menu can split a background tab while Canvas is active.
+      // Only update the active mirror if it actually owns the selected pane.
+      const active = state.paneTree && findLeaf(state.paneTree, paneId) ? state.paneTree : null;
+      const background = active ? undefined : Object.entries(state.treesByTabId)
+        .find(([, tree]) => tree && findLeaf(tree, paneId)?.type === 'terminal');
+      const tree = active ?? background?.[1];
+      if (!tree) return;
+
       const findAndSplitPane = (node: PaneNode): boolean => {
         if (node.id === paneId && node.type === 'terminal') {
           // Create new terminal pane
@@ -907,11 +913,13 @@ const panesSlice = createSlice({
           delete node.titleColor;
           delete node.ssh;
 
-          // Set the new pane as active
-          state.activePaneId = newPaneId;
-          // Splitting the maximized pane reshapes the tab — exit maximize so the new
-          // split is visible (the flag would otherwise point at a now-split node id).
-          if (state.activeTabId) delete state.maximizedPaneByTabId[state.activeTabId];
+          if (active) {
+            state.activePaneId = newPaneId;
+            if (state.activeTabId) delete state.maximizedPaneByTabId[state.activeTabId];
+          } else if (background) {
+            state.activePaneByTabId[background[0]] = newPaneId;
+            delete state.maximizedPaneByTabId[background[0]];
+          }
 
           return true;
         }
@@ -925,8 +933,7 @@ const panesSlice = createSlice({
         return false;
       };
 
-      findAndSplitPane(state.paneTree);
-      syncActive(state);
+      if (findAndSplitPane(tree) && active) syncActive(state);
     });
   },
 });

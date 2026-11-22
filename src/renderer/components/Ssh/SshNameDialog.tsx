@@ -2,6 +2,7 @@ import React, { useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useDialogA11y } from '../UI/useDialogA11y';
 import { validRemoteName } from './sshFileMenu';
+import { sshShellOwnsFocusRestore } from './SshFileDialog';
 import type { CreateKind } from './useSshFileBrowser';
 import '../UI/ConfirmDialog.css';
 
@@ -23,9 +24,9 @@ export function SshNameDialog({ kind, path, initialName = '', disabled = false, 
   const [pending, setPending] = useState(false);
   const busy = useRef(false);
   const cancel = () => { if (!busy.current) onClose(); };
-  useDialogA11y(ref, { isOpen: true, onCancel: cancel });
+  useDialogA11y(ref, { isOpen: true, onCancel: cancel, restoreFocusIf: sshShellOwnsFocusRestore });
   return createPortal(<div className="confirm-dialog-overlay" onClick={cancel}>
-    <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1}
+    <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} data-ssh-keyboard-owner=""
       className="confirm-dialog" onClick={event => event.stopPropagation()}>
       <div className="confirm-dialog-header"><h3 id={titleId}>{kind === 'rename' ? 'Rename remote entry' : `New ${kind}`}</h3></div>
       <form onSubmit={async event => {
