@@ -31,6 +31,9 @@ macro_rules! ssh_handlers {
             $crate::commands::ssh_fs_mkdir, $crate::commands::ssh_fs_create,
             $crate::commands::ssh_fs_rename, $crate::commands::ssh_fs_delete,
             $crate::commands::ssh_fs_chmod, $crate::commands::ssh_fs_chown,
+            $crate::commands::ssh_metrics::ssh_metrics_watch,
+            $crate::commands::ssh_metrics::ssh_metrics_unwatch,
+            $crate::commands::ssh_metrics::ssh_metrics_resume,
             $($extra),*
         ]
     };

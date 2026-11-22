@@ -1,9 +1,11 @@
 import reducer, {
   addTabTree, closePane, initializePane, insertPaneIntoTab, movePaneToTab, movePaneWithinTab,
-  patchSshPaneTag, removePaneFromTab, setActiveTabId, setPaneTree,
+  patchSshPaneTag, removePaneFromTab, selectSshHiddenMetrics, setActiveTabId, setPaneTree, setSshHiddenMetrics,
   splitPane, splitPaneInTab, splitPaneWithTab,
 } from '../panesSlice';
 import { findLeaf } from '../paneTreeOps';
+import { sanitizePaneTreeSshFields } from '../../../services/sshPanePersistence';
+import { METRIC_KEYS, type MetricKey } from '../../../types/ssh';
 import { planSeeds } from '../../../services/tabTreeSeed';
 import { expectPaneTags, other, pane, sentinel, taggedTree, tags } from '../../../__testFixtures__/sshPaneCensus';
 
@@ -84,6 +86,73 @@ test('ssh_tag_follows_terminal_through_insert_move_and_swap', () => {
   state = reducer(state, movePaneWithinTab({ tabId: 'tb-a', sourcePaneId: 'pn-new', targetPaneId: 'pn-other', zone: 'center' }));
   expectPaneTags([state.paneTree], tags, ['tm-local', 'tm-new']);
   expect(findLeaf(state.paneTree, 'pn-new')).toMatchObject({ terminalId: 'tm-other', ssh: other });
+});
+
+test('toggle_targets_background_terminal_not_active_pane', () => {
+  const a = pane('ssh', sentinel);
+  const b = pane('other', other);
+  let state = reducer(active(), setPaneTree(a));
+  state = reducer(state, addTabTree({ tabId: 'tb-b', tree: b }));
+  const updatedB = pane('other', { ...other, hiddenMetrics: ['ram'] });
+  const background = reducer(state, setSshHiddenMetrics({ terminalId: 'tm-other', hiddenMetrics: ['ram'] }));
+  expect(background.treesByTabId).toStrictEqual({ 'tb-a': a, 'tb-b': updatedB });
+  expect(background.paneTree).toBe(state.paneTree);
+  const updatedA = pane('ssh', { ...sentinel, hiddenMetrics: ['host'] });
+  const foreground = reducer(background, setSshHiddenMetrics({ terminalId: 'tm-ssh', hiddenMetrics: ['host'] }));
+  expect(foreground.treesByTabId).toStrictEqual({ 'tb-a': updatedA, 'tb-b': updatedB });
+  expect(foreground.paneTree).toStrictEqual(updatedA);
+});
+
+test('toggle_preserves_concurrent_browser_path_and_follow_cd', () => {
+  const patch = { browserPath: '/new', followCd: false, browserCollapsed: false };
+  const state = reducer(seeded(), patchSshPaneTag({ terminalId: 'tm-ssh', patch }));
+  const action = setSshHiddenMetrics({ terminalId: 'tm-ssh', hiddenMetrics: ['ram'] });
+  const next = reducer(state, { ...action, payload: {
+    ...action.payload, connectionId: 'wrong', browserPath: '/stale', followCd: true, browserCollapsed: true,
+  } });
+  expectPaneTags([next.paneTree], { ...tags, 'tm-ssh': { ...sentinel, ...patch, hiddenMetrics: ['ram'] } }, ['tm-local']);
+});
+
+test('missing_unknown_and_duplicate_keys_normalize_safely', () => {
+  const state = seeded();
+  const select = (panes: typeof state, id = 'tm-ssh') => selectSshHiddenMetrics({ panes }, id);
+  for (const id of ['tm-local', 'tm-unknown']) {
+    expect(select(state, id)).toEqual([]);
+    expect(reducer(state, setSshHiddenMetrics({ terminalId: id, hiddenMetrics: ['cpu'] }))).toBe(state);
+  }
+  for (const [input, expected] of [[undefined, []], [['nfs', 'unknown', 'cpu', 'nfs'], ['nfs', 'cpu']]] as const) {
+    const hiddenMetrics = input as unknown as readonly MetricKey[];
+    expect(select(reducer(state, setSshHiddenMetrics({ terminalId: 'tm-ssh', hiddenMetrics })))).toEqual(expected);
+    const legacy = pane('ssh', { ...sentinel, hiddenMetrics: hiddenMetrics as MetricKey[] });
+    if (input === undefined) expect(select(reducer(active(), setPaneTree(legacy)))).toEqual([]);
+    const restored = sanitizePaneTreeSshFields(JSON.parse(JSON.stringify(legacy)));
+    expect(restored?.ssh?.hiddenMetrics).toEqual(expected);
+    expect(select(reducer(active(), setPaneTree(restored)))).toEqual(expected);
+  }
+});
+
+test('all_hidden_can_reset_to_defaults', () => {
+  const set = (hiddenMetrics: readonly MetricKey[]) => setSshHiddenMetrics({ terminalId: 'tm-ssh', hiddenMetrics });
+  const hidden = reducer(seeded(), set(METRIC_KEYS));
+  expect(selectSshHiddenMetrics({ panes: hidden }, 'tm-ssh')).toEqual(METRIC_KEYS);
+  const reset = reducer(hidden, set([]));
+  expect(selectSshHiddenMetrics({ panes: reset }, 'tm-ssh')).toEqual([]);
+  expectPaneTags([reset.paneTree], { ...tags, 'tm-ssh': { ...sentinel, hiddenMetrics: [] } }, ['tm-local']);
+});
+
+// The all-hidden hit target and Reset are exercised in SshMetricsStatusBar.test.tsx.
+
+test('hidden_metrics_follow_terminal_through_split_swap_and_restore', () => {
+  const expected = { ...tags, 'tm-ssh': { ...sentinel, hiddenMetrics: ['netUp', 'ram'] as MetricKey[] } };
+  let state = reducer(seeded(), setSshHiddenMetrics({ terminalId: 'tm-ssh', hiddenMetrics: ['netUp', 'ram'] }));
+  state = reducer(state, splitPane({ paneId: 'pn-ssh', direction: 'vertical', terminalId: 'tm-new' }));
+  expectPaneTags([state.paneTree], expected, ['tm-local', 'tm-new']);
+  const ssh = state.paneTree?.children?.[0].children?.find(node => node.terminalId === 'tm-ssh');
+  expect(ssh).toBeDefined();
+  state = reducer(state, movePaneWithinTab({ tabId: 'tb-a', sourcePaneId: ssh!.id, targetPaneId: 'pn-other', zone: 'center' }));
+  expect(findLeaf(state.paneTree, 'pn-other')?.terminalId).toBe('tm-ssh');
+  const restored = sanitizePaneTreeSshFields(JSON.parse(JSON.stringify(state.treesByTabId['tb-a'])));
+  expectPaneTags([restored], expected, ['tm-local', 'tm-new']);
 });
 
 test('cross_tab_move_keeps_ssh_and_does_not_resurrect_source', () => {

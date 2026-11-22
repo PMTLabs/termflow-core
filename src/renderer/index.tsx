@@ -74,6 +74,8 @@ if (isTauri) {
 // Now that window.electronAPI is guaranteed to be set, require the rest
 const { Provider } = require('react-redux');
 const { store } = require('./store');
+const { installSshSessionStartup } = require('./services/sshSessionEvents');
+installSshSessionStartup(store, window.electronAPI);
 const { default: App } = require('./App');
 const { default: BuildBadge } = require('./components/BuildBadge/BuildBadge');
 const { terminalService } = require('./services/TerminalService');

@@ -658,6 +658,11 @@ pub fn run() {
         }
 
         // Manage state in Tauri
+        app.manage(crate::ssh::metrics::watch::WatchRegistry::native(
+            state.host_table.keys().clone(),
+            state.ssh_sessions.clone(),
+            app.handle().clone(),
+        ));
         app.manage(state.clone());
         let edit_root = ssh::sftp::edit::edit_root(app.handle())?;
         let ssh_edits = std::sync::Arc::new(ssh::sftp::edit::EditRegistry::with_sink(

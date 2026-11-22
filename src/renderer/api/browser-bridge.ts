@@ -1,4 +1,4 @@
-import type { SshSessionView, SshPromptReceipt } from '../types/ssh';
+import type { SshSessionView, SshPromptReceipt, SshMetricsAPI } from '../types/ssh';
 import { ElectronAPI, HostGeneration, TerminalSnapshot, PeerInfo, PeerRequestInfo, PairingCode, FabricStatus, GrantLevel } from '../types/electron';
 import { browserSshBridge } from './sshBridge';
 import { emitPtyInput } from '../utils/ptyInputSignal';
@@ -40,6 +40,13 @@ class BrowserBridge implements ElectronAPI {
   async sshTestTrustHost(_probeId: string, _accept: boolean, _receipt: SshPromptReceipt = {}): Promise<void> { throw new Error('SSH is desktop-only'); }
   async onSshSessionState(_listener: (view: SshSessionView) => void): Promise<() => void> { throw new Error('SSH is desktop-only'); }
   async onSshTestState(_listener: (view: SshSessionView) => void): Promise<() => void> { throw new Error('SSH is desktop-only'); }
+
+    sshMetricsWatch: SshMetricsAPI['sshMetricsWatch'] = async () => { throw new Error('SSH host metrics are desktop-only'); };
+    sshMetricsUnwatch: SshMetricsAPI['sshMetricsUnwatch'] = async () => { throw new Error('SSH host metrics are desktop-only'); };
+    sshMetricsResume: SshMetricsAPI['sshMetricsResume'] = async () => { throw new Error('SSH host metrics are desktop-only'); };
+    // No browser event transport. The command still rejects rather than arming a fake watch.
+    onSshMetricsSample: SshMetricsAPI['onSshMetricsSample'] = async () => () => {};
+    onSshMetricsControl: SshMetricsAPI['onSshMetricsControl'] = async () => () => {};
 
     private ws: WebSocket | null = null;
     private dataListeners: ((id: string, data: string) => void)[] = [];

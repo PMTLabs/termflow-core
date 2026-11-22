@@ -38,6 +38,10 @@ impl<R: Runtime> AppState<R> {
             current.is_some() && (receipt.is_none() || current == receipt)
         });
         self.ssh_launches.reconcile_processes(self.host_table.keys());
+        use tauri::Manager;
+        if let Some(metrics) = self.app_handle.try_state::<std::sync::Arc<crate::ssh::metrics::watch::WatchRegistry>>() {
+            metrics.reconcile();
+        }
     }
     pub(crate) fn metadata_leaf(&self, reference: &str) -> Result<Option<String>, String> {
         super::ingress::metadata_target(self.host_table.keys(), reference)

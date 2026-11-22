@@ -32,6 +32,31 @@ fn absent_owner() -> ProcessIdentity {
         start_time: 1,
     }
 }
+// A stepped wall clock (NTP, WSL2 host sync) moves /proc/stat btime and so
+// sysinfo's start_time (btime + uptime). The identity must come from the
+// kernel's fixed start tick, or a live shell stops matching itself.
+#[cfg(target_os = "linux")]
+#[test]
+fn process_identity_uses_the_clock_independent_kernel_start_tick() {
+    let stat = fs::read_to_string("/proc/self/stat").unwrap();
+    let after_comm = &stat[stat.rfind(')').unwrap() + 2..];
+    let start_tick: u64 = after_comm.split_whitespace().nth(19).unwrap().parse().unwrap(); // field 22
+    let me = owner();
+    assert_eq!(me, ProcessIdentity { pid: std::process::id(), start_time: start_tick });
+    assert!(me.is_live());
+    assert!(!ProcessIdentity { start_time: start_tick + 1, ..me.clone() }.is_live());
+    assert!(!absent_owner().is_live());
+}
+
+#[test]
+fn process_identity_matches_itself_and_rejects_another_birth() {
+    let me = owner();
+    assert!(me.is_live());
+    assert_eq!(ProcessIdentity::capture(me.pid).unwrap(), me);
+    assert!(!ProcessIdentity { start_time: me.start_time + 1, ..me.clone() }.is_live());
+    assert!(!absent_owner().is_live());
+}
+
 fn payload(root: &HelperRoot) -> Helper {
     root.publish(
         owner(),

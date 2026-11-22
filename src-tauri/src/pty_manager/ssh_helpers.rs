@@ -97,21 +97,22 @@ pub struct ProcessIdentity {
 }
 
 impl ProcessIdentity {
+    /// The OS birth timestamp, never sysinfo's `start_time`: on Linux that is
+    /// btime + uptime, and btime moves when the wall clock is stepped (NTP, the
+    /// WSL2 host sync), so the same live process would stop matching itself.
+    /// Compare identities only by capturing again.
     pub fn capture(pid: u32) -> io::Result<Self> {
-        let mut sys = sysinfo::System::new();
-        sys.refresh_processes(
-            sysinfo::ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
-            true,
-        );
-        let process = sys
-            .process(sysinfo::Pid::from_u32(pid))
-            .ok_or_else(denied)?;
         let identity = Self {
             pid,
-            start_time: process.start_time(),
+            start_time: super::native_process_birth(pid).ok_or_else(denied)?,
         };
         identity.validate()?;
         Ok(identity)
+    }
+
+    /// The same process is still alive under this pid.
+    pub fn is_live(&self) -> bool {
+        Self::capture(self.pid).is_ok_and(|now| &now == self)
     }
 
     fn validate(&self) -> io::Result<()> {

@@ -483,3 +483,9 @@
   font-size: 12px;
 }
 
+
+.context-menu-heading {
+  padding: 6px 16px;
+  color: var(--menu-accelerator-color, #969696);
+  font-size: 11px;
+}

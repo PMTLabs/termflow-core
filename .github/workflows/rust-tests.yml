@@ -65,7 +65,8 @@ jobs:
             build-essential \
             pkg-config \
             zsh \
-            fish
+            fish \
+            tcsh
 
       # Ubuntu's global /etc/zsh/zshrc runs compinit. When an fpath directory on
       # the image is group/world-writable or not owned by root, every login zsh
@@ -87,6 +88,13 @@ jobs:
             printf '%s\n' "$insecure" | xargs -d '\n' sudo chmod g-w,o-w
           fi
           zsh -fc 'autoload -Uz compaudit; compaudit'
+
+      # The SSH metrics collector test runs the collector under every login
+      # shell it supports (collector_runs_identically_under_each_login_shell).
+      # macOS ships sh/bash/dash/zsh/tcsh but not fish.
+      - name: Install fish for the login-shell matrix (macOS)
+        if: runner.os == 'macOS'
+        run: brew install fish
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable

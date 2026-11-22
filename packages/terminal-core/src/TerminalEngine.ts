@@ -1893,8 +1893,12 @@ export class TerminalEngine {
       // no listeners, no observer, no watchdog, and a caller that went on to
       // attach() and read `engine.terminal`.
       try {
-        fit.fit();
-        didReattachFit = true;
+        // A hidden reparent (for example, adding/removing the SSH pane shell)
+        // must preserve the cached grid until the activation fit measures it.
+        if (this.geometryEligible()) {
+          fit.fit();
+          didReattachFit = true;
+        }
       } catch (fitError) {
         // Carry on and finish the mount, and reconcile the backend with whatever
         // grid xterm is ACTUALLY on at the end of mount().
@@ -3194,11 +3198,13 @@ export class TerminalEngine {
       boundTerm.focus();
     }
 
-    // rAF settle-fit after DOM updates (source 592-596). Skipped in mirror mode.
+    // rAF settle-fit after DOM updates (source 592-596). A cached mount
+    // that is still hidden settles on activation instead.
     if (!this.opts.mirror && typeof requestAnimationFrame === 'function') {
+      const reattached = !!cached?.terminal.element;
       const rafId = requestAnimationFrame(() => {
         try {
-          if (this.container) fit?.fit();
+          if (this.container && (!reattached || this.geometryEligible())) fit?.fit();
         } catch (e) {
           console.warn('terminal-core/engine: rAF settle-fit failed:', e);
         }

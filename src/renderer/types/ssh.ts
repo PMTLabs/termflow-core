@@ -113,6 +113,41 @@ export interface SshAPI {
   onSshSessionState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
   onSshTestState(listener: (view: SshSessionView) => void): Promise<SshUnlisten>;
 }
+// 069 wire contract. Raw counters never leave the native reducer.
+export type Metric<T> = ({ available: true } & T) | { available: false; reason: string };
+export interface MountUsage {
+  source: string; mountPoint: string; fsType: string;
+  totalBytes: number; usedBytes: number; availableBytes: number; usedPercent: number;
+}
+interface MetricPayloads {
+  host: { hostname: string; os: Metric<{ name: string }>; architecture: Metric<{ name: string }> };
+  cpu: { percent: number | null; cores: Metric<{ count: number }>; load1: Metric<{ value: number }> };
+  ram: { usedBytes: number; totalBytes: number; percent: number };
+  netUp: { bytesPerSecond: number | null };
+  netDown: { bytesPerSecond: number | null };
+  uptime: { seconds: number };
+  users: { count: number; names: string[] };
+  partitions: { mounts: MountUsage[] };
+  nfs: { mounts: MountUsage[] };
+}
+type Assert<T extends true> = T;
+// Require both directions so extra wire keys cannot silently escape the display list.
+export type MetricPayloadKeysMatch = Assert<
+  [keyof MetricPayloads] extends [MetricKey] ? [MetricKey] extends [keyof MetricPayloads] ? true : false : false
+>;
+export type SshMetrics = { [K in MetricKey]: Metric<MetricPayloads[K]> };
+export interface SshMetricsSample { terminalId: string; sampledAt: number; metrics: SshMetrics }
+export interface SshMetricsResumeReceipt { sampleFloor: number; generation: number; pauseSeq: number }
+export interface SshMetricsWatchReceipt extends SshMetricsResumeReceipt { pausedReason: string | null }
+export interface SshMetricsControl { terminalId: string; generation: number; pauseSeq: number; pausedReason: string | null }
+export interface SshMetricsAPI {
+  sshMetricsWatch(terminalId: string, consumerId: string, pg?: number): Promise<SshMetricsWatchReceipt>;
+  sshMetricsUnwatch(terminalId: string, consumerId: string, pg?: number): Promise<void>;
+  sshMetricsResume(terminalId: string, consumerId: string, pg?: number): Promise<SshMetricsResumeReceipt>;
+  onSshMetricsSample(listener: (sample: SshMetricsSample) => void): Promise<SshUnlisten>;
+  onSshMetricsControl(listener: (control: SshMetricsControl) => void): Promise<SshUnlisten>;
+}
+
 export function newerSshView(current: SshSessionView | undefined, next: SshSessionView): boolean {
   if (!current) return true;
   const cg = current.generation ?? 0, ng = next.generation ?? 0;

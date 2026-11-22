@@ -64,7 +64,7 @@ fn native_bare_shell(shell: &str, identity: &ProcessIdentity) -> bool {
     system.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let pid = sysinfo::Pid::from_u32(identity.pid);
     system.process(pid).is_some_and(|process| {
-        process.start_time() == identity.start_time
+        identity.is_live()
             && Path::new(shell).file_name().is_some_and(|name| {
                 name.to_string_lossy().eq_ignore_ascii_case(&process.name().to_string_lossy())
             })

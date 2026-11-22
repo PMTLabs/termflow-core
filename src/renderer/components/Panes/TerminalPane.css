@@ -186,9 +186,18 @@
   color: white;
 }
 
-/* Content */
+/* Flexible column item around the terminal or the existing SSH shell. */
+.terminal-pane-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Terminal content, with or without the SSH shell. */
 .terminal-pane-content {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   position: relative;
   min-height: 0; /* Important for flexbox children */
