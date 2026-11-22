@@ -28,7 +28,8 @@ pub(crate) fn new_nonce() -> String {
 }
 
 const WSL_REFUSAL: &str = "SSH connections launch in a native shell; WSL default profile not supported yet";
-const HOST_REFUSAL: &str = "SSH readiness adapter: this pty-host does not support SSH prompt registration; restart or update the terminal host";
+// The terminal-create commands carry string errors; this refusal is a wire code.
+const HOST_REFUSAL: &str = "PtyHostOutdated";
 
 pub(crate) fn validate_create(
     connection_id: Option<&str>, executable: Option<&str>, args: Option<&[String]>,

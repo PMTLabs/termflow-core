@@ -74,6 +74,7 @@ pub(crate) enum LaunchErrorCode {
     TrustBlocked,
     Timeout,
     WriteFailed,
+    SshExitedBeforeConnecting,
     TransportClosed,
     StoreUnavailable,
 }
@@ -95,6 +96,7 @@ impl From<LaunchErrorCode> for LaunchError {
             LaunchErrorCode::UnsupportedShell => "This shell cannot safely run the saved SSH connection.",
             LaunchErrorCode::Timeout => "Return to the local shell prompt, then retry the SSH connection.",
             LaunchErrorCode::WriteFailed => "Writing the SSH command failed. It was not retried.",
+            LaunchErrorCode::SshExitedBeforeConnecting => "SSH exited before connecting. Check the terminal output above for the reason.",
             LaunchErrorCode::TransportClosed => "The terminal writer is unavailable.",
             LaunchErrorCode::StoreUnavailable => "SSH connection definitions could not be read.",
         };

@@ -271,7 +271,7 @@ async fn immediate_ssh_failure_never_claims_running() {
     shell.prompt(f.keys(), true).await;
     f.observe_until(&a, LaunchStage::Ended).await;
     assert_eq!(f.stages(), [json!("typed"), json!("ended")]);
-    assert_eq!(f.access(&a, Operation::Query).unwrap().error.unwrap().code, Code::WriteFailed);
+    assert_eq!(f.access(&a, Operation::Query).unwrap().error.unwrap().code, Code::SshExitedBeforeConnecting);
     f.shutdown().await;
 }
 

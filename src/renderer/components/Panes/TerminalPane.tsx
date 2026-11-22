@@ -23,7 +23,9 @@ import { takeInitialCwd } from '../../services/initialCwd';
 import { setCwdSnapshot, getCwdSnapshot, clearCwdSnapshot, sampleCwdGeneration } from '../../services/cwdSnapshot';
 import { reattachPromptGate, takeArmProbePending } from '../../services/reattachGate';
 import { usePaneDrag } from './dnd/usePaneDrag';
-import { getPaneStartupStatus } from '../../services/paneStartupStatus';
+import { openSettingsTab } from '../../services/openSettings';
+import { savedSshConnectionIssue } from '../../services/savedSshConnectionIssue';
+import { getPaneStartupStatus, paneStartupFailureCode } from '../../services/paneStartupStatus';
 import { isHostSessionContended } from '../../services/hostSessionContention';
 import { isHostOwnershipPending, isLifecycleBusy } from '../../services/hostOwnershipPending';
 import type { HostWaitState } from '../../services/TerminalService';
@@ -100,7 +102,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
   // Set when the most recent create/restart attempt's promise rejected. Drives
   // the top-row "Failed to start shell" status (P0: never leave a silent blank
   // while startup is in flight or has failed).
-  const [startupFailed, setStartupFailed] = useState(false);
+  const [startupFailed, setStartupFailed] = useState<boolean | 'PtyHostOutdated'>(false);
   const [waitingForHost, setWaitingForHost] = useState<HostWaitState>();
   const [retryAttempt, setRetryAttempt] = useState(0);
   const [elevationRequired, setElevationRequired] = useState(false);
@@ -197,9 +199,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
 
   const sshConnectionId = useSelector((state: RootState) => terminalId
     ? findLeafByTerminalId(state.panes.treesByTabId, terminalId)?.ssh?.connectionId : undefined);
-  const sshUnavailable = useSelector((state: RootState) => !!sshConnectionId
-    && (state.ssh?.status !== 'ready' || !!state.ssh.view.loadError
-      || !state.ssh.view.connections.some(connection => connection.id === sshConnectionId)));
+  const sshIssue = useSelector((state: RootState) => sshConnectionId ? savedSshConnectionIssue(state.ssh, sshConnectionId) : undefined);
+  const sshUnavailable = !!sshIssue;
 
   // Initialize terminal when component mounts or terminalId changes
   useEffect(() => {
@@ -312,7 +313,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           }).catch(error => {
             if (!current()) return;
             if (isHostOwnershipPending(error)) setWaitingForHost('retry');
-            else setStartupFailed(true);
+            else setStartupFailed(paneStartupFailureCode(error));
           });
         } else {
           console.log(`TerminalPane: WARNING - Lock exists but no promise found for ${terminalId}`);
@@ -496,7 +497,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           dispatch(removeTabTree(tabId));
           return;
         }
-        setStartupFailed(true);
+        setStartupFailed(paneStartupFailureCode(error));
       });
 
     return () => {
@@ -953,7 +954,9 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
           </div>
           {isBroadcastMember && <span className="broadcast-chip">⇉ broadcast</span>}
         </div>
-        {sshUnavailable && <div role="status" className="terminal-startup-status">This saved SSH connection is unavailable.</div>}
+        {sshIssue && <div role="status" className="terminal-startup-status">
+          {sshIssue.message}{'settings' in sshIssue && <> <button type="button" onClick={() => openSettingsTab('ssh')}>Open SSH Connections</button></>}
+        </div>}
         {terminalId && processId && incarnation && processBinding?.owner === incarnation && sshConnectionId && !sshUnavailable &&
           <OwnedSshLaunchNotice key={processId} terminalId={terminalId} paneId={paneId}
             processId={processId} owner={incarnation} connectionId={sshConnectionId} />}

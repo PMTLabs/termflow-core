@@ -78,7 +78,7 @@ test('deleted_mid_batch_reports_named_failure_and_preserves_other_tabs', async (
   const summary = await connectAllInTabs('f1');
   expect(summary).toMatchObject({
     attempted: 3, started: 2,
-    failures: [{ id: 'b', name: 'Beta', message: 'This saved SSH connection is unavailable.' }],
+    failures: [{ id: 'b', name: 'Beta', message: 'This saved SSH connection was deleted. Pick another from SSH Connections.' }],
   });
   expect(summary!.message).toContain('Beta');
   expect(summary!.message).not.toMatch(/all connected/i);

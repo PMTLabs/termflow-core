@@ -515,15 +515,13 @@ impl<P: LaunchPort> Driver<'_, P> {
             let returned = boundary.returned && sample.bare;
             let stage = entry.snapshot.stage;
             let transition = match stage {
-                LaunchStage::Typed if boundary.transport_lost => {
+                LaunchStage::Typed | LaunchStage::Running if boundary.transport_lost => {
                     Some((LaunchStage::Ended, LaunchState::Ended, Some(Code::TransportClosed.into())))
                 }
                 LaunchStage::Typed if boundary.returned || now.saturating_duration_since(watch.accepted_at) >= NO_START => {
                     // Works with old hosts and with partial host-side writes:
                     // the queue has no delivery feedback and must not replay.
-                    Some((LaunchStage::Ended, LaunchState::Ended, Some(LaunchError {
-                        code: Code::WriteFailed, message: "SSH did not start in the terminal. The command was not retried.",
-                    })))
+                    Some((LaunchStage::Ended, LaunchState::Ended, Some(typed_end_error(boundary.returned, watch.child.observed_start()))))
                 }
                 LaunchStage::Running if boundary.returned => Some((LaunchStage::Ended, LaunchState::Ended, None)),
                 LaunchStage::Typed | LaunchStage::Running => match watch.child.sample(&sample, now, !boundary.extra_input) {
@@ -629,6 +627,25 @@ impl<P: LaunchPort> InputFence<LaunchError> for Fence<'_, '_, P> {
             }).unwrap_or_else(|| Err(Code::TrustBlocked.into()))
         }).map_err(|_| Code::StoreUnavailable)?
     }
+}
+
+fn typed_end_error(returned: bool, observed_start: bool) -> LaunchError {
+    if returned && observed_start {
+        Code::SshExitedBeforeConnecting.into()
+    } else {
+        LaunchError {
+            code: Code::WriteFailed,
+            message: "SSH did not start in the terminal. The command was not retried.",
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn returned_launch_distinguishes_an_observed_child_from_no_start() {
+    assert_eq!(typed_end_error(true, false).code, Code::WriteFailed);
+    assert_eq!(typed_end_error(true, true).code, Code::SshExitedBeforeConnecting);
+    assert_eq!(typed_end_error(false, false).code, Code::WriteFailed);
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+import { savedSshConnectionIssue, type SavedSshConnectionIssue } from './savedSshConnectionIssue';
 import { browserSshBridge } from '../api/sshBridge';
 import { store } from '../store';
 import { addTabTree } from '../store/slices/panesSlice';
@@ -23,7 +24,7 @@ export function reconnectSshTerminal(terminalId: string): Promise<ReconnectSshRe
 
 export type SshLaunchPlacement = { kind: 'tab' } | { kind: 'canvas'; rect: Rect; sourceTerminalId?: string };
 export type SshLaunchInsertion =
-  | { ok: false; error: { code: 'desktop-only' | 'NotFound' | 'MissingDefaultProfile'; message: string } }
+  | { ok: false; error: SavedSshConnectionIssue | { code: 'desktop-only' | 'MissingDefaultProfile'; message: string } }
   | { ok: true; tabId: string; paneId: string; terminalId: string; placement: SshLaunchPlacement;
       recent: Promise<{ ok: true } | { ok: false; message: string }> };
 
@@ -35,9 +36,9 @@ export function launchSshConnection(connectionId: string, placement: SshLaunchPl
   }
   const state = store.getState();
   const connection = state.ssh.view.connections.find(c => c.id === connectionId);
-  if (!connection) {
-    return { ok: false, error: { code: 'NotFound', message: 'This saved SSH connection is unavailable.' } };
-  }
+  const issue = savedSshConnectionIssue(state.ssh, connectionId);
+  if (issue) return { ok: false, error: issue };
+  if (!connection) throw new Error('Expected the resolved SSH connection');
   // Plan 066 §4.1: the same default-profile resolution as an ordinary new tab,
   // never a profile chosen from the connection.
   const { defaultProfile, shellProfiles } = state.settings;

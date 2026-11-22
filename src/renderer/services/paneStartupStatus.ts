@@ -3,6 +3,10 @@
 // placeholder). Framework-free so TerminalPane's render branch can stay a thin
 // call-site and the decision itself is unit-testable without React.
 
+export function paneStartupFailureCode(error: unknown): 'PtyHostOutdated' | true {
+  return error === 'PtyHostOutdated' ? 'PtyHostOutdated' : true;
+}
+
 export interface PaneStartupStatus {
   text: string;
   failed: boolean;
@@ -18,9 +22,12 @@ export interface PaneStartupStatus {
  */
 export function getPaneStartupStatus(
   processId: string | undefined,
-  startupFailed: boolean
+  startupFailed: boolean | 'PtyHostOutdated'
 ): PaneStartupStatus | null {
   if (processId) return null;
+  if (startupFailed === 'PtyHostOutdated') return {
+    text: "The terminal host is out of date. Restart TermFlow's terminal host, then retry.", failed: true,
+  };
   if (startupFailed) return { text: 'Failed to start shell', failed: true };
   return { text: 'Starting new shell…', failed: false };
 }

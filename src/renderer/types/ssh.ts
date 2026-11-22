@@ -50,7 +50,7 @@ export interface LaunchAttemptRef {
 }
 export interface LaunchError {
   code: 'StaleAttempt' | 'NotFound' | 'InputLocked' | 'UnsupportedShell' | 'UnsupportedContext'
-    | 'TrustBlocked' | 'Timeout' | 'WriteFailed' | 'TransportClosed' | 'StoreUnavailable' | 'desktop-only';
+    | 'TrustBlocked' | 'Timeout' | 'WriteFailed' | 'SshExitedBeforeConnecting' | 'TransportClosed' | 'StoreUnavailable' | 'desktop-only';
   message: string;
 }
 export interface LaunchSnapshot {
