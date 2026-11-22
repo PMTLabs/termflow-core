@@ -24,7 +24,7 @@ import { CANVAS_SHELL_TYPE } from '../tabKinds';
 import { installPaneIncarnations, PaneIncarnations, type PaneBridge, type PaneResult } from '../paneIncarnations';
 import { terminalService, TerminalServiceClass } from '../TerminalService';
 import { launchSshConnection, reconnectSshTerminal } from '../sshLaunch';
-import { sshOwnersChanged } from '../../store/slices/sshSessionSlice';
+import { sshOwnersChanged, sshSessionObserved } from '../../store/slices/sshSessionSlice';
 import { observeOwnedSshLaunch } from '../sshLaunchAttempt';
 import { getTabPanesGlobal, clearTabPanesInPlace } from '../tabPanesStore';
 import type { LaunchAttemptRef, LaunchSnapshot, SshSessionView } from '../../types/ssh';
@@ -444,6 +444,38 @@ test('reattached SSH without a snapshot offers a new tab, not a reconnect', asyn
   expect(strip.tagName).toBe('SECTION');
   expect(strip.className).toBe('ssh-launch-notice');
   expect(strip.firstElementChild?.className).toBe('ssh-launch-strip');
+});
+
+const tick30s = async () => {
+  for (let i = 0; i < 120; i++) await act(async () => { jest.advanceTimersByTime(250); await flush(); });
+};
+
+test('reattached SSH without a snapshot reads once, then stops polling session state (D63)', async () => {
+  // Live: 320 ssh_session_state calls in 85 s from one restored pane (a 250 ms re-read forever).
+  const h = harness({ status: 'Existing', pc: 'pc-existing' });
+  Object.assign(h.api, { onSshLaunchState: jest.fn(async () => () => {}) });
+  jest.useFakeTimers();
+  try {
+    let leaf = '';
+    await act(async () => {
+      leaf = launch().terminalId;
+      store.dispatch(sshOwnersChanged({ [leaf]: 'saved' }));
+      render();
+      await flush();
+    });
+    await tick30s();
+    const settledCalls = h.api.sshSessionState.mock.calls.length;
+    expect(settledCalls).toBeGreaterThanOrEqual(1);
+    expect(settledCalls).toBeLessThanOrEqual(3);
+    expect(element.querySelector('.ssh-launch-notice [role="status"]')?.textContent).toContain(
+      'This SSH session continued from before TermFlow restarted.');
+    // A session started outside this notice (no launch event yet) must be watched again.
+    const view: SshSessionView = { terminalId: leaf, connectionId: 'saved', generation: 1, state: 'connecting', revision: 1, gate: 'verified' };
+    h.sessions.set(leaf, view);
+    await act(async () => { store.dispatch(sshSessionObserved(view)); await flush(); });
+    await tick30s();
+    expect(h.api.sshSessionState.mock.calls.length - settledCalls).toBeGreaterThan(10);
+  } finally { jest.useRealTimers(); }
 });
 
 test('fresh SSH without a snapshot keeps the preparing strip and starts the launch', async () => {
