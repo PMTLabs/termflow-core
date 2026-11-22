@@ -1,9 +1,77 @@
 /** @jest-environment jsdom */
-import React, { useState } from 'react';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+// Root renderer tests drive `react-dom/client` + `act` directly; the root
+// package does not depend on @testing-library.
+import React, { act, useState } from 'react';
+import { createRoot, Root } from 'react-dom/client';
 import { SshMenus } from '../../Settings/SshConnections/SshMenus';
 import type { SshFolder, SshStoreApi } from '../../../types/ssh';
 import { ContextMenu } from '../ContextMenu';
+
+let host: HTMLDivElement;
+let root: Root;
+
+beforeEach(() => {
+  (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+  host = document.body.appendChild(document.createElement('div'));
+  root = createRoot(host);
+});
+afterEach(() => {
+  act(() => root.unmount());
+  host.remove();
+  delete (globalThis as any).IS_REACT_ACT_ENVIRONMENT;
+});
+
+function render(ui: React.ReactElement) {
+  act(() => root.render(ui));
+}
+
+// Accessible name: aria-labelledby, then aria-label, then text outside aria-hidden.
+function accessibleName(el: Element): string {
+  const labelledBy = el.getAttribute('aria-labelledby');
+  if (labelledBy) return labelledBy.split(/\s+/).map(id => document.getElementById(id)?.textContent ?? '').join(' ').trim();
+  const label = el.getAttribute('aria-label');
+  if (label !== null) return label.trim();
+  const text = (node: Node): string => node.nodeType === Node.TEXT_NODE
+    ? node.textContent ?? ''
+    : node instanceof Element && node.getAttribute('aria-hidden') === 'true' ? '' : [...node.childNodes].map(text).join('');
+  return text(el).replace(/\s+/g, ' ').trim();
+}
+const roleOf = (el: Element) => el.getAttribute('role') ?? (el.tagName === 'BUTTON' ? 'button' : null);
+function allByRole(role: string, name?: string | RegExp, scope: ParentNode = document.body): HTMLElement[] {
+  return [...scope.querySelectorAll<HTMLElement>('*')].filter(el => roleOf(el) === role
+    && (name === undefined || (typeof name === 'string' ? accessibleName(el) === name : name.test(accessibleName(el)))));
+}
+function queryByRole(role: string, name?: string | RegExp): HTMLElement | null {
+  const found = allByRole(role, name);
+  if (found.length > 1) throw new Error(`more than one ${role} ${name ?? ''}`);
+  return found[0] ?? null;
+}
+function byRole(role: string, name?: string | RegExp, scope?: ParentNode): HTMLElement {
+  const found = allByRole(role, name, scope);
+  if (found.length !== 1) throw new Error(`expected one ${role} ${name ?? ''}, found ${found.length}`);
+  return found[0];
+}
+// Like getByText: an element whose own text nodes equal the text.
+function queryByText(text: string): HTMLElement | null {
+  const found = [...document.body.querySelectorAll<HTMLElement>('*')].filter(el =>
+    [...el.childNodes].filter(n => n.nodeType === Node.TEXT_NODE).map(n => n.textContent).join('').trim() === text);
+  if (found.length > 1) throw new Error(`more than one element with text ${text}`);
+  return found[0] ?? null;
+}
+function byText(text: string): HTMLElement {
+  const found = queryByText(text);
+  if (!found) throw new Error(`no element with text ${text}`);
+  return found;
+}
+const click = (el: Element) => act(() => { el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true })); });
+const keyDown = (el: Element, key: string) => act(() => { el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })); });
+async function waitFor(check: () => void, timeoutMs = 1000) {
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    try { check(); return; } catch (error) { if (Date.now() >= end) throw error; }
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)); });
+  }
+}
 
 test('checkbox_menu_aria_checked_tracks_actual_visibility', () => {
   const disabledAction = jest.fn();
@@ -21,31 +89,31 @@ test('checkbox_menu_aria_checked_tracks_actual_visibility', () => {
     </>;
   }
   render(<Host />);
-  const open = () => fireEvent.click(screen.getByRole('button', { name: 'Metrics menu' }));
-  const cpu = () => screen.getByRole('menuitemcheckbox', { name: 'CPU' });
+  const open = () => click(byRole('button', 'Metrics menu'));
+  const cpu = () => byRole('menuitemcheckbox', 'CPU');
   open();
-  fireEvent.click(screen.getByText('Show in status bar'));
+  click(byText('Show in status bar'));
   expect(cpu().getAttribute('aria-checked')).toBe('true');
   expect(cpu().textContent).toBe('✓CPU');
-  fireEvent.click(cpu());
-  expect(screen.queryByText('CPU reading')).toBeNull();
+  click(cpu());
+  expect(queryByText('CPU reading')).toBeNull();
   open();
   expect(cpu().getAttribute('aria-checked')).toBe('false');
   expect(cpu().textContent).toBe('CPU');
-  const ram = screen.getByRole('menuitemcheckbox', { name: 'RAM' }) as HTMLButtonElement;
+  const ram = byRole('menuitemcheckbox', 'RAM') as HTMLButtonElement;
   expect(ram.disabled).toBe(true);
-  fireEvent.click(ram);
-  fireEvent.keyDown(ram, { key: 'Enter' });
-  fireEvent.keyDown(ram, { key: ' ' });
+  click(ram);
+  keyDown(ram, 'Enter');
+  keyDown(ram, ' ');
   expect(disabledAction).not.toHaveBeenCalled();
-  fireEvent.keyDown(screen.getByRole('menu'), { key: 'End' });
+  keyDown(byRole('menu'), 'End');
   expect(document.activeElement).toBe(cpu());
-  fireEvent.keyDown(cpu(), { key: ' ' });
-  expect(screen.getByText('CPU reading')).not.toBeNull();
+  keyDown(cpu(), ' ');
+  expect(byText('CPU reading')).not.toBeNull();
   open();
   expect(cpu().getAttribute('aria-checked')).toBe('true');
-  fireEvent.keyDown(cpu(), { key: 'Enter' });
-  expect(screen.queryByText('CPU reading')).toBeNull();
+  keyDown(cpu(), 'Enter');
+  expect(queryByText('CPU reading')).toBeNull();
 });
 
 test('normal_disabled_and_submenu_behaviour_unchanged', async () => {
@@ -63,37 +131,37 @@ test('normal_disabled_and_submenu_behaviour_unchanged', async () => {
     </>;
   }
   render(<Host />);
-  const invoker = screen.getByRole('button', { name: 'Folder actions' });
-  invoker.focus();
-  fireEvent.click(invoker);
-  const row = (name: RegExp) => screen.getByRole('menuitem', { name }) as HTMLButtonElement;
-  const menu = screen.getByRole('menu');
+  const invoker = byRole('button', 'Folder actions');
+  act(() => invoker.focus());
+  click(invoker);
+  const row = (name: RegExp) => byRole('menuitem', name) as HTMLButtonElement;
+  const menu = byRole('menu');
   expect(document.activeElement).toBe(menu);
   const disabled = row(/move down/i);
   expect(disabled.disabled).toBe(true);
-  fireEvent.click(disabled);
-  fireEvent.keyDown(disabled, { key: 'Enter' });
+  click(disabled);
+  keyDown(disabled, 'Enter');
   expect(commit).not.toHaveBeenCalled();
   const danger = row(/delete folder/i);
   expect(danger.classList.contains('danger')).toBe(true);
   expect(danger.hasAttribute('aria-checked')).toBe(false);
-  fireEvent.keyDown(menu, { key: 'End' });
+  keyDown(menu, 'End');
   expect(document.activeElement).toBe(danger);
-  fireEvent.keyDown(danger, { key: 'ArrowUp' });
+  keyDown(danger, 'ArrowUp');
   expect(document.activeElement).toBe(row(/rename/i));
   const submenu = row(/folder icon/i);
-  submenu.focus();
-  fireEvent.keyDown(submenu, { key: 'ArrowRight' });
+  act(() => submenu.focus());
+  keyDown(submenu, 'ArrowRight');
   expect(submenu.getAttribute('aria-expanded')).toBe('true');
-  expect(within(screen.getByRole('group', { name: 'Choose icon' })).getAllByRole('button')).toContain(document.activeElement);
-  submenu.focus();
-  fireEvent.keyDown(submenu, { key: 'ArrowLeft' });
+  expect(allByRole('button', undefined, byRole('group', 'Choose icon'))).toContain(document.activeElement);
+  act(() => submenu.focus());
+  keyDown(submenu, 'ArrowLeft');
   expect(submenu.getAttribute('aria-expanded')).toBe('false');
   expect(document.activeElement).toBe(submenu);
   const renameRow = row(/rename/i);
-  renameRow.focus();
-  fireEvent.keyDown(renameRow, { key: 'Enter' });
+  act(() => renameRow.focus());
+  keyDown(renameRow, 'Enter');
   expect(rename).toHaveBeenCalledWith(folder, 'folder');
-  expect(screen.queryByRole('menu')).toBeNull();
+  expect(queryByRole('menu')).toBeNull();
   await waitFor(() => expect(document.activeElement).toBe(invoker));
 });
