@@ -110,3 +110,14 @@ test.each([
   act(() => root.render(<SshLaunchNotice {...props()} snapshot={snapshot} failure={failure} />));
   expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual(alerts);
 });
+
+test.each([
+  [{ code: 'TransportClosed', message: 'The terminal writer is unavailable.' }, 'The local terminal connection closed. Reconnect to try again.'],
+  [{ code: 'SshExitedBeforeConnecting', message: 'other details' }, 'SSH exited before connecting. Check the terminal output above for the reason.'],
+  [undefined, 'The reason, if any, is in the terminal output above. Reconnect to try again.'],
+] as const)('an ended launch renders its reason by code (%o)', (error, reason) => {
+  act(() => root.render(<SshLaunchNotice {...props()} snapshot={{ ...base, stage: 'ended', ...(error ? { error } : {}) }} />));
+  expect(el.querySelector('[role=status]')?.textContent).toBe('SSH has ended.');
+  expect([...el.querySelectorAll('[role=alert]')].map(a => a.textContent)).toEqual([reason]);
+  expect(button('Reconnect')).toBeTruthy();
+});

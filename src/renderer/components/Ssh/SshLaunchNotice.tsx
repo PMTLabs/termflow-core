@@ -25,7 +25,7 @@ export function sshLaunchEndReason(error?: LaunchSnapshot['error']): string | un
     case 'TransportClosed': return 'The local terminal connection closed. Reconnect to try again.';
     // No reason code (an ordinary ssh exit carries no status yet, backlog 023): point at the terminal.
     case undefined: return 'The reason, if any, is in the terminal output above. Reconnect to try again.';
-    default: return error.message;
+    default: return error?.message;
   }
 }
 

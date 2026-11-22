@@ -9,7 +9,8 @@ async fn hosted_ssh_create_requires_registration_capable_host() {
     let nonce = "0123456789abcdef0123456789abcdef";
     opted.env.push((HOST_REGISTRATION_ENV.into(), nonce.into()));
     let refusal = host.spawn_session("tm-a", &opted).await.unwrap_err();
-    assert!(refusal.contains("does not support SSH prompt registration"));
+    // A wire code the renderer keys its copy on, so it must arrive exact.
+    assert_eq!(refusal, "PtyHostOutdated");
     assert!(frames.try_recv().is_err(), "no Spawn, and no nonce, reached the old host");
 
     for (capable, spec, expected) in [(false, &ordinary, None), (true, &opted, Some(nonce))] {

@@ -81,6 +81,20 @@ pub(crate) fn require_host_registration(opted_in: bool, capable: bool) -> Result
     if opted_in && !capable { Err(HOST_REFUSAL.into()) } else { Ok(()) }
 }
 
+/// Adds context to a host spawn error, except the host refusal: the renderer matches that code
+/// exactly, so a prefix would turn its actionable copy back into "Failed to start shell".
+pub(crate) fn spawn_error(context: &str, error: String) -> String {
+    if error == HOST_REFUSAL { error } else { format!("{context}: {error}") }
+}
+
+#[cfg(test)]
+#[test]
+fn spawn_error_keeps_the_host_refusal_code_exact() {
+    let refusal = require_host_registration(true, false).unwrap_err();
+    assert_eq!(spawn_error("SSH readiness host spawn failed", refusal), "PtyHostOutdated");
+    assert_eq!(spawn_error("elevated spawn failed", "boom".into()), "elevated spawn failed: boom");
+}
+
 /// Retire unused helpers automatically; once a spawn might have reached a
 /// child, only positive evidence of shell exit permits retirement.
 pub(crate) struct PreparedShell(Option<posix::PosixAdapter>);

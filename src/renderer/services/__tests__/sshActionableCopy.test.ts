@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import { readSource } from '../../utils/readSource';
 import { getPaneStartupStatus, paneStartupFailureCode } from '../paneStartupStatus';
 import { savedSshConnectionIssue } from '../savedSshConnectionIssue';
 import type { SshState } from '../../store/slices/sshSlice';
@@ -35,4 +38,31 @@ test.each([
 
 test('an end with no reason code points at the terminal output and Reconnect', () => {
   expect(sshLaunchEndReason()).toBe('The reason, if any, is in the terminal output above. Reconnect to try again.');
+});
+
+test('loading, desktop-only and a failed load each keep their own issue', () => {
+  expect(savedSshConnectionIssue(undefined, 'c')?.code).toBe('Loading');
+  expect(savedSshConnectionIssue({ status: 'loading' } as SshState, 'c')?.code).toBe('Loading');
+  expect(savedSshConnectionIssue({ status: 'desktop-only' } as SshState, 'c')?.code).toBe('desktop-only');
+  expect(savedSshConnectionIssue({ status: 'error', error: 'x' } as unknown as SshState, 'c')?.code).toBe('StoreUnavailable');
+  const listed: SshState = { status: 'ready', revision: 0, error: null,
+    view: { revision: 0, folders: [], connections: [{ id: 'c' } as SshState['view']['connections'][number]], loadError: null } };
+  expect(savedSshConnectionIssue(listed, 'c')).toBeUndefined();
+});
+
+test('census: no SSH surface renders the old ↗ connection icon', () => {
+  const roots = ['components/Ssh', 'components/Settings/SshConnections'].map(dir => path.join(__dirname, '..', '..', dir));
+  const offenders = roots.flatMap(dir => fs.readdirSync(dir).filter(f => /\.tsx?$/.test(f) && !/\.test\./.test(f))
+    .filter(f => readSource(path.join(dir, f)).includes('↗')).map(f => path.join(dir, f)));
+  expect(offenders).toEqual([]);
+});
+
+test('census: every TerminalPane startup failure keeps its code, and the pane uses the coded SSH issue', () => {
+  const pane = readSource(path.join(__dirname, '..', '..', 'components', 'Panes', 'TerminalPane.tsx'));
+  // The two create/restart error catches. The `setStartupFailed(true)` sites are authorizeExisting
+  // refusals, which never carry a host spawn error, so they keep the generic copy.
+  expect(pane.match(/setStartupFailed\(paneStartupFailureCode\(error\)\)/g)).toHaveLength(2);
+  expect(pane.match(/\.catch\(error => \{[^}]*setStartupFailed\(true\)/g)).toBeNull();
+  expect(pane).toMatch(/savedSshConnectionIssue\(state\.ssh, sshConnectionId\)/);
+  expect(pane).not.toMatch(/saved SSH connection is unavailable/);
 });

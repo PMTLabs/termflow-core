@@ -515,7 +515,8 @@ impl<P: LaunchPort> Driver<'_, P> {
             let returned = boundary.returned && sample.bare;
             let stage = entry.snapshot.stage;
             let transition = match stage {
-                LaunchStage::Typed | LaunchStage::Running if boundary.transport_lost => {
+                // Typed only: a Running ssh keeps being sampled by PID, so it survives a host hot-swap.
+                LaunchStage::Typed if boundary.transport_lost => {
                     Some((LaunchStage::Ended, LaunchState::Ended, Some(Code::TransportClosed.into())))
                 }
                 LaunchStage::Typed if boundary.returned || now.saturating_duration_since(watch.accepted_at) >= NO_START => {
@@ -646,6 +647,8 @@ fn returned_launch_distinguishes_an_observed_child_from_no_start() {
     assert_eq!(typed_end_error(true, false).code, Code::WriteFailed);
     assert_eq!(typed_end_error(true, true).code, Code::SshExitedBeforeConnecting);
     assert_eq!(typed_end_error(false, false).code, Code::WriteFailed);
+    // A NO_START timeout with no shell return is not evidence ssh exited.
+    assert_eq!(typed_end_error(false, true).code, Code::WriteFailed);
 }
 
 #[cfg(test)]

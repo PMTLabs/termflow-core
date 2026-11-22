@@ -582,10 +582,10 @@ pub(super) async fn run_create(state: &AppState, req: SpawnRequest, cg: u64) -> 
                 }
                 // Never host_fallback for an elevated request (R7): fail visibly
                 // instead of silently spawning an unprivileged shell.
-                Err(format!("elevated spawn failed: {e}"))
+                Err(ssh_shell::spawn_error("elevated spawn failed", e))
             } else if ssh_opt_in {
                 // Do not start a second SSH-prepared shell on an ambiguous host result.
-                Err(format!("SSH readiness host spawn failed: {e}"))
+                Err(ssh_shell::spawn_error("SSH readiness host spawn failed", e))
             } else {
                 host_fallback(state, &id, owning_tab_id.as_deref(), cols, rows, shell_path, shell_name, shell_args, cwd, name.as_deref(), &e, cg, None)
             }
