@@ -100,9 +100,13 @@ impl Reducer {
 
 impl Boot {
     fn changed(&self, now: &Self) -> bool {
-        self.id.zip(now.id).is_some_and(|(a, b)| a != b)
-            || self.btime.zip(now.btime).is_some_and(|(a, b)| a != b)
-            || self.uptime.zip(now.uptime).is_some_and(|(a, b)| b < a)
+        let rebooted = match self.id.zip(now.id) {
+            // The boot id is authoritative. btime is the wall clock minus uptime, so a
+            // stepped host clock (NTP, WSL2 host sync) moves it without any reboot.
+            Some((a, b)) => a != b,
+            None => self.btime.zip(now.btime).is_some_and(|(a, b)| a != b),
+        };
+        rebooted || self.uptime.zip(now.uptime).is_some_and(|(a, b)| b < a)
     }
 
     fn confirms_same_boot(&self, now: &Self) -> bool {

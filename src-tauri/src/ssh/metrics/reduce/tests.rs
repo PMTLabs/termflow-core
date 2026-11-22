@@ -147,6 +147,21 @@ fn reboot_with_new_boot_id_and_higher_uptime_resets_rates() {
 }
 
 #[test]
+fn btime_drift_with_the_same_boot_id_keeps_rates() {
+    // Linux derives btime from the wall clock minus uptime, so a stepped host clock
+    // (NTP, WSL2 host time sync) moves it without a reboot. Observed live on WSL2:
+    // +1 s and +2 s within one minute, each resetting CPU and network to "...".
+    let mut r = Reducer::default();
+    sample(&mut r, "10", &[]);
+    let drifted = sample(&mut r, "12", &[("stat", &SECOND_STAT.replace("1000", "1001"), 0), ("netdev", SECOND_NET, 0)]);
+    assert_eq!(cpu(&drifted), Some(25.0));
+    assert_eq!(rates(&drifted), (Some(30.0), Some(15.0)));
+    let back = sample(&mut r, "14", &[("stat", &THIRD_STAT.replace("1000", "999"), 0), ("netdev", THIRD_NET, 0)]);
+    assert_eq!(cpu(&back), Some(50.0));
+    assert_eq!(rates(&back), (Some(20.0), Some(5.0)));
+}
+
+#[test]
 fn missing_boot_id_uses_btime_and_uptime() {
     let mut r = Reducer::default();
     sample(&mut r, "10", &[("bootId", "", 1)]);
